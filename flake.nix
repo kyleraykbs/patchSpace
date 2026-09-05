@@ -35,8 +35,9 @@
 
           pythonPackages =
             ps: with ps; [
-              # Packages
               numpy
+              pygobject3 # GTK bindings
+              pycairo # Cairo drawing
             ];
 
           pythonDevPackages =
@@ -50,17 +51,22 @@
 
         in
         {
-          # {{{ Build DevShell
           devShells.default = pkgs.mkShell {
             packages = [
               pythonEnv
+              pkgs.gobject-introspection
+              pkgs.gtk4
+              pkgs.libadwaita
+              pkgs.cairo # provides Cairo-1.0.typelib
+              pkgs.pipewire
+              pkgs.wireplumber
             ];
 
             shellHook = ''
               echo "Python dev shell ready ($(python --version))"
+              echo "GTK4, Adwaita, PipeWire, and WirePlumber available"
             '';
           };
         };
-      # }}}
     };
 }

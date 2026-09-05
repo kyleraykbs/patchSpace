@@ -320,6 +320,21 @@ class PipewireGraph:
         if not self._virtual_sink_name:
             return
 
+        if self._virtual_sink_set_default:
+            # Capture whatever's currently default BEFORE we create the
+            # virtual sink, not after. The old code captured it in
+            # _set_default_sink(), which only runs once the sink has
+            # been fully confirmed from a pw-dump snapshot - by then,
+            # WirePlumber's own default-node autoselection can already
+            # have flipped the system default onto the sink we just
+            # created (especially likely if it's the only sink around),
+            # so "previous default" would silently end up being the
+            # virtual sink itself. That's what caused shutdown's
+            # "Failed to restore previous default sink (id N): N is not
+            # a device node" - N was our own just-destroyed sink, not a
+            # real previous default.
+            self._previous_default_sink_id = self._get_default_sink_id()
+
         position = ",".join(self._virtual_sink_channels)
         props = (
             "{ factory.name=support.null-audio-sink "
@@ -495,16 +510,17 @@ class PipewireGraph:
         """
         Point Wireplumber's default sink at the virtual sink, so apps
         that follow the system default pick it up without the user
-        manually reselecting an output device. Remembers whatever was
-        default before switching (by id), so _restore_default_sink()
-        can put it back when the virtual sink goes away. Requires
+        manually reselecting an output device. The "previous default"
+        to restore later is captured earlier, in _create_virtual_sink()
+        - by the time this method runs (after the sink is confirmed
+        from a graph snapshot), the system default may already have
+        drifted onto our own sink, which would poison the capture (see
+        the comment in _create_virtual_sink()). Requires
         self._virtual_sink_id to already be resolved (see
         _resolve_virtual_sink_on_initial_sync).
         """
         if not self._virtual_sink_name or self._virtual_sink_id is None:
             return
-
-        self._previous_default_sink_id = self._get_default_sink_id()
 
         try:
             result = subprocess.run(
@@ -536,17 +552,35 @@ class PipewireGraph:
                 (result.stderr or result.stdout).strip(),
             )
 
-    def _restore_default_sink(self) -> None:
+    def _restore_default_sink(self, skip_id: Optional[int] = None) -> None:
         """
         Restore whatever sink was default before we switched to the
         virtual sink (see _set_default_sink). No-op if we never
         recorded a previous default (e.g. virtual_sink_set_default was
         False, or reading the old default failed).
+
+        `skip_id` is a last-line-of-defense guard, not the primary
+        fix (see _create_virtual_sink() for that): if the recorded
+        "previous" default id is the very sink we just destroyed - it
+        shouldn't be, now that the capture happens before creation,
+        but "shouldn't be" isn't "can't be" given this all depends on
+        WirePlumber's own timing - restoring to it would just log
+        another confusing failure for a node that no longer exists,
+        so skip it instead.
         """
         if self._previous_default_sink_id is None:
             return
         previous_id = self._previous_default_sink_id
         self._previous_default_sink_id = None
+
+        if skip_id is not None and previous_id == skip_id:
+            logger.info(
+                "Not restoring default sink to id %s - that's the virtual "
+                "sink we just destroyed, not a genuine previous default.",
+                previous_id,
+            )
+            return
+
         try:
             result = subprocess.run(
                 [*self._wpctl_command, "set-default", str(previous_id)],
@@ -576,7 +610,7 @@ class PipewireGraph:
         if proc is None:
             # No owning pw-cli process tracked - still try to restore
             # whatever the default sink was before.
-            self._restore_default_sink()
+            self._restore_default_sink(skip_id=node_id)
             return
 
         try:
@@ -602,7 +636,7 @@ class PipewireGraph:
         # through cleanly - so this is logged unconditionally.
         logger.info("Destroyed virtual sink (node id %s)", node_id)
 
-        self._restore_default_sink()
+        self._restore_default_sink(skip_id=node_id)
 
     # ---------- link control ----------
 
@@ -613,7 +647,8 @@ class PipewireGraph:
         failure raises LinkError.
 
         Returns True if this call actually created a new link, False if
-        the link already existed (still a success, just nothing to do).
+        the link already existed, or if one of the ports no longer
+        exists (a normal race during graph churn - see below).
         """
         result = subprocess.run(
             [*self._link_command, str(output_port_id), str(input_port_id)],
@@ -625,6 +660,21 @@ class PipewireGraph:
         stderr = (result.stderr or "").strip()
         if "File exists" in stderr:
             return False  # already linked - success, but nothing new
+        lowered = stderr.lower()
+        if "no such" in lowered or "not found" in lowered:
+            # A port named in this pair no longer exists by the time
+            # pw-link actually ran - a normal race during graph churn
+            # (something can vanish between the snapshot sync()
+            # computed pairs from and this call), not a genuine
+            # failure. Log quietly; the next sync() recomputes against
+            # current reality and either drops or retries this pair.
+            logger.debug(
+                "pw-link %s -> %s: port(s) no longer exist (%s)",
+                output_port_id,
+                input_port_id,
+                stderr,
+            )
+            return False
         raise LinkError(
             f"pw-link {output_port_id} -> {input_port_id} failed: "
             f"{stderr or result.stdout.strip() or f'exit status {result.returncode}'}"
