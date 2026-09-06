@@ -26,6 +26,7 @@ from constants import (
     LAYOUT_SETTLE_TICKS,
     LAYOUT_SETTLE_EPSILON,
     POST_MUTATION_REFRESH_MS,
+    GRAPH_CANVAS_MIN_SIZE,
 )
 from render_utils import (
     theme_palette,
@@ -100,7 +101,9 @@ class PipeWireGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._prev_link_set = set()
 
         self.set_draw_func(self.on_draw)
-        self.set_size_request(800, 600)
+        self.set_size_request(*GRAPH_CANVAS_MIN_SIZE)
+        self.set_hexpand(True)
+        self.set_vexpand(True)
         self.set_can_focus(True)
 
         drag = Gtk.GestureDrag()

@@ -27,7 +27,7 @@ import math
 import random
 import time
 
-from gi.repository import Gtk, Gdk, GLib, GObject
+from gi.repository import Gtk, Gdk, GLib, GObject, Pango
 
 from constants import (
     REFRESH_INTERVAL_MS,
@@ -37,6 +37,8 @@ from constants import (
     POST_MUTATION_REFRESH_MS,
     SESSION_CACHE_PATH,
     VOLUME_SEND_EPSILON,
+    ADD_NODE_PANEL_MIN_WIDTH,
+    GRAPH_CANVAS_MIN_SIZE,
 )
 from render_utils import (
     theme_palette,
@@ -58,6 +60,7 @@ from node_specs import (
     spec_for,
     is_mute_node,
     type_label,
+    icon_for_add_node_type,
 )
 from portal_file_dialog import open_file, save_file
 
@@ -125,7 +128,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._prev_edge_set = set()
 
         self.set_draw_func(self.on_draw)
-        self.set_size_request(800, 600)
+        self.set_size_request(*GRAPH_CANVAS_MIN_SIZE)
+        self.set_hexpand(True)
+        self.set_vexpand(True)
         self.set_can_focus(True)
 
         drag = Gtk.GestureDrag()
@@ -1901,7 +1906,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         box.set_margin_start(6)
         box.set_margin_end(6)
         for label, ntype in ADD_NODE_MENU_ITEMS:
-            btn = Gtk.Button(label=label)
+            btn = Gtk.Button()
+            btn.set_has_frame(False)
+            content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            content.append(Gtk.Image.new_from_icon_name(icon_for_add_node_type(ntype)))
+            row_label = Gtk.Label(label=label)
+            row_label.set_halign(Gtk.Align.START)
+            content.append(row_label)
+            btn.set_child(content)
             btn.connect("clicked", self._on_add_node, ntype, popover)
             box.append(btn)
         popover.set_child(box)
@@ -1920,7 +1932,19 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # no backend changes needed.
         is_mute = node_type == "mute"
         real_type = "volume" if is_mute else node_type
-        node_id = f"{'mute' if is_mute else 'node'}_{int(time.time() * 1000)}"
+        if node_type == "patchbay_device":
+            # Fixed, readable id instead of a timestamped one - there's
+            # only one such node conceptually (it always points at the
+            # daemon's single built-in virtual sink, see
+            # PatchBayDeviceNode's docstring), and add_node is
+            # idempotent on an id that already exists (main.py's
+            # _cmd_add_node returns already_existed=True instead of
+            # duplicating), so re-clicking "Add" is harmless.
+            node_id = "patchbay_speaker"
+        elif node_type == "patchbay_mic_device":
+            node_id = "patchbay_mic"
+        else:
+            node_id = f"{'mute' if is_mute else 'node'}_{int(time.time() * 1000)}"
 
         config = {}
         if node_type in ("regex_input", "regex_output"):
@@ -1942,6 +1966,18 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             config["backing_node_name"] = f"{node_type}_{node_id}"
             config["device_label"] = (
                 "Virtual Speaker" if node_type == "virtual_speaker" else "Virtual Mic"
+            )
+        elif node_type in ("patchbay_device", "patchbay_mic_device"):
+            # These two are otherwise no-config nodes (see
+            # PatchBayDeviceNode/PatchBayMicDeviceNode's docstrings in
+            # patchSpace.py) - "label" is the generic display-name
+            # property every node type already supports (set via
+            # setattr in main.py's add_node handling, read back by
+            # _draw_node() below), so a short human-readable default
+            # here needs no daemon changes, unlike device_label above
+            # which only those two backed node types understand.
+            config["label"] = (
+                "Speaker Line" if node_type == "patchbay_device" else "Mic Line"
             )
         # exclude_filter deliberately gets no default pattern here (it
         # falls through to config={}, i.e. an empty "pattern" once the
@@ -2014,10 +2050,20 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         row.add_css_class("flat")
 
         content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        content.append(Gtk.Image.new_from_icon_name("list-add-symbolic"))
+        content.append(Gtk.Image.new_from_icon_name(icon_for_add_node_type(node_type)))
         row_label = Gtk.Label(label=label)
         row_label.set_halign(Gtk.Align.START)
         row_label.set_hexpand(True)
+        # Ellipsize only as a last resort, if the label genuinely
+        # doesn't fit the panel's fixed width (see build_add_node_panel
+        # - the ScrolledWindow's min/max content width is what actually
+        # pins the panel's width now, not this). No max-width-chars
+        # here: that caps the label's own size *request*, and with an
+        # over-aggressive value every row showed nothing but "..." -
+        # the tooltip below is just a hover-friendly backup, not a
+        # substitute for the visible name.
+        row_label.set_ellipsize(Pango.EllipsizeMode.END)
+        row.set_tooltip_text(label)
         content.append(row_label)
         row.set_child(content)
 
@@ -2042,9 +2088,17 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         exactly where you want it. This is an alternative to the
         right-click "add node" popover (show_add_node_menu), not a
         replacement for it - both end up at _build_add_node_command().
+
+        Sized by the Gtk.Paned in main_window._build_patchspace_page,
+        not by this widget itself: the panel just fills whatever width
+        the paned handle gives it (ADD_NODE_PANEL_MIN_WIDTH is set as
+        a floor via set_size_request so the paned's shrink-start-child
+        =False can't squeeze it away entirely), and rows ellipsize if
+        that width is ever too narrow for a long label.
         """
         panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        panel.set_size_request(220, -1)
+        panel.set_size_request(ADD_NODE_PANEL_MIN_WIDTH, -1)
+        panel.set_hexpand(True)
         panel.set_margin_top(10)
         panel.set_margin_bottom(10)
         panel.set_margin_start(10)
@@ -2058,13 +2112,20 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
         scroller = Gtk.ScrolledWindow()
         scroller.set_vexpand(True)
+        scroller.set_hexpand(True)
         scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
 
         categories_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         categories_box.set_margin_top(6)
 
         for category_name, items in ADD_NODE_CATEGORIES:
-            expander = Gtk.Expander(label=f"{category_name} ({len(items)})")
+            header_label = Gtk.Label(label=f"{category_name} ({len(items)})")
+            header_label.set_halign(Gtk.Align.START)
+            header_label.set_ellipsize(Pango.EllipsizeMode.END)
+            header_label.set_hexpand(True)
+
+            expander = Gtk.Expander()
+            expander.set_label_widget(header_label)
             expander.set_expanded(True)
 
             rows_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)

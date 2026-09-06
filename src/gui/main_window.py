@@ -17,7 +17,12 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, GLib
 
-from constants import POLL_RESPONSES_MS
+from constants import (
+    POLL_RESPONSES_MS,
+    ADD_NODE_PANEL_WIDTH,
+    ADD_NODE_PANEL_MIN_WIDTH,
+    ADD_NODE_PANEL_MAX_WIDTH,
+)
 from socket_client import PatchBayClient
 from pipewire_widget import PipeWireGraphWidget
 from patchspace_widget import PatchSpaceGraphWidget
@@ -117,10 +122,33 @@ class MainWindow(Gtk.ApplicationWindow):
 
         add_node_panel = self.ps_widget.build_add_node_panel()
 
-        page = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
-        page.append(add_node_panel)
-        page.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
-        page.append(overlay)
+        # A Gtk.Paned instead of a plain Box+Separator: it draws its
+        # own draggable handle, so the user can grab the edge between
+        # the panel and the canvas to resize it, instead of the panel
+        # being a fixed width forever. resize_start_child(False) keeps
+        # the panel's width stable when the *window* is resized (only
+        # dragging the handle itself changes it); shrink_start_child
+        # (False) stops it from being dragged/squeezed narrower than
+        # add_node_panel's own minimum (see build_add_node_panel).
+        # shrink_end_child(True) lets the canvas give up space down to
+        # its own minimum (GRAPH_CANVAS_MIN_SIZE) instead of jamming.
+        page = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        page.set_start_child(add_node_panel)
+        page.set_resize_start_child(False)
+        page.set_shrink_start_child(False)
+        page.set_end_child(overlay)
+        page.set_resize_end_child(True)
+        page.set_shrink_end_child(True)
+        page.set_position(ADD_NODE_PANEL_WIDTH)
+
+        def _clamp_panel_width(paned, _pspec):
+            pos = paned.get_position()
+            clamped = max(ADD_NODE_PANEL_MIN_WIDTH, min(ADD_NODE_PANEL_MAX_WIDTH, pos))
+            if clamped != pos:
+                paned.set_position(clamped)
+
+        page.connect("notify::position", _clamp_panel_width)
+
         return page
 
     def process_responses(self):

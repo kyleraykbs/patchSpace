@@ -30,6 +30,29 @@ ZOOM_MAX = 3.0
 ZOOM_STEP = 1.1
 UNDO_LIMIT = 100
 
+# Width of the PatchSpace tab's "Add Node" side panel
+# (patchspace_widget.build_add_node_panel). The user can drag the
+# Gtk.Paned handle in main_window._build_patchspace_page to resize it
+# between ADD_NODE_PANEL_MIN_WIDTH and ADD_NODE_PANEL_MAX_WIDTH -
+# ADD_NODE_PANEL_WIDTH is just the width it starts at. The min bound
+# is also set as the panel's own set_size_request(), which is what
+# stops it (via the Paned's shrink-start-child=False) from being
+# dragged/squeezed away entirely on a narrow window.
+ADD_NODE_PANEL_WIDTH = 260
+ADD_NODE_PANEL_MIN_WIDTH = 180
+ADD_NODE_PANEL_MAX_WIDTH = 420
+
+# Minimum size for the two graph canvases (PipeWireGraphWidget,
+# PatchSpaceGraphWidget). This is a floor so a canvas never collapses
+# to nothing, NOT a target size to design a window around - it used to
+# be 800x600, which combined with a fixed-width sidebar meant the
+# window's real minimum size was silently ~1000x600+, so shrinking a
+# window smaller than that made GTK give up on honoring every widget's
+# minimum at once (the sidebar, the canvas, and the popover box in
+# main_window.py all competing for space), which is what "wonky" /
+# underflowing layout on resize actually was.
+GRAPH_CANVAS_MIN_SIZE = (200, 150)
+
 # Minimum change in a dragged volume slider (0..1 fraction) before we
 # bother sending another set_volume command to the daemon. Keeps a
 # slider drag from putting a message on the socket for every single

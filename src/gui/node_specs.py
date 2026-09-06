@@ -215,6 +215,48 @@ ADD_NODE_MENU_ITEMS = [
     item for _category, items in ADD_NODE_CATEGORIES for item in items
 ]
 
+# Best-effort symbolic icon per add-node entry, used by the sidebar
+# panel and the right-click "add node" popover. Purely cosmetic - a
+# theme that lacks one of these just falls back to its own generic
+# "missing icon" glyph, nothing else depends on this mapping. "mute"
+# is included even though it isn't a real backend node type (see
+# ADD_NODE_CATEGORIES above) because it's still a distinct entry in
+# these menus with its own icon.
+NODE_TYPE_ICONS: Dict[str, str] = {
+    "regex_input": "edit-find-symbolic",
+    "regex_output": "edit-find-symbolic",
+    "media_class_input": "view-list-symbolic",
+    "media_class_output": "view-list-symbolic",
+    "description_input": "text-x-generic-symbolic",
+    "description_output": "text-x-generic-symbolic",
+    "splitter": "network-transmit-receive-symbolic",
+    "gate": "view-reveal-symbolic",
+    "exclude_filter": "action-unavailable-symbolic",
+    "volume": "audio-volume-high-symbolic",
+    "mute": "audio-volume-muted-symbolic",
+    "device_input": "audio-input-microphone-symbolic",
+    "device_output": "audio-speakers-symbolic",
+    "app_input": "application-x-executable-symbolic",
+    "app_output": "application-x-executable-symbolic",
+    "patchbay_device": "audio-speakers-symbolic",
+    "patchbay_mic_device": "audio-input-microphone-symbolic",
+    "virtual_speaker": "audio-speakers-symbolic",
+    "virtual_mic": "audio-input-microphone-symbolic",
+}
+
+_DEFAULT_ADD_NODE_ICON = "list-add-symbolic"
+
+
+def icon_for_add_node_type(node_type: str) -> str:
+    """Icon name for an ADD_NODE_CATEGORIES/ADD_NODE_MENU_ITEMS entry
+    (which, for "mute", is not a real backend node type - see
+    NODE_TYPE_ICONS above). Falls back to the old generic plus-icon
+    for anything not listed, so a future node type added to
+    ADD_NODE_CATEGORIES without a matching icon entry still renders
+    something instead of raising."""
+    return NODE_TYPE_ICONS.get(node_type, _DEFAULT_ADD_NODE_ICON)
+
+
 # The daemon is *supposed* to serialize node types via its own
 # CLASS_TO_TYPE map (in main.py) into the short keys used above. When
 # that doesn't happen (older daemon build, a node whose type() isn't
