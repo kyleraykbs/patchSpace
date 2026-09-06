@@ -20,11 +20,24 @@ description/descriptionRegex, port group "type", channel matching) are
 identical to pwroute.py's rule schema - see that module's docstring
 for the full reference if you need it; it is not repeated here.
 
-One addition beyond pwroute.py's schema: a source filter dict may
-carry an "exclude" key, a list of filter dicts (same schema,
-recursively) that a candidate must match NONE of in addition to
-matching the filter itself. This is what backs
-patchSpace.ExcludeFilterNode - see matches_source_filter() below.
+Two additions beyond pwroute.py's schema, both source-filter-only:
+
+  * "nodeName" - an EXACT, case-sensitive match against the candidate's
+    live `node.name` property (unlike "name", which is a case-insensitive
+    SUBSTRING match against application.name-or-node.name). This is what
+    every node that identifies itself by a real object's node.name should
+    use (BackedNode identities, DeviceInputNode, the built-in PatchBay
+    convenience nodes): node.name is a unique identifier, so loose
+    substring matching makes one such node accidentally select any other
+    live node whose name merely *contains* it - e.g. a virtual sink
+    "PatchBay" whose filter would also match the daemon's own virtual
+    microphone internals "PatchBay Mic"/"PatchBay Mic_sink". See
+    patchSpace.py for the nodes that generate nodeName filters.
+
+  * "exclude" - a list of filter dicts (same schema, recursively) that a
+    candidate must match NONE of in addition to matching the filter
+    itself. This is what backs patchSpace.ExcludeFilterNode - see
+    matches_source_filter() below.
 """
 
 from __future__ import annotations
@@ -62,6 +75,10 @@ def matches_source_filter(props: dict, filt: dict) -> bool:
     (AND) - OR-ing several filters together is the caller's job."""
     filt_id = filt.get("id")
     if filt_id is not None and filt_id != props.get("_node_id"):
+        return False
+
+    node_name = filt.get("nodeName")
+    if node_name is not None and (props.get("node.name") or "") != node_name:
         return False
 
     name_regex = filt.get("nameRegex")

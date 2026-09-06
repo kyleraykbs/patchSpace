@@ -13,10 +13,13 @@ import logging
 import os
 import re
 import select
+import signal
 import subprocess
 import threading
 import time as _time
 from typing import Any, Callable, Dict, Optional, Sequence, Set, Tuple
+
+from pw_owned import OwnedPwNode, OwnedPwProcess
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +93,9 @@ class PipewireGraph:
         virtual_sink_name: Optional[str] = None,
         virtual_sink_channels: Sequence[str] = ("FL", "FR"),
         virtual_sink_set_default: bool = True,
+        virtual_mic_name: Optional[str] = None,
+        virtual_mic_channels: Sequence[str] = ("FL", "FR"),
+        virtual_mic_set_default: bool = True,
         pw_cli_command: Sequence[str] = ("pw-cli",),
         pw_cli_settle: float = 0.3,
         wpctl_command: Sequence[str] = ("wpctl",),
@@ -160,6 +166,39 @@ class PipewireGraph:
         self._virtual_sink_id: Optional[int] = None
         self._virtual_sink_proc: Optional[subprocess.Popen] = None
         self._previous_default_sink_id: Optional[int] = None
+
+        # Optional virtual microphone ("PatchBay Mic"-style default
+        # input override) - the input-side mirror of the virtual sink
+        # above, requested before start() the same way and torn down
+        # in stop() via _destroy_virtual_mic().
+        #
+        # A bare monitor-enabled null-audio-sink (which is all the
+        # virtual *sink* above needs, since apps pick a sink for
+        # playback directly) isn't enough here: most apps only offer
+        # real Audio/Source nodes in a microphone dropdown, and a
+        # sink's monitor doesn't show up as one. So this needs the
+        # same three-object backing patchSpace.VirtualMicNode already
+        # uses for a per-node virtual mic - a null-audio-sink
+        # everything feeds into, a standalone `pw-loopback` process
+        # republishing that sink's monitor as a real Audio/Source, and
+        # a silent pw-cat keepalive so the mic never reads as idle -
+        # built with the exact same pw_owned.OwnedPwNode/
+        # OwnedPwProcess helpers rather than reinventing that
+        # lifecycle a third time. See _create_virtual_mic() below.
+        #
+        # self._virtual_mic_id, once resolved, is the loopback
+        # object's node id (the visible Audio/Source apps actually
+        # pick) - exactly analogous to self._virtual_sink_id - not the
+        # underlying sink's id, which is never exposed as a pickable
+        # device.
+        self._virtual_mic_name = virtual_mic_name
+        self._virtual_mic_channels = list(virtual_mic_channels)
+        self._virtual_mic_set_default = virtual_mic_set_default
+        self._virtual_mic_sink: Optional[OwnedPwNode] = None
+        self._virtual_mic_loopback: Optional[OwnedPwProcess] = None
+        self._virtual_mic_keepalive: Optional[OwnedPwProcess] = None
+        self._virtual_mic_id: Optional[int] = None
+        self._previous_default_source_id: Optional[int] = None
 
         self.objects: Dict[Any, dict] = {}
         self._lock = threading.RLock()
@@ -638,6 +677,288 @@ class PipewireGraph:
 
         self._restore_default_sink(skip_id=node_id)
 
+    # ---------- virtual microphone lifecycle ----------
+
+    def _create_virtual_mic(self) -> None:
+        """
+        Create the virtual mic's three backing objects (sink, loopback,
+        keepalive) via pw_owned - see the constructor docstring for why
+        a mic needs all three where the virtual sink only needs one.
+        Mirrors _create_virtual_sink()'s "capture the previous default
+        before touching anything" ordering, but for
+        @DEFAULT_AUDIO_SOURCE@: WirePlumber's own default-node
+        autoselection can just as easily flip the default input onto a
+        brand new Audio/Source the moment it appears, so the previous
+        default has to be read before the loopback is created, not
+        after.
+        """
+        if not self._virtual_mic_name:
+            return
+
+        if self._virtual_mic_set_default:
+            self._previous_default_source_id = self._get_default_source_id()
+
+        sink_name = f"{self._virtual_mic_name}_sink"
+        capture_name = f"{self._virtual_mic_name}_capture"
+        position = ",".join(self._virtual_mic_channels)
+        position_json = " ".join(self._virtual_mic_channels)
+
+        sink_config = (
+            "factory.name=support.null-audio-sink "
+            f'node.name="{sink_name}" '
+            f'node.description="PatchBay Mic (input)" '
+            "media.class=Audio/Sink "
+            f"audio.position=[{position}] "
+            "monitor.channel-volumes=1"
+        )
+        sink_owned = OwnedPwNode(sink_name, self._pw_cli_command, self._pw_cli_settle)
+        if not sink_owned.create(f"create-node adapter {sink_config}"):
+            logger.error(
+                "Failed to create virtual mic sink %r - virtual mic will not "
+                "be available",
+                sink_name,
+            )
+            return
+        self._virtual_mic_sink = sink_owned
+
+        # Republish the sink's monitor as a real Audio/Source, exactly
+        # as patchSpace.VirtualMicNode.ensure_backing() does - see that
+        # method's comment for why this is a standalone `pw-loopback`
+        # process (argv list, no shell quoting to get wrong) rather
+        # than a `pw-cli load-module` call, and why --playback-props/
+        # --capture-props are the correct flags (-P/-C are TARGET
+        # device names, not property blocks - see patchSpace.py's
+        # VirtualMicNode.ensure_backing for the incident that taught us
+        # this).
+        playback_props = (
+            f'{{ node.name = "{self._virtual_mic_name}" '
+            'node.description = "PatchBay Mic" '
+            "media.class = Audio/Source }"
+        )
+        capture_props = (
+            f'{{ node.name = "{capture_name}" '
+            f'target.object = "{sink_name}" '
+            "stream.capture.sink = true "
+            f"audio.position = [ {position_json} ] }}"
+        )
+        loopback_owned = OwnedPwProcess(
+            self._virtual_mic_name, self._pw_cli_command, self._pw_cli_settle
+        )
+        loopback_command = (
+            "pw-loopback",
+            "--playback-props",
+            playback_props,
+            "--capture-props",
+            capture_props,
+        )
+        if loopback_owned.create(loopback_command):
+            self._virtual_mic_loopback = loopback_owned
+        else:
+            logger.error(
+                "Failed to create virtual mic loopback %r - the sink was "
+                "created but no Audio/Source will be visible to apps",
+                self._virtual_mic_name,
+            )
+
+        # Silent keepalive so the mic never reads as idle when nothing
+        # upstream is currently routed into it - same rationale as
+        # patchSpace.VirtualMicNode's keepalive.
+        keepalive_name = f"{self._virtual_mic_name}_keepalive"
+        keepalive_owned = OwnedPwProcess(
+            keepalive_name, self._pw_cli_command, self._pw_cli_settle
+        )
+        keepalive_command = (
+            "pw-cat",
+            "--playback",
+            "--volume",
+            "0",
+            "--target",
+            sink_name,
+            "--raw",
+            "--format",
+            "s16",
+            "--rate",
+            "48000",
+            "--channels",
+            str(len(self._virtual_mic_channels)),
+            "/dev/zero",
+        )
+        if keepalive_owned.create(keepalive_command):
+            self._virtual_mic_keepalive = keepalive_owned
+        else:
+            logger.error(
+                "Failed to start virtual mic keepalive stream for %r",
+                self._virtual_mic_name,
+            )
+
+    def _resolve_virtual_mic_on_initial_sync(self) -> None:
+        """
+        Authoritatively resolve self._virtual_mic_id from the now-
+        populated graph, by looking up the LOOPBACK's node.name (the
+        visible Audio/Source, i.e. self._virtual_mic_name itself - not
+        the internal "..._sink" name) - exact mirror of
+        _resolve_virtual_sink_on_initial_sync().
+        """
+        if not self._virtual_mic_name:
+            return
+
+        found_id = None
+        for node_id, node_data in self.nodes().items():
+            props = node_data.get("info", {}).get("props", {})
+            if props.get("node.name") == self._virtual_mic_name:
+                found_id = node_id
+                break
+
+        if found_id is None:
+            logger.warning(
+                "Virtual mic %r did not appear in the initial graph snapshot",
+                self._virtual_mic_name,
+            )
+            return
+
+        self._virtual_mic_id = found_id
+        if self._virtual_mic_loopback is not None:
+            self._virtual_mic_loopback.resolve(found_id)
+        logger.info(
+            "Confirmed virtual mic %r as node id %s", self._virtual_mic_name, found_id
+        )
+
+        if self._virtual_mic_set_default:
+            self._set_default_source()
+
+    def _get_default_source_id(self) -> Optional[int]:
+        try:
+            result = subprocess.run(
+                [*self._wpctl_command, "inspect", "@DEFAULT_AUDIO_SOURCE@"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            logger.warning("Failed to read current default source via wpctl: %s", exc)
+            return None
+
+        if result.returncode != 0:
+            logger.warning(
+                "wpctl inspect @DEFAULT_AUDIO_SOURCE@ failed: %s",
+                (result.stderr or result.stdout).strip(),
+            )
+            return None
+
+        match = re.search(r"\bid\s+(\d+)", result.stdout)
+        if not match:
+            logger.warning(
+                "Could not parse default source id from wpctl output: %r",
+                result.stdout.strip(),
+            )
+            return None
+        return int(match.group(1))
+
+    def _set_default_source(self) -> None:
+        """
+        Point WirePlumber's default source at the virtual mic's
+        loopback node, so apps that follow the system default input
+        pick it up without the user manually reselecting a microphone.
+        `wpctl set-default` figures out sink-vs-source from the node
+        itself, so this is the same call _set_default_sink() makes,
+        just against self._virtual_mic_id.
+        """
+        if not self._virtual_mic_name or self._virtual_mic_id is None:
+            return
+
+        try:
+            result = subprocess.run(
+                [*self._wpctl_command, "set-default", str(self._virtual_mic_id)],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            logger.warning(
+                "Failed to set default source to %r (id %s): %s",
+                self._virtual_mic_name,
+                self._virtual_mic_id,
+                exc,
+            )
+            return
+
+        if result.returncode == 0:
+            logger.info(
+                "Set %r (id %s) as the default audio source",
+                self._virtual_mic_name,
+                self._virtual_mic_id,
+            )
+        else:
+            logger.warning(
+                "wpctl set-default failed for %r (id %s): %s",
+                self._virtual_mic_name,
+                self._virtual_mic_id,
+                (result.stderr or result.stdout).strip(),
+            )
+
+    def _restore_default_source(self, skip_id: Optional[int] = None) -> None:
+        """Mirror of _restore_default_sink(), for @DEFAULT_AUDIO_SOURCE@."""
+        if self._previous_default_source_id is None:
+            return
+        previous_id = self._previous_default_source_id
+        self._previous_default_source_id = None
+
+        if skip_id is not None and previous_id == skip_id:
+            logger.info(
+                "Not restoring default source to id %s - that's the virtual "
+                "mic we just destroyed, not a genuine previous default.",
+                previous_id,
+            )
+            return
+
+        try:
+            result = subprocess.run(
+                [*self._wpctl_command, "set-default", str(previous_id)],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode != 0:
+                logger.warning(
+                    "Failed to restore previous default source (id %s): %s",
+                    previous_id,
+                    (result.stderr or result.stdout).strip(),
+                )
+            else:
+                logger.info("Restored default source (id %s)", previous_id)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            logger.warning(
+                "Failed to restore previous default source (id %s): %s",
+                previous_id,
+                exc,
+            )
+
+    def _destroy_virtual_mic(self) -> None:
+        """
+        Tear down in reverse of creation order - keepalive and loopback
+        both depend on the sink still existing, so kill them first,
+        exactly like patchSpace.VirtualMicNode.teardown_backing().
+        """
+        node_id = self._virtual_mic_id
+        self._virtual_mic_id = None
+
+        keepalive, self._virtual_mic_keepalive = self._virtual_mic_keepalive, None
+        if keepalive is not None:
+            keepalive.destroy()
+
+        loopback, self._virtual_mic_loopback = self._virtual_mic_loopback, None
+        if loopback is not None:
+            loopback.destroy()
+
+        sink, self._virtual_mic_sink = self._virtual_mic_sink, None
+        if sink is not None:
+            sink.destroy()
+
+        if node_id is not None or loopback is not None or sink is not None:
+            logger.info("Destroyed virtual mic (node id %s)", node_id)
+
+        self._restore_default_source(skip_id=node_id)
+
     # ---------- link control ----------
 
     def connect(self, output_port_id: int, input_port_id: int) -> bool:
@@ -701,17 +1022,201 @@ class PipewireGraph:
             f"{stderr or result.stdout.strip() or f'exit status {result.returncode}'}"
         )
 
+    # ---------- virtual device orphan cleanup ----------
+
+    def _prune_stale_virtual_objects(self) -> None:
+        """
+        Best-effort sweep run at the very start of start() (before the
+        fresh virtual sink/mic are requested), for the crash-and-restart
+        case.
+
+        When the daemon is killed uncleanly (SIGKILL, etc.), its helper
+        children that OWE the virtual objects - the interactive pw-cli
+        sessions, the pw-loopback republisher, the pw-cat keepalive - can
+        be reparented to init and keep running. The nodes they exported
+        (and every link into/out of them, e.g. a stale virtual-mic ->
+        speaker feedback link) therefore survive the daemon restart. The
+        new daemon would then try to create fresh nodes with the SAME
+        reserved node.names (colliding with the leftovers), and - because
+        PatchSpace's link bookkeeping is per-run only - could never clean
+        up a link it didn't create this run.
+
+        This method finds any leftover node bearing one of this daemon's
+        reserved names and destroys it (which also drops every link
+        touching that node), and SIGTERMs any leftover pw-loopback/pw-cat
+        helper whose args still reference our reserved names. Purely
+        best-effort: every step is guarded so a failure just logs - in the
+        normal graceful case there is nothing to clean and this is a cheap
+        no-op. Leftover idle pw-cli sessions that owned a destroyed null
+        node are intentionally left alone: they now own nothing, and their
+        generic "pw-cli" command line can't be told apart from anything
+        else without risking a live process.
+        """
+        if not self._virtual_sink_name and not self._virtual_mic_name:
+            return
+
+        reserved: Set[str] = set()
+        if self._virtual_sink_name:
+            reserved.add(self._virtual_sink_name)
+        if self._virtual_mic_name:
+            reserved.add(self._virtual_mic_name)
+            reserved.add(f"{self._virtual_mic_name}_sink")
+            reserved.add(f"{self._virtual_mic_name}_capture")
+
+        # Terminate owner processes first so their exported nodes (and any
+        # links) disappear with them, then destroy whatever reserved-named
+        # null nodes remain (owned by orphaned interactive pw-cli sessions,
+        # which can't be identified by command line to kill directly).
+        self._terminate_stale_helpers(reserved)
+        self._destroy_stale_nodes(reserved)
+
+    def _destroy_stale_nodes(self, reserved: Set[str]) -> None:
+        snapshot = self._snapshot_node_names()
+        if snapshot is None:
+            return
+
+        for node_id, name in snapshot.items():
+            if name not in reserved:
+                continue
+            try:
+                result = subprocess.run(
+                    [*self._pw_cli_command, "destroy", str(node_id)],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                logger.warning(
+                    "Failed to destroy stale leftover node %r (id %s): %s",
+                    name,
+                    node_id,
+                    exc,
+                )
+                continue
+            if result.returncode == 0:
+                logger.info(
+                    "Destroyed stale leftover node %r (id %s) from a previous run",
+                    name,
+                    node_id,
+                )
+            else:
+                logger.warning(
+                    "Failed to destroy stale leftover node %r (id %s): %s",
+                    name,
+                    node_id,
+                    (result.stderr or result.stdout).strip(),
+                )
+
+    def _snapshot_node_names(self) -> Optional[Dict[int, str]]:
+        """
+        One-shot `pw-dump` (monitor flag stripped so it prints the full
+        graph once and exits) -> {node_id: node.name}. Returns None if the
+        snapshot can't be produced; cleanup is best-effort either way.
+        """
+        command = list(self._dump_command)
+        if "-m" in command:
+            command.remove("-m")
+        try:
+            result = subprocess.run(
+                command, capture_output=True, text=True, timeout=5
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            logger.warning(
+                "Failed to snapshot the graph for stale-object cleanup: %s", exc
+            )
+            return None
+        if result.returncode != 0:
+            logger.warning(
+                "pw-dump failed during stale-object cleanup: %s",
+                (result.stderr or result.stdout).strip(),
+            )
+            return None
+        try:
+            objects = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            logger.warning(
+                "Could not parse pw-dump output during stale-object cleanup: %s", exc
+            )
+            return None
+
+        found: Dict[int, str] = {}
+        for obj in objects if isinstance(objects, list) else [objects]:
+            if not isinstance(obj, dict) or obj.get("type") != NODE_TYPE:
+                continue
+            node_id = obj.get("id")
+            if node_id is None:
+                continue
+            props = obj.get("info", {}).get("props", {})
+            if props.get("node.name"):
+                found[node_id] = props["node.name"]
+        return found
+
+    def _terminate_stale_helpers(self, reserved: Set[str]) -> None:
+        for pid in self._iter_pids():
+            try:
+                cmdline = self._read_cmdline(pid)
+            except OSError:
+                continue
+            if not cmdline:
+                continue
+            prog = os.path.basename(cmdline[0])
+            if prog not in ("pw-loopback", "pw-cat"):
+                continue
+            args_text = " ".join(cmdline)
+            if not any(marker in args_text for marker in reserved):
+                continue
+            try:
+                os.kill(pid, signal.SIGTERM)
+                logger.info(
+                    "Terminated stale leftover helper process pid %s (%s)",
+                    pid,
+                    args_text[:160],
+                )
+            except (ProcessLookupError, PermissionError) as exc:
+                logger.warning(
+                    "Failed to terminate stale leftover helper pid %s: %s", pid, exc
+                )
+
+    @staticmethod
+    def _iter_pids() -> List[int]:
+        try:
+            entries = os.listdir("/proc")
+        except OSError:
+            return []
+        pids = []
+        for entry in entries:
+            if entry.isdigit():
+                pids.append(int(entry))
+        return pids
+
+    @staticmethod
+    def _read_cmdline(pid: int) -> List[str]:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            raw = f.read()
+        return [
+            part.decode("utf-8", errors="replace") for part in raw.split(b"\0") if part
+        ]
+
     # ---------- lifecycle ----------
 
     def start(self) -> None:
         if self._proc is not None:
             raise RuntimeError("PipewireGraph already started")
 
-        # Request the virtual sink (if configured) before starting the
-        # pw-dump monitor, so it's already present in the very first
-        # full-graph snapshot. Its id/default-sink status get confirmed
-        # from that snapshot in _resolve_virtual_sink_on_initial_sync().
+        # If a previous daemon was killed uncleanly, its orphaned helper
+        # processes may still own nodes with our reserved names (and any
+        # stale links attached to them) - clear those BEFORE requesting
+        # fresh virtuals so we never create duplicates or adopt leftovers.
+        self._prune_stale_virtual_objects()
+
+        # Request the virtual sink and virtual mic (if configured)
+        # before starting the pw-dump monitor, so both are already
+        # present in the very first full-graph snapshot. Their ids/
+        # default-device status get confirmed from that snapshot in
+        # _resolve_virtual_sink_on_initial_sync() /
+        # _resolve_virtual_mic_on_initial_sync().
         self._create_virtual_sink()
+        self._create_virtual_mic()
 
         try:
             self._proc = subprocess.Popen(
@@ -721,6 +1226,7 @@ class PipewireGraph:
             )
         except OSError as exc:
             self._destroy_virtual_sink()
+            self._destroy_virtual_mic()
             raise ProcessStartError(
                 f"failed to start {self._dump_command!r}: {exc}"
             ) from exc
@@ -752,6 +1258,7 @@ class PipewireGraph:
             t.cancel()
 
         self._destroy_virtual_sink()
+        self._destroy_virtual_mic()
 
         # Allow a fresh start()/stop() cycle to see a new initial dump.
         self._initial_dump_received = False
@@ -880,6 +1387,7 @@ class PipewireGraph:
 
     def _fire_initial_sync(self) -> None:
         self._resolve_virtual_sink_on_initial_sync()
+        self._resolve_virtual_mic_on_initial_sync()
         for callback in self._initial_sync_callbacks:
             try:
                 callback(self)

@@ -150,6 +150,7 @@ NODE_TYPE_SPECS.update(
         "app_input": NodeSpec("App Input", [], ["out"]),
         "app_output": NodeSpec("App Output", ["in"], []),
         "patchbay_device": NodeSpec("PatchBay Device", ["in"], ["out"]),
+        "patchbay_mic_device": NodeSpec("PatchBay Mic Device", ["in"], ["out"]),
         "virtual_speaker": NodeSpec(
             "Virtual Speaker", ["in"], ["out"], field="device_label"
         ),
@@ -198,6 +199,7 @@ ADD_NODE_CATEGORIES = [
             ("App Input", "app_input"),
             ("App Output", "app_output"),
             ("PatchBay Device", "patchbay_device"),
+            ("PatchBay Mic Device", "patchbay_mic_device"),
         ],
     ),
     (
@@ -244,6 +246,7 @@ CLASS_NAME_TO_TYPE.update(
         "AppInputNode": "app_input",
         "AppOutputNode": "app_output",
         "PatchBayDeviceNode": "patchbay_device",
+        "PatchBayMicDeviceNode": "patchbay_mic_device",
         "VirtualSpeakerNode": "virtual_speaker",
         "VirtualMicNode": "virtual_mic",
     }

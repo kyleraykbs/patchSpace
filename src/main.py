@@ -31,6 +31,7 @@ from patchSpace import (
     AppInputNode,
     AppOutputNode,
     PatchBayDeviceNode,
+    PatchBayMicDeviceNode,
     VirtualSpeakerNode,
     VirtualMicNode,
 )
@@ -59,6 +60,7 @@ NODE_TYPE_REGISTRY: Dict[str, type] = {
     "app_input": AppInputNode,
     "app_output": AppOutputNode,
     "patchbay_device": PatchBayDeviceNode,
+    "patchbay_mic_device": PatchBayMicDeviceNode,
     "virtual_speaker": VirtualSpeakerNode,
     "virtual_mic": VirtualMicNode,
 }
@@ -99,7 +101,14 @@ _MUTATING_COMMANDS = {
 
 class PatchBayDaemon:
     def __init__(self):
-        self.graph = PipewireGraph(virtual_sink_name="PatchBay")
+        # virtual_mic_name is the input-side counterpart of
+        # virtual_sink_name - see PipewireGraph._create_virtual_mic()
+        # and patchSpace.PATCHBAY_VIRTUAL_MIC_NAME (kept in sync with
+        # this string for the same reason PATCHBAY_VIRTUAL_SINK_NAME
+        # already is - see that constant's comment).
+        self.graph = PipewireGraph(
+            virtual_sink_name="PatchBay", virtual_mic_name="PatchBay Mic"
+        )
         self.router = RuleRouter(self.graph)
         self.patch_space = PatchSpace(self.graph)
         self.graph.on_change(self._on_graph_change)
@@ -327,6 +336,8 @@ class PatchBayDaemon:
             return AppOutputNode(node_id, config.get("app_name", ""))
         elif cls is PatchBayDeviceNode:
             return PatchBayDeviceNode(node_id)
+        elif cls is PatchBayMicDeviceNode:
+            return PatchBayMicDeviceNode(node_id)
         elif cls is VirtualSpeakerNode:
             return VirtualSpeakerNode(
                 node_id,

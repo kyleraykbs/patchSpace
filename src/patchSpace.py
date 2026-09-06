@@ -73,6 +73,20 @@ EdgeId = str
 # passes to PipewireGraph if it's ever changed.
 PATCHBAY_VIRTUAL_SINK_NAME = "PatchBay"
 
+# Name of the daemon's own virtual microphone - the input-side mirror
+# of PATCHBAY_VIRTUAL_SINK_NAME, created by
+# pwgraph.PipewireGraph(virtual_mic_name=...) at startup (see
+# main.py). Unlike the virtual sink (a single null-audio-sink),
+# PATCHBAY_VIRTUAL_MIC_NAME names the visible Audio/Source - a
+# pw-loopback process republishing an internal "{name}_sink"'s
+# monitor - since that's the object other apps actually pick as a
+# microphone; see pwgraph.PipewireGraph._create_virtual_mic() and
+# VirtualMicNode below, which uses the exact same three-object
+# pattern for a user-created (rather than built-in) virtual mic. Keep
+# this in sync with the virtual_mic_name= argument main.py passes to
+# PipewireGraph if it's ever changed.
+PATCHBAY_VIRTUAL_MIC_NAME = "PatchBay Mic"
+
 
 def _run_wpctl(*args, timeout: float = 2.0) -> bool:
     """Best-effort `wpctl <args>`, swallowing failures the same way the
@@ -148,10 +162,18 @@ class BackedNode(Node):
         self.backings: List[OwnedPwNode] = []
 
     def input_identity(self) -> dict:
+        # Targets are matched by pwmatch.matches_sink_target, where
+        # "name" is already an EXACT node.name comparison.
         return {"name": self.backing_node_name}
 
     def output_identity(self) -> dict:
-        return {"name": self.backing_node_name}
+        # Sources are matched by pwmatch.matches_source_filter, where
+        # "name" is a SUBSTRING match. node.name is a unique identifier,
+        # so identity-by-node.name must go through the exact "nodeName"
+        # key instead - a loose "name" here would also select any other
+        # live node whose name merely contains ours (e.g. a virtual
+        # mic's internal "{name}_sink" sibling).
+        return {"nodeName": self.backing_node_name}
 
     def ensure_backing(self) -> None:
         """Create the real PipeWire object(s) if not already up."""
@@ -312,7 +334,10 @@ class DeviceInputNode(InputNode, LiveResolvableNode, DeviceControlMixin):
     def source_filters(self) -> List[dict]:
         if not self.device_name:
             return []
-        return [{"name": self.device_name, "mediaClass": "Audio/Source"}]
+        # nodeName (exact) - device_name is a specific hardware node's
+        # node.name, and the substring "name" key would also select any
+        # other live source whose node.name merely contains it.
+        return [{"nodeName": self.device_name, "mediaClass": "Audio/Source"}]
 
     def matches_live_node(self, props: dict) -> bool:
         return bool(self.device_name) and props.get("node.name") == self.device_name
@@ -440,13 +465,56 @@ class PatchBayDeviceNode(InputNode, OutputNode):
     implementing both filter methods is automatically usable as either
     end of an edge - no PatchSpace/engine changes needed for this to
     work.
+
+    source_filters() deliberately matches its node EXACTLY (nodeName,
+    not the substring "name" key): the daemon's own virtual microphone
+    plumbing uses node.names that merely *start with* this sink's name
+    ("PatchBay Mic", "PatchBay Mic_sink", "PatchBay Mic_capture"), and
+    a loose substring filter on "PatchBay" would let this node select
+    those too - silently routing the live mic through whatever this
+    node feeds. See pwmatch.matches_source_filter for the distinction.
     """
 
     def source_filters(self) -> List[dict]:
-        return [{"name": PATCHBAY_VIRTUAL_SINK_NAME}]
+        return [{"nodeName": PATCHBAY_VIRTUAL_SINK_NAME}]
 
     def sink_filters(self) -> List[dict]:
         return [{"name": PATCHBAY_VIRTUAL_SINK_NAME}]
+
+
+class PatchBayMicDeviceNode(InputNode, OutputNode):
+    """
+    No-config convenience node pointing at the daemon's own built-in
+    virtual microphone (PATCHBAY_VIRTUAL_MIC_NAME) - the input-side
+    mirror of PatchBayDeviceNode above. The daemon creates this
+    virtual mic once at startup and points the system's default input
+    device at it (see pwgraph.PipewireGraph's virtual_mic_name=/
+    virtual_mic_set_default=), so apps that just use "the default
+    mic" pick up whatever's routed through this node in the
+    PatchSpace graph, without the user reselecting an input device
+    anywhere.
+
+    Same "inherit both InputNode and OutputNode" shape as
+    PatchBayDeviceNode, for the same reason: real audio (an actual
+    hardware mic, or anything else) routes IN via sink_filters()
+    targeting the virtual mic's underlying "{name}_sink", and
+    whatever's flowing through it is picked up downstream via
+    source_filters() targeting the loopback's visible Audio/Source
+    (PATCHBAY_VIRTUAL_MIC_NAME itself) - the same two independent
+    isinstance() checks PatchSpace's engine already handles for
+    PatchBayDeviceNode (PatchSpace._resolve_sources / sync()), so this
+    node type needed no engine changes either.
+    """
+
+    def source_filters(self) -> List[dict]:
+        # Exact node.name identity - this node's visible object is the
+        # loopback Audio/Source whose node.name is exactly
+        # PATCHBAY_VIRTUAL_MIC_NAME. A substring "name" here would also
+        # select the virtual mic's own internal "{name}_sink" monitor.
+        return [{"nodeName": PATCHBAY_VIRTUAL_MIC_NAME}]
+
+    def sink_filters(self) -> List[dict]:
+        return [{"name": f"{PATCHBAY_VIRTUAL_MIC_NAME}_sink"}]
 
 
 class RegexInputNode(InputNode):
@@ -542,7 +610,8 @@ class SplitterNode(BackedNode):
         return {"name": self.backing_node_name}
 
     def output_identity(self) -> dict:
-        return {"name": self.backing_node_name}
+        # Exact node.name identity - see BackedNode.output_identity.
+        return {"nodeName": self.backing_node_name}
 
     def ensure_backing(self) -> None:
         if self.backings:
@@ -912,8 +981,13 @@ class VirtualMicNode(BackedNode):
 
     def output_identity(self) -> dict:
         # Consumers pick this mic up via the loopback's Audio/Source
-        # output, not the sink's monitor directly.
-        return {"name": self.backing_node_name}
+        # output, not the sink's monitor directly. Exact node.name
+        # identity ("nodeName") rather than the substring "name" key -
+        # without it this filter would also match this mic's own
+        # underlying "{name}_sink" Audio/Sink (whose monitor carries the
+        # same signal), silently wiring a duplicate feed to every
+        # consumer of this virtual mic.
+        return {"nodeName": self.backing_node_name}
 
     def teardown_backing(self) -> None:
         # Tear down in the reverse of creation order: the keepalive
