@@ -1938,6 +1938,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             config["device_name"] = ""
         elif node_type in ("app_input", "app_output"):
             config["app_name"] = ""
+        elif node_type in ("virtual_speaker", "virtual_mic"):
+            config["backing_node_name"] = f"{node_type}_{node_id}"
+            config["device_label"] = (
+                "Virtual Speaker" if node_type == "virtual_speaker" else "Virtual Mic"
+            )
         # exclude_filter deliberately gets no default pattern here (it
         # falls through to config={}, i.e. an empty "pattern" once the
         # daemon fills in its default) - an empty pattern means

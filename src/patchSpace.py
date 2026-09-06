@@ -57,12 +57,21 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import pwmatch
 from pwgraph import PipewireGraph
-from pw_owned import OwnedPwNode
+from pw_owned import OwnedPwNode, OwnedPwProcess
 
 logger = logging.getLogger(__name__)
 
 NodeId = str
 EdgeId = str
+
+# Name of the daemon's own virtual sink, created by
+# pwgraph.PipewireGraph(virtual_sink_name=...) at startup (see
+# main.py). Duplicated here rather than imported from main.py for the
+# same reason SOCKET_PATH is duplicated between constants.py and
+# patchbay_cli.py - this module shouldn't depend on the daemon's entry
+# point. Keep this in sync with the virtual_sink_name= argument main.py
+# passes to PipewireGraph if it's ever changed.
+PATCHBAY_VIRTUAL_SINK_NAME = "PatchBay"
 
 
 def _run_wpctl(*args, timeout: float = 2.0) -> bool:
@@ -413,6 +422,33 @@ class AppOutputNode(OutputNode, LiveResolvableNode):
 # ---------------------------------------------------------------------
 
 
+class PatchBayDeviceNode(InputNode, OutputNode):
+    """
+    A no-config convenience node pointing directly at the daemon's own
+    built-in virtual sink (PATCHBAY_VIRTUAL_SINK_NAME) - the thing a
+    user would otherwise have to reconstruct by hand with a
+    Description Output filter matching its sink name AND a separate
+    Description Input filter matching the same name's monitor ports.
+
+    It inherits both InputNode and OutputNode rather than picking one:
+    the underlying object is a real Audio/Sink, which - like any
+    sink - has input ports apps can be routed into (sink_filters(),
+    used as a target) and monitor ports usable as a live source
+    (source_filters(), used as an origin). PatchSpace's engine treats
+    these two roles as independent isinstance() checks (see
+    PatchSpace._resolve_sources and PatchSpace.sync()), so a node
+    implementing both filter methods is automatically usable as either
+    end of an edge - no PatchSpace/engine changes needed for this to
+    work.
+    """
+
+    def source_filters(self) -> List[dict]:
+        return [{"name": PATCHBAY_VIRTUAL_SINK_NAME}]
+
+    def sink_filters(self) -> List[dict]:
+        return [{"name": PATCHBAY_VIRTUAL_SINK_NAME}]
+
+
 class RegexInputNode(InputNode):
     """Matches live nodes by nameRegex."""
 
@@ -662,6 +698,231 @@ class VolumeProcessNode(BackedNode):
 
         node_id = self.backings[0].node_id
         _run_wpctl("set-volume", node_id, actual)
+
+
+# ---------------------------------------------------------------------
+# Virtual devices: user-created speakers and microphones
+# ---------------------------------------------------------------------
+
+
+class VirtualSpeakerNode(BackedNode):
+    """
+    A user-named virtual output device: a monitor-enabled null-audio-
+    sink, exactly like VolumeProcessNode's backing except it exists to
+    be a permanent, nameable device rather than a gain control. Apps
+    (or other PatchSpace nodes) can be routed into it as a sink
+    (input_identity()) and whatever plays through it can be picked up
+    downstream via its monitor ports as a source (output_identity()) -
+    both directions come for free from BackedNode, same as every other
+    backed node type.
+    """
+
+    def __init__(
+        self,
+        node_id: NodeId,
+        backing_node_name: str,
+        device_label: str = "",
+        pw_cli_command: Tuple[str, ...] = ("pw-cli",),
+        pw_cli_settle: float = 0.3,
+    ):
+        super().__init__(node_id, backing_node_name)
+        self.device_label = device_label
+        self._pw_cli_command = pw_cli_command
+        self._pw_cli_settle = pw_cli_settle
+
+    def ensure_backing(self) -> None:
+        if self.backings:
+            return
+
+        description = self.device_label or self.backing_node_name
+        config = (
+            "factory.name=support.null-audio-sink "
+            f'node.name="{self.backing_node_name}" '
+            f'node.description="{description}" '
+            "media.class=Audio/Sink "
+            "audio.position=[FL,FR] "
+            "monitor.channel-volumes=1"
+        )
+        command = f"create-node adapter {config}"
+        logger.info("Creating virtual speaker with: %s", command)
+
+        owned = OwnedPwNode(
+            self.backing_node_name, self._pw_cli_command, self._pw_cli_settle
+        )
+        if owned.create(command):
+            self.backings.append(owned)
+        else:
+            logger.error("Virtual speaker creation failed for %r", self.id)
+
+
+class VirtualMicNode(BackedNode):
+    """
+    A user-named virtual input device (microphone), backed by three
+    real objects instead of one (creation order = backings order):
+
+      backings[0] - the underlying null-audio-sink everything gets fed
+      into. input_identity()/output_identity() are overridden below to
+      NOT point here directly - real edges route into this sink, but
+      nothing routes out of it directly; see backings[1].
+
+      backings[1] - a Stream/Output/Audio node loopback-republishing
+      that sink's monitor as an actual Audio/Source, via a standalone
+      `pw-loopback` process (see OwnedPwProcess) whose -P playback
+      properties give the visible node its name/media.class and whose
+      -C capture properties point node.target/capture.sink at
+      backings[0]. This is what makes the mic show up in another app's
+      recording dropdown at all - a bare monitor-enabled null-sink (as
+      used by VirtualSpeakerNode/VolumeProcessNode) only ever exposes a
+      "Monitor of ..." source, which most apps won't offer as a mic.
+
+      backings[2] - a permanent keepalive: a silent pw-cat stream
+      played into backings[0]'s sink input, via OwnedPwProcess rather
+      than OwnedPwNode since it's a plain long-running command, not a
+      pw-cli create-node request. This exists purely so the mic never
+      goes idle: without something always feeding the sink, the
+      moment the user's real input edge is disconnected or gated
+      (e.g. floating the node temporarily) some apps drop or pause a
+      recording source whose stream has gone silent/inactive rather
+      than treating it as "still there, just quiet". The keepalive
+      guarantees at least one active input at all times, independent
+      of anything the user does upstream.
+    """
+
+    def __init__(
+        self,
+        node_id: NodeId,
+        backing_node_name: str,
+        device_label: str = "",
+        pw_cli_command: Tuple[str, ...] = ("pw-cli",),
+        pw_cli_settle: float = 0.3,
+    ):
+        super().__init__(node_id, backing_node_name)
+        self.device_label = device_label
+        self._pw_cli_command = pw_cli_command
+        self._pw_cli_settle = pw_cli_settle
+
+    def ensure_backing(self) -> None:
+        if self.backings:
+            return
+
+        description = self.device_label or self.backing_node_name
+        sink_name = f"{self.backing_node_name}_sink"
+        loopback_name = self.backing_node_name  # what edges actually route via
+
+        # 1. The underlying sink everything (real input + keepalive) feeds into.
+        sink_config = (
+            "factory.name=support.null-audio-sink "
+            f'node.name="{sink_name}" '
+            f'node.description="{description} (input)" '
+            "media.class=Audio/Sink "
+            "audio.position=[FL,FR] "
+            "monitor.channel-volumes=1"
+        )
+        sink_owned = OwnedPwNode(sink_name, self._pw_cli_command, self._pw_cli_settle)
+        if not sink_owned.create(f"create-node adapter {sink_config}"):
+            logger.error("Virtual mic sink creation failed for %r", self.id)
+            return
+        self.backings.append(sink_owned)
+
+        # 2. Republish that sink's monitor as a real Audio/Source loopback -
+        #    this is the object other apps actually see as "the mic".
+        #
+        #    Deliberately NOT a pw-cli `load-module` call: that requires
+        #    hand-escaping a nested SPA-JSON properties string inside a
+        #    single stdin line, which has twice now silently failed to
+        #    parse (pw-cli accepted the line and stayed alive, so
+        #    OwnedPwNode.create() reported success, but the properties -
+        #    including capture.props' node.target - never actually took
+        #    effect, and PipeWire/WirePlumber auto-connected the loopback's
+        #    capture side to the default source instead of our sink).
+        #    pw-loopback is a standalone foreground process built for
+        #    exactly this - properties passed as separate argv elements
+        #    (a Python list, not a shell string), so there's no
+        #    quoting/escaping step left to get wrong.
+        #
+        #    NOTE: -P/-C are NOT property flags - they set --playback/
+        #    --capture *TARGET*, i.e. a device name to search for. Passing
+        #    a JSON properties blob there makes pw-loopback fail to find a
+        #    matching device and fall back to the session's default
+        #    sink/source for both ends, which is exactly the "loopback to
+        #    default" feedback-through-your-speakers bug this caused. The
+        #    actual properties flags are --capture-props/--playback-props.
+        #    Also "capture.sink"/"node.target" aren't real property keys -
+        #    the loopback module uses "stream.capture.sink" and
+        #    "target.object" respectively.
+        capture_name = f"{self.backing_node_name}_capture"
+        playback_props = (
+            f'{{ node.name = "{loopback_name}" '
+            f'node.description = "{description}" '
+            "media.class = Audio/Source }"
+        )
+        capture_props = (
+            f'{{ node.name = "{capture_name}" '
+            f'target.object = "{sink_name}" '
+            "stream.capture.sink = true "
+            "audio.position = [ FL FR ] }"
+        )
+        loopback_command = (
+            "pw-loopback",
+            "--playback-props",
+            playback_props,
+            "--capture-props",
+            capture_props,
+        )
+        loopback_owned = OwnedPwProcess(
+            loopback_name, self._pw_cli_command, self._pw_cli_settle
+        )
+        if loopback_owned.create(loopback_command):
+            self.backings.append(loopback_owned)
+        else:
+            logger.error("Virtual mic loopback creation failed for %r", self.id)
+
+        # 3. Silent keepalive, always feeding the sink so the mic never
+        #    reads as idle (see class docstring).
+        keepalive_name = f"{self.backing_node_name}_keepalive"
+        keepalive_command = (
+            "pw-cat",
+            "--playback",
+            "--volume",
+            "0",
+            "--target",
+            sink_name,
+            "--raw",
+            "--format",
+            "s16",
+            "--rate",
+            "48000",
+            "--channels",
+            "2",
+            "/dev/zero",
+        )
+        keepalive = OwnedPwProcess(
+            keepalive_name, self._pw_cli_command, self._pw_cli_settle
+        )
+        if keepalive.create(keepalive_command):
+            self.backings.append(keepalive)
+        else:
+            logger.error("Virtual mic keepalive stream failed to start for %r", self.id)
+
+    def input_identity(self) -> dict:
+        # Real audio (the user's actual mic, or anything else feeding
+        # this virtual mic) routes into the underlying sink, not the
+        # loopback node.
+        return {"name": f"{self.backing_node_name}_sink"}
+
+    def output_identity(self) -> dict:
+        # Consumers pick this mic up via the loopback's Audio/Source
+        # output, not the sink's monitor directly.
+        return {"name": self.backing_node_name}
+
+    def teardown_backing(self) -> None:
+        # Tear down in the reverse of creation order: the keepalive
+        # and loopback both depend on the sink still existing, so kill
+        # them first rather than relying on BackedNode's default
+        # creation-order teardown.
+        for owned in reversed(self.backings):
+            owned.destroy()
+        self.backings.clear()
 
 
 # ---------------------------------------------------------------------

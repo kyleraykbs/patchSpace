@@ -30,6 +30,9 @@ from patchSpace import (
     DeviceOutputNode,
     AppInputNode,
     AppOutputNode,
+    PatchBayDeviceNode,
+    VirtualSpeakerNode,
+    VirtualMicNode,
 )
 from pwgraph import PipewireGraph
 from pwroute import RuleRouter
@@ -55,6 +58,9 @@ NODE_TYPE_REGISTRY: Dict[str, type] = {
     "device_output": DeviceOutputNode,
     "app_input": AppInputNode,
     "app_output": AppOutputNode,
+    "patchbay_device": PatchBayDeviceNode,
+    "virtual_speaker": VirtualSpeakerNode,
+    "virtual_mic": VirtualMicNode,
 }
 
 # Reverse mapping: class -> type string (for serialization)
@@ -319,6 +325,20 @@ class PatchBayDaemon:
             return AppInputNode(node_id, config.get("app_name", ""))
         elif cls is AppOutputNode:
             return AppOutputNode(node_id, config.get("app_name", ""))
+        elif cls is PatchBayDeviceNode:
+            return PatchBayDeviceNode(node_id)
+        elif cls is VirtualSpeakerNode:
+            return VirtualSpeakerNode(
+                node_id,
+                config.get("backing_node_name", f"patchbay_{node_id}"),
+                config.get("device_label", ""),
+            )
+        elif cls is VirtualMicNode:
+            return VirtualMicNode(
+                node_id,
+                config.get("backing_node_name", f"patchbay_{node_id}"),
+                config.get("device_label", ""),
+            )
         else:
             raise AssertionError(f"Unhandled node type in registry: {node_type}")
 
@@ -533,6 +553,30 @@ class PatchBayDaemon:
                     return {
                         "status": "error",
                         "message": f"Node {node_id} has no 'app_name' property",
+                    }
+            elif prop == "device_label":
+                if hasattr(node, "device_label"):
+                    node.device_label = value
+                    # device_label only feeds the real node's
+                    # node.description, which - unlike volume/profile -
+                    # isn't a live-settable Props parameter, only a
+                    # creation-time property. sync() below re-links
+                    # ports but never touches that, so without
+                    # recreating the backing here the live device keeps
+                    # whatever description it was created with (often
+                    # blank, since a node is usually added before it's
+                    # labeled) while the GUI happily shows the new
+                    # text - the mismatch this branch exists to close.
+                    # backing_node_name is unchanged, so
+                    # input_identity()/output_identity() still match
+                    # and the sync() call below reconnects everything.
+                    if isinstance(node, BackedNode):
+                        node.teardown_backing()
+                        node.ensure_backing()
+                else:
+                    return {
+                        "status": "error",
+                        "message": f"Node {node_id} has no 'device_label' property",
                     }
             else:
                 return {"status": "error", "message": f"Unknown property {prop}"}
@@ -1005,6 +1049,8 @@ class PatchBayDaemon:
                 node_data["device_name"] = node.device_name
             if hasattr(node, "app_name"):
                 node_data["app_name"] = node.app_name
+            if hasattr(node, "device_label"):
+                node_data["device_label"] = node.device_label
             if hasattr(node, "device_volume"):
                 node_data["device_volume"] = node.device_volume
             if hasattr(node, "profile_index"):

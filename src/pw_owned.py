@@ -167,3 +167,71 @@ class OwnedPwNode:
                 break
             chunks.append(chunk.decode("utf-8", errors="replace"))
         return "".join(chunks)
+
+
+class OwnedPwProcess(OwnedPwNode):
+    """
+    Same ownership contract as OwnedPwNode (kept alive for as long as
+    the object it backs should exist; killed in destroy()) but for a
+    real PipeWire client that's brought up by simply running a
+    long-lived command - e.g. `pw-cat` streaming silence into a sink -
+    rather than by speaking pw-cli's interactive create-node/destroy
+    protocol over stdin.
+
+    Used for patchSpace.VirtualMicNode's keepalive stream: that
+    process registers itself as a PipeWire node exactly like a
+    pw-cli-created one does, but there's no "destroy <id>" command to
+    send it - it just needs to be started and, later, terminated.
+    resolve()/is_alive/name all behave identically to the base class;
+    only create()/destroy() differ in how the process is launched and
+    stopped.
+    """
+
+    def create(self, command: Sequence[str]) -> bool:
+        if self._proc is not None:
+            return True
+
+        try:
+            proc = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        except OSError as exc:
+            logger.warning("Failed to start %r: %s", self.name, exc)
+            return False
+
+        _time.sleep(self._settle)
+
+        if proc.poll() is not None:
+            stderr_data = proc.stderr.read() if proc.stderr else ""
+            logger.warning(
+                "%r exited immediately (exit code %s): %s",
+                self.name,
+                proc.returncode,
+                stderr_data.strip(),
+            )
+            return False
+
+        self._proc = proc
+        logger.info("Started keepalive process %r.", self.name)
+        return True
+
+    def destroy(self) -> None:
+        proc, self._proc = self._proc, None
+        if proc is None:
+            return
+        # No in-band "quit" command exists for this process the way
+        # pw-cli has one - just ask it to terminate, same escalation
+        # (terminate -> wait -> kill) as OwnedPwNode.destroy() uses
+        # for its own timeout fallback.
+        proc.terminate()
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=1)
+        logger.info("Stopped keepalive process %r", self.name)
+        self.node_id = None

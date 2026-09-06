@@ -28,6 +28,7 @@ FIELD_LABELS = {
     "pattern": "Pattern:",
     "media_class": "Media Class:",
     "description": "Description:",
+    "device_label": "Name:",
 }
 
 # Human-readable labels for the raw PipeWire media.class strings that
@@ -148,6 +149,11 @@ NODE_TYPE_SPECS.update(
         "device_output": NodeSpec("Hardware Output", ["in"], []),
         "app_input": NodeSpec("App Input", [], ["out"]),
         "app_output": NodeSpec("App Output", ["in"], []),
+        "patchbay_device": NodeSpec("PatchBay Device", ["in"], ["out"]),
+        "virtual_speaker": NodeSpec(
+            "Virtual Speaker", ["in"], ["out"], field="device_label"
+        ),
+        "virtual_mic": NodeSpec("Virtual Mic", ["in"], ["out"], field="device_label"),
     }
 )
 
@@ -191,6 +197,14 @@ ADD_NODE_CATEGORIES = [
             ("Hardware Output", "device_output"),
             ("App Input", "app_input"),
             ("App Output", "app_output"),
+            ("PatchBay Device", "patchbay_device"),
+        ],
+    ),
+    (
+        "Virtual Devices",
+        [
+            ("Virtual Speaker", "virtual_speaker"),
+            ("Virtual Mic", "virtual_mic"),
         ],
     ),
 ]
@@ -229,6 +243,9 @@ CLASS_NAME_TO_TYPE.update(
         "DeviceOutputNode": "device_output",
         "AppInputNode": "app_input",
         "AppOutputNode": "app_output",
+        "PatchBayDeviceNode": "patchbay_device",
+        "VirtualSpeakerNode": "virtual_speaker",
+        "VirtualMicNode": "virtual_mic",
     }
 )
 
