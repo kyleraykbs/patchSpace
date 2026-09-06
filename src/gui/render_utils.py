@@ -97,6 +97,53 @@ def draw_text_ellipsized(cr, x, y, text, max_width, font_size, color):
     PangoCairo.show_layout(cr, layout)
 
 
+def draw_text_wrapped(cr, x, y, text, max_width, font_size, color):
+    """Like draw_text_ellipsized, but wraps onto as many lines as it
+    needs instead of truncating one line with an ellipsis - used for
+    a node's label/id text, which should always be fully readable
+    rather than cut off (see PatchSpaceGraphWidget._draw_header). Word-
+    char wrapping (not plain word wrapping) so a single long unbroken
+    token - a node id like "node_1738699999999" - still wraps instead
+    of overflowing the node's width. Returns the pixel height the
+    drawn text actually occupied, so the caller can stack further
+    lines below it.
+
+    Callers that need this height *before* drawing (to size the node
+    itself - see node_height()) should use wrapped_text_height()
+    below instead; it computes the identical layout without needing a
+    Cairo context, since node sizing runs outside on_draw."""
+    layout = PangoCairo.create_layout(cr)
+    layout.set_text(text, -1)
+    layout.set_font_description(Pango.FontDescription.from_string(f"sans {font_size}"))
+    layout.set_width(int(max_width * Pango.SCALE))
+    layout.set_wrap(Pango.WrapMode.WORD_CHAR)
+    PangoCairo.update_layout(cr, layout)
+    cr.set_source_rgb(*color)
+    cr.move_to(x, y)
+    PangoCairo.show_layout(cr, layout)
+    return layout.get_pixel_size()[1]
+
+
+def wrapped_text_height(widget, text, max_width, font_size):
+    """Pixel height `text` would occupy if drawn with
+    draw_text_wrapped() at the same max_width/font_size - without
+    needing a Cairo context, so this can be called from sizing/layout
+    code (node_height(), the force-layout sizes dict) that runs
+    outside on_draw, where no `cr` exists yet. Uses `widget`'s own
+    Pango context (Gtk.Widget.create_pango_layout()) rather than
+    PangoCairo.create_layout(), which is the only reason this needs a
+    widget and draw_text_wrapped() above doesn't - text metrics come
+    from the same font/fontconfig setup either way, so the two stay
+    in agreement."""
+    if not text:
+        return 0
+    layout = widget.create_pango_layout(text)
+    layout.set_font_description(Pango.FontDescription.from_string(f"sans {font_size}"))
+    layout.set_width(int(max_width * Pango.SCALE))
+    layout.set_wrap(Pango.WrapMode.WORD_CHAR)
+    return layout.get_pixel_size()[1]
+
+
 def draw_bezier_link(cr, x1, y1, x2, y2):
     dx = max(40, abs(x2 - x1) * 0.5)
     cr.move_to(x1, y1)

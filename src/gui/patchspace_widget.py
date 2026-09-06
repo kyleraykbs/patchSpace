@@ -45,6 +45,8 @@ from render_utils import (
     theme_class_color,
     draw_rounded_rect,
     draw_text_ellipsized,
+    draw_text_wrapped,
+    wrapped_text_height,
     draw_bezier_link,
     draw_grid_background,
 )
@@ -68,6 +70,11 @@ from portal_file_dialog import open_file, save_file
 class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     NODE_WIDTH = 180
     NODE_HEIGHT = 80
+    # Top padding before the first header line, and the gap between
+    # each wrapped header line thereafter (type label, then
+    # description/label/id - see _draw_header/_header_blocks).
+    HEADER_TOP_PAD = 14
+    HEADER_BLOCK_GAP = 4
     SLIDER_HEIGHT = 16
     SLIDER_MARGIN = 10
     FIELD_HEIGHT = 22
@@ -111,6 +118,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._slider_last_sent = None  # last volume value we sent (throttling)
 
         self.pinned_nodes = set()
+
+        # font_size -> single line's pixel height (measured once via
+        # wrapped_text_height(), see _single_line_height()). Used to
+        # tell whether a header block actually needed to wrap onto
+        # more than one line, so node_height()/_node_offset() only
+        # grow a node past its normal size when the text genuinely
+        # doesn't fit on one line at that font size.
+        self._line_height_cache = {}
 
         # node_id -> (world_x, world_y) for a node that was just
         # created via drag-and-drop from the add-node side panel (see
@@ -334,11 +349,69 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     # ---------- geometry ----------
 
+    def _single_line_height(self, font_size):
+        """Pixel height of one line at `font_size`, measured once and
+        cached. This is the baseline node_height()'s fixed 80/100px
+        budget already assumes for each header line - so comparing a
+        block's actual wrapped height against this (see
+        _header_extra_height) tells us whether it wrapped onto extra
+        lines, not just how tall a single line happens to be."""
+        if font_size not in self._line_height_cache:
+            self._line_height_cache[font_size] = wrapped_text_height(
+                self, "Ag", 1000, font_size
+            )
+        return self._line_height_cache[font_size]
+
+    def _header_blocks(self, nid, node):
+        """(text, font_size, color_key) for every line drawn in the
+        node's header, top to bottom - exactly the same text and
+        font-size choices the old fixed-line drawing code used
+        (type label, then description/label/id per the same
+        priority), just pulled out so _draw_header, node_height(), and
+        _node_offset() all agree on what's being drawn instead of the
+        drawing code and the sizing code each encoding the rules
+        separately."""
+        label = node.get("label", "")
+        desc = node.get("meta", {}).get("description", "")
+        blocks = [(type_label(node["type"], nid), 10, "subtext")]
+        if desc:
+            blocks.append((desc, 12, "text"))
+            blocks.append((label or str(nid), 10 if label else 9, "subtext"))
+        elif label:
+            blocks.append((label, 12, "text"))
+            blocks.append((str(nid), 9, "subtext"))
+        else:
+            blocks.append((str(nid), 12, "text"))
+        return blocks
+
+    def _header_extra_height(self, node_id):
+        """Extra vertical room node_id's header needs beyond what
+        node_height()'s fixed base already budgets for single-line
+        text - 0 unless a label, description, or node id is long
+        enough to wrap onto more than one line at the node's current
+        width, in which case this is exactly enough to fit every
+        wrapped line without clipping (see _draw_header, which stacks
+        blocks using these same measurements)."""
+        node = self.nodes[node_id]
+        extra = 0.0
+        for i, (text, font_size, _color) in enumerate(
+            self._header_blocks(node_id, node)
+        ):
+            # Must match _draw_header's per-line max_width exactly -
+            # the type label (i == 0) shares its row with the
+            # three-dot menu icon, so it wraps at a narrower width
+            # than the lines below it.
+            max_width = self.NODE_WIDTH - (34 if i == 0 else 20)
+            wrapped_h = wrapped_text_height(self, text, max_width, font_size)
+            extra += max(0.0, wrapped_h - self._single_line_height(font_size))
+        return extra
+
     def node_height(self, node_id):
         node = self.nodes[node_id]
         base = self.NODE_HEIGHT
         if node.get("meta", {}).get("description") or node.get("label"):
             base += 20
+        base += self._header_extra_height(node_id)
         rows = self._device_rows(node)
         if rows:
             base += len(rows) * (self.FIELD_HEIGHT + 4) + 5
@@ -348,13 +421,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             base += 25
         return base
 
-    def _node_offset(self, node):
+    def _node_offset(self, nid, node):
         """Vertical offset from the node's top edge to where its
         sockets start, so ports never overlap the description/label
         row or an inline control."""
         offset = 0
         if node.get("meta", {}).get("description") or node.get("label"):
             offset += 20
+        offset += self._header_extra_height(nid)
         rows = self._device_rows(node)
         if rows:
             offset += len(rows) * (self.FIELD_HEIGHT + 4) + 5
@@ -402,7 +476,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     def find_socket_at(self, x, y):
         for nid, node in self.nodes.items():
-            offset = self._node_offset(node)
+            offset = self._node_offset(nid, node)
             for i in range(len(node["inputs"])):
                 sx, sy = self.get_socket_position_with_offset(nid, "in", i, offset)
                 if math.hypot(x - sx, y - sy) < 9:
@@ -586,7 +660,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             node = self.nodes.get(nid)
             if node:
                 sx, sy = self.get_socket_position_with_offset(
-                    nid, "out", idx, self._node_offset(node)
+                    nid, "out", idx, self._node_offset(nid, node)
                 )
                 cr.set_source_rgb(*pal["pending_link"])
                 cr.set_line_width(2)
@@ -616,42 +690,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
         self._draw_three_dots(cr, x, y)
 
-        draw_text_ellipsized(
-            cr,
-            x + 10,
-            y + 20,
-            type_label(node["type"], nid),
-            self.NODE_WIDTH - 34,
-            10,
-            pal["subtext"],
-        )
-
-        label = node.get("label", "")
-        desc = node.get("meta", {}).get("description", "")
-        if desc:
-            draw_text_ellipsized(
-                cr, x + 10, y + 38, desc, self.NODE_WIDTH - 20, 12, pal["text"]
-            )
-            draw_text_ellipsized(
-                cr,
-                x + 10,
-                y + 56,
-                label or str(nid),
-                self.NODE_WIDTH - 20,
-                10 if label else 9,
-                pal["subtext"],
-            )
-        elif label:
-            draw_text_ellipsized(
-                cr, x + 10, y + 38, label, self.NODE_WIDTH - 20, 12, pal["text"]
-            )
-            draw_text_ellipsized(
-                cr, x + 10, y + 56, str(nid), self.NODE_WIDTH - 20, 9, pal["subtext"]
-            )
-        else:
-            draw_text_ellipsized(
-                cr, x + 10, y + 38, str(nid), self.NODE_WIDTH - 20, 12, pal["text"]
-            )
+        self._draw_header(cr, pal, nid, node, x, y)
 
         if spec.control == "volume":
             if is_mute_node(nid):
@@ -666,7 +705,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         for i, row_kind in enumerate(self._device_rows(node)):
             self._draw_device_row(cr, nid, node, i, row_kind)
 
-        offset = self._node_offset(node)
+        offset = self._node_offset(nid, node)
         for i in range(len(node["inputs"])):
             sx, sy = self.get_socket_position_with_offset(nid, "in", i, offset)
             cr.set_source_rgb(*pal["input_port"])
@@ -678,6 +717,29 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             cr.set_source_rgb(*(pal["select"] if is_source else pal["output_port"]))
             cr.arc(sx, sy, 6, 0, 2 * math.pi)
             cr.fill()
+
+    def _draw_header(self, cr, pal, nid, node, x, y):
+        """Draw every _header_blocks() line, wrapped (not
+        ellipsized - see draw_text_wrapped) and stacked top to
+        bottom by each block's own measured height, so a long label
+        or node id is always fully visible instead of cut off with
+        "...". node_height()/_node_offset() already grew the node to
+        fit this same stack (via _header_extra_height, which uses the
+        identical per-block measurements) before this ever draws, so
+        there's no clipping against the node's bottom edge or the
+        control/ports area below it."""
+        text_y = y + self.HEADER_TOP_PAD
+        for i, (text, font_size, color_key) in enumerate(
+            self._header_blocks(nid, node)
+        ):
+            # The first line (the type label) shares its row with the
+            # three-dot menu icon in the top-right corner, so it gets
+            # a narrower width than every line below it.
+            max_width = self.NODE_WIDTH - (34 if i == 0 else 20)
+            block_h = draw_text_wrapped(
+                cr, x + 10, text_y, text, max_width, font_size, pal[color_key]
+            )
+            text_y += block_h + self.HEADER_BLOCK_GAP
 
     def _draw_three_dots(self, cr, x, y):
         dot_x = x + self.NODE_WIDTH - 14
@@ -1919,6 +1981,25 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         popover.set_child(box)
         self.popup_context_menu(popover, x, y)
 
+    def _unique_default_label(self, base_label):
+        """`base_label` itself if no currently-known node already
+        carries that label, otherwise the lowest-numbered "base_label
+        N" (N >= 2) that isn't taken yet - "Volume", then "Volume 2",
+        "Volume 3", ... Checked against self.nodes' live "label"
+        values (not node ids, which are timestamp-based and never
+        collide on their own), so this is really asking "would this
+        default be ambiguous to a human looking at the canvas" -
+        independent of type, so a "Volume" node and a differently
+        typed node someone manually renamed to "Volume" still count
+        as a clash."""
+        existing = {n.get("label", "") for n in self.nodes.values()}
+        if base_label not in existing:
+            return base_label
+        n = 2
+        while f"{base_label} {n}" in existing:
+            n += 1
+        return f"{base_label} {n}"
+
     def _build_add_node_command(self, node_type):
         """Node-type-specific (real_type, node_id, config) for an
         add_node command. Shared by the right-click popover
@@ -1946,7 +2027,17 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         else:
             node_id = f"{'mute' if is_mute else 'node'}_{int(time.time() * 1000)}"
 
-        config = {}
+        # Default label: reuses type_label()'s own mute-switch check
+        # (is_mute_node(node_id), keyed off the "mute_" id prefix we
+        # just chose above) so "Mute Switch" comes out right without
+        # a second special case here, then de-duplicated against every
+        # label currently on the canvas so a second Volume node reads
+        # as "Volume 2" instead of an indistinguishable "Volume". The
+        # two idempotent singleton types below (patchbay_device/
+        # patchbay_mic_device) overwrite this with their own fixed
+        # label, which is correct - they're id-locked to one instance,
+        # so there's nothing to disambiguate.
+        config = {"label": self._unique_default_label(type_label(real_type, node_id))}
         if node_type in ("regex_input", "regex_output"):
             config["pattern"] = ".*"
         elif node_type == "media_class_input":
