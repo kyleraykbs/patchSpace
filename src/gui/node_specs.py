@@ -101,7 +101,7 @@ def media_class_label(value: Optional[str]) -> str:
 
 
 class NodeSpec:
-    __slots__ = ("label", "inputs", "outputs", "control", "field")
+    __slots__ = ("label", "inputs", "outputs", "control", "field", "settings")
 
     def __init__(
         self,
@@ -110,17 +110,35 @@ class NodeSpec:
         outputs: List[str],
         control: Optional[str] = None,
         field: Optional[str] = None,
+        settings: Optional[List[tuple]] = None,
     ):
         self.label = label
         self.inputs = inputs
         self.outputs = outputs
-        # None | "gate" | "volume" - which inline control (if any) is
-        # drawn on the node body and wired to a daemon command.
+        # None | "gate" | "volume" | "wetdry" | "threshold" - which
+        # inline control (if any) is drawn on the node body and wired
+        # to a daemon command. "gate" is the on/off toggle, "volume"
+        # the gain slider, "wetdry" the 0..1 dry/wet mix slider
+        # (Reverb), "threshold" the 0-100 sensitivity slider
+        # (Sensitivity Gate).
         self.control = control
         # None | "pattern" | "media_class" | "description" - which
         # single string property (if any) is edited via an inline
         # text field + a settings-dialog row.
         self.field = field
+        # Optional list of settings-dialog-only rows, each either a
+        # 3-tuple (attr, label, kind) or a 4-tuple (attr, label, kind,
+        # extra) when the widget needs more than a label - kind is one
+        # of:
+        #   "text"   - free-text entry (extra unused)
+        #   "bool"   - checkbox (extra unused)
+        #   "number" - spin button; extra = {"min", "max", "step"}
+        #   "choice" - dropdown; extra = {"choices": [(label, value), ...]}
+        # These are arbitrary per-node daemon properties (see main.py's
+        # set_node_property) - e.g. the echo-cancel module options or
+        # Noise Cancel's VAD dial - that don't get an inline
+        # field on the node body, only a settings row.
+        self.settings = settings
 
     @property
     def has_extra_row(self) -> bool:
@@ -145,10 +163,48 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
 
 NODE_TYPE_SPECS.update(
     {
+        "echo_cancel": NodeSpec(
+            "Echo Cancel",
+            ["mic", "probe"],
+            ["out"],
+            settings=[
+                ("library_name", "AEC library:", "text"),
+                ("aec_args", "AEC args:", "text"),
+                ("monitor_mode", "Monitor mode (auto-cancel default sink)", "bool"),
+            ],
+        ),
+        "noise_cancel": NodeSpec(
+            "Noise Cancel",
+            ["in"],
+            ["out"],
+            settings=[
+                (
+                    "vad_threshold",
+                    "Sensitivity, RNNoise (0-100):",
+                    "number",
+                    {"min": 0, "max": 100, "step": 1},
+                ),
+                ("ladspa_plugin", "Override plugin path (blank = auto):", "text"),
+                ("ladspa_label", "Override plugin label (blank = auto):", "text"),
+            ],
+        ),
+        "sensitivity_gate": NodeSpec(
+            "Sensitivity", ["in"], ["out"], control="threshold"
+        ),
+        # Reverb's only real dial - the dry/wet mix - is drawn as an
+        # inline slider on the node body (control="wetdry") rather than
+        # buried in its Settings menu; see the Reverb wet_dry handler in
+        # main.py's set_node_property.
+        "reverb": NodeSpec("Reverb", ["in"], ["out"], control="wetdry"),
+    }
+)
+
+NODE_TYPE_SPECS.update(
+    {
         "device_input": NodeSpec("Hardware Input", [], ["out"]),
         "device_output": NodeSpec("Hardware Output", ["in"], []),
-        "app_input": NodeSpec("App Input", [], ["out"]),
-        "app_output": NodeSpec("App Output", ["in"], []),
+        "app_input": NodeSpec("App Playback", [], ["out"]),
+        "app_output": NodeSpec("App Mic", ["in"], []),
         "patchbay_device": NodeSpec("PatchBay Device", ["in"], ["out"]),
         "patchbay_mic_device": NodeSpec("PatchBay Mic Device", ["in"], ["out"]),
         "virtual_speaker": NodeSpec(
@@ -161,10 +217,12 @@ NODE_TYPE_SPECS.update(
 # Menu entries for the right-click "add node" popover and the add-node
 # side panel, grouped into the categories the side panel shows as
 # collapsible sections (patchspace_widget.build_add_node_panel()).
-# "mute" isn't a real node type - _on_add_node()/add_node_at() map it
-# to a real "volume" node whose id happens to be prefixed "mute_",
-# which is how is_mute_node() tells a slider-style volume node from a
-# checkbox-style one without needing any backend changes.
+#
+# (The old "Mute Switch" entry was removed - it was just a Gate with a
+# checkbox skin. Nodes created before its removal still load fine: they
+# are plain "volume" nodes whose id is prefixed "mute_", which is how
+# is_mute_node() tells a slider-style volume node from a checkbox-style
+# one without needing any backend changes. See is_mute_node below.)
 #
 # ADD_NODE_MENU_ITEMS is the flat form (still used by the right-click
 # popover, which has no notion of categories) - derived from
@@ -188,7 +246,15 @@ ADD_NODE_CATEGORIES = [
             ("Gate (checkbox)", "gate"),
             ("Exclude Filter (regex)", "exclude_filter"),
             ("Volume (slider)", "volume"),
-            ("Mute Switch (checkbox)", "mute"),
+        ],
+    ),
+    (
+        "Effects",
+        [
+            ("Echo Cancel", "echo_cancel"),
+            ("Noise Cancel", "noise_cancel"),
+            ("Sensitivity Gate", "sensitivity_gate"),
+            ("Reverb", "reverb"),
         ],
     ),
     (
@@ -196,8 +262,8 @@ ADD_NODE_CATEGORIES = [
         [
             ("Hardware Input", "device_input"),
             ("Hardware Output", "device_output"),
-            ("App Input", "app_input"),
-            ("App Output", "app_output"),
+            ("App Playback", "app_input"),
+            ("App Mic", "app_output"),
             ("PatchBay Device", "patchbay_device"),
             ("PatchBay Mic Device", "patchbay_mic_device"),
         ],
@@ -231,9 +297,14 @@ NODE_TYPE_ICONS: Dict[str, str] = {
     "description_output": "text-x-generic-symbolic",
     "splitter": "network-transmit-receive-symbolic",
     "gate": "view-reveal-symbolic",
+    "sensitivity_gate": "microphone-sensitivity-high-symbolic",
     "exclude_filter": "action-unavailable-symbolic",
     "volume": "audio-volume-high-symbolic",
     "mute": "audio-volume-muted-symbolic",
+    "echo_cancel": "audio-input-microphone-symbolic",
+    "noise_cancel": "microphone-sensitivity-muted-symbolic",
+    "sensitivity_gate": "microphone-sensitivity-high-symbolic",
+    "reverb": "media-playlist-repeat-symbolic",
     "device_input": "audio-input-microphone-symbolic",
     "device_output": "audio-speakers-symbolic",
     "app_input": "application-x-executable-symbolic",
@@ -279,6 +350,10 @@ CLASS_NAME_TO_TYPE = {
     "GateNode": "gate",
     "ExcludeFilterNode": "exclude_filter",
     "VolumeProcessNode": "volume",
+    "NoiseCancelNode": "noise_cancel",
+    "SensitivityGateNode": "sensitivity_gate",
+    "ReverbNode": "reverb",
+    "EchoCancelNode": "echo_cancel",
 }
 
 CLASS_NAME_TO_TYPE.update(

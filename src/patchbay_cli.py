@@ -60,9 +60,16 @@ class PatchBayClient:
             }
         )
 
-    def add_edge(self, from_node: str, to_node: str) -> Dict[str, Any]:
+    def add_edge(
+        self, from_node: str, to_node: str, to_port: str = "in"
+    ) -> Dict[str, Any]:
         return self._send(
-            {"command": "add_edge", "from_node": from_node, "to_node": to_node}
+            {
+                "command": "add_edge",
+                "from_node": from_node,
+                "to_node": to_node,
+                "to_port": to_port,
+            }
         )
 
     def export_config(self) -> Dict[str, Any]:

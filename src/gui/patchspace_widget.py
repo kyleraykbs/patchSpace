@@ -87,6 +87,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     GATE_MARGIN = 14
     GATE_BOTTOM_MARGIN = 10
     GATE_AREA_HEIGHT = GATE_HEIGHT + GATE_BOTTOM_MARGIN + 8
+    # Minimum pixel gap between consecutive socket centres on a node
+    # that labels its sockets (multi-input types such as Echo Cancel).
+    # Big enough that the label text next to one socket never runs into
+    # the socket/label of its neighbour once the sockets are pushed
+    # below the header (see _socket_margins/_socket_position).
+    SOCKET_MIN_STEP = 22
 
     def __init__(self, client):
         super().__init__()
@@ -117,14 +123,22 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self.slider_initial_volume = 0
         self._slider_last_sent = None  # last volume value we sent (throttling)
 
+        # Effect sliders (Reverb wet/dry, Sensitivity threshold) whose
+        # set_node_property triggers a slow backing rebuild on the
+        # daemon. node_id -> (kind, value) for the most recent value we
+        # sent; until a get_nodes poll reports that same value back,
+        # any stale in-flight poll (sent while we were still dragging)
+        # is ignored instead of yanking the handle backwards.
+        self._pending_effect_slider = {}
+
         self.pinned_nodes = set()
 
         # font_size -> single line's pixel height (measured once via
         # wrapped_text_height(), see _single_line_height()). Used to
         # tell whether a header block actually needed to wrap onto
-        # more than one line, so node_height()/_node_offset() only
-        # grow a node past its normal size when the text genuinely
-        # doesn't fit on one line at that font size.
+        # more than one line, so node_height() only grows a node past
+        # its normal size when the text genuinely doesn't fit on one
+        # line at that font size.
         self._line_height_cache = {}
 
         # node_id -> (world_x, world_y) for a node that was just
@@ -139,6 +153,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         )
         self.layout_awake = True
         self._settle_ticks = 0
+        # Consecutive awake layout ticks since the last settle/sleep -
+        # capped in on_layout_tick so a non-converging layout can't
+        # spin the CPU forever (see that method).
+        self._awake_ticks = 0
         self._prev_node_ids = set()
         self._prev_edge_set = set()
 
@@ -226,6 +244,39 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             }
         )
 
+    def _send_effect_slider(self, node_id, kind, prop, value):
+        """Send an effect-slider value (Reverb wet_dry / Sensitivity
+        level) and remember it as the value we expect to see echoed
+        back. Both sliders trigger a slow backing rebuild server-side,
+        so a get_nodes poll that was already in flight while we were
+        dragging can come back stale *after* release and yank the
+        handle back; update_from_daemon() ignores such echoes until
+        they report this value (see _pending_effect_slider)."""
+        self._pending_effect_slider[node_id] = (kind, value)
+        self.client.send(
+            {
+                "command": "set_node_property",
+                "node_id": node_id,
+                "property": prop,
+                "value": value,
+            }
+        )
+
+    def _accept_effect_slider_echo(self, node_id, kind, reported, tolerance):
+        """Decide whether a get_nodes value for an effect slider should
+        be applied. While we have a pending value of our own (one we
+        sent that the daemon is still rebuilding toward), only accept
+        the poll once it actually reports that value back - anything
+        earlier is a stale in-flight response and must not yank the
+        handle backwards."""
+        pending = self._pending_effect_slider.get(node_id)
+        if pending and pending[0] == kind:
+            if abs(reported - pending[1]) <= tolerance:
+                del self._pending_effect_slider[node_id]
+                return reported
+            return None
+        return reported
+
     # ---------- daemon state -> local model ----------
 
     def update_from_daemon(self, data):
@@ -235,6 +286,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         for nid in list(self.nodes.keys()):
             if nid not in daemon_nodes:
                 del self.nodes[nid]
+                self._pending_effect_slider.pop(nid, None)
 
         for nid, ndata in daemon_nodes.items():
             ntype = normalize_node_type(ndata.get("type"))
@@ -256,6 +308,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     "label": ndata.get("label", ""),
                     "enabled": ndata.get("enabled", True),
                     "volume": ndata.get("volume", 1.0),
+                    "wet_dry": ndata.get("wet_dry", 0.3),
+                    "level": ndata.get("level", 25.0),
                     "device_volume": 1.0,
                     "device_name": ndata.get("device_name", ""),
                     "app_name": ndata.get("app_name", ""),
@@ -286,6 +340,23 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     node["volume"] = ndata.get("volume", 1.0)
                 else:
                     print(f"Skipping volume update for dragged node {nid}")
+                # Same drag guard for the Reverb dry/wet mix slider -
+                # a poll landing mid-drag would otherwise yank it back.
+                if self.slider_dragging != ("wetdry", nid):
+                    reported = ndata.get("wet_dry", node.get("wet_dry", 0.3))
+                    value = self._accept_effect_slider_echo(
+                        nid, "wetdry", reported, 0.05
+                    )
+                    if value is not None:
+                        node["wet_dry"] = value
+                # ...and for the Sensitivity Gate threshold slider.
+                if self.slider_dragging != ("threshold", nid):
+                    reported = ndata.get("level", node.get("level", 25.0))
+                    value = self._accept_effect_slider_echo(
+                        nid, "threshold", reported, 0.5
+                    )
+                    if value is not None:
+                        node["level"] = value
                 # Always update min/max (they don't change during drag)
                 node["volume_min"] = ndata.get("volume_min", 0.0)
                 node["volume_max"] = ndata.get("volume_max", 1.0)
@@ -300,12 +371,18 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 node["codec_label"] = ndata.get("profile_description", "")
 
         self.edges = {
-            eid: {"from_node": edata["from_node"], "to_node": edata["to_node"]}
+            eid: {
+                "from_node": edata["from_node"],
+                "to_node": edata["to_node"],
+                "to_port": edata.get("to_port", "in"),
+            }
             for eid, edata in daemon_edges.items()
         }
 
         new_node_ids = set(self.nodes.keys())
-        new_edge_set = {(e["from_node"], e["to_node"]) for e in self.edges.values()}
+        new_edge_set = {
+            (e["from_node"], e["to_node"], e["to_port"]) for e in self.edges.values()
+        }
         if new_node_ids != self._prev_node_ids or new_edge_set != self._prev_edge_set:
             self.layout_awake = True
             self._settle_ticks = 0
@@ -341,7 +418,19 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self._settle_ticks += 1
             if self._settle_ticks > LAYOUT_SETTLE_TICKS:
                 self.layout_awake = False
+                self._awake_ticks = 0
         else:
+            self._settle_ticks = 0
+
+        # Safety valve: if the forces never converge (overlapping
+        # pinned nodes, pathological repulsion, ...), stop burning CPU
+        # on a layout that isn't settling after a generous number of
+        # ticks (~40s) rather than spinning forever and freezing the
+        # UI. Any structural change re-arms layout via update_from_daemon.
+        self._awake_ticks += 1
+        if self._awake_ticks > 1200:
+            self.layout_awake = False
+            self._awake_ticks = 0
             self._settle_ticks = 0
 
         self.queue_draw()
@@ -368,12 +457,35 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         font-size choices the old fixed-line drawing code used
         (type label, then description/label/id per the same
         priority), just pulled out so _draw_header, node_height(), and
-        _node_offset() all agree on what's being drawn instead of the
-        drawing code and the sizing code each encoding the rules
+        _header_stack_height() all agree on what's being drawn instead
+        of the drawing code and the sizing code each encoding the rules
         separately."""
         label = node.get("label", "")
         desc = node.get("meta", {}).get("description", "")
         blocks = [(type_label(node["type"], nid), 10, "subtext")]
+        if node["type"] in ("device_input", "device_output", "app_input", "app_output"):
+            # Hardware / app nodes name an external device, so their
+            # header is deliberately ordered: user label first (its
+            # normal spot), node id under it, then the device name it's
+            # currently bound to - never the device name masquerading as
+            # the title. When there's no user label, the id takes the
+            # label slot and the device name still sits beneath.
+            device = (
+                node.get("meta", {}).get("description")
+                or node.get("device_name")
+                or node.get("app_name")
+                or ""
+            )
+            if label:
+                blocks.append((label, 12, "text"))
+                blocks.append((str(nid), 9, "subtext"))
+                if device:
+                    blocks.append((device, 10, "subtext"))
+            else:
+                blocks.append((str(nid), 12, "text"))
+                if device:
+                    blocks.append((device, 10, "subtext"))
+            return blocks
         if desc:
             blocks.append((desc, 12, "text"))
             blocks.append((label or str(nid), 10 if label else 9, "subtext"))
@@ -383,6 +495,24 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         else:
             blocks.append((str(nid), 12, "text"))
         return blocks
+
+    def _device_header_bonus(self, node):
+        """Extra header pixels a hardware/app node needs when it shows a
+        user label AND a bound device name (a fourth header line on top
+        of the type/label/id stack the base budget already fits)."""
+        if node["type"] not in (
+            "device_input",
+            "device_output",
+            "app_input",
+            "app_output",
+        ):
+            return 0
+        device = (
+            node.get("meta", {}).get("description")
+            or node.get("device_name")
+            or node.get("app_name")
+        )
+        return 18 if (node.get("label") and device) else 0
 
     def _header_extra_height(self, node_id):
         """Extra vertical room node_id's header needs beyond what
@@ -408,9 +538,25 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     def node_height(self, node_id):
         node = self.nodes[node_id]
+        base = self._base_node_height(node_id)
+        # A node that labels its input sockets (multi-input types such
+        # as Echo Cancel) needs enough room below the header to spread
+        # those sockets out - see _socket_margins/_socket_position.
+        if len(node.get("inputs", [])) > 1:
+            top, bottom = self._socket_margins(node_id, node)
+            need = top + bottom + self.SOCKET_MIN_STEP * (len(node["inputs"]) + 1)
+            base = max(base, int(need))
+        return base
+
+    def _base_node_height(self, node_id):
+        """node_height() without the extra room a labelled multi-input
+        node needs below its header - the historical height every
+        existing single-socket node type used, kept intact."""
+        node = self.nodes[node_id]
         base = self.NODE_HEIGHT
         if node.get("meta", {}).get("description") or node.get("label"):
             base += 20
+        base += self._device_header_bonus(node)
         base += self._header_extra_height(node_id)
         rows = self._device_rows(node)
         if rows:
@@ -421,22 +567,64 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             base += 25
         return base
 
-    def _node_offset(self, nid, node):
-        """Vertical offset from the node's top edge to where its
-        sockets start, so ports never overlap the description/label
-        row or an inline control."""
-        offset = 0
-        if node.get("meta", {}).get("description") or node.get("label"):
-            offset += 20
-        offset += self._header_extra_height(nid)
-        rows = self._device_rows(node)
-        if rows:
-            offset += len(rows) * (self.FIELD_HEIGHT + 4) + 5
-        elif spec_for(node["type"]).control == "gate":
-            offset += self.GATE_AREA_HEIGHT
-        elif spec_for(node["type"]).has_extra_row:
-            offset += 25
-        return offset
+    def _header_stack_height(self, node_id, node):
+        """Pixel height of everything drawn in the node's header block,
+        measured the same way _draw_header stacks it (identical per-line
+        widths and gaps) - used to keep labelled sockets clear of it."""
+        blocks = self._header_blocks(node_id, node)
+        total = self.HEADER_TOP_PAD
+        for i, (text, font_size, _color) in enumerate(blocks):
+            max_width = self.NODE_WIDTH - (34 if i == 0 else 20)
+            total += wrapped_text_height(self, text, max_width, font_size)
+            if i + 1 < len(blocks):
+                total += self.HEADER_BLOCK_GAP
+        return total
+
+    def _socket_margins(self, node_id, node):
+        """(top, bottom) insets, in node-local pixels, inside which this
+        node's socket centres live.
+
+        Ordinary nodes return the legacy single-value offset for both,
+        which leaves a lone socket centred on the node body (the two
+        insets cancel out of the centre calculation), so nothing moves
+        for them. A node that labels its input sockets reserves the
+        wrapped header text on top instead, so "mic"/"probe" (and their
+        labels) sit below the title/label instead of on top of it, with
+        only a small pad at the bottom."""
+        if len(node.get("inputs", [])) <= 1:
+            offset = 0
+            if node.get("meta", {}).get("description") or node.get("label"):
+                offset += 20
+            offset += self._device_header_bonus(node)
+            offset += self._header_extra_height(node_id)
+            rows = self._device_rows(node)
+            if rows:
+                offset += len(rows) * (self.FIELD_HEIGHT + 4) + 5
+            elif spec_for(node["type"]).control == "gate":
+                offset += self.GATE_AREA_HEIGHT
+            elif spec_for(node["type"]).has_extra_row:
+                offset += 25
+            return offset, offset
+
+        top = self._header_stack_height(node_id, node) + 4
+        return top, 8
+
+    def _socket_position(self, node_id, direction, index):
+        """The single source of truth for where a socket circle is (and
+        therefore where an edge endpoint, hover highlight, and click hit-
+        test must point too), so drawing and hit-testing can never drift
+        apart. Distributed across the vertical band between
+        _socket_margins()'s top and bottom insets."""
+        node = self.nodes[node_id]
+        ports = node["inputs"] if direction == "in" else node["outputs"]
+        x = node["x"] if direction == "in" else node["x"] + self.NODE_WIDTH
+        total = len(ports)
+        if total == 0:
+            return (x, node["y"] + self.node_height(node_id) / 2)
+        top, bottom = self._socket_margins(node_id, node)
+        band = self.node_height(node_id) - top - bottom
+        y = node["y"] + top + band * (index + 1) / (total + 1)
+        return (x, y)
 
     def _gate_rect(self, nid):
         """Geometry of the big gate toggle - single source of truth
@@ -450,21 +638,17 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         y = node["y"] + node_h - h - self.GATE_BOTTOM_MARGIN
         return (x, y, w, h)
 
-    def get_socket_position_with_offset(self, node_id, direction, index, offset):
-        node = self.nodes[node_id]
-        ports = node["inputs"] if direction == "in" else node["outputs"]
-        x = node["x"] if direction == "in" else node["x"] + self.NODE_WIDTH
-        total = len(ports)
-        spacing = (
-            (self.node_height(node_id) - 2 * offset) / (total + 1)
-            if total
-            else self.NODE_HEIGHT / 2
+    def _edge_endpoints(self, edge):
+        """The exact (out_x, out_y, in_x, in_y) positions an edge is
+        drawn at, taken from _socket_position so an edge always lands on
+        the drawn socket circles - the old code used the no-offset
+        centre guess, which drifts away from a labelled multi-input
+        socket (e.g. Echo Cancel's "probe")."""
+        out_x, out_y = self._socket_position(edge["from_node"], "out", 0)
+        in_x, in_y = self._socket_position(
+            edge["to_node"], "in", self._edge_to_port_index(edge)
         )
-        y = node["y"] + offset + spacing * (index + 1)
-        return (x, y)
-
-    def get_socket_position(self, node_id, direction, index):
-        return self.get_socket_position_with_offset(node_id, direction, index, 0)
+        return out_x, out_y, in_x, in_y
 
     def find_node_at(self, x, y):
         for nid, node in self.nodes.items():
@@ -476,24 +660,39 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     def find_socket_at(self, x, y):
         for nid, node in self.nodes.items():
-            offset = self._node_offset(nid, node)
             for i in range(len(node["inputs"])):
-                sx, sy = self.get_socket_position_with_offset(nid, "in", i, offset)
+                sx, sy = self._socket_position(nid, "in", i)
                 if math.hypot(x - sx, y - sy) < 9:
                     return (nid, "in", i)
             for i in range(len(node["outputs"])):
-                sx, sy = self.get_socket_position_with_offset(nid, "out", i, offset)
+                sx, sy = self._socket_position(nid, "out", i)
                 if math.hypot(x - sx, y - sy) < 9:
                     return (nid, "out", i)
         return None
+
+    def _edge_to_port_index(self, edge):
+        """Which of the target node's input sockets `edge` actually
+        lands on - 0 for every single-input node type (and the
+        common case even for a multi-input one), only different when
+        the edge's to_port names a later socket (e.g. EchoCancelNode's
+        "probe", index 1 - see node_specs.NODE_TYPE_SPECS["echo_cancel"]
+        and Edge.to_port in patchSpace.py). Falls back to 0 for a
+        to_port that isn't (or isn't yet) one of the target's declared
+        inputs, so a stale/renamed port never crashes rendering."""
+        node = self.nodes.get(edge["to_node"])
+        if node is None:
+            return 0
+        try:
+            return node["inputs"].index(edge.get("to_port", "in"))
+        except ValueError:
+            return 0
 
     def find_edge_at(self, x, y):
         threshold = 6
         for eid, edge in self.edges.items():
             if edge["from_node"] not in self.nodes or edge["to_node"] not in self.nodes:
                 continue
-            out_x, out_y = self.get_socket_position(edge["from_node"], "out", 0)
-            in_x, in_y = self.get_socket_position(edge["to_node"], "in", 0)
+            out_x, out_y, in_x, in_y = self._edge_endpoints(edge)
             dx, dy = in_x - out_x, in_y - out_y
             if dx == 0 and dy == 0:
                 dist = math.hypot(x - out_x, y - out_y)
@@ -520,6 +719,57 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 slider_x <= x <= slider_x + slider_width
                 and slider_y - 6 <= y <= slider_y + 6
             ):
+                return nid
+        return None
+
+    def find_wetdry_slider_at(self, x, y):
+        """Reverb's dry/wet mix slider - same geometry as the volume
+        slider (both live at the bottom of the node body) but only on
+        control == "wetdry" nodes."""
+        for nid, node in self.nodes.items():
+            if spec_for(node["type"]).control != "wetdry":
+                continue
+            nx, ny = node["x"], node["y"]
+            node_h = self.node_height(nid)
+            slider_y = ny + node_h - self.SLIDER_HEIGHT - 5
+            slider_x = nx + self.SLIDER_MARGIN
+            slider_width = self.NODE_WIDTH - 2 * self.SLIDER_MARGIN
+            if (
+                slider_x <= x <= slider_x + slider_width
+                and slider_y - 6 <= y <= slider_y + 6
+            ):
+                return nid
+        return None
+
+    def find_threshold_slider_at(self, x, y):
+        """Sensitivity Gate's threshold bar - same bottom-of-node-body
+        geometry as the volume/wetdry sliders, control == "threshold"."""
+        for nid, node in self.nodes.items():
+            if spec_for(node["type"]).control != "threshold":
+                continue
+            nx, ny = node["x"], node["y"]
+            node_h = self.node_height(nid)
+            slider_y = ny + node_h - self.SLIDER_HEIGHT - 5
+            slider_x = nx + self.SLIDER_MARGIN
+            slider_width = self.NODE_WIDTH - 2 * self.SLIDER_MARGIN
+            if (
+                slider_x <= x <= slider_x + slider_width
+                and slider_y - 6 <= y <= slider_y + 6
+            ):
+                return nid
+        return None
+
+    def find_settings_gear_at(self, x, y):
+        """The settings badge in a node's bottom-right corner - returns
+        the node whose Settings dialog should open when it's clicked.
+        Only nodes with spec.settings (extra controls beyond the
+        generic ID/label rows) draw one, so nothing to hit otherwise."""
+        for nid, node in self.nodes.items():
+            if not spec_for(node["type"]).settings:
+                continue
+            node_h = self.node_height(nid)
+            gx, gy = node["x"] + self.NODE_WIDTH - 20, node["y"] + node_h - 20
+            if gx - 12 <= x <= gx + 12 and gy - 12 <= y <= gy + 12:
                 return nid
         return None
 
@@ -647,8 +897,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 continue
             if edge["from_node"] not in self.nodes or edge["to_node"] not in self.nodes:
                 continue
-            out_x, out_y = self.get_socket_position(edge["from_node"], "out", 0)
-            in_x, in_y = self.get_socket_position(edge["to_node"], "in", 0)
+            out_x, out_y, in_x, in_y = self._edge_endpoints(edge)
             cr.set_source_rgb(*pal["link"])
             draw_bezier_link(cr, out_x, out_y, in_x, in_y)
 
@@ -659,9 +908,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             nid, idx = self.connecting_from
             node = self.nodes.get(nid)
             if node:
-                sx, sy = self.get_socket_position_with_offset(
-                    nid, "out", idx, self._node_offset(nid, node)
-                )
+                sx, sy = self._socket_position(nid, "out", idx)
                 cr.set_source_rgb(*pal["pending_link"])
                 cr.set_line_width(2)
                 draw_bezier_link(cr, sx, sy, *self.drag_current_xy)
@@ -699,20 +946,51 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 self._draw_volume_slider(cr, x, y, node_h, node["volume"])
         elif spec.control == "gate":
             self._draw_gate_toggle(cr, nid, node["enabled"])
+        elif spec.control == "wetdry":
+            self._draw_wetdry_slider(cr, x, y, node_h, node.get("wet_dry", 0.3))
+        elif spec.control == "threshold":
+            self._draw_threshold_slider(
+                cr, x, y, node_h, node.get("level", 25.0) / 100.0
+            )
         elif spec.field:
             self._draw_text_field(cr, x, y, node_h, self._field_value(node))
 
         for i, row_kind in enumerate(self._device_rows(node)):
             self._draw_device_row(cr, nid, node, i, row_kind)
 
-        offset = self._node_offset(nid, node)
+        # A node whose Settings dialog has more than the generic
+        # ID/label rows (Echo Cancel's module options, Noise Cancel's
+        # method/dials) gets a small gear badge in its bottom-right
+        # corner, so it's obvious there's something worth opening the
+        # menu for - the whole point of the badge is that otherwise
+        # those dials are invisible until someone happens to right-
+        # click. Clicking the badge opens Settings directly (see
+        # find_settings_gear_at/on_click).
+        if spec.settings:
+            self._draw_settings_gear(cr, pal, x, y, node_h)
+
+        multi_input = len(node["inputs"]) > 1
         for i in range(len(node["inputs"])):
-            sx, sy = self.get_socket_position_with_offset(nid, "in", i, offset)
+            sx, sy = self._socket_position(nid, "in", i)
             cr.set_source_rgb(*pal["input_port"])
             cr.arc(sx, sy, 6, 0, 2 * math.pi)
             cr.fill()
+            # A single "in" socket is self-explanatory and every node
+            # type had exactly that until EchoCancelNode - only label
+            # sockets when there's more than one to tell apart (e.g.
+            # "mic" vs "probe"), so ordinary nodes stay uncluttered.
+            if multi_input:
+                draw_text_ellipsized(
+                    cr,
+                    sx + 9,
+                    sy - 5,
+                    node["inputs"][i],
+                    self.NODE_WIDTH - 28,
+                    8,
+                    pal["subtext"],
+                )
         for i in range(len(node["outputs"])):
-            sx, sy = self.get_socket_position_with_offset(nid, "out", i, offset)
+            sx, sy = self._socket_position(nid, "out", i)
             is_source = self.connecting_from == (nid, i)
             cr.set_source_rgb(*(pal["select"] if is_source else pal["output_port"]))
             cr.arc(sx, sy, 6, 0, 2 * math.pi)
@@ -723,7 +1001,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         ellipsized - see draw_text_wrapped) and stacked top to
         bottom by each block's own measured height, so a long label
         or node id is always fully visible instead of cut off with
-        "...". node_height()/_node_offset() already grew the node to
+        "...". node_height() already grew the node to
         fit this same stack (via _header_extra_height, which uses the
         identical per-block measurements) before this ever draws, so
         there's no clipping against the node's bottom edge or the
@@ -748,6 +1026,99 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             cr.arc(dot_x, start_y + i * 6, 2.2, 0, 2 * math.pi)
             cr.set_source_rgb(0.7, 0.7, 0.7)
             cr.fill()
+
+    def _draw_settings_gear(self, cr, pal, x, y, node_h):
+        """Small cog in the node's bottom-right corner marking "this
+        node's Settings menu has important extra controls" - and the
+        click target that opens it (find_settings_gear_at). Drawn as a
+        solid disc with notches (a proper little gear), NOT a thin ring
+        with radial spokes - the spokes read as a stray yellow line
+        across the node body."""
+        cx = x + self.NODE_WIDTH - 20
+        cy = y + node_h - 20
+        cr.save()
+        amber = (0.88, 0.70, 0.30)
+        cr.set_source_rgb(*amber)
+        cr.arc(cx, cy, 8, 0, 2 * math.pi)
+        cr.fill()
+        # Notch teeth out of the rim by punching node-bg-coloured dots
+        # around the circumference - reads as a cog without any spokes.
+        cr.set_source_rgb(*pal["node_bg"])
+        for k in range(8):
+            a = k * math.pi / 4
+            cr.arc(
+                cx + math.cos(a) * 6.0, cy + math.sin(a) * 6.0, 2.4, 0, 2 * math.pi
+            )
+            cr.fill()
+        cr.set_source_rgb(*amber)
+        cr.arc(cx, cy, 2.2, 0, 2 * math.pi)
+        cr.fill()
+        cr.restore()
+
+    def _draw_wetdry_slider(self, cr, x, y, node_h, mix):
+        """Reverb's dry/wet mix as an inline slider on the node body
+        (0 = fully dry, 1 = fully wet), styled like the volume slider
+        so the same drag gesture drives it (see on_drag_begin/update/
+        end's "wetdry" handling)."""
+        slider_y = y + node_h - self.SLIDER_HEIGHT - 5
+        slider_width = self.NODE_WIDTH - 2 * self.SLIDER_MARGIN
+        slider_x = x + self.SLIDER_MARGIN
+
+        cr.set_font_size(8)
+        cr.set_source_rgb(0.6, 0.6, 0.6)
+        cr.move_to(slider_x, slider_y - 3)
+        cr.show_text("dry/wet")
+
+        cr.set_source_rgb(0.3, 0.3, 0.3)
+        cr.rectangle(slider_x, slider_y, slider_width, 4)
+        cr.fill()
+
+        cr.set_source_rgb(0.95, 0.72, 0.25)
+        cr.rectangle(slider_x, slider_y, slider_width * mix, 4)
+        cr.fill()
+
+        handle_x = slider_x + slider_width * mix
+        cr.arc(handle_x, slider_y + 2, 6, 0, 2 * math.pi)
+        cr.set_source_rgb(0.9, 0.9, 0.9)
+        cr.fill()
+
+        cr.set_font_size(9)
+        cr.set_source_rgb(0.6, 0.6, 0.6)
+        cr.move_to(x + self.NODE_WIDTH - 34, slider_y - 4)
+        cr.show_text(f"{int(round(mix * 100))}% wet")
+
+    def _draw_threshold_slider(self, cr, x, y, node_h, frac):
+        """Sensitivity Gate's threshold bar (Discord-style voice
+        activity): `frac` is the 0..1 threshold position on the node's
+        inline slider. Only the gating threshold lives here today; a
+        live incoming-level indicator layered onto the same bar is a
+        later, cosmetic addition (see SensitivityGateNode's docstring)."""
+        slider_y = y + node_h - self.SLIDER_HEIGHT - 5
+        slider_width = self.NODE_WIDTH - 2 * self.SLIDER_MARGIN
+        slider_x = x + self.SLIDER_MARGIN
+
+        cr.set_font_size(8)
+        cr.set_source_rgb(0.6, 0.6, 0.6)
+        cr.move_to(slider_x, slider_y - 3)
+        cr.show_text("sensitivity")
+
+        cr.set_source_rgb(0.3, 0.3, 0.3)
+        cr.rectangle(slider_x, slider_y, slider_width, 4)
+        cr.fill()
+
+        cr.set_source_rgb(0.45, 0.78, 0.95)
+        cr.rectangle(slider_x, slider_y, slider_width * frac, 4)
+        cr.fill()
+
+        handle_x = slider_x + slider_width * frac
+        cr.arc(handle_x, slider_y + 2, 6, 0, 2 * math.pi)
+        cr.set_source_rgb(0.9, 0.9, 0.9)
+        cr.fill()
+
+        cr.set_font_size(9)
+        cr.set_source_rgb(0.6, 0.6, 0.6)
+        cr.move_to(x + self.NODE_WIDTH - 30, slider_y - 4)
+        cr.show_text(f"{int(round(frac * 100))}%")
 
     def _draw_volume_slider(self, cr, x, y, node_h, volume):
         slider_y = y + node_h - self.SLIDER_HEIGHT - 5
@@ -907,13 +1278,18 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             # cursor doesn't flicker.
             return
 
-        if self.find_slider_at(wx, wy) is not None:
+        if (
+            self.find_slider_at(wx, wy) is not None
+            or self.find_wetdry_slider_at(wx, wy) is not None
+            or self.find_threshold_slider_at(wx, wy) is not None
+        ):
             self.set_cursor(Gdk.Cursor.new_from_name("ew-resize", None))
         elif (
             self.find_field_at(wx, wy) is not None
             or self.find_mute_checkbox_at(wx, wy) is not None
             or self.find_gate_toggle_at(wx, wy) is not None
             or self.find_three_dots_at(wx, wy) is not None
+            or self.find_settings_gear_at(wx, wy) is not None
         ):
             self.set_cursor(Gdk.Cursor.new_from_name("pointer", None))
         else:
@@ -927,6 +1303,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             return
         self.grab_focus()
         wx, wy = self.to_world(x, y)
+
+        nid = self.find_settings_gear_at(wx, wy)
+        if nid is not None:
+            self.show_settings_dialog(nid)
+            return
 
         nid = self.find_three_dots_at(wx, wy)
         if nid is not None:
@@ -1282,6 +1663,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     "command": "add_edge",
                     "from_node": edge.get("from"),
                     "to_node": edge.get("to"),
+                    "to_port": edge.get("to_port", "in"),
                 }
             )
         GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
@@ -1420,11 +1802,44 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self.pinned_nodes.add(nid)
             return
 
+        wet_hit = self.find_wetdry_slider_at(wx, wy)
+        if wet_hit is not None:
+            node = self.nodes[wet_hit]
+            slider_left = node["x"] + self.SLIDER_MARGIN
+            slider_width = self.NODE_WIDTH - 2 * self.SLIDER_MARGIN
+            new_mix = max(0.0, min(1.0, (wx - slider_left) / slider_width))
+            node["wet_dry"] = new_mix
+            self._send_effect_slider(wet_hit, "wetdry", "wet_dry", new_mix)
+            self.slider_dragging = ("wetdry", wet_hit)
+            self.slider_drag_start_x = wx
+            self.slider_initial_volume = new_mix
+            self._slider_last_sent = new_mix
+            self.queue_draw()
+            self.pinned_nodes.add(wet_hit)
+            return
+
+        threshold_hit = self.find_threshold_slider_at(wx, wy)
+        if threshold_hit is not None:
+            node = self.nodes[threshold_hit]
+            slider_left = node["x"] + self.SLIDER_MARGIN
+            slider_width = self.NODE_WIDTH - 2 * self.SLIDER_MARGIN
+            new_level = max(0.0, min(100.0, (wx - slider_left) / slider_width * 100))
+            node["level"] = new_level
+            self._send_effect_slider(threshold_hit, "threshold", "level", new_level)
+            self.slider_dragging = ("threshold", threshold_hit)
+            self.slider_drag_start_x = wx
+            self.slider_initial_volume = new_level
+            self._slider_last_sent = new_level
+            self.queue_draw()
+            self.pinned_nodes.add(threshold_hit)
+            return
+
         device_row_hit = self.find_device_row_at(wx, wy)
         if (
             self.find_mute_checkbox_at(wx, wy) is not None
             or self.find_gate_toggle_at(wx, wy) is not None
             or self.find_three_dots_at(wx, wy) is not None
+            or self.find_settings_gear_at(wx, wy) is not None
             or self.find_field_at(wx, wy) is not None
             or (device_row_hit is not None and device_row_hit[1] != "volume")
         ):
@@ -1476,6 +1891,28 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             node = self.nodes.get(nid)
             if node is None:
                 return
+            if kind == "wetdry":
+                slider_width = self.NODE_WIDTH - 2 * self.SLIDER_MARGIN
+                delta_mix = (offset_x / self.zoom) / slider_width
+                new_mix = max(
+                    0.0, min(1.0, self.slider_initial_volume + delta_mix)
+                )
+                node["wet_dry"] = new_mix
+                if abs(new_mix - self._slider_last_sent) >= VOLUME_SEND_EPSILON:
+                    self._slider_last_sent = new_mix
+                    self._send_effect_slider(nid, "wetdry", "wet_dry", new_mix)
+                self.queue_draw()
+                return
+            if kind == "threshold":
+                slider_width = self.NODE_WIDTH - 2 * self.SLIDER_MARGIN
+                delta_level = (offset_x / self.zoom) / slider_width * 100
+                new_level = max(0.0, min(100.0, self.slider_initial_volume + delta_level))
+                node["level"] = new_level
+                if abs(new_level - self._slider_last_sent) >= 1.0:
+                    self._slider_last_sent = new_level
+                    self._send_effect_slider(nid, "threshold", "level", new_level)
+                self.queue_draw()
+                return
             if kind == "process":
                 slider_width = self.NODE_WIDTH - 2 * self.SLIDER_MARGIN
             else:
@@ -1520,6 +1957,16 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self.pan_y = self.pan_drag_start[1] + offset_y
             self.queue_draw()
 
+    @staticmethod
+    def _edge_id(from_node, to_node, to_port="in"):
+        """Client-side mirror of PatchSpace._edge_id() on the daemon -
+        needed here purely to predict what id an add_edge would get,
+        for the "dragging onto an existing edge removes it" toggle
+        below. Must stay in sync with that method."""
+        if to_port == "in":
+            return f"{from_node}->{to_node}"
+        return f"{from_node}->{to_node}:{to_port}"
+
     def on_drag_end(self, gesture, offset_x, offset_y):
         if self.slider_dragging is not None:
             kind, nid = self.slider_dragging
@@ -1533,6 +1980,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             if node is not None:
                 if kind == "process":
                     self._send_set_volume(nid, node["volume"])
+                elif kind == "wetdry":
+                    self._send_effect_slider(nid, "wetdry", "wet_dry", node["wet_dry"])
+                elif kind == "threshold":
+                    self._send_effect_slider(nid, "threshold", "level", node["level"])
                 else:
                     self.client.send(
                         {
@@ -1551,18 +2002,31 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             target_nid = (
                 socket_hit[0] if (socket_hit and socket_hit[1] == "in") else None
             )
+            # Which named input socket was actually hit (e.g.
+            # EchoCancelNode's "mic" vs "probe") - defaults to "in"
+            # for every ordinary single-input node type, same as
+            # Edge.to_port's own default.
+            target_port = (
+                self.nodes[target_nid]["inputs"][socket_hit[2]]
+                if target_nid is not None
+                else "in"
+            )
 
             if self.detaching_edge:
                 eid, from_nid = self.detaching_edge
                 old_to_nid = self.edges[eid]["to_node"]
+                old_to_port = self.edges[eid].get("to_port", "in")
                 if target_nid is not None:
-                    if target_nid != old_to_nid and target_nid != from_nid:
+                    if (
+                        target_nid != old_to_nid or target_port != old_to_port
+                    ) and target_nid != from_nid:
                         self.client.send({"command": "remove_edge", "edge_id": eid})
                         self.client.send(
                             {
                                 "command": "add_edge",
                                 "from_node": from_nid,
                                 "to_node": target_nid,
+                                "to_port": target_port,
                             }
                         )
                         GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
@@ -1572,7 +2036,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             elif target_nid is not None:
                 out_nid, _ = self.connecting_from
                 if out_nid != target_nid:
-                    existing_eid = f"{out_nid}->{target_nid}"
+                    existing_eid = self._edge_id(out_nid, target_nid, target_port)
                     if existing_eid in self.edges:
                         self.client.send(
                             {"command": "remove_edge", "edge_id": existing_eid}
@@ -1583,6 +2047,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                                 "command": "add_edge",
                                 "from_node": out_nid,
                                 "to_node": target_nid,
+                                "to_port": target_port,
                             }
                         )
                     GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
@@ -1765,6 +2230,54 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 )
             )
 
+        # Additional per-node settings rows (spec.settings): advanced
+        # properties that don't deserve an inline field on the node body
+        # but should still be editable from this dialog - currently the
+        # echo-cancel module options (library/aec.args/monitor.mode) and
+        # NoiseCancelNode's VAD dial. Each entry is a 3-tuple
+        # (attr, label, kind) or a 4-tuple with an `extra` dict for the
+        # kinds that need bounds/choices; the response handler sends the
+        # matching set_node_property only when its value changed.
+        param_widgets = []
+        if spec.settings:
+            for row in spec.settings:
+                attr, label, kind = row[0], row[1], row[2]
+                extra = dict(row[3]) if len(row) > 3 else {}
+                if kind == "bool":
+                    widget = Gtk.CheckButton(label=label)
+                    widget.set_active(bool(node.get("meta", {}).get(attr, False)))
+                    content.append(widget)
+                elif kind == "number":
+                    lo = extra.get("min", 0.0)
+                    hi = extra.get("max", 100.0)
+                    step = extra.get("step", 1.0)
+                    widget = Gtk.SpinButton.new_with_range(lo, hi, step)
+                    try:
+                        current = float(node.get("meta", {}).get(attr, 0.0) or 0.0)
+                    except (TypeError, ValueError):
+                        current = 0.0
+                    widget.set_value(current)
+                    widget.set_hexpand(True)
+                    content.append(self._labeled_row(label, widget))
+                elif kind == "choice":
+                    choices = extra.get("choices", [])
+                    values = [v for _l, v in choices]
+                    labels = [l for l, _v in choices]
+                    widget = Gtk.DropDown.new_from_strings(labels)
+                    current = node.get("meta", {}).get(attr, "")
+                    try:
+                        widget.set_selected(values.index(current))
+                    except ValueError:
+                        widget.set_selected(0)
+                    widget.set_hexpand(True)
+                    content.append(self._labeled_row(label, widget))
+                else:  # text
+                    widget = Gtk.Entry()
+                    widget.set_text(node.get("meta", {}).get(attr, "") or "")
+                    widget.set_hexpand(True)
+                    content.append(self._labeled_row(label, widget))
+                param_widgets.append((attr, kind, widget, extra))
+
         dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
         dialog.add_button("Apply", Gtk.ResponseType.APPLY)
         dialog.set_default_response(Gtk.ResponseType.APPLY)
@@ -1778,6 +2291,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             label_entry,
             control_widget,
             field_entry,
+            param_widgets,
         )
         dialog.show()
 
@@ -1838,6 +2352,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         label_entry,
         control_widget,
         field_entry,
+        param_widgets=None,
     ):
         if response == Gtk.ResponseType.APPLY:
             node = self.nodes.get(node_id)
@@ -1934,6 +2449,48 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     self._send_property(node_id, spec.field, new_value)
                 else:
                     self._send_property(node_id, spec.field, field_entry.get_text())
+
+            # Extra per-node settings rows (spec.settings - e.g. the
+            # echo-cancel module options or NoiseCancelNode's
+            # method/dials). Each changed value goes out as a
+            # set_node_property; the daemon recreates the backing for
+            # load-time options so they reach the live graph. Update our
+            # own meta copy so the dialog re-opening immediately reflects
+            # the change even before the next poll.
+            if param_widgets:
+                meta = node.setdefault("meta", {})
+                for attr, kind, widget, extra in param_widgets:
+                    if kind == "bool":
+                        new_value = bool(widget.get_active())
+                        if bool(meta.get(attr, False)) != new_value:
+                            meta[attr] = new_value
+                            self._send_property(node_id, attr, new_value)
+                    elif kind == "number":
+                        new_value = widget.get_value()
+                        try:
+                            old_value = float(meta.get(attr, 0.0) or 0.0)
+                        except (TypeError, ValueError):
+                            old_value = 0.0
+                        if new_value != old_value:
+                            meta[attr] = new_value
+                            self._send_property(node_id, attr, new_value)
+                    elif kind == "choice":
+                        choices = extra.get("choices", [])
+                        values = [v for _l, v in choices]
+                        idx = widget.get_selected()
+                        new_value = (
+                            values[idx]
+                            if 0 <= idx < len(values)
+                            else meta.get(attr, "")
+                        )
+                        if meta.get(attr, "") != new_value:
+                            meta[attr] = new_value
+                            self._send_property(node_id, attr, new_value)
+                    else:  # text
+                        new_value = widget.get_text()
+                        if (meta.get(attr, "") or "") != new_value:
+                            meta[attr] = new_value
+                            self._send_property(node_id, attr, new_value)
 
             GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
 
@@ -2049,6 +2606,15 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         elif node_type in ("volume", "mute"):
             config["backing_node_name"] = f"volume_{node_id}"
             config["initial_volume"] = 1.0
+        elif node_type in ("echo_cancel", "noise_cancel", "reverb"):
+            # No inline field/control for these (see NODE_TYPE_SPECS) -
+            # just a real backing name, like volume/virtual_speaker/
+            # virtual_mic above. Everything else (which LADSPA plugin
+            # a noise_cancel/reverb node runs) is a daemon-side default
+            # a user can override from this node's settings dialog if
+            # it doesn't match what's installed on their system - see
+            # NoiseCancelNode/ReverbNode's docstrings in patchSpace.py.
+            config["backing_node_name"] = f"{node_type}_{node_id}"
         elif node_type in ("device_input", "device_output"):
             config["device_name"] = ""
         elif node_type in ("app_input", "app_output"):

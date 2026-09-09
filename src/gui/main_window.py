@@ -9,7 +9,11 @@ whichever tab it belongs to.
 
 from __future__ import annotations
 
+import os
+import signal
 import sys
+import threading
+import time
 
 import gi
 
@@ -26,6 +30,40 @@ from constants import (
 from socket_client import PatchBayClient
 from pipewire_widget import PipeWireGraphWidget
 from patchspace_widget import PatchSpaceGraphWidget
+
+# Wall-clock heartbeat of the GTK main thread, updated by _heartbeat() on
+# a GLib timeout. Only used by the PATCHBAY_TRACE_HANG watchdog below.
+_heartbeat_time = [0.0]
+
+
+def _heartbeat() -> bool:
+    _heartbeat_time[0] = time.monotonic()
+    return True
+
+
+def _arm_hang_watchdog() -> None:
+    """Diagnostic for the "UI randomly freezes" report (no exception, no
+    traceback): a hard hang here is a Python busy-loop on the main
+    thread, which never returns control to the GLib loop, so GTK can't
+    tell us anything. Enable with PATCHBAY_TRACE_HANG=1 when launching
+    the GUI; a watchdog thread then sends SIGUSR1 (registered via
+    faulthandler to dump every thread's stack to stderr) the moment the
+    main thread's heartbeat goes stale for more than 4 seconds. The
+    dumped stack shows exactly which callback is spinning."""
+    import faulthandler
+
+    faulthandler.register(signal.SIGUSR1, all_threads=True)
+
+    def _watcher() -> None:
+        while True:
+            time.sleep(2)
+            if time.monotonic() - _heartbeat_time[0] > 4.0:
+                try:
+                    os.kill(os.getpid(), signal.SIGUSR1)
+                except OSError:
+                    pass
+
+    threading.Thread(target=_watcher, daemon=True).start()
 
 
 class MainWindow(Gtk.ApplicationWindow):
@@ -51,6 +89,11 @@ class MainWindow(Gtk.ApplicationWindow):
         self.ps_widget.refresh()
 
         GLib.timeout_add(POLL_RESPONSES_MS, self.process_responses)
+        # Heartbeat + optional hang watchdog - see _arm_hang_watchdog.
+        _heartbeat_time[0] = time.monotonic()
+        GLib.timeout_add(200, _heartbeat)
+        if os.environ.get("PATCHBAY_TRACE_HANG"):
+            _arm_hang_watchdog()
 
     def _build_patchspace_page(self):
         """The PatchSpace tab is a side panel (drag-and-drop "add

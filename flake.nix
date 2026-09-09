@@ -60,11 +60,20 @@
               pkgs.cairo # provides Cairo-1.0.typelib
               pkgs.pipewire
               pkgs.wireplumber
+              # Noise Cancel node's DSP backends (see
+              # patchSpace.NoiseCancelNode.METHODS):
+              # RNNoise LADSPA ("rnnoise" method)
+              pkgs.rnnoise-plugin
+              # Noise Repellent spectral-subtraction LV2 ("noise_repellent")
+              pkgs.noise-repellent
+              # Steve Harris LADSPA suite, provides gate_1921 ("gate")
+              pkgs.ladspaPlugins
             ];
 
             shellHook = ''
               echo "Python dev shell ready ($(python --version))"
-              echo "GTK4, Adwaita, PipeWire, and WirePlumber available"
+              echo "GTK4, Adwaita, PipeWire, WirePlumber available"
+              echo "Noise plugins: RNNoise / Noise Repellent / SWH gate"
             '';
           };
         };

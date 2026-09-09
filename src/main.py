@@ -24,6 +24,10 @@ from patchSpace import (
     GateNode,
     ExcludeFilterNode,
     VolumeProcessNode,
+    NoiseCancelNode,
+    SensitivityGateNode,
+    ReverbNode,
+    EchoCancelNode,
     BackedNode,
     LiveResolvableNode,
     DeviceInputNode,
@@ -55,6 +59,10 @@ NODE_TYPE_REGISTRY: Dict[str, type] = {
     "gate": GateNode,
     "exclude_filter": ExcludeFilterNode,
     "volume": VolumeProcessNode,
+    "noise_cancel": NoiseCancelNode,
+    "sensitivity_gate": SensitivityGateNode,
+    "reverb": ReverbNode,
+    "echo_cancel": EchoCancelNode,
     "device_input": DeviceInputNode,
     "device_output": DeviceOutputNode,
     "app_input": AppInputNode,
@@ -134,6 +142,23 @@ class PatchBayDaemon:
         # to trigger a retry on its own.
         self._safety_sync_interval_s = 2.0
 
+        # node_id -> threading.Timer: coalesced "reload this effect
+        # node's interior" jobs, scheduled for load-time-only option
+        # changes (plugin path, echo-cancel library/args/monitor_mode,
+        # wet/dry), for a backing process that died, and for a new edge
+        # into a directly-exposed EchoCancelNode (see
+        # _schedule_effect_rebuild and reload_backing). See those
+        # methods for why a clean interior restart is preferred over a
+        # live nudge in each case.
+        self._effect_rebuild_timers: dict[str, threading.Timer] = {}
+        # Effect ids with a rebuild currently executing in
+        # _run_effect_rebuild (as opposed to merely queued in
+        # _effect_rebuild_timers). Lets the periodic backing-health
+        # check (_repair_dead_backings) notice that a rebuild is
+        # already in flight for a node it just saw broken, so it
+        # doesn't schedule a redundant second one.
+        self._effect_rebuilds_running: set[str] = set()
+
         self.graph.on_node_created(self._on_pw_node_created)
         self.graph.on_node_removed(self._on_pw_node_removed)
 
@@ -169,6 +194,12 @@ class PatchBayDaemon:
 
     def _safety_sync(self) -> None:
         try:
+            # First heal anything whose backing process died on its own
+            # since the last tick (see _repair_dead_backings), then
+            # reconcile - so a chain routed through a node whose module
+            # crashed gets its backing rebuilt and its links re-made
+            # within one tick instead of staying disconnected forever.
+            self._repair_dead_backings()
             self.patch_space.sync()
             # Continuously re-lock in configured device volume/profile
             # (Bluetooth codec) settings, the same way sync() above
@@ -191,6 +222,197 @@ class PatchBayDaemon:
                 t = threading.Timer(self._safety_sync_interval_s, self._safety_sync)
                 t.daemon = True
                 t.start()
+
+    # ---------- backing-process health ----------
+
+    _EFFECT_TYPES = (
+        EchoCancelNode,
+        NoiseCancelNode,
+        SensitivityGateNode,
+        ReverbNode,
+    )
+
+    def _repair_dead_backings(self) -> None:
+        """Periodic self-healing for a BackedNode whose owning process
+        has died on its own since the last tick.
+
+        A BackedNode's real PipeWire objects are owned by the process
+        that created them (see pw_owned.py), and everything a module's
+        single pw-cli session exported dies with that session - so a
+        crashed LADSPA plugin (or an OOM-killed/otherwise-dying pw-cli,
+        pw-loopback or pw-cat helper) silently removes the node's
+        streams from the live graph while the PatchSpace node stays
+        put. Without this check nothing would ever bring the module
+        back: for a directly-exposed effect (EchoCancelNode) the
+        periodic sync() would just keep disconnecting the now-
+        unroutable edges every tick; for a _FilterChainNode sandwich
+        only the interior dies (the dummy sockets survive), but the
+        node still carries no audio until the module is reloaded.
+
+        Death is detected from the process itself (OwnedPwNode.is_alive
+        polling), never from graph presence - so a module that is
+        merely between create() and its node_created event, or whose
+        streams are being torn down and recreated by an in-flight
+        effect reload, is never mistaken for broken."""
+        broken: List[BackedNode] = []
+        with self._lock:
+            for node in self.patch_space.nodes.values():
+                if (
+                    isinstance(node, BackedNode)
+                    and node.backings
+                    and node.dead_backings()
+                ):
+                    broken.append(node)
+            for node in broken:
+                # One node whose repair misbehaves must not stop the
+                # rest from being healed (or the reconciliation sync
+                # below from running).
+                try:
+                    self._repair_backing(node)
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to repair backing for %r (%s): %s",
+                        node.id,
+                        type(node).__name__,
+                        exc,
+                    )
+        if broken:
+            self.patch_space.sync()
+
+    def _repair_backing(self, node: BackedNode) -> None:
+        """Repair one BackedNode whose backing process died (see
+        _repair_dead_backings). Caller holds self._lock.
+
+        Effect nodes go through _schedule_effect_rebuild so the repair
+        is coalesced with any edit-triggered reload already queued for
+        the node, and reload_backing() (interior-only for a filter-chain
+        sandwich, full teardown/ensure for EchoCancelNode) is what
+        actually fixes it; every other BackedNode type has no reload
+        scheduler and is a single process to restart, so it is rebuilt
+        in place."""
+        primary = node.backings[0]
+        primary_dead = primary.owns_process and not primary.is_alive
+        node_id = node.id
+
+        if isinstance(node, self._EFFECT_TYPES):
+            if primary_dead:
+                # The whole DSP module is gone (its owning pw-cli
+                # session died) - a real reload is required. For a
+                # sandwich this is an interior-only reload; the dummies
+                # and the edges on them were never affected.
+                if (
+                    node_id in self._effect_rebuild_timers
+                    or node_id in self._effect_rebuilds_running
+                ):
+                    return  # a reload is already queued/in flight
+                logger.warning(
+                    "Backing process for effect %r (%s) died - scheduling reload",
+                    node_id,
+                    type(node).__name__,
+                )
+                self._schedule_effect_rebuild(node_id)
+            else:
+                # The DSP module itself is still up - only a non-module
+                # process-owning backing died (a sandwich dummy, or one
+                # of the feed/drain keepalives; EchoCancelNode's
+                # keepalives). Drop just the dead one(s) and let
+                # ensure_backing() re-add whatever is now missing by
+                # name, so a healthy module is NOT reloaded (and the
+                # audio is NOT dropped) just to replace a null sink or a
+                # pw-cat.
+                self._prune_dead_backings(node)
+                node.ensure_backing()
+        else:
+            # Splitters / volumes / virtual devices: either a single
+            # backing or (virtual mic) helpers whose loss already means
+            # the device is broken from a consumer's point of view, so
+            # a clean full restart is the right recovery.
+            logger.warning(
+                "Backing process for %r (%s) died - rebuilding",
+                node_id,
+                type(node).__name__,
+            )
+            node.reload_backing()
+
+    def _prune_dead_backings(self, node: BackedNode) -> None:
+        """Remove any dead process-owning backing from a node's
+        backings list (destroy()ing it for cleanliness), leaving its
+        healthy module/placeholders untouched. Caller holds
+        self._lock."""
+        for owned in list(node.backings):
+            if owned.owns_process and not owned.is_alive:
+                owned.destroy()
+                if owned in node.backings:
+                    node.backings.remove(owned)
+
+    def _schedule_effect_rebuild(self, node_id: str) -> None:
+        """Coalesce "reload this effect node's backing" jobs.
+
+        What actually needs this now:
+
+          * Load-time-only option changes (plugin path, wet/dry,
+            echo-cancel library/args/monitor_mode, ...) - those need a
+            fresh module regardless of edges. For a _FilterChainNode
+            sandwich that is a reload_backing(), which swaps just the
+            interior and leaves the node's dummy sockets (and therefore
+            every edge drawn on them) untouched; for EchoCancelNode
+            (still directly exposed) it is a full teardown/ensure.
+            Rapid edits are collapsed into a single reload via this
+            timer so it never restarts more than once per burst.
+
+          * A new edge into a *directly-exposed* EchoCancelNode: wiring
+            a real source into its already-running module is a
+            live-to-live renegotiation, which a clean restart is still
+            the reliable fix for. Filter-chain effects no longer call
+            this on add_edge at all - their edges only ever touch the
+            sandwich dummies (see _FilterChainNode in patchSpace.py),
+            which are plain, always-running adapters that take a new
+            link without any renegotiation.
+
+          * A backing process that died on its own (see
+            _repair_dead_backings) - reload_backing() is also the crash
+            recovery path.
+
+        The old reason "a bare disconnect leaves a stream at zero
+        active links and the session manager suspends it" no longer
+        schedules anything: every effect keeps its sides permanently
+        fed/drained by silent pw-cat keepalives, so _cmd_remove_edge
+        never calls this at all."""
+        existing = self._effect_rebuild_timers.pop(node_id, None)
+        if existing is not None:
+            existing.cancel()
+        timer = threading.Timer(0.4, self._run_effect_rebuild, args=(node_id,))
+        timer.daemon = True
+        self._effect_rebuild_timers[node_id] = timer
+        timer.start()
+
+    def _run_effect_rebuild(self, node_id: str) -> None:
+        with self._lock:
+            if node_id in self._effect_rebuilds_running:
+                return  # a previous timer is still executing - don't stack
+            self._effect_rebuilds_running.add(node_id)
+            self._effect_rebuild_timers.pop(node_id, None)
+        try:
+            with self._lock:
+                node = self.patch_space.nodes.get(node_id)
+                if not isinstance(node, self._EFFECT_TYPES):
+                    return
+                # Reload the backing. For a filter-chain sandwich this
+                # swaps only the interior module (the node's user-facing
+                # sockets - its dummies - and every edge on them are
+                # untouched); for EchoCancelNode it is a full
+                # teardown/ensure. Either way the node's identities are
+                # unchanged, so the sync() below reconnects whatever was
+                # briefly broken (for a sandwich: just its two internal
+                # links) to the fresh streams.
+                logger.info(
+                    "Reloading %s backing for %r", type(node).__name__, node_id
+                )
+                node.reload_backing()
+            self.patch_space.sync()
+        finally:
+            with self._lock:
+                self._effect_rebuilds_running.discard(node_id)
 
     def _on_pw_node_created(self, node_id: int, node_data: dict) -> None:
         props = node_data.get("info", {}).get("props", {})
@@ -311,6 +533,39 @@ class PatchBayDaemon:
                 node_id,
                 config.get("backing_node_name", f"patchbay_{node_id}"),
                 config.get("initial_volume", 1.0),
+            )
+        elif cls is NoiseCancelNode:
+            return NoiseCancelNode(
+                node_id,
+                config.get("backing_node_name", f"patchbay_{node_id}"),
+                vad_threshold=config.get("vad_threshold", 50.0),
+                ladspa_plugin=config.get("ladspa_plugin", ""),
+                ladspa_label=config.get("ladspa_label", ""),
+                method=config.get("method", "rnnoise"),
+            )
+        elif cls is SensitivityGateNode:
+            return SensitivityGateNode(
+                node_id,
+                config.get("backing_node_name", f"patchbay_{node_id}"),
+                level=config.get("level", 25.0),
+                ladspa_plugin=config.get("ladspa_plugin", ""),
+                ladspa_label=config.get("ladspa_label", ""),
+            )
+        elif cls is ReverbNode:
+            return ReverbNode(
+                node_id,
+                config.get("backing_node_name", f"patchbay_{node_id}"),
+                config.get("ladspa_plugin", ""),
+                config.get("ladspa_label", ""),
+                config.get("wet_dry", 0.3),
+            )
+        elif cls is EchoCancelNode:
+            return EchoCancelNode(
+                node_id,
+                config.get("backing_node_name", f"patchbay_{node_id}"),
+                config.get("library_name", ""),
+                config.get("aec_args", ""),
+                config.get("monitor_mode", False),
             )
         elif cls is DeviceInputNode:
             return DeviceInputNode(
@@ -589,6 +844,119 @@ class PatchBayDaemon:
                         "status": "error",
                         "message": f"Node {node_id} has no 'device_label' property",
                     }
+            elif prop in ("library_name", "aec_args", "monitor_mode"):
+                # Echo-cancel module options. Like device_label these
+                # only take effect at module-load time (they become the
+                # load-module args), so the module must be reloaded for
+                # a change to reach the live graph - a full
+                # reload_backing() here, since EchoCancelNode is still
+                # directly exposed (no sandwich dummies). backing_node_name
+                # is unchanged, so the sync() below reconnects every
+                # existing edge to the rebuilt streams.
+                if not isinstance(node, EchoCancelNode):
+                    return {
+                        "status": "error",
+                        "message": f"Node {node_id} is not an echo-cancel node",
+                    }
+                if prop == "monitor_mode":
+                    if not isinstance(value, bool):
+                        return {
+                            "status": "error",
+                            "message": "monitor_mode must be a boolean",
+                        }
+                    node.monitor_mode = value
+                elif prop == "library_name":
+                    node.library_name = value or EchoCancelNode.DEFAULT_AEC_LIBRARY
+                else:  # aec_args
+                    node.aec_args = value or ""
+                node.reload_backing()
+            elif prop in ("ladspa_plugin", "ladspa_label") and isinstance(
+                node, (NoiseCancelNode, SensitivityGateNode)
+            ):
+                # Plugin-path override for either effect node - a
+                # settings-dialog text field, not something dragged, so
+                # it changes rarely. Still load-time only (baked into
+                # _filter_graph_args()) and still coalesced via
+                # _schedule_effect_rebuild rather than reloaded inline.
+                # The reload swaps only the sandwich's interior module
+                # (see _FilterChainNode.reload_backing), so even rapid
+                # back-to-back edits never touch this node's user-facing
+                # sockets or anything chained through them. The actual
+                # per-tick dials (vad_threshold, level below) don't go
+                # through this path at all any more - see their own
+                # branches.
+                if getattr(node, prop) != value or not node.backings:
+                    setattr(node, prop, value)
+                    self._schedule_effect_rebuild(node.id)
+                return {"status": "ok"}
+            elif prop == "vad_threshold":
+                # NoiseCancelNode's RNNoise dial. RNNoise-only since
+                # the Noise Repellent / Simple Gate methods were
+                # dropped (the gate engine became its own
+                # SensitivityGateNode). Like SensitivityGateNode's
+                # "level" below, this is NOT load-time any more: "VAD
+                # Threshold (%)" is a live LADSPA control on the
+                # already-loaded plugin, pushed straight down the
+                # filter-chain's own pw-cli stdin by
+                # set_vad_threshold() - no rebuild, no debounce, and
+                # (unlike the old rebuild path) no risk of a reload
+                # here degrading whatever is chained upstream of it.
+                if not isinstance(node, NoiseCancelNode):
+                    return {
+                        "status": "error",
+                        "message": f"Node {node_id} is not a noise-cancel node",
+                    }
+                try:
+                    new_val = max(0.0, min(100.0, float(value)))
+                except (TypeError, ValueError):
+                    return {
+                        "status": "error",
+                        "message": "vad_threshold must be a number between 0 and 100",
+                    }
+                node.set_vad_threshold(new_val)
+                return {"status": "ok"}
+            elif prop == "level":
+                # SensitivityGateNode's Discord-style sensitivity
+                # slider. Unlike ladspa_plugin/wet_dry above, this is
+                # NOT load-time: the gate's own "Threshold (dB)" is a
+                # live LADSPA control on the already-loaded plugin,
+                # pushed straight down the filter-chain's own pw-cli
+                # stdin by set_level() - no rebuild, no debounce, safe
+                # to call on every tick of a slider drag.
+                if not isinstance(node, SensitivityGateNode):
+                    return {
+                        "status": "error",
+                        "message": f"Node {node_id} is not a sensitivity-gate node",
+                    }
+                try:
+                    new_val = max(0.0, min(100.0, float(value)))
+                except (TypeError, ValueError):
+                    return {
+                        "status": "error",
+                        "message": "level must be a number between 0 and 100",
+                    }
+                node.set_level(new_val)
+                return {"status": "ok"}
+            elif prop == "wet_dry":
+                # ReverbNode's only real dial. Also a load-time option
+                # (it becomes the filter-graph control value).
+                # Coalesced rebuild - see above.
+                if not isinstance(node, ReverbNode):
+                    return {
+                        "status": "error",
+                        "message": f"Node {node_id} is not a reverb node",
+                    }
+                try:
+                    new_val = max(0.0, min(1.0, float(value)))
+                except (TypeError, ValueError):
+                    return {
+                        "status": "error",
+                        "message": "wet_dry must be a number between 0 and 1",
+                    }
+                if abs(new_val - node.wet_dry) >= 1e-9 or not node.backings:
+                    node.wet_dry = new_val
+                    self._schedule_effect_rebuild(node.id)
+                return {"status": "ok"}
             else:
                 return {"status": "error", "message": f"Unknown property {prop}"}
             self.patch_space.sync()
@@ -597,18 +965,42 @@ class PatchBayDaemon:
     def _cmd_add_edge(self, cmd: dict) -> dict:
         from_node = cmd.get("from_node")
         to_node = cmd.get("to_node")
+        to_port = cmd.get("to_port", "in")
 
         if not from_node or not to_node:
             return {"status": "error", "message": "from_node and to_node required"}
 
         with self._lock:
-            edge_id = f"{from_node}->{to_node}"
+            edge_id = PatchSpace._edge_id(from_node, to_node, to_port)
             if edge_id in self.patch_space.edges:
                 return {"status": "ok", "edge_id": edge_id, "already_existed": True}
 
             try:
-                edge_id = self.patch_space.add_edge(from_node, to_node)
+                edge_id = self.patch_space.add_edge(from_node, to_node, to_port)
                 self.patch_space.sync()
+                target = self.patch_space.nodes.get(to_node)
+                if isinstance(target, EchoCancelNode):
+                    # EchoCancelNode is still *directly* exposed: its
+                    # mic/probe/out sockets ARE the echo-cancel module's
+                    # own streams (see its class docstring - it was not
+                    # converted to the _FilterChainNode dummy-sandwich).
+                    # Wiring a real source into that already-running
+                    # module for the first time is a live-to-live
+                    # renegotiation, and a clean restart of the module is
+                    # the reliable fix for it - so a new edge into an
+                    # echo-cancel node still reloads it (coalesced via
+                    # the usual timer). Its keepalives mean a bare
+                    # disconnect (see _cmd_remove_edge) never needs this,
+                    # only the first-time-connect case does.
+                    self._schedule_effect_rebuild(to_node)
+                # The filter-chain effects (NoiseCancelNode,
+                # SensitivityGateNode, ReverbNode) deliberately do NOT
+                # schedule a reload here: every user edge they carry
+                # plugs into one of their two stable sandwich dummies
+                # (see _FilterChainNode in patchSpace.py), which are
+                # plain, always-running null sinks - adding a link to one
+                # is no more special than plugging into a splitter, so
+                # there is nothing to rebuild and nothing to renegotiate.
                 return {"status": "ok", "edge_id": edge_id, "already_existed": False}
             except (KeyError, ValueError) as e:
                 return {"status": "error", "message": str(e)}
@@ -624,6 +1016,10 @@ class PatchBayDaemon:
 
             self.patch_space.remove_edge(edge_id)
             self.patch_space.sync()
+            # No backing reload needed on a plain disconnect: the
+            # filter-chain effects' user edges sit on sandwich dummies
+            # that stay fed/drained regardless (see _FilterChainNode),
+            # and EchoCancelNode's exposed sockets are each keepalive'd.
             return {"status": "ok"}
 
     def _cmd_set_gate(self, cmd: dict) -> dict:
@@ -905,6 +1301,24 @@ class PatchBayDaemon:
                     params["initial_volume"] = node.volume
                 elif isinstance(node, GateNode):
                     params["enabled"] = node.enabled
+                elif isinstance(node, (NoiseCancelNode, ReverbNode)):
+                    params["backing_node_name"] = node.backing_node_name
+                    params["ladspa_plugin"] = node.ladspa_plugin
+                    params["ladspa_label"] = node.ladspa_label
+                    if isinstance(node, NoiseCancelNode):
+                        params["vad_threshold"] = node.vad_threshold
+                    else:
+                        params["wet_dry"] = node.wet_dry
+                elif isinstance(node, SensitivityGateNode):
+                    params["backing_node_name"] = node.backing_node_name
+                    params["ladspa_plugin"] = node.ladspa_plugin
+                    params["ladspa_label"] = node.ladspa_label
+                    params["level"] = node.level
+                elif isinstance(node, EchoCancelNode):
+                    params["backing_node_name"] = node.backing_node_name
+                    params["library_name"] = node.library_name
+                    params["aec_args"] = node.aec_args
+                    params["monitor_mode"] = node.monitor_mode
                 elif isinstance(node, BackedNode):
                     params["backing_node_name"] = node.backing_node_name
 
@@ -916,6 +1330,8 @@ class PatchBayDaemon:
                     params["description"] = node.description
                 if hasattr(node, "device_name"):
                     params["device_name"] = node.device_name
+                if hasattr(node, "device_label"):
+                    params["device_label"] = node.device_label
                 if hasattr(node, "app_name"):
                     params["app_name"] = node.app_name
                 if hasattr(node, "device_volume"):
@@ -931,7 +1347,15 @@ class PatchBayDaemon:
                 nodes[node_id] = {"type": node_type, "params": params}
 
             edges = [
-                {"from": edge.from_node, "to": edge.to_node}
+                (
+                    {"from": edge.from_node, "to": edge.to_node}
+                    if edge.to_port == "in"
+                    else {
+                        "from": edge.from_node,
+                        "to": edge.to_node,
+                        "to_port": edge.to_port,
+                    }
+                )
                 for edge in self.patch_space.edges.values()
             ]
 
@@ -1047,6 +1471,24 @@ class PatchBayDaemon:
                 node_data["volume_min"] = node.volume_min
                 node_data["volume_max"] = node.volume_max
                 node_data["backing_node_id"] = node.backing_node_id
+            elif isinstance(node, (NoiseCancelNode, ReverbNode)):
+                node_data["backing_node_name"] = node.backing_node_name
+                node_data["ladspa_plugin"] = node.ladspa_plugin
+                node_data["ladspa_label"] = node.ladspa_label
+                if isinstance(node, NoiseCancelNode):
+                    node_data["vad_threshold"] = node.vad_threshold
+                else:
+                    node_data["wet_dry"] = node.wet_dry
+            elif isinstance(node, SensitivityGateNode):
+                node_data["backing_node_name"] = node.backing_node_name
+                node_data["ladspa_plugin"] = node.ladspa_plugin
+                node_data["ladspa_label"] = node.ladspa_label
+                node_data["level"] = node.level
+            elif isinstance(node, EchoCancelNode):
+                node_data["backing_node_name"] = node.backing_node_name
+                node_data["library_name"] = node.library_name
+                node_data["aec_args"] = node.aec_args
+                node_data["monitor_mode"] = node.monitor_mode
             elif isinstance(node, BackedNode):
                 node_data["backing_node_name"] = node.backing_node_name
 
@@ -1088,6 +1530,7 @@ class PatchBayDaemon:
                 "id": edge.id,
                 "from_node": edge.from_node,
                 "to_node": edge.to_node,
+                "to_port": edge.to_port,
             }
             for edge_id, edge in self.patch_space.edges.items()
         }

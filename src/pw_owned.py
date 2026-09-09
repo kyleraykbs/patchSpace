@@ -55,10 +55,29 @@ class OwnedPwNode:
         self._pw_cli_command = list(pw_cli_command)
         self._settle = settle
         self._proc: Optional[subprocess.Popen] = None
+        # True once create() has successfully started a process for
+        # this backing. Distinguishes a real, process-owning backing
+        # from a pure name placeholder (see _FilterChainNode/
+        # EchoCancelNode, which append an OwnedPwNode with no process
+        # for each sibling stream their module's single pw-cli session
+        # also exports) - is_alive on a placeholder is always False
+        # because it never launched anything, so process liveness can
+        # only be judged for backings that actually own a process.
+        self._owns_process = False
 
     @property
     def is_alive(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
+
+    @property
+    def owns_process(self) -> bool:
+        """True if this backing ever started a real process (and so
+        owns real PipeWire objects whose lifetime is tied to that
+        process) rather than being a name-only placeholder. Stays True
+        after the process exits or is destroyed - it is a fact about
+        what this backing *is*, not its current state; pair it with
+        is_alive to detect an unexpected exit."""
+        return self._owns_process
 
     def create(self, pw_cli_line: str) -> bool:
         if self._proc is not None:
@@ -97,7 +116,28 @@ class OwnedPwNode:
             )
             return False
 
+        # "pw-cli is still running" is NOT the same as "the module
+        # loaded". A load-module that fails (e.g. a filter-chain whose
+        # LADSPA plugin path doesn't exist) makes pw-cli print
+        # Error: "Could not load module" to stderr and then carry on
+        # waiting for the next command - so the process stays alive and
+        # the old code reported success for a node that will never
+        # resolve. Fail fast on that specific error instead of
+        # registering a phantom backing.
+        stderr_text = self._read_stderr(proc, 0.2)
+        if "Could not load module" in stderr_text:
+            logger.warning(
+                "Module load failed for %r: %s", self.name, stderr_text.strip()
+            )
+            proc.kill()
+            try:
+                proc.wait(timeout=2)
+            except Exception:
+                pass
+            return False
+
         self._proc = proc
+        self._owns_process = True
         logger.info("Successfully requested node %r, pw-cli is running.", self.name)
         return True
 
@@ -111,10 +151,19 @@ class OwnedPwNode:
         set_param("Props", '{ params = [ "Volume" 0.5 ] }'). No-op
         until both the backing process and the resolved node id are
         available."""
-        if self._proc is None or self._proc.stdin is None or self.node_id is None:
+        if self.node_id is not None:
+            self.set_param_for(self.node_id, iface, params_body)
+
+    def set_param_for(self, node_id: int, iface: str, params_body: str) -> None:
+        """Like set_param, but targets an arbitrary graph object id over
+        this connection's pw-cli session. A module-loading connection
+        owns every object its module created, so this lets one pw-cli
+        session (e.g. a filter-chain's) update properties on any of its
+        streams without spawning a subprocess per change."""
+        if self._proc is None or self._proc.stdin is None:
             return
         try:
-            self._proc.stdin.write(f"set-param {self.node_id} {iface} {params_body}\n")
+            self._proc.stdin.write(f"set-param {node_id} {iface} {params_body}\n")
             self._proc.stdin.flush()
         except OSError as exc:
             logger.warning("Failed to set-param on %r: %s", self.name, exc)
@@ -139,6 +188,33 @@ class OwnedPwNode:
                 proc.wait(timeout=1)
         logger.info("Destroyed owned node %r", self.name)
         self.node_id = None
+
+    @staticmethod
+    def _read_stderr(proc: subprocess.Popen, timeout: float) -> str:
+        """Non-blocking read of whatever a still-running subprocess has
+        written to stderr within `timeout` seconds - used by create() to
+        catch a load-module failure that leaves pw-cli alive (see that
+        method for why the process staying up isn't proof of success)."""
+        if proc.stderr is None:
+            return ""
+        fd = proc.stderr.fileno()
+        deadline = _time.monotonic() + timeout
+        chunks = []
+        while True:
+            remaining = deadline - _time.monotonic()
+            if remaining <= 0:
+                break
+            ready, _, _ = select.select([fd], [], [], remaining)
+            if not ready:
+                break
+            try:
+                chunk = os.read(fd, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            chunks.append(chunk.decode("utf-8", errors="replace"))
+        return "".join(chunks)
 
     @staticmethod
     def _read_available(proc: subprocess.Popen, timeout: float) -> str:
@@ -216,6 +292,7 @@ class OwnedPwProcess(OwnedPwNode):
             return False
 
         self._proc = proc
+        self._owns_process = True
         logger.info("Started keepalive process %r.", self.name)
         return True
 
