@@ -20,7 +20,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, GLib
+from gi.repository import Gtk, Gdk, GLib
 
 from constants import (
     POLL_RESPONSES_MS,
@@ -262,10 +262,19 @@ class MainWindow(Gtk.ApplicationWindow):
         itself is a plain Gtk.DrawingArea with no room for child
         widgets, so the menu button lives in a Gtk.Overlay wrapped
         around it instead of inside it."""
+        # Filled in below; the loading overlay is created after the
+        # toolbar so _on_console_toggled/_console_button exist.
+        self._loading_overlay = None
+        self._loading_spinner = None
+        self._console_auto_opened = False
+
         overlay = Gtk.Overlay()
         overlay.set_child(self.ps_widget)
         overlay.set_hexpand(True)
         overlay.set_vexpand(True)
+        # Kept so _on_loading_changed can add/remove the loading overlay
+        # on top of the canvas.
+        self.ps_overlay = overlay
 
         menu_button = Gtk.MenuButton()
         menu_button.set_icon_name("open-menu-symbolic")
@@ -322,6 +331,13 @@ class MainWindow(Gtk.ApplicationWindow):
 
         overlay.add_overlay(menu_button)
 
+        # Transparent loading wheel + faint dim over the canvas, shown
+        # while a session import stages its nodes (see
+        # PatchSpaceGraphWidget.on_loading_changed).  Created here so it
+        # sits above the menu button; _on_loading_changed toggles it.
+        self._loading_overlay = self._build_loading_overlay()
+        overlay.add_overlay(self._loading_overlay)
+
         add_node_panel = self.ps_widget.build_add_node_panel()
 
         # Canvas + a thin tool strip pinned under it, plus an optional
@@ -334,6 +350,9 @@ class MainWindow(Gtk.ApplicationWindow):
         canvas_area.append(overlay)
         canvas_area.append(self._build_patchspace_toolbar())
         canvas_area.append(self.log_console)
+        # Load progress (start/stop) drives the overlay + console
+        # auto-open/collapse; see _on_loading_changed.
+        self.ps_widget.on_loading_changed.append(self._on_loading_changed)
 
         # A Gtk.Paned instead of a plain Box+Separator: it draws its
         # own draggable handle, so the user can grab the edge between
@@ -364,6 +383,80 @@ class MainWindow(Gtk.ApplicationWindow):
 
         return page
 
+    def _build_loading_overlay(self):
+        """A translucent full-canvas sheet with a centered Gtk.Spinner,
+        hidden until a session load starts.  Gtk.Overlay overlay children
+        are only as big as their natural size unless they expand, so the
+        sheet sets hexpand/vexpand + FILL alignment to cover the whole
+        canvas."""
+        self._install_loading_css()
+
+        sheet = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        sheet.add_css_class("loading-overlay")
+        sheet.set_halign(Gtk.Align.FILL)
+        sheet.set_valign(Gtk.Align.FILL)
+        sheet.set_hexpand(True)
+        sheet.set_vexpand(True)
+
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        card.set_halign(Gtk.Align.CENTER)
+        card.set_valign(Gtk.Align.CENTER)
+
+        self._loading_spinner = Gtk.Spinner()
+        self._loading_spinner.set_size_request(48, 48)
+        card.append(self._loading_spinner)
+
+        label = Gtk.Label(label="Loading nodes\u2026")
+        card.append(label)
+
+        sheet.append(card)
+        sheet.set_visible(False)
+        return sheet
+
+    def _install_loading_css(self):
+        # GTK4 has no per-widget background-color setter; a display-wide
+        # provider with one class is the sanctioned way to get the faint
+        # dim behind the spinner.  Added once (re-adding would stack
+        # providers on every window).
+        if getattr(self, "_loading_css_installed", False):
+            return
+        self._loading_css_installed = True
+        css = Gtk.CssProvider()
+        css.load_from_data(
+            b".loading-overlay { background-color: rgba(0, 0, 0, 0.28); }"
+        )
+        display = Gdk.Display.get_default()
+        if display is not None:
+            Gtk.StyleContext.add_provider_for_display(
+                display,
+                css,
+                Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+            )
+
+    def _on_loading_changed(self, loading):
+        """Show/hide the loading wheel and keep the log console visible
+        for the duration of a session import.  On finish, only collapse
+        the console if WE opened it - a console the user opened stays
+        open."""
+        if self._loading_overlay is not None:
+            self._loading_overlay.set_visible(loading)
+        if self._loading_spinner is not None:
+            if loading:
+                self._loading_spinner.start()
+            else:
+                self._loading_spinner.stop()
+
+        button = getattr(self, "_console_button", None)
+        if button is None:
+            return
+        if loading:
+            if not self.log_console.active:
+                self._console_auto_opened = True
+                button.set_active(True)
+        elif self._console_auto_opened:
+            self._console_auto_opened = False
+            button.set_active(False)
+
     def _build_patchspace_toolbar(self):
         """Strip under the PatchSpace canvas.  Currently just the
         right-drag selection's anchor control: select some nodes, then
@@ -387,6 +480,23 @@ class MainWindow(Gtk.ApplicationWindow):
         self._console_button.set_child(console_box)
         self._console_button.connect("toggled", self._on_console_toggled)
         bar.append(self._console_button)
+
+        # "Recenter" sits immediately right of Logs: re-frames the whole
+        # canvas (PatchSpaceGraphWidget.zoom_to_fit) - horizontally AND
+        # vertically centred - so a graph that has drifted off-screen (or
+        # been zoomed way out) comes back into view.
+        self._recenter_button = Gtk.Button()
+        self._recenter_button.set_tooltip_text("Recenter and fit all nodes")
+        recenter_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        recenter_box.append(
+            Gtk.Image.new_from_icon_name("zoom-fit-best-symbolic")
+        )
+        recenter_box.append(Gtk.Label(label="Recenter"))
+        self._recenter_button.set_child(recenter_box)
+        self._recenter_button.connect(
+            "clicked", lambda _b: self.ps_widget.zoom_to_fit()
+        )
+        bar.append(self._recenter_button)
 
         self._ps_selection_label = Gtk.Label(label="No selection")
         self._ps_selection_label.set_halign(Gtk.Align.START)
@@ -412,6 +522,18 @@ class MainWindow(Gtk.ApplicationWindow):
             "clicked", lambda _b: self.ps_widget.toggle_anchor_selected()
         )
         bar.append(self._ps_anchor_button)
+
+        # Vertically centre every strip control; a horizontal Gtk.Box
+        # otherwise FILLs each child to the bar's full height, which left
+        # the short icon+label buttons sitting taller than they needed to.
+        for widget in (
+            self._console_button,
+            self._recenter_button,
+            self._ps_selection_label,
+            self._ps_group_button,
+            self._ps_anchor_button,
+        ):
+            widget.set_valign(Gtk.Align.CENTER)
 
         self.ps_widget.on_selection_changed.append(self._update_patchspace_toolbar)
         self._update_patchspace_toolbar()

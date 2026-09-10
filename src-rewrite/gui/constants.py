@@ -27,6 +27,16 @@ POST_MUTATION_REFRESH_MS = 150
 # output is bursty and there's no point polling it as hard as the graph.
 LOG_POLL_MS = 800
 
+# Session loads (main.py's _cmd_load_session runs in a background thread
+# and stages nodes one at a time) drive a transparent loading-wheel
+# overlay + auto-opened log console in the GUI. The overlay is kept up
+# for at least this long even if every node reports ready on the very
+# first poll, so a short import doesn't flash a spinner for one frame;
+# the timeout is a safety net so a node stuck "starting" can't pin the
+# overlay/console on forever.
+SESSION_LOAD_OVERLAY_MIN_MS = 800
+SESSION_LOAD_OVERLAY_TIMEOUT_MS = 90000
+
 LAYOUT_TICK_MS = 33
 LAYOUT_SETTLE_TICKS = 20
 LAYOUT_SETTLE_EPSILON = 0.05
@@ -38,7 +48,11 @@ LAYOUT_SETTLE_EPSILON = 0.05
 # normal edit is saved well before the next get_nodes poll.
 LAYOUT_SAVE_DEBOUNCE_MS = 600
 
-ZOOM_MIN = 0.2
+# Zoom bounds. There is deliberately no practical lower bound: the wheel
+# can keep zooming the graph out until it's a speck, so a huge layout
+# can always be framed. ZOOM_MIN is only a tiny positive floor to keep
+# to_world()'s division (and the pan math) away from zero.
+ZOOM_MIN = 1e-6
 ZOOM_MAX = 3.0
 ZOOM_STEP = 1.1
 UNDO_LIMIT = 100

@@ -325,3 +325,106 @@ def test_load_stages_hidden_nodes_so_a_mid_load_tick_cannot_prune_them(monkeypat
     # And they survived the load.
     assert "__sens_pre__sens" in d.space.nodes
     assert "__sens_post__sens" in d.space.nodes
+
+
+def test_fresh_sensitivity_level_and_sensitivity_agree():
+    """Regression: a fresh Sensitivity node used to default to level=25
+    with sensitivity=0.0 (which implies level 100), so the Settings dialog
+    showed "25" while the node's inline 0..1 slider sat empty.  The two
+    are now derived from whichever one the config supplies, so they can't
+    disagree."""
+    d = fresh_daemon()
+    _add(d, "sensitivity_gate", "sens")
+    node = d.space.nodes["sens"]
+    assert node.level == 25.0
+    assert node.sensitivity == pytest.approx(0.75)
+    assert node.sensitivity_to_level(node.sensitivity) == pytest.approx(node.level)
+
+    # A config carrying only the legacy `level` still round-trips.
+    d2 = fresh_daemon()
+    _add(d2, "sensitivity_gate", "sens", {"level": 40.0})
+    n2 = d2.space.nodes["sens"]
+    assert n2.level == 40.0
+    assert n2.sensitivity == pytest.approx(0.6)
+
+
+def test_sensitivity_tuning_controls_are_settable_and_clamped():
+    d = fresh_daemon()
+    _add(d, "sensitivity_gate", "sens")
+    node = d.space.nodes["sens"]
+    assert (
+        node.ratio,
+        node.attack_ms,
+        node.release_ms,
+        node.knee_db,
+        node.makeup,
+        node.range_db,
+    ) == (4.0, 5.0, 2000.0, 6.0, 1.0, -96.0)
+
+    for prop, value in (
+        ("ratio", 8.0),
+        ("attack_ms", 12.0),
+        ("release_ms", 350.0),
+        ("knee_db", 3.0),
+        ("makeup", 2.5),
+        ("range_db", -60.0),
+    ):
+        resp = d.handle_command(
+            {
+                "command": "set_node_property",
+                "node_id": "sens",
+                "property": prop,
+                "value": value,
+            }
+        )
+        assert resp["status"] == "ok", resp
+        assert getattr(node, prop) == value
+        assert node._reload_due is not None
+
+    # Out-of-range values clamp; non-numbers are rejected.
+    d.handle_command(
+        {
+            "command": "set_node_property",
+            "node_id": "sens",
+            "property": "ratio",
+            "value": 999.0,
+        }
+    )
+    assert node.ratio == node.RATIO_MAX
+    assert (
+        d.handle_command(
+            {
+                "command": "set_node_property",
+                "node_id": "sens",
+                "property": "makeup",
+                "value": "loud",
+            }
+        )["status"]
+        == "error"
+    )
+
+    # The values are baked into the module graph and survive export.
+    assert f'"ratio" = {node.RATIO_MAX:.2f}' in node._module_command_args()
+    export = d.handle_command({"command": "export_config"})["config"]
+    assert export["nodes"]["sens"]["params"]["makeup"] == 2.5
+    assert export["nodes"]["sens"]["params"]["range_db"] == -60.0
+
+
+def test_sensitivity_gate_closes_to_silence_by_default():
+    """Regression: Calf Gate's `range` (max gain reduction) defaults to
+    -24 dB, so an inactive sensitivity node still bled audible background
+    noise.  The node now pins it to Calf's minimum (~-96 dB) so a closed
+    gate is effectively silent."""
+    d = fresh_daemon()
+    _add(d, "sensitivity_gate", "sens")
+    node = d.space.nodes["sens"]
+    assert node.range_db == -96.0
+    # 10**(-96/20) == 1.5849e-05, exactly Calf's `range` minimum.
+    assert '"range" = 0.00001585' in node._module_command_args()
+    assert 'plugin = "http://calf.sourceforge.net/plugins/Gate"' in (
+        node._module_command_args()
+    )
+    # A config can override it (e.g. a gentler -24 dB duck).
+    d2 = fresh_daemon()
+    _add(d2, "sensitivity_gate", "sens", {"range_db": -24.0})
+    assert d2.space.nodes["sens"].range_db == -24.0

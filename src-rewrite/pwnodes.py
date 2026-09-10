@@ -1961,25 +1961,89 @@ class SensitivityGateNode(_ChainEffect):
 
     LV2_URI = "http://calf.sourceforge.net/plugins/Gate"
 
+    # Defaults for Calf Gate's tuning controls.  They used to be baked in
+    # as class constants; they are now per-node values the Settings dialog
+    # exposes.  Like `sensitivity`/`level` these are load-time
+    # filter-graph controls, so changing one schedules the same debounced
+    # interior reload (main.py's _coalesce_reload).
     RATIO = 4.0
     ATTACK_MS = 5.0
-    RELEASE_MS = 200.0
+    # Long default hold so the gate doesn't chatter shut between words;
+    # 2000 ms is Calf's own release maximum.
+    RELEASE_MS = 2000.0
     KNEE = 6.0
     MAKEUP = 1.0
+    # How far the closed gate ducks the signal.  Calf's own default is
+    # -24 dB, which leaves obvious background bleed; -96 dB is its
+    # minimum gain (1.5849e-05 linear) and effectively silence, so an
+    # inactive gate actually gets out of the way.
+    RANGE_DB = -96.0
+
+    RATIO_MIN, RATIO_MAX = 1.0, 20.0
+    ATTACK_MIN_MS, ATTACK_MAX_MS = 0.0, 200.0
+    RELEASE_MIN_MS, RELEASE_MAX_MS = 0.0, 2000.0
+    KNEE_MIN, KNEE_MAX = 0.0, 12.0
+    MAKEUP_MIN, MAKEUP_MAX = 0.0, 10.0
+    # 20*log10(1.5849e-05) ~= -96 dB, Calf's own `range` minimum.
+    RANGE_DB_MIN, RANGE_DB_MAX = -96.0, 0.0
 
     # level 0 -> most sensitive (opens on a whisper), level 100 -> least
     # sensitive (needs a loud, close voice).
     THRESHOLD_DB_AT_LEVEL_0 = -45.0
     THRESHOLD_DB_AT_LEVEL_100 = -15.0
+    DEFAULT_LEVEL = 25.0
 
     def __init__(self, node_id, backing_node_name: str,
-                 level: float = 25.0, sensitivity: float = 0.0,
+                 level: Optional[float] = None,
+                 sensitivity: Optional[float] = None,
                  lv2_uri: str = "",
+                 ratio: Optional[float] = None,
+                 attack_ms: Optional[float] = None,
+                 release_ms: Optional[float] = None,
+                 knee_db: Optional[float] = None,
+                 makeup: Optional[float] = None,
+                 range_db: Optional[float] = None,
                  pw_cli_command=("pw-cli",), settle: float = 0.3, **_ignored):
         super().__init__(node_id, backing_node_name, pw_cli_command, settle)
         self.lv2_uri = lv2_uri or ""
-        self.sensitivity = _clamp(sensitivity, 0.0, 1.0)
-        self.level = _clamp(level, 0.0, 100.0)
+        # `sensitivity` (the inline 0..1 slider) is the single source of
+        # truth; `level` is just its inverse on a 0..100 scale.  Derive
+        # whichever one wasn't supplied so a saved config carrying only
+        # the legacy `level` (or only `sensitivity`) round-trips, and a
+        # brand-new node can never come up with the two disagreeing -
+        # which previously showed an empty slider next to "25" in
+        # Settings (level defaulted to 25 while sensitivity defaulted to
+        # 0.0, even though 0.0 implies level 100).
+        if sensitivity is None:
+            if level is None:
+                level = self.DEFAULT_LEVEL
+            self.set_level(level)
+        else:
+            self.set_sensitivity(sensitivity)
+        self.ratio = _clamp(
+            self.RATIO if ratio is None else ratio,
+            self.RATIO_MIN, self.RATIO_MAX,
+        )
+        self.attack_ms = _clamp(
+            self.ATTACK_MS if attack_ms is None else attack_ms,
+            self.ATTACK_MIN_MS, self.ATTACK_MAX_MS,
+        )
+        self.release_ms = _clamp(
+            self.RELEASE_MS if release_ms is None else release_ms,
+            self.RELEASE_MIN_MS, self.RELEASE_MAX_MS,
+        )
+        self.knee_db = _clamp(
+            self.KNEE if knee_db is None else knee_db,
+            self.KNEE_MIN, self.KNEE_MAX,
+        )
+        self.makeup = _clamp(
+            self.MAKEUP if makeup is None else makeup,
+            self.MAKEUP_MIN, self.MAKEUP_MAX,
+        )
+        self.range_db = _clamp(
+            self.RANGE_DB if range_db is None else range_db,
+            self.RANGE_DB_MIN, self.RANGE_DB_MAX,
+        )
 
     @classmethod
     def level_to_threshold_linear(cls, level: float) -> float:
@@ -2008,11 +2072,12 @@ class SensitivityGateNode(_ChainEffect):
             f'plugin = "{uri}" '
             "control = { "
             f'"threshold" = {threshold:.6f} '
-            f'"ratio" = {self.RATIO:.2f} '
-            f'"attack" = {self.ATTACK_MS:.2f} '
-            f'"release" = {self.RELEASE_MS:.2f} '
-            f'"knee" = {self.KNEE:.4f} '
-            f'"makeup" = {self.MAKEUP:.2f} '
+            f'"range" = {10.0 ** (self.range_db / 20.0):.8f} '
+            f'"ratio" = {self.ratio:.2f} '
+            f'"attack" = {self.attack_ms:.2f} '
+            f'"release" = {self.release_ms:.2f} '
+            f'"knee" = {self.knee_db:.4f} '
+            f'"makeup" = {self.makeup:.2f} '
             "} } ] } "
             "capture.props = { "
             f'node.name = "{self._capture_name}" '

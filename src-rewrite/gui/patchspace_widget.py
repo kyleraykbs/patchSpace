@@ -40,6 +40,10 @@ from constants import (
     VOLUME_SEND_EPSILON,
     ADD_NODE_PANEL_MIN_WIDTH,
     GRAPH_CANVAS_MIN_SIZE,
+    SESSION_LOAD_OVERLAY_MIN_MS,
+    SESSION_LOAD_OVERLAY_TIMEOUT_MS,
+    ZOOM_MIN,
+    ZOOM_MAX,
 )
 from render_utils import (
     theme_palette,
@@ -211,6 +215,19 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # Callbacks fired whenever the selection or anchor set changes,
         # so the tool panel can keep its button in sync.
         self.on_selection_changed: list = []
+        # Callbacks fired when a session load starts/finishes, so
+        # main_window can show/hide the loading-wheel overlay and
+        # auto-open/collapse the log console.  `loading` is True only for
+        # a bulk load_session import (see _begin_load), never for the
+        # brief not-ready window of a single added node.
+        self.on_loading_changed: list = []
+        self.loading = False
+        self._load_started_at = 0.0
+        self._load_min_visible_until = 0.0
+        self._load_timeout_at = 0.0
+        # GLib source for the deferred post-load zoom_to_fit (see
+        # _set_loading/_fit_after_load).
+        self._fit_source = 0
         # GLib source id for the debounced "push layout to daemon" timer.
         self._layout_save_source = 0
 
@@ -320,6 +337,96 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     def refresh(self):
         self.client.send({"command": "get_nodes"})
         return True
+
+    # ---------- session-load progress ----------
+
+    def _set_loading(self, loading: bool) -> None:
+        loading = bool(loading)
+        if loading == self.loading:
+            return
+        self.loading = loading
+        for cb in self.on_loading_changed:
+            try:
+                cb(loading)
+            except Exception:
+                logger.exception("loading-changed callback failed")
+        if not loading:
+            # A completed load just dropped the new graph on the canvas at
+            # whatever scattered positions it had - frame all of it so the
+            # user sees the whole session at once instead of a corner.
+            # Deferred: the console collapse above changes the canvas
+            # height, and fitting before GTK re-lays-out would centre
+            # against the old (shorter) canvas and leave the graph sitting
+            # high once the console actually disappears.
+            if self._fit_source:
+                GLib.source_remove(self._fit_source)
+            self._fit_source = GLib.timeout_add(80, self._fit_after_load)
+
+    def _fit_after_load(self):
+        self._fit_source = 0
+        if not self.loading:
+            self.zoom_to_fit()
+        return False
+
+    def _begin_load(self) -> None:
+        """Mark a bulk session load as in progress.  Called the moment a
+        load_session command is sent; _update_loading_state clears it once
+        the daemon reports every node ready (or the safety timeout
+        fires).  Individual add_node commands never call this - only a
+        whole-config import goes through _apply_config/_load_session."""
+        now = time.monotonic()
+        self._load_started_at = now
+        self._load_min_visible_until = now + SESSION_LOAD_OVERLAY_MIN_MS / 1000.0
+        self._load_timeout_at = now + SESSION_LOAD_OVERLAY_TIMEOUT_MS / 1000.0
+        self._set_loading(True)
+
+    def _update_loading_state(self, daemon_nodes) -> None:
+        if not self.loading:
+            return
+        now = time.monotonic()
+        # Keep the overlay up for a minimum beat even if a short session's
+        # nodes are all ready by the first poll, so it doesn't flicker.
+        if now < self._load_min_visible_until:
+            return
+        if now >= self._load_timeout_at:
+            self._set_loading(False)
+            return
+        pending = any(
+            ndata.get("health") == "starting"
+            or (not ndata.get("ready", True) and ndata.get("health") != "dead")
+            for ndata in daemon_nodes.values()
+        )
+        if not pending:
+            self._set_loading(False)
+
+    def zoom_to_fit(self, margin: float = 40.0) -> None:
+        """Point the camera at every node at once: pick the zoom that
+        fits the nodes' bounding box (with `margin` px of canvas padding)
+        inside the current allocation, then pan so that box's centre sits
+        in the middle of the viewport.  No-op on an empty canvas or
+        before the widget has a real size."""
+        if not self.nodes:
+            return
+        view_w = self.get_width()
+        view_h = self.get_height()
+        if view_w <= 1 or view_h <= 1:
+            return
+
+        min_x = min(n["x"] for n in self.nodes.values())
+        min_y = min(n["y"] for n in self.nodes.values())
+        max_x = max(n["x"] + self.node_width(nid) for nid, n in self.nodes.items())
+        max_y = max(n["y"] + self.node_height(nid) for nid, n in self.nodes.items())
+
+        world_w = max(1.0, max_x - min_x)
+        world_h = max(1.0, max_y - min_y)
+        usable_w = max(1.0, view_w - 2.0 * margin)
+        usable_h = max(1.0, view_h - 2.0 * margin)
+        zoom = min(usable_w / world_w, usable_h / world_h)
+        self.zoom = max(ZOOM_MIN, min(ZOOM_MAX, zoom))
+
+        self.pan_x = view_w / 2.0 - ((min_x + max_x) / 2.0) * self.zoom
+        self.pan_y = view_h / 2.0 - ((min_y + max_y) / 2.0) * self.zoom
+        self.queue_draw()
 
     # ---------- commands to the daemon ----------
     # These two methods are the ONLY places that build set_volume /
@@ -696,6 +803,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             or self.anchored_nodes != anchored_before
         ):
             self._notify_selection_changed()
+
+        # A bulk import has no explicit "done" reply (see main.py's
+        # _cmd_load_session); infer completion from the node health the
+        # daemon reports each poll.
+        self._update_loading_state(daemon_nodes)
 
         self.queue_draw()
 
@@ -2543,6 +2655,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         REFRESH_INTERVAL_MS timer) picks up nodes and edges as they
         land, so there's no separate "done" signal to wait for here."""
         self.client.send({"command": "load_session", "config": config})
+        self._begin_load()
         GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
 
     def show_import_last_session(self):
@@ -2561,6 +2674,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         the cache path duplicated between constants.py and main.py for
         no reason beyond "the GUI needs it too"."""
         self.client.send({"command": "load_session"})
+        self._begin_load()
         GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
 
     # ---------- export/import helpers (clipboard, file chooser) ----------
@@ -3500,6 +3614,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                         if new_value != old_value:
                             meta[attr] = new_value
                             self._send_property(node_id, attr, new_value)
+                            if attr == "sensitivity":
+                                # The inline slider draws from the node's
+                                # top-level value, so mirror the Settings
+                                # edit there too - otherwise the bar would
+                                # keep showing the old position until the
+                                # interior reload finishes and the next
+                                # get_nodes poll lands.
+                                node["sensitivity"] = new_value
                     elif kind == "choice":
                         choices = extra.get("choices", [])
                         values = [v for _l, v in choices]

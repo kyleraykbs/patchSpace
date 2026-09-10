@@ -270,6 +270,8 @@ _SERIAL_ATTRS = (
     "attack_ms",
     "release_ms",
     "knee_db",
+    "makeup",
+    "range_db",
     "limiter_release_s",
     "ladspa_dir",
     "warp_name",
@@ -1549,9 +1551,19 @@ class PatchBayDaemon:
             return cls(
                 node_id,
                 backing,
-                level=g("level", 25.0),
-                sensitivity=g("sensitivity", 0.0),
+                # None means "derive from the other" - see the
+                # SensitivityGateNode constructor.  Both are absent for a
+                # freshly GUI-created node, and both are present (and
+                # consistent) for one loaded from a saved session.
+                level=g("level", None),
+                sensitivity=g("sensitivity", None),
                 lv2_uri=g("lv2_uri", ""),
+                ratio=g("ratio", None),
+                attack_ms=g("attack_ms", None),
+                release_ms=g("release_ms", None),
+                knee_db=g("knee_db", None),
+                makeup=g("makeup", None),
+                range_db=g("range_db", None),
             )
         if cls is ReverbNode:
             return cls(
@@ -2050,6 +2062,36 @@ class PatchBayDaemon:
                 self._coalesce_reload(node)
             elif prop == "lv2_uri" and isinstance(node, SensitivityGateNode):
                 node.lv2_uri = value or ""
+                self._coalesce_reload(node)
+            elif isinstance(node, SensitivityGateNode) and prop in (
+                "ratio",
+                "attack_ms",
+                "release_ms",
+                "knee_db",
+                "makeup",
+                "range_db",
+            ):
+                # Calf Gate tuning.  These are load-time filter-graph
+                # controls too, so (like sensitivity/level above) a change
+                # is clamped and then schedules a debounced interior
+                # reload - a live set_param doesn't reliably reach the
+                # plugin through the daemon's pw-cli session.
+                try:
+                    new_val = float(value)
+                except (TypeError, ValueError):
+                    return {
+                        "status": "error",
+                        "message": f"{prop} must be a number",
+                    }
+                lo, hi = {
+                    "ratio": (node.RATIO_MIN, node.RATIO_MAX),
+                    "attack_ms": (node.ATTACK_MIN_MS, node.ATTACK_MAX_MS),
+                    "release_ms": (node.RELEASE_MIN_MS, node.RELEASE_MAX_MS),
+                    "knee_db": (node.KNEE_MIN, node.KNEE_MAX),
+                    "makeup": (node.MAKEUP_MIN, node.MAKEUP_MAX),
+                    "range_db": (node.RANGE_DB_MIN, node.RANGE_DB_MAX),
+                }[prop]
+                setattr(node, prop, max(lo, min(hi, new_val)))
                 self._coalesce_reload(node)
             elif prop == "wet_dry" and isinstance(node, ReverbNode):
                 try:

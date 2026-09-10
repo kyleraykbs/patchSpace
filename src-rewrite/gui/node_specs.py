@@ -294,24 +294,20 @@ NODE_TYPE_SPECS.update(
             ],
         ),
         # control="sensitivity" is the Sensitivity Gate's 0..1 inline
-        # slider. It is deliberately *not* wired to this node's own live
-        # LADSPA threshold (that set-param path isn't reliable on every
-        # build - see SensitivityGateNode's docstring). Instead the
-        # daemon invisibly brackets every Sensitivity gate with two
-        # hidden VolumeProcessNodes - a pre-gain and an equal-and-
-        # opposite post-gain (main.py's _ensure_sensitivity_internals) -
-        # and routes the user's edges through them. The pre gain swings
-        # below unity (more aggressive gating) and above it (opens more
-        # easily), with the post node's reciprocal keeping output
-        # loudness constant. The slider just sends
-        # set_node_property("sensitivity", <0..1>) and the daemon drives
-        # both hidden nodes (main.py's _apply_sensitivity), so there is
-        # nothing for the user to create or wire and the control works
-        # the moment the node exists. `level` (this node's static
-        # threshold, in dB terms via THRESHOLD_DB_AT_LEVEL_0/100) remains
-        # a Settings-dialog-only value, same as Noise Cancel's
-        # vad_threshold - the fixed point the gain staging pushes signal
-        # across.
+        # slider; the Settings dialog edits the *same* `sensitivity` value
+        # (not the raw 0..100 `level`, which the daemon derives from it),
+        # so the two always agree.  The daemon invisibly brackets every
+        # Sensitivity gate with two hidden VolumeProcessNodes - a pre-gain
+        # and an equal-and-opposite post-gain (main.py's
+        # _ensure_sensitivity_internals) - and routes the user's edges
+        # through them; they are unity pass-throughs now that the gate
+        # itself is Calf LV2.  The slider just sends
+        # set_node_property("sensitivity", <0..1>) and the daemon bakes
+        # the matching threshold into the module graph.  The remaining
+        # Calf Gate controls (ratio/attack/release/knee/makeup) are
+        # load-time filter-graph values too - each change schedules the
+        # same debounced interior reload (see SensitivityGateNode's
+        # docstring).
         "sensitivity_gate": NodeSpec(
             "Sensitivity",
             ["in"],
@@ -319,10 +315,46 @@ NODE_TYPE_SPECS.update(
             control="sensitivity",
             settings=[
                 (
-                    "level",
-                    "Gate threshold (0-100, 0 = most sensitive):",
+                    "sensitivity",
+                    "Sensitivity (0-1, 1 = most sensitive):",
                     "number",
-                    {"min": 0, "max": 100, "step": 1},
+                    {"min": 0, "max": 1, "step": 0.01},
+                ),
+                (
+                    "ratio",
+                    "Gate ratio (1-20):",
+                    "number",
+                    {"min": 1, "max": 20, "step": 0.5},
+                ),
+                (
+                    "attack_ms",
+                    "Attack (ms):",
+                    "number",
+                    {"min": 0, "max": 200, "step": 1},
+                ),
+                (
+                    "release_ms",
+                    "Release / decay (ms):",
+                    "number",
+                    {"min": 0, "max": 2000, "step": 10},
+                ),
+                (
+                    "knee_db",
+                    "Knee (dB):",
+                    "number",
+                    {"min": 0, "max": 12, "step": 0.5},
+                ),
+                (
+                    "makeup",
+                    "Makeup gain:",
+                    "number",
+                    {"min": 0, "max": 10, "step": 0.1},
+                ),
+                (
+                    "range_db",
+                    "Closed-gate level (dB, -96 = silence):",
+                    "number",
+                    {"min": -96, "max": 0, "step": 1},
                 ),
                 (
                     "lv2_uri",
