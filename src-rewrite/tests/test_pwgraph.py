@@ -61,12 +61,12 @@ def test_reap_stale_returns_count(monkeypatch):
     no-op when nothing is stale."""
     g = PipewireGraph()
     g._terminate_orphan_helpers = lambda markers: 1
-    g._snapshot_stale = lambda markers: ({}, set())
+    g._snapshot_stale = lambda *a, **k: ({}, set())
     assert g.reap_stale_for_names(["patchbay_x"]) == 1
     assert g.reap_stale_for_names([]) == 0
 
     g._terminate_orphan_helpers = lambda markers: 0
-    g._snapshot_stale = lambda markers: ({1: "patchbay_x"}, set())
+    g._snapshot_stale = lambda *a, **k: ({1: "patchbay_x"}, set())
     destroyed = []
     g._destroy_nodes = lambda nodes: destroyed.extend(nodes) or len(nodes)
     assert g.reap_stale_for_names(["patchbay_x"]) == 1
@@ -173,4 +173,66 @@ def test_live_names_matching_matches_owned_prefix_markers():
     assert set(g._live_names_matching([_STARTUP_MARKER])) == set(
         _STALE_NOISE_CANCEL_NODES.values()
     )
+
+
+def _node(node_id, name, media_class):
+    return {
+        "id": node_id,
+        "type": "PipeWire:Interface:Node",
+        "info": {"props": {"node.name": name, "media.class": media_class}},
+    }
+
+
+# An effect whose backing was NOT the GUI's "<type>_node_<id>" pattern -
+# an older/imported/test config using a bare "fx" - is invisible to the
+# prefix sweep.  Its dead dummies and keepalives stay wired into the
+# default devices and keep the graph wedged.  The owned sweep derives the
+# backing from the reserved Internal media class / *_keepalive names, so
+# the startup sweep can reap it regardless of what it was called.
+
+_ORPHAN_DUMP = [
+    _node(1, "fx", "Audio/Sink"),               # module capture
+    _node(2, "fx_fx_out", "Audio/Source"),      # module playback
+    _node(3, "fx_in", "Audio/Sink/Internal"),   # dummy
+    _node(4, "fx_out", "Audio/Sink/Internal"),  # dummy
+    _node(5, "fx_in_keepalive", "Stream/Output/Audio"),
+    _node(6, "fx_out_keepalive", "Stream/Input/Audio"),
+    _node(7, "Firefox", "Stream/Output/Audio"),  # must NOT be swept
+    _node(8, "fxbox", "Stream/Output/Audio"),    # prefix, but not ours
+]
+
+
+def test_owned_sweep_reaps_arbitrary_backing_plumbing(monkeypatch):
+    monkeypatch.setattr(
+        "pwgraph.subprocess.run",
+        lambda *a, **k: fake_run(0, stdout=json.dumps(_ORPHAN_DUMP)),
+    )
+    found, _pids = PipewireGraph()._snapshot_stale([], owned_sweep=True)
+    assert set(found.values()) == {
+        "fx",
+        "fx_fx_out",
+        "fx_in",
+        "fx_out",
+        "fx_in_keepalive",
+        "fx_out_keepalive",
+    }
+
+
+def test_targeted_reap_matches_only_its_backing_family():
+    # A targeted reap (default, owned_sweep off) matches only the marker
+    # and its "_"-siblings - never the whole graph's owned plumbing.
+    g = PipewireGraph()
+    g.nodes = lambda: {
+        node["id"]: {"info": node["info"]} for node in _ORPHAN_DUMP
+    }
+    assert set(g._live_names_matching(["fx"])) == {
+        "fx",
+        "fx_fx_out",
+        "fx_in",
+        "fx_out",
+        "fx_in_keepalive",
+        "fx_out_keepalive",
+    }
+    # A mere textual prefix ("fxbox") is not part of the "fx" family.
+    assert "fxbox" not in g._live_names_matching(["fx"])
 

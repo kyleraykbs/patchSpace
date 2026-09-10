@@ -596,6 +596,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     "label": ndata.get("label", ""),
                     "enabled": ndata.get("enabled", True),
                     "output": ndata.get("output", 0),
+                    # Boolean-controlled nodes: whether a ctrl signal is
+                    # wired and, if so, the value it drives - so the
+                    # on/off switch can be drawn read-only and white
+                    # showing the state actually in effect.
+                    "bool_driven": ndata.get("bool_driven", False),
+                    "bool_state": ndata.get("bool_state"),
                     "volume": ndata.get("volume", 1.0),
                     "wet_dry": ndata.get("wet_dry", 0.3),
                     "level": ndata.get("level", 25.0),
@@ -661,6 +667,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 node["label"] = new_label
                 node["enabled"] = ndata.get("enabled", True)
                 node["output"] = ndata.get("output", 0)
+                node["bool_driven"] = ndata.get("bool_driven", False)
+                node["bool_state"] = ndata.get("bool_state")
                 node["device_name"] = ndata.get("device_name", "")
                 node["app_name"] = ndata.get("app_name", "")
                 node["connected"] = ndata.get("connected", False)
@@ -1076,9 +1084,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             return len(rows) * (self.FIELD_HEIGHT + 4) + 5
         spec = spec_for(node["type"])
         if spec.control == "fallback_onoff":
-            # The fallback on/off button only claims space while nothing
-            # is wired into the node's boolean "ctrl" input.
-            return 0 if node.get("ctrl_connected") else self.GATE_AREA_HEIGHT
+            # The on/off button is always shown: interactive while
+            # nothing is wired into the ctrl input, and a read-only white
+            # state indicator once a boolean signal drives the node.
+            return self.GATE_AREA_HEIGHT
         if spec.control in ("gate", "switcher", "boolean"):
             return self.GATE_AREA_HEIGHT
         if spec.has_extra_row:
@@ -1493,9 +1502,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         return None
 
     def find_fallback_toggle_at(self, x, y):
-        """The on/off fallback button on a gate/switcher whose boolean
-        ctrl input is unwired (it disappears once something is plugged
-        into ctrl - see _bottom_control_height)."""
+        """The interactive on/off button on a gate/switcher whose boolean
+        ctrl input is unwired.  Once a ctrl signal is wired the button is
+        still drawn (read-only, white - see _draw_node), but is not a hit
+        target so it can't be clicked."""
         for nid, node in self._hit_nodes(x, y):
             if spec_for(node["type"]).control != "fallback_onoff":
                 continue
@@ -1706,16 +1716,22 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         elif spec.control == "boolean":
             self._draw_boolean_toggle(cr, nid, node.get("output", 0))
         elif spec.control == "fallback_onoff":
-            # Gate/switch fallback button: shown only while nothing is
-            # wired into the boolean ctrl input.  For a gate it reflects
-            # `enabled`, for a switch its stored `output` channel.
-            if not node.get("ctrl_connected"):
-                if node["type"] == "gate":
-                    self._draw_boolean_toggle(
-                        cr, nid, 1 if node.get("enabled", True) else 0
-                    )
-                else:
-                    self._draw_boolean_toggle(cr, nid, node.get("output", 0))
+            # Gate/switch on/off button.  With nothing wired into the
+            # boolean ctrl input it is the interactive control (a gate
+            # reflects `enabled`, a switch its stored `output` channel).
+            # Once a ctrl signal is wired it stays visible but read-only
+            # and white, showing the value actually in effect.  The
+            # ctrl edge can appear a poll before the daemon reports the
+            # resolved value, so fall back to the stored default until it
+            # arrives rather than flashing "Off".
+            driven = bool(node.get("ctrl_connected"))
+            state = node.get("bool_state")
+            if node["type"] == "gate":
+                stored = 1 if node.get("enabled", True) else 0
+            else:
+                stored = node.get("output", 0)
+            output = (1 if state else 0) if (driven and state is not None) else stored
+            self._draw_boolean_toggle(cr, nid, output, driven=driven)
         elif spec.control == "wetdry":
             self._draw_wetdry_slider(cr, x, y, node_h, node.get("wet_dry", 0.3))
         elif spec.control == "gain":
@@ -2097,11 +2113,15 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             cr.move_to(text_x, text_y)
             cr.show_text(label)
 
-    def _draw_boolean_toggle(self, cr, nid, output):
+    def _draw_boolean_toggle(self, cr, nid, output, driven=False):
         """On/Off button for the boolean source node - the A/B button's
         shape with On/Off labels.  The active segment is filled green so
         a glance shows the value being broadcast to any gate/switcher
-        wired to this node."""
+        wired to this node.
+
+        ``driven`` renders the same button read-only and white: it is a
+        gate/switcher whose ctrl input is wired, so the value shown is
+        the one being driven into it (not something the user can click)."""
         x, y, w, h = self._gate_rect(nid)
         radius = 10
         half = w / 2
@@ -2109,7 +2129,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         draw_rounded_rect(cr, x, y, w, h, radius)
         cr.set_source_rgb(0.20, 0.20, 0.22)
         cr.fill_preserve()
-        cr.set_source_rgb(0.46, 0.46, 0.49)
+        if driven:
+            cr.set_source_rgb(0.90, 0.90, 0.93)
+        else:
+            cr.set_source_rgb(0.46, 0.46, 0.49)
         cr.set_line_width(1.5)
         cr.stroke()
 
@@ -2121,13 +2144,20 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             seg_x = x + i * half
             if i == active:
                 draw_rounded_rect(cr, seg_x + 2, y + 2, half - 4, h - 4, radius - 2)
-                cr.set_source_rgb(0.30, 0.72, 0.42)
+                if driven:
+                    # White, not green: externally driven, not user-set.
+                    cr.set_source_rgb(0.92, 0.92, 0.95)
+                else:
+                    cr.set_source_rgb(0.30, 0.72, 0.42)
                 cr.fill()
             extents = cr.text_extents(label)
             text_x = seg_x + (half - extents.width) / 2 - extents.x_bearing
             text_y = y + (h - extents.height) / 2 - extents.y_bearing
             if i == active:
-                cr.set_source_rgb(0.06, 0.16, 0.09)
+                if driven:
+                    cr.set_source_rgb(0.10, 0.10, 0.12)
+                else:
+                    cr.set_source_rgb(0.06, 0.16, 0.09)
             else:
                 cr.set_source_rgb(0.78, 0.78, 0.80)
             cr.move_to(text_x, text_y)

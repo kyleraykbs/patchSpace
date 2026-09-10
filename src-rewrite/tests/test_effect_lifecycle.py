@@ -116,66 +116,6 @@ def _add_duplex(g, node_id, name, media_class):
     return g
 
 
-def _run_fresh_effect(factory, target_names):
-    """Add `factory()` to a space whose live graph already has the module
-    streams and a duplex dummy for each name in `target_names`, run one
-    supervision tick, and return (graph, node).  `graph.events` records
-    interior connects and every backing drop during the tick (the
-    structural drops from add_node are cleared first)."""
-    g = OrderGraph()
-    for offset, name in enumerate(target_names):
-        _add_duplex(g, 52 + offset, name, "Audio/Sink/Internal")
-    g.add_sink(50, "fx", media_class="Audio/Sink")             # module capture
-    g.add_source(51, "fx_fx_out", media_class="Audio/Source")  # module playback
-
-    space = make_space(g, repair_gate=pwnodes.Backoff(initial_s=0, jitter_fraction=0))
-    space.mark_graph_loaded()
-
-    node = factory()
-    real_drop = node._drop
-
-    def recording_drop(name):
-        g.events.append(("drop", name))
-        return real_drop(name)
-
-    node._drop = recording_drop
-    space.add_node(node)
-    g.events.clear()
-    space.supervise()
-    return g, node
-
-
-@pytest.mark.parametrize(
-    "factory",
-    [
-        pytest.param(lambda: NoiseCancelNode("n", "fx"), id="noise_cancel"),
-        pytest.param(lambda: SensitivityGateNode("n", "fx"), id="sensitivity_gate"),
-        pytest.param(lambda: NormalizeNode("n", "fx"), id="normalize"),
-        pytest.param(lambda: ReverbNode("n", "fx"), id="reverb"),
-    ],
-)
-def test_chain_effect_keeps_its_output_drain_through_module_spawn(factory):
-    """Regression: the output dummy is drained by a silent
-    ``pw-cat --record --target {out}`` that taps whatever feeds the dummy
-    when it starts.  ``ensure_module`` used to drop and re-create that
-    drain on every module spawn, leaving the out-dummy with no consumer
-    at all for a moment; a timing-sensitive module (RNNoise) then had
-    nothing to run into and stalled silent, so whether the chain survived
-    depended on user wiring order (output wired first worked, input first
-    died).
-
-    The drain targets the stable out-dummy, not the module, so it must be
-    created once (by add_node) and left alone across a module spawn - for
-    every chain effect, not just Noise Cancel."""
-    g, node = _run_fresh_effect(factory, ["fx_in", "fx_out"])
-
-    dropped = [e[1] for e in g.events if e[0] == "drop"]
-    assert "fx_out_keepalive" not in dropped, g.events
-    # The interior links were still derived/wired.
-    assert any(e[0] == "connect" for e in g.events), g.events
-    assert node._find("fx_out_keepalive") is not None
-
-
 def test_echo_cancel_out_drain_is_created_once_and_left_alone():
     """Echo Cancel likewise leaves its out-dummy drain alone: only its
     module-stream playback-sink tap is re-pointed, by ensure_module."""

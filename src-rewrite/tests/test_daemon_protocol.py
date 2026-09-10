@@ -787,6 +787,30 @@ def test_boolean_nodes_registry_specs_and_output_control():
     )
     assert d.space.nodes["g"].gate_open() is True
 
+    # get_nodes must surface the *effective* state and whether a ctrl
+    # signal is wired, so the GUI can draw the on/off switch read-only
+    # and white showing the value actually in effect (not the gate's
+    # stored default).
+    g = d.handle_command({"command": "get_nodes"})["nodes"]["g"]
+    assert g["bool_driven"] is True
+    assert g["bool_state"] is True
+    d.handle_command(
+        {"command": "set_node_property", "node_id": "bo",
+         "property": "output", "value": 0}
+    )
+    g = d.handle_command({"command": "get_nodes"})["nodes"]["g"]
+    assert g["bool_state"] is False
+
+    # An unwired gate falls back to its own default: nothing is driving
+    # it, so it reports no effective value.
+    d.handle_command(
+        {"command": "add_node", "node_type": "gate", "node_id": "g2",
+         "config": {}}
+    )
+    g2 = d.handle_command({"command": "get_nodes"})["nodes"]["g2"]
+    assert g2["bool_driven"] is False
+    assert g2["bool_state"] is None
+
     # A boolean output can't be wired into an audio input.
     assert d.handle_command(
         {"command": "add_edge", "from_node": "bo", "to_node": "g",

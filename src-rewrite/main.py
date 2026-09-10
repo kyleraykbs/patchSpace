@@ -38,6 +38,7 @@ from pwnodes import (
     Node,
     BackedNode,
     LiveResolvableNode,
+    BoolControlledMixin,
     GateNode,
     ABSwitchNode,
     SwitcherNode,
@@ -348,6 +349,7 @@ class PatchBayDaemon:
         "light_noise_cancel_node_",
         "noise_cancel_node_",
         "reverb_node_",
+        "normalize_node_",
         "volume_node_",
         "volume_mute_",
         "virtual_speaker_node_",
@@ -386,7 +388,11 @@ class PatchBayDaemon:
         our reserved names / last-session backing names removes the
         leftovers; best-effort, cheap when nothing is stale."""
         markers = self._startup_stale_markers()
-        stale = self.graph.reap_stale_for_names(markers)
+        # owned_sweep also reaps project plumbing whose backing name is
+        # not in the prefix list / session cache (an imported or old
+        # config's ``fx``/``nc_a`` style backings), derived from the live
+        # graph's reserved Internal media class and *_keepalive names.
+        stale = self.graph.reap_stale_for_names(markers, owned_sweep=True)
         logger.info("Startup cleanup swept %d stale object(s)", stale)
 
     def start(self) -> None:
@@ -2523,6 +2529,14 @@ class PatchBayDaemon:
             if isinstance(node, VolumeProcessNode):
                 data["volume"] = node.volume
                 data["backing_node_id"] = node.backing_node_id
+            if isinstance(node, BoolControlledMixin):
+                # A gate/switcher whose boolean "ctrl" input is wired has
+                # its state set by that signal, not its own stored
+                # default.  Surface both so the GUI can draw the on/off
+                # switch read-only (white) showing the value actually in
+                # effect on the node.
+                data["bool_driven"] = node.bool_driven
+                data["bool_state"] = node.bool_state
             if isinstance(node, BackedNode):
                 # Same definition of "ready" _bring_node_up polls for on
                 # session load - structural pieces + module (if any) all

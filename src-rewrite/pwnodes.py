@@ -284,6 +284,20 @@ class BoolControlledMixin:
     def effective_bool(self, default: bool) -> bool:
         return self._bool_effective if self._bool_effective is not None else default
 
+    @property
+    def bool_driven(self) -> bool:
+        """True while a boolean signal is actually wired into this node's
+        input (so PatchSpace resolved an effective value).  Serialized so
+        the GUI can draw the node's on/off switch non-interactively and
+        show the value being driven into it."""
+        return self._bool_effective is not None
+
+    @property
+    def bool_state(self) -> Optional[bool]:
+        """The resolved boolean driving this node, or None when nothing
+        is wired (the stored default applies instead)."""
+        return self._bool_effective
+
 
 class TransparentNode(Node):
     def is_transparent(self) -> bool:
