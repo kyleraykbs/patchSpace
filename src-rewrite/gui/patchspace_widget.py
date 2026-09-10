@@ -141,6 +141,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     # a nested group's name never touches or pokes past its container's
     # top edge.  A small deliberate bump, not a full GROUP_SPACING.
     GROUP_NAME_BUMP = 6
+    # How far a group's member bounds may fall *outside* another's and
+    # still count as enclosed.  Node positions are continuous floats, so
+    # two groups that are conceptually nested ("Config" vs. a narrower
+    # "Noise Cancel Config" sharing most of its nodes) routinely miss
+    # strict containment by a fraction of a pixel.  Without slack the
+    # container wouldn't grow around the inner group and their name blocks
+    # would be drawn in the same spot.
+    GROUP_ENCLOSE_TOLERANCE = 2.0
     GROUP_COLORS = (
         "#3584e4",  # blue
         "#33d17a",  # green
@@ -814,20 +822,32 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         for nid, node in self.nodes.items():
             node["ctrl_connected"] = nid in ctrl_connected
 
-        # Groups: daemon is authoritative, but keep locally-created ones
-        # that haven't been echoed yet so they don't flicker away.
+        # Groups: the daemon is authoritative, but a group we just created
+        # or edited must not be clobbered by a poll that raced our
+        # in-flight add_group/set_group command.  That race showed the old
+        # label/members for a few polls - the "settings dialog flickers and
+        # changes don't stick" report.  While a gid is pending, keep our
+        # optimistic copy; hand it back to the daemon once it echoes the
+        # exact same group.
         seen_groups = set()
         for g in data.get("groups", []):
             gid = g.get("id")
             if not gid:
                 continue
             seen_groups.add(gid)
-            self._pending_groups.discard(gid)
-            self.groups[gid] = {
+            incoming = {
                 "label": g.get("label", "Group"),
                 "color": g.get("color", self.GROUP_COLORS[0]),
                 "nodes": set(g.get("nodes", [])),
             }
+            if gid in self._pending_groups:
+                if self.groups.get(gid) == incoming:
+                    self._pending_groups.discard(gid)
+                else:
+                    # The daemon's copy still lags our edit (or is the
+                    # pre-rename id we've already dropped); keep ours.
+                    continue
+            self.groups[gid] = incoming
         for gid in list(self.groups.keys()):
             if gid not in seen_groups and gid not in self._pending_groups:
                 del self.groups[gid]
@@ -3366,6 +3386,18 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         box.append(widget)
         return box
 
+    @staticmethod
+    def _focus_and_select(entry):
+        """A handler for a dialog's "map" signal that puts the cursor in
+        `entry` with its text selected, so opening a settings dialog lands
+        the user straight in the label field ready to overtype it.  Done
+        on map (not right after construction) because focus can't be
+        grabbed until the dialog's surface is actually on screen."""
+        def _on_map(_widget):
+            entry.grab_focus()
+            entry.select_region(0, -1)
+        return _on_map
+
     def show_settings_dialog(self, node_id):
         node = self.nodes.get(node_id)
         if not node:
@@ -3552,6 +3584,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             field_entry,
             param_widgets,
         )
+        dialog.connect("map", self._focus_and_select(label_entry))
         dialog.show()
 
     def _validate_new_node_id(self, old_id, new_id):
@@ -3890,12 +3923,20 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         return 6 + block_h + self.GROUP_NAME_BUMP
 
     def _encloses(self, outer_raw, inner_raw):
-        """Whether `outer_raw` (member bounds) fully contains `inner_raw`."""
+        """Whether `outer_raw` (member bounds) contains `inner_raw`, within
+        GROUP_ENCLOSE_TOLERANCE - see that constant for why the slack
+        matters."""
         if outer_raw is None or inner_raw is None:
             return False
         ox1, oy1, ox2, oy2 = outer_raw
         ix1, iy1, ix2, iy2 = inner_raw
-        return ox1 <= ix1 and oy1 <= iy1 and ix2 <= ox2 and iy2 <= oy2
+        t = self.GROUP_ENCLOSE_TOLERANCE
+        return (
+            ox1 - t <= ix1
+            and oy1 - t <= iy1
+            and ix2 <= ox2 + t
+            and iy2 <= oy2 + t
+        )
 
     def _enclosed_group_ids(self, gid):
         """Ids of the other groups whose member bounds this group fully
@@ -3966,10 +4007,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self._group_geo_cache[("bounds", gid)] = result
         return result
 
-    def _group_header_layout(self, gid, group):
-        """Geometry of a group's label / id / colour chip block, which sits
-        just above the top-left of its box.  One source of truth for both
-        drawing and hit-testing."""
+    def _build_group_header(self, gid, group, top):
+        """Geometry of one group's label / id / colour chip / +/- block for
+        a given `top` (or the naive top above its box when None).  Pure;
+        the collision-resolved top comes from _all_group_header_layouts."""
         bounds = self._group_bounds(gid, group)
         if bounds is None:
             return None
@@ -3980,7 +4021,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         chip = 12
         gap = 2
         block_h = lh + gap + ih
-        top = y1 - 6 - block_h
+        if top is None:
+            top = y1 - 6 - block_h
         mid_y = top + block_h / 2
         chip_x = x1 + max(lw, iw) + 8
         chip_y = mid_y - chip / 2
@@ -3993,8 +4035,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         rem_x = add_x + btn + 3
         rem_rect = (rem_x, btn_y, rem_x + btn, btn_y + btn)
         return {
+            "gid": gid,
             "x": x1,
             "top": top,
+            "block_h": block_h,
             "label": label,
             "color": group.get("color"),
             "lw": lw,
@@ -4007,8 +4051,62 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             "chip_y": chip_y,
             "add_rect": add_rect,
             "rem_rect": rem_rect,
+            # Clickable label/id/chip hotspot...
             "rect": (x1 - 2, top - 2, chip_x + chip + 2, top + block_h + 2),
+            # ...and the whole block including the +/- buttons, which is
+            # what the collision pass keeps clear of other blocks.
+            "extent": (x1 - 2, top - 2, rem_x + btn + 2, top + block_h + 2),
         }
+
+    def _all_group_header_layouts(self):
+        """{gid: header info} for every group, with colliding headers
+        stacked so their names can never collapse together.
+
+        Groups may overlap (share members) without one enclosing the
+        other - a broad "Config" group and a narrower "Noise Cancel
+        Config" sharing most of it, say - so their boxes' top-left corners,
+        and therefore their naive header positions, can coincide and draw
+        both names in the same spot.  Each colliding header is pushed up a
+        block so they read as a stack above their boxes.  Cached per frame
+        (cleared at the top of on_draw)."""
+        cached = self._group_geo_cache.get("headers")
+        if cached is not None:
+            return cached
+        naive = []
+        for gid, group in self.groups.items():
+            info = self._build_group_header(gid, group, None)
+            if info is not None:
+                naive.append(info)
+        naive.sort(key=lambda i: i["top"])
+        placed: list = []
+        for info in naive:
+            top = info["top"]
+            block_h = info["block_h"]
+            left = info["extent"][0]
+            right = info["extent"][2]
+            bottom = top + block_h
+            moved = True
+            while moved:
+                moved = False
+                for p in placed:
+                    pl, _pt, pr, pb = p["extent"]
+                    if left < pr and pl < right and top < pb and p["top"] < bottom:
+                        # 4px, not 0: each extent carries 2px of padding on
+                        # each side, so clearing the *rects* needs 2+2.
+                        top = p["top"] - block_h - 4
+                        bottom = top + block_h
+                        moved = True
+            placed.append(
+                self._build_group_header(info["gid"], self.groups[info["gid"]], top)
+            )
+        result = {info["gid"]: info for info in placed}
+        self._group_geo_cache["headers"] = result
+        return result
+
+    def _group_header_layout(self, gid, group):
+        """Cached, collision-resolved header geometry for one group - one
+        source of truth for both drawing and hit-testing."""
+        return self._all_group_header_layouts().get(gid)
 
     def find_group_action_at(self, x, y):
         """(group_id, "add"|"remove") for the +/- header buttons."""
@@ -4120,10 +4218,26 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             n += 1
         return gid
 
+    def _exact_duplicate_group(self, node_ids, exclude_gid=None):
+        """The id of an existing group whose member set is *exactly*
+        `node_ids`, or None.  Groups are allowed to overlap; only an
+        identical membership set is disallowed, so this is an exact
+        frozenset comparison, not a subset one."""
+        wanted = frozenset(node_ids)
+        for gid, group in self.groups.items():
+            if gid == exclude_gid:
+                continue
+            if frozenset(group.get("nodes", ())) == wanted:
+                return gid
+        return None
+
     def create_group_from_selection(self):
         """Tool-panel action: wrap the selected nodes in a new group."""
         ids = [nid for nid in self.selected_nodes if nid in self.nodes]
         if not ids:
+            return
+        # No two groups may hold exactly the same nodes (overlap is fine).
+        if self._exact_duplicate_group(ids) is not None:
             return
         gid = self._new_group_id()
         color = self.GROUP_COLORS[len(self.groups) % len(self.GROUP_COLORS)]
@@ -4143,8 +4257,16 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         group = self.groups.get(gid)
         if group is None or nid not in self.nodes or nid in group["nodes"]:
             return
+        # Adding this node must not turn this group into a copy of another.
+        if self._exact_duplicate_group(
+            group["nodes"] | {nid}, exclude_gid=gid
+        ) is not None:
+            return
         # Additive: a node can be in several groups at once.
         group["nodes"].add(nid)
+        # Keep this group locally authoritative until the daemon echoes the
+        # change, so a racing poll can't flicker the membership back.
+        self._pending_groups.add(gid)
         self.client.send(
             {"command": "set_group", "group_id": gid,
              "nodes": sorted(group["nodes"])}
@@ -4155,7 +4277,15 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         group = self.groups.get(gid)
         if group is None or nid not in group["nodes"]:
             return
+        # Removing this node must not leave this group identical to another.
+        if self._exact_duplicate_group(
+            group["nodes"] - {nid}, exclude_gid=gid
+        ) is not None:
+            return
         group["nodes"].discard(nid)
+        # Keep this group locally authoritative until the daemon echoes the
+        # change (see update_from_daemon's pending-group handling).
+        self._pending_groups.add(gid)
         self.client.send(
             {"command": "set_group", "group_id": gid,
              "nodes": sorted(group["nodes"])}
@@ -4218,6 +4348,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             dlg.destroy()
 
         dialog.connect("response", on_response)
+        dialog.connect("map", self._focus_and_select(label_entry))
         dialog.present()
 
     def _apply_group_edit(self, gid, new_id, label, color):
@@ -4230,7 +4361,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self.groups[gid] = group  # duplicate guard; don't clobber
             return
         self.groups[new_id] = group
-        self._pending_groups.discard(gid)
+        # Keep both ids locally authoritative until the daemon echoes the
+        # rename: it still reports the old id for a poll or two, and we
+        # must neither flicker back to the old label nor resurrect the old
+        # group (see update_from_daemon's pending-group handling).
+        self._pending_groups.add(new_id)
+        if new_id != gid:
+            self._pending_groups.add(gid)
         self.client.send(
             {"command": "set_group", "group_id": gid, "new_group_id": new_id,
              "label": label, "color": color, "nodes": sorted(group["nodes"])}

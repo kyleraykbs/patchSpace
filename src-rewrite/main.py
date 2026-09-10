@@ -47,6 +47,8 @@ from pwnodes import (
     BooleanSourceNode,
     BooleanSplitterNode,
     BooleanInvertNode,
+    BooleanAndNode,
+    BooleanOrNode,
     WarpInNode,
     WarpOutNode,
     BooleanWarpInNode,
@@ -180,6 +182,8 @@ NODE_TYPE_REGISTRY: Dict[str, type] = {
     "boolean_switch": BooleanSourceNode,
     "boolean_splitter": BooleanSplitterNode,
     "boolean_invert": BooleanInvertNode,
+    "boolean_and": BooleanAndNode,
+    "boolean_or": BooleanOrNode,
     "warp_in": WarpInNode,
     "warp_out": WarpOutNode,
     "bool_warp_in": BooleanWarpInNode,
@@ -1532,6 +1536,8 @@ class PatchBayDaemon:
             return cls(node_id)
         if cls is BooleanInvertNode:
             return cls(node_id)
+        if cls in (BooleanAndNode, BooleanOrNode):
+            return cls(node_id)
         if cls in (WarpInNode, WarpOutNode, BooleanWarpInNode, BooleanWarpOutNode):
             return cls(node_id, g("warp_name", ""))
         if cls is ExcludeFilterNode:
@@ -2247,16 +2253,34 @@ class PatchBayDaemon:
             self._dirty = True
         return {"status": "ok"}
 
+    def _duplicate_group_id(self, nodes, exclude_gid=None):
+        """Id of an existing group whose (live) member set is exactly
+        ``nodes``, or None.  Groups may overlap freely; only an identical
+        membership set is disallowed."""
+        wanted = frozenset(n for n in nodes if n in self.space.nodes)
+        for gid, group in self.groups.items():
+            if gid == exclude_gid:
+                continue
+            if frozenset(group.get("nodes", ())) == wanted:
+                return gid
+        return None
+
     def _cmd_add_group(self, cmd: dict) -> dict:
         group_id = cmd.get("group_id")
         if not group_id:
             return {"status": "error", "message": "group_id required"}
+        nodes = [n for n in cmd.get("nodes", []) if n in self.space.nodes]
         with self._lock:
+            if self._duplicate_group_id(nodes) is not None:
+                return {
+                    "status": "error",
+                    "message": "a group with exactly these nodes already exists",
+                }
             self.groups[group_id] = {
                 "id": group_id,
                 "label": cmd.get("label", "Group"),
                 "color": cmd.get("color", "#3584e4"),
-                "nodes": [n for n in cmd.get("nodes", []) if n in self.space.nodes],
+                "nodes": nodes,
             }
             self._dirty = True
         return {"status": "ok", "group_id": group_id}
@@ -2267,6 +2291,17 @@ class PatchBayDaemon:
             group = self.groups.get(group_id)
             if group is None:
                 return {"status": "error", "message": f"Group {group_id} not found"}
+            if "nodes" in cmd:
+                nodes = [
+                    n for n in cmd["nodes"] if n in self.space.nodes
+                ]
+                if self._duplicate_group_id(nodes, exclude_gid=group_id) is not None:
+                    return {
+                        "status": "error",
+                        "message": "another group already has exactly these nodes",
+                    }
+            else:
+                nodes = None
             new_id = cmd.get("new_group_id") or group_id
             if new_id != group_id:
                 if new_id in self.groups:
@@ -2278,10 +2313,8 @@ class PatchBayDaemon:
                 group["label"] = cmd["label"]
             if "color" in cmd:
                 group["color"] = cmd["color"]
-            if "nodes" in cmd:
-                group["nodes"] = [
-                    n for n in cmd["nodes"] if n in self.space.nodes
-                ]
+            if nodes is not None:
+                group["nodes"] = nodes
             self._dirty = True
         return {"status": "ok", "group_id": new_id}
 

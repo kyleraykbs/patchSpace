@@ -18,6 +18,8 @@ from pwnodes import (
     BooleanSourceNode,
     BooleanSplitterNode,
     BooleanInvertNode,
+    BooleanAndNode,
+    BooleanOrNode,
     WarpInNode,
     WarpOutNode,
     BooleanWarpInNode,
@@ -1014,6 +1016,59 @@ def test_boolean_invert_negates_its_input():
     space.remove_edge(space._edge_id("n", "g", "ctrl"))
     space._refresh_boolean_states()
     assert space.nodes["g"].gate_open() is True  # stored enabled=True
+
+
+def test_boolean_and_or_gates_combine_two_inputs():
+    g = FakeGraph()
+    space = make_space(g)
+    space.mark_graph_loaded()
+    space.add_node(BooleanSourceNode("s1", output=1))
+    space.add_node(BooleanSourceNode("s2", output=1))
+    space.add_node(BooleanAndNode("and"))
+    space.add_node(BooleanOrNode("or"))
+    space.add_node(GateNode("ga", enabled=False))
+    space.add_node(GateNode("go", enabled=False))
+    space.add_edge("s1", "and", "a")
+    space.add_edge("s2", "and", "b")
+    space.add_edge("and", "ga", "ctrl")
+    space.add_edge("s1", "or", "a")
+    space.add_edge("s2", "or", "b")
+    space.add_edge("or", "go", "ctrl")
+
+    def states():
+        space._refresh_boolean_states()
+        return space.nodes["ga"].gate_open(), space.nodes["go"].gate_open()
+
+    assert states() == (True, True)    # 1 AND 1 | 1 OR 1
+    space.nodes["s1"].output = 0
+    assert states() == (False, True)   # 0 AND 1 | 0 OR 1
+    space.nodes["s2"].output = 0
+    assert states() == (False, False)  # 0 AND 0 | 0 OR 0
+    space.nodes["s1"].output = 1
+    assert states() == (False, True)   # 1 AND 0 | 1 OR 0
+
+
+def test_boolean_logic_single_input_passes_through_and_empty_emits_nothing():
+    g = FakeGraph()
+    space = make_space(g)
+    space.mark_graph_loaded()
+    space.add_node(BooleanSourceNode("s", output=1))
+    space.add_node(BooleanAndNode("and"))
+    space.add_node(GateNode("gate", enabled=False))
+    space.add_edge("s", "and", "a")          # only "a" wired; "b" left open
+    space.add_edge("and", "gate", "ctrl")
+
+    space._refresh_boolean_states()
+    assert space.nodes["gate"].gate_open() is True   # passes the one input
+    space.nodes["s"].output = 0
+    space._refresh_boolean_states()
+    assert space.nodes["gate"].gate_open() is False
+
+    # With no inputs wired at all the gate emits nothing, so downstream
+    # falls back to its own stored default.
+    space.remove_edge(space._edge_id("s", "and", "a"))
+    space._refresh_boolean_states()
+    assert space.nodes["gate"].gate_open() is False  # stored enabled=False
 
 
 # ---------------------------------------------------------------------------

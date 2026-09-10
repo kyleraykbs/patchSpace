@@ -997,6 +997,39 @@ class BooleanInvertNode(Node):
         return "boolean"
 
 
+class BooleanLogicNode(Node):
+    """Shared base for the two-input boolean logic gates (AND / OR).
+
+    Pure control-plane plumbing like the splitter and inverter - no
+    audio, no PipeWire object, just a value derived from its boolean
+    inputs.  An unwired input contributes nothing, so a gate with a
+    single input wired passes that value through (AND/OR with one
+    operand); with nothing wired it emits no value and anything
+    downstream keeps its own default."""
+
+    BOOLEAN_INPUTS = ("a", "b")
+
+    def port_kind(self, port: str, direction: str) -> str:
+        return "boolean"
+
+    def combine(self, values: List[bool]) -> bool:
+        raise NotImplementedError
+
+
+class BooleanAndNode(BooleanLogicNode):
+    """Boolean AND: true only when every wired input is true."""
+
+    def combine(self, values: List[bool]) -> bool:
+        return all(values)
+
+
+class BooleanOrNode(BooleanLogicNode):
+    """Boolean OR: true when any wired input is true."""
+
+    def combine(self, values: List[bool]) -> bool:
+        return any(values)
+
+
 class WarpInNode(TransparentNode):
     """Publishes the audio feeding its single "in" under ``warp_name``.
 
@@ -2783,6 +2816,24 @@ class PatchSpace:
             return self._resolve_boolean(edge.from_node, edge.from_port, seen)
         return None
 
+    def _resolve_boolean_inputs(self, node_id: NodeId,
+                                seen: Set[NodeId]) -> List[bool]:
+        """Resolve every *wired* input of a multi-input logic gate, in
+        port order.  Unwired inputs are skipped rather than treated as a
+        value, so a gate with a single input wired acts as a pass-through
+        (the caller combines whatever it gets)."""
+        node = self.nodes.get(node_id)
+        values: List[bool] = []
+        for port in getattr(node, "BOOLEAN_INPUTS", ()):
+            for edge in self._edges_into.get(node_id, []):
+                if edge.to_port != port:
+                    continue
+                value = self._resolve_boolean(edge.from_node, edge.from_port, seen)
+                if value is not None:
+                    values.append(value)
+                break
+        return values
+
     def _resolve_boolean(self, node_id: NodeId, from_port: str,
                          seen: Set[NodeId]) -> Optional[bool]:
         if node_id in seen:
@@ -2798,6 +2849,9 @@ class PatchSpace:
         if isinstance(node, BooleanInvertNode):
             value = self._resolve_boolean_input(node_id, seen)
             return None if value is None else (not value)
+        if isinstance(node, BooleanLogicNode):
+            values = self._resolve_boolean_inputs(node_id, seen)
+            return node.combine(values) if values else None
         if isinstance(node, BooleanWarpOutNode):
             name = getattr(node, "warp_name", "")
             if not name:

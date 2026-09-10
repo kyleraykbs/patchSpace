@@ -205,8 +205,9 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
     "volume": NodeSpec("Volume", ["in"], ["out"], control="volume"),
     # Boolean control-signal nodes (gray ports/edges; never a PipeWire
     # link). The On/Off source's button flips a boolean output; the
-    # splitter fans one boolean out to two; the inverter emits its
-    # negation.
+    # splitter fans one boolean out to two; Invert negates its single input;
+    # AND/OR combine their two inputs (an unwired input is ignored, so a
+    # gate with one input wired passes that value through).
     "boolean_switch": NodeSpec(
         "On/Off",
         [],
@@ -222,10 +223,24 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
         boolean_outputs=["out1", "out2"],
     ),
     "boolean_invert": NodeSpec(
-        "Bool Invert",
+        "Invert",
         ["in"],
         ["out"],
         boolean_inputs=["in"],
+        boolean_outputs=["out"],
+    ),
+    "boolean_and": NodeSpec(
+        "AND",
+        ["a", "b"],
+        ["out"],
+        boolean_inputs=["a", "b"],
+        boolean_outputs=["out"],
+    ),
+    "boolean_or": NodeSpec(
+        "OR",
+        ["a", "b"],
+        ["out"],
+        boolean_inputs=["a", "b"],
         boolean_outputs=["out"],
     ),
     # Warps: named logical aliases. A Warp In publishes whatever is
@@ -540,7 +555,9 @@ ADD_NODE_CATEGORIES = [
         "Boolean",
         [
             ("On/Off", "boolean_switch"),
-            ("Bool Invert", "boolean_invert"),
+            ("Invert", "boolean_invert"),
+            ("AND", "boolean_and"),
+            ("OR", "boolean_or"),
             ("Bool Splitter", "boolean_splitter"),
         ],
     ),
@@ -645,6 +662,8 @@ NODE_TYPE_ICONS: Dict[str, str] = {
     "boolean_switch": "object-select-symbolic",
     "boolean_splitter": "network-transmit-receive-symbolic",
     "boolean_invert": "action-unavailable-symbolic",
+    "boolean_and": "checkbox-checked-symbolic",
+    "boolean_or": "list-add-symbolic",
     "warp_in": "insert-link-symbolic",
     "warp_out": "insert-link-symbolic",
     "bool_warp_in": "insert-link-symbolic",
@@ -706,6 +725,8 @@ CLASS_NAME_TO_TYPE = {
     "BooleanSourceNode": "boolean_switch",
     "BooleanSplitterNode": "boolean_splitter",
     "BooleanInvertNode": "boolean_invert",
+    "BooleanAndNode": "boolean_and",
+    "BooleanOrNode": "boolean_or",
     "WarpInNode": "warp_in",
     "WarpOutNode": "warp_out",
     "BooleanWarpInNode": "bool_warp_in",

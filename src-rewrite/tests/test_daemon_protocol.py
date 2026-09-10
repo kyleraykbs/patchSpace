@@ -209,6 +209,41 @@ def test_groups_add_update_export_and_prune():
     assert groups["g3"]["nodes"] == []
 
 
+def test_no_two_groups_with_identical_members():
+    """Groups may overlap freely, but two groups can never hold exactly
+    the same node set - enforced daemon-side as the safety net behind the
+    GUI's own guard."""
+    d = fresh_daemon()
+    for nid in ("a", "b", "c"):
+        d.handle_command({"command": "add_node", "node_type": "gate",
+                          "node_id": nid, "config": {}})
+
+    assert d.handle_command({"command": "add_group", "group_id": "g1",
+                             "nodes": ["a", "b"]})["status"] == "ok"
+    # Same members, different order -> still an exact duplicate.
+    assert d.handle_command({"command": "add_group", "group_id": "g2",
+                             "nodes": ["b", "a"]})["status"] == "error"
+    # Overlapping groups are fine.
+    assert d.handle_command({"command": "add_group", "group_id": "g2",
+                             "nodes": ["a", "b", "c"]})["status"] == "ok"
+    assert d.handle_command({"command": "add_group", "group_id": "g3",
+                             "nodes": ["a"]})["status"] == "ok"
+
+    # Editing a group so it matches another is rejected...
+    assert d.handle_command({"command": "set_group", "group_id": "g3",
+                             "nodes": ["a", "b"]})["status"] == "error"
+    # ...an overlapping edit is fine...
+    assert d.handle_command({"command": "set_group", "group_id": "g3",
+                             "nodes": ["c"]})["status"] == "ok"
+    # ...and it can't be made identical to another later either.
+    assert d.handle_command({"command": "set_group", "group_id": "g1",
+                             "nodes": ["a", "b", "c"]})["status"] == "error"
+
+    groups = {g["id"]: set(g["nodes"])
+              for g in d.handle_command({"command": "get_nodes"})["groups"]}
+    assert groups == {"g1": {"a", "b"}, "g2": {"a", "b", "c"}, "g3": {"c"}}
+
+
 def test_set_property_and_rename():
     d = fresh_daemon()
     d.handle_command({"command": "add_node", "node_type": "regex_input",
@@ -784,12 +819,19 @@ def test_boolean_nodes_registry_specs_and_output_control():
         BooleanSourceNode,
         BooleanSplitterNode,
         BooleanInvertNode,
+        BooleanAndNode,
+        BooleanOrNode,
     )
     from gui import node_specs as ns
 
     assert main_mod.NODE_TYPE_REGISTRY["boolean_switch"] is BooleanSourceNode
     assert main_mod.NODE_TYPE_REGISTRY["boolean_splitter"] is BooleanSplitterNode
     assert main_mod.NODE_TYPE_REGISTRY["boolean_invert"] is BooleanInvertNode
+    assert main_mod.NODE_TYPE_REGISTRY["boolean_and"] is BooleanAndNode
+    assert main_mod.NODE_TYPE_REGISTRY["boolean_or"] is BooleanOrNode
+    assert ns.spec_for("boolean_and").inputs == ["a", "b"]
+    assert ns.spec_for("boolean_and").boolean_inputs == {"a", "b"}
+    assert ns.spec_for("boolean_or").boolean_outputs == {"out"}
     assert ns.spec_for("boolean_switch").inputs == []
     assert ns.spec_for("boolean_switch").boolean_outputs == {"out"}
     assert ns.spec_for("gate").boolean_inputs == {"ctrl"}
@@ -804,7 +846,9 @@ def test_boolean_nodes_registry_specs_and_output_control():
     assert ns.port_kind("boolean_invert", "out", "out") == "boolean"
     assert ("On/Off", "boolean_switch") in ns.ADD_NODE_MENU_ITEMS
     assert ("Bool Splitter", "boolean_splitter") in ns.ADD_NODE_MENU_ITEMS
-    assert ("Bool Invert", "boolean_invert") in ns.ADD_NODE_MENU_ITEMS
+    assert ("Invert", "boolean_invert") in ns.ADD_NODE_MENU_ITEMS
+    assert ("AND", "boolean_and") in ns.ADD_NODE_MENU_ITEMS
+    assert ("OR", "boolean_or") in ns.ADD_NODE_MENU_ITEMS
 
     d = fresh_daemon()
     d.space.mark_graph_loaded()
