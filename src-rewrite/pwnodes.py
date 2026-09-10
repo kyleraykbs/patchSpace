@@ -449,12 +449,18 @@ class BackedNode(Node):
     def _ensure_null_sink(self, name: str, extra_props: str = "",
                           description: Optional[str] = None,
                           pw_cli_command=("pw-cli",), settle: float = 0.3,
-                          drop_keepalive: bool = True) -> Optional[OwnedPwNode]:
+                          drop_keepalive: bool = True,
+                          media_class: str = "Audio/Sink") -> Optional[OwnedPwNode]:
         """Create one plain null-audio-sink adapter named ``name`` if it
         is not already among self.backings.  When it has to be created
         the old one is gone, so any keepalive aimed at it is aimed at a
         vanished target and is dropped too (a pw-cat client does not
-        re-link on its own)."""
+        re-link on its own).
+
+        ``media_class`` is normally Audio/Sink (a Pulse-visible sink).
+        Purely internal plumbing passes ``pwmatch.INTERNAL_MEDIA_CLASS``
+        instead, which keeps the same ports and routing while staying
+        invisible to pipewire-pulse clients like Discord."""
         existing = self._find(name)
         if existing is not None:
             return existing
@@ -463,7 +469,7 @@ class BackedNode(Node):
             "factory.name=support.null-audio-sink "
             f'node.name="{name}" '
             f'node.description="{desc}" '
-            "media.class=Audio/Sink "
+            f"media.class={media_class} "
             "audio.position=[FL,FR]" + (f" {extra_props}" if extra_props else "")
         )
         owned = self._spawn_cli(name, f"create-node adapter {config}",
@@ -798,7 +804,15 @@ class ExcludeFilterNode(TransparentNode):
 
 class _SingleSinkNode(BackedNode):
     """A single monitor-enabled null-audio-sink adapter, optionally with
-    monitor.channel-volumes so wpctl can drive a per-channel volume."""
+    monitor.channel-volumes so wpctl can drive a per-channel volume.
+
+    ``MEDIA_CLASS`` is the sink's media.class.  The default is a real
+    Pulse-visible Audio/Sink (wpctl-controllable volume nodes, virtual
+    speakers); SplitterNode overrides it with the engine's internal,
+    non-Pulse class so its backing sink never shows up as an audio
+    device to clients like Discord."""
+
+    MEDIA_CLASS = "Audio/Sink"
 
     def __init__(self, node_id, backing_node_name: str,
                  pw_cli_command=("pw-cli",), settle: float = 0.3,
@@ -818,10 +832,15 @@ class _SingleSinkNode(BackedNode):
     def ensure_structural(self) -> None:
         self._prune_dead()
         self._ensure_null_sink(self.backing_node_name, self._extra_props,
-                               self._description, self._pw_cli_command, self._settle)
+                               self._description, self._pw_cli_command, self._settle,
+                               media_class=self.MEDIA_CLASS)
 
 
 class SplitterNode(_SingleSinkNode):
+    # A splitter is pure fan-out plumbing the user never selects in an
+    # app, so its sink stays out of the Pulse device list entirely.
+    MEDIA_CLASS = pwmatch.INTERNAL_MEDIA_CLASS
+
     def __init__(self, node_id, backing_node_name: Optional[str] = None,
                  pw_cli_command=("pw-cli",), settle: float = 0.3):
         super().__init__(node_id, backing_node_name or f"splitter_{node_id}",
@@ -1130,10 +1149,25 @@ class _ChainEffect(BackedNode):
         structural_names = {self._input_dummy_name, self._output_dummy_name,
                             self._feed_name, self._drain_name}
         self._prune_dead(structural_names)
-        self._ensure_null_sink(self._input_dummy_name, description=f"{self.id} input",
-                               pw_cli_command=self._pw_cli_command, settle=self._settle)
-        self._ensure_null_sink(self._output_dummy_name, description=f"{self.id} output",
-                               pw_cli_command=self._pw_cli_command, settle=self._settle)
+        # The two dummy sinks are internal plumbing the user never picks
+        # in an app, so they use the engine's non-Pulse media class -
+        # Discord/Chromium never enumerate them (the effect module's own
+        # capture/playback streams keep their real Audio/Sink/Source
+        # classes).
+        self._ensure_null_sink(
+            self._input_dummy_name,
+            description=f"{self.id} input",
+            pw_cli_command=self._pw_cli_command,
+            settle=self._settle,
+            media_class=pwmatch.INTERNAL_MEDIA_CLASS,
+        )
+        self._ensure_null_sink(
+            self._output_dummy_name,
+            description=f"{self.id} output",
+            pw_cli_command=self._pw_cli_command,
+            settle=self._settle,
+            media_class=pwmatch.INTERNAL_MEDIA_CLASS,
+        )
         self._ensure_feed(self._feed_name, self._input_dummy_name,
                           self._pw_cli_command, self._settle)
         self._ensure_drain(self._drain_name, self._output_dummy_name,

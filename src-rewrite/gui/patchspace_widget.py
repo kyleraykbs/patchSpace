@@ -97,6 +97,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     # Big enough that the label text beside one socket never runs into
     # its neighbour.
     SOCKET_MIN_STEP = 22
+    # Radius of a drawn socket circle. Kept as a constant so the layout
+    # maths (how much room a stack of sockets needs) and the drawing can
+    # never drift apart.
+    SOCKET_RADIUS = 6
 
     def __init__(self, client):
         super().__init__()
@@ -638,9 +642,27 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         socket_count = max(len(node.get("inputs", [])), len(node.get("outputs", [])))
         if socket_count > 1:
             top, bottom = self._socket_margins(node_id, node)
-            need = top + bottom + self.SOCKET_MIN_STEP * (socket_count + 1)
+            if self._uses_compact_sockets(node):
+                # Just the circles plus the gap between them - the
+                # sockets are stacked directly under the header rather
+                # than centred in a band with a whole extra step of
+                # padding above and below (which made the Switcher /
+                # Inverse Switcher far taller than they needed to be).
+                span = (socket_count - 1) * self.SOCKET_MIN_STEP
+                need = top + bottom + span + 2 * self.SOCKET_RADIUS
+            else:
+                need = top + bottom + self.SOCKET_MIN_STEP * (socket_count + 1)
             base = max(base, int(need))
         return base
+
+    def _uses_compact_sockets(self, node):
+        """A multi-socket node that also carries a bottom control (the
+        Switcher and Inverse Switcher) packs its sockets tightly under
+        the header instead of reserving a full step of padding around
+        them - the control already anchors the bottom, so centring the
+        sockets in the whole body just makes the node needlessly tall."""
+        socket_count = max(len(node.get("inputs", [])), len(node.get("outputs", [])))
+        return socket_count > 1 and self._bottom_control_height(node) > 0
 
     def _base_node_height(self, node_id):
         """node_height() without the extra room a labelled multi-input
@@ -691,10 +713,19 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         Ordinary nodes return the legacy single-value offset for both,
         which leaves a lone socket centred on the node body (the two
         insets cancel out of the centre calculation), so nothing moves
-        for them. A node that labels its input sockets reserves the
-        wrapped header text on top instead, so "mic"/"probe" (and their
-        labels) sit below the title/label instead of on top of it, with
-        only a small pad at the bottom."""
+        for them. A node that labels its sockets reserves the wrapped
+        header text on top instead, so "mic"/"probe" and the Switcher's
+        "a"/"b" sit below the title/label rather than on top of it.
+        Multi-socket nodes that also have a bottom control (the two
+        switchers) reserve just the control below, not a small pad, so
+        the A/B toggle stays close to the sockets above it."""
+        if self._uses_compact_sockets(node):
+            # Multi-socket nodes with a bottom control: sockets sit
+            # right under the wrapped header, control reserved below.
+            top = self._header_stack_height(node_id, node) + 4
+            bottom = self._bottom_control_height(node)
+            return top, bottom
+
         if len(node.get("inputs", [])) <= 1:
             offset = 0
             if node.get("meta", {}).get("description") or node.get("label"):
@@ -704,10 +735,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             offset += self._bottom_control_height(node)
             return offset, offset
 
-        # Labelled sockets (more than one input, e.g. Echo Cancel or the
-        # Inverse Switcher): sit below the wrapped header on top and
-        # clear of the bottom control too, so an input switch's "a"/"b"
-        # circles never land on the A/B button.
+        # Labelled sockets (more than one input, e.g. Echo Cancel):
+        # sit below the wrapped header on top and clear of the bottom
+        # control too, so an input switch's "a"/"b" circles never land
+        # on the A/B button.
         top = self._header_stack_height(node_id, node) + 4
         bottom = 8 + self._bottom_control_height(node)
         return top, bottom
@@ -729,7 +760,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             return (x, node["y"] + self.node_height(node_id) / 2)
         top, bottom = self._socket_margins(node_id, node)
         band = self.node_height(node_id) - top - bottom
-        y = node["y"] + top + band * (index + 1) / (total + 1)
+        if self._uses_compact_sockets(node) and total > 1:
+            # Packed at the standard step and centred in the (now tight)
+            # band, instead of the proportional spread used elsewhere.
+            span = (total - 1) * self.SOCKET_MIN_STEP
+            y = node["y"] + top + (band - span) / 2 + index * self.SOCKET_MIN_STEP
+        else:
+            y = node["y"] + top + band * (index + 1) / (total + 1)
         return (x, y)
 
     def _gate_rect(self, nid):
@@ -1125,7 +1162,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         for i in range(len(node["inputs"])):
             sx, sy = self._socket_position(nid, "in", i)
             cr.set_source_rgb(*pal["input_port"])
-            cr.arc(sx, sy, 6, 0, 2 * math.pi)
+            cr.arc(sx, sy, self.SOCKET_RADIUS, 0, 2 * math.pi)
             cr.fill()
             # A single "in" socket is self-explanatory and every node
             # type had exactly that until EchoCancelNode - only label
@@ -1146,7 +1183,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             sx, sy = self._socket_position(nid, "out", i)
             is_source = self.connecting_from == (nid, i)
             cr.set_source_rgb(*(pal["select"] if is_source else pal["output_port"]))
-            cr.arc(sx, sy, 6, 0, 2 * math.pi)
+            cr.arc(sx, sy, self.SOCKET_RADIUS, 0, 2 * math.pi)
             cr.fill()
             # Multi-output nodes (today only the Switcher's "a"/"b") get
             # their sockets labelled, right-aligned inside the node body;

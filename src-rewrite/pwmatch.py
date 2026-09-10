@@ -54,10 +54,30 @@ from typing import Dict, List, Optional, Pattern, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
+# Media class for nodes the engine owns purely as internal routing
+# plumbing - splitters and the dummy sinks bracketing a chain effect.
+# It must be an `Audio/Sink/*` subclass, not a custom top-level class:
+# the PipeWire adapter only creates the sink/monitor ports for an
+# Audio/Sink* class (a non-Audio class yields a node with zero ports).
+# The `pipewire-pulse` module, however, only exposes a node as a sink on
+# an EXACT "Audio/Sink" match (see its pw_manager_object_is_sink), so
+# this subclass keeps every port while staying invisible to Pulse device
+# enumeration - no Discord/Chromium "new audio device" toast.  It still
+# has to be listed in SOURCE_MEDIA_CLASSES below so the engine routes it.
+INTERNAL_MEDIA_CLASS = "Audio/Sink/Internal"
+INTERNAL_SOURCE_MEDIA_CLASS = "Audio/Source/Internal"
+
 # media classes the engine will treat as a routable *source*: ordinary
 # app playback streams, sinks (their monitor ports mirror what plays
-# into them), and hardware capture devices.
-SOURCE_MEDIA_CLASSES = ("Stream/Output/Audio", "Audio/Sink", "Audio/Source")
+# into them), hardware capture devices, and our own non-Pulse internal
+# plumbing (see INTERNAL_MEDIA_CLASS).
+SOURCE_MEDIA_CLASSES = (
+    "Stream/Output/Audio",
+    "Audio/Sink",
+    "Audio/Source",
+    INTERNAL_MEDIA_CLASS,
+    INTERNAL_SOURCE_MEDIA_CLASS,
+)
 
 # groups[group_name][channel] -> port id
 PortGroups = Dict[str, Dict[str, int]]

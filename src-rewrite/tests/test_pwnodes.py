@@ -6,6 +6,7 @@ import time
 import pytest
 
 from pwproc import Backoff
+from pwmatch import INTERNAL_MEDIA_CLASS, SOURCE_MEDIA_CLASSES
 from pwnodes import (
     PatchSpace,
     InputNode,
@@ -14,6 +15,10 @@ from pwnodes import (
     GateNode,
     SwitcherNode,
     InverseSwitcherNode,
+    NoiseCancelNode,
+    SplitterNode,
+    VolumeProcessNode,
+    VirtualSpeakerNode,
     Node,
     LINK_CONFIRM_TIMEOUT_S,
 )
@@ -518,6 +523,33 @@ def test_removing_edge_with_inflight_link_does_not_stall():
     space.remove_edge("src->snk")
     assert space._inflight_link is None
     space.sync()  # must not raise or block on the dead link
+
+
+def test_internal_media_class_hides_plumbing_but_keeps_it_routable():
+    # An Audio/Sink subclass, so the adapter still creates the sink and
+    # monitor ports (a custom top-level class yields zero ports)...
+    assert INTERNAL_MEDIA_CLASS.startswith("Audio/Sink")
+    # ...but not the exact string pipewire-pulse exposes as a sink.
+    assert INTERNAL_MEDIA_CLASS != "Audio/Sink"
+    # And the engine still treats it as a routable source.
+    assert INTERNAL_MEDIA_CLASS in SOURCE_MEDIA_CLASSES
+
+    # Splitters hide; things an app selects or wpctl drives stay visible.
+    assert SplitterNode("s").MEDIA_CLASS == INTERNAL_MEDIA_CLASS
+    assert VolumeProcessNode("v", "v").MEDIA_CLASS == "Audio/Sink"
+    assert VirtualSpeakerNode("vs", "vs").MEDIA_CLASS == "Audio/Sink"
+
+
+def test_chain_effect_dummy_sinks_use_internal_media_class():
+    node = NoiseCancelNode("nc", "nc")
+    recorded = []
+    node._prune_dead = lambda *a, **k: None
+    node._ensure_null_sink = lambda *a, **k: recorded.append(k.get("media_class"))
+    node._ensure_feed = lambda *a, **k: None
+    node._ensure_drain = lambda *a, **k: None
+    node.ensure_structural()
+    assert recorded  # the two dummies
+    assert all(cls == INTERNAL_MEDIA_CLASS for cls in recorded)
 
 
 def test_removing_node_tears_down_and_unlinks():
