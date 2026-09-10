@@ -3,6 +3,8 @@ so nothing touches a real PipeWire process.  Exercises the same command
 layer and serialization shapes the GUI depends on."""
 
 from main import PatchBayDaemon
+from pwnodes import BackedNode, Node
+import main as main_mod
 
 
 def fresh_daemon():
@@ -139,6 +141,72 @@ def test_inverse_switcher_registered_and_toggles():
     assert d.handle_command({"command": "get_nodes"})["nodes"]["inv"]["output"] == 1
 
 
+def test_node_layout_persists_through_export_and_reimport():
+    d1 = fresh_daemon()
+    d1.handle_command({"command": "add_node", "node_type": "gate", "node_id": "g1",
+                       "config": {"label": "G"}})
+    resp = d1.handle_command({"command": "set_node_layout", "layout": {
+        "g1": {"x": 123.5, "y": -40.0, "anchored": True},
+    }})
+    assert resp["status"] == "ok"
+
+    nodes = d1.handle_command({"command": "get_nodes"})["nodes"]
+    assert nodes["g1"]["x"] == 123.5
+    assert nodes["g1"]["y"] == -40.0
+    assert nodes["g1"]["anchored"] is True
+
+    export = d1.handle_command({"command": "export_config"})["config"]
+    params = export["nodes"]["g1"]["params"]
+    assert params["x"] == 123.5
+    assert params["y"] == -40.0
+    assert params["anchored"] is True
+
+    # Replay the export into a fresh daemon, as apply_config.py does.
+    d2 = fresh_daemon()
+    for node_id, cfg in export["nodes"].items():
+        resp = d2.handle_command({
+            "command": "add_node", "node_type": cfg["type"],
+            "node_id": node_id, "config": cfg["params"],
+        })
+        assert resp["status"] == "ok"
+    restored = d2.handle_command({"command": "get_nodes"})["nodes"]["g1"]
+    assert restored["x"] == 123.5
+    assert restored["y"] == -40.0
+    assert restored["anchored"] is True
+
+
+def test_groups_add_update_export_and_prune():
+    d = fresh_daemon()
+    for nid in ("a", "b"):
+        d.handle_command({"command": "add_node", "node_type": "gate",
+                          "node_id": nid, "config": {}})
+    resp = d.handle_command({"command": "add_group", "group_id": "g1",
+                             "label": "Drums", "color": "#33d17a",
+                             "nodes": ["a", "b"]})
+    assert resp["status"] == "ok"
+
+    groups = d.handle_command({"command": "get_nodes"})["groups"]
+    assert groups == [{"id": "g1", "label": "Drums", "color": "#33d17a",
+                       "nodes": ["a", "b"]}]
+
+    # Rename, recolor, and drop a member.
+    assert d.handle_command({"command": "set_group", "group_id": "g1",
+                             "new_group_id": "g2", "label": "Perc",
+                             "color": "#e01b24", "nodes": ["a"]})["status"] == "ok"
+    groups = d.handle_command({"command": "get_nodes"})["groups"]
+    assert groups[0]["id"] == "g2"
+    assert groups[0]["label"] == "Perc"
+    assert groups[0]["nodes"] == ["a"]
+
+    # Export carries groups, and removing a node prunes it from them.
+    d.handle_command({"command": "add_group", "group_id": "g3", "nodes": ["b"]})
+    export = d.handle_command({"command": "export_config"})["config"]
+    assert {g["id"] for g in export["groups"]} == {"g2", "g3"}
+    d.handle_command({"command": "remove_node", "node_id": "b"})
+    groups = {g["id"]: g for g in d.handle_command({"command": "get_nodes"})["groups"]}
+    assert groups["g3"]["nodes"] == []
+
+
 def test_set_property_and_rename():
     d = fresh_daemon()
     d.handle_command({"command": "add_node", "node_type": "regex_input",
@@ -177,3 +245,190 @@ def test_unknown_type_and_bad_command_error():
                              "node_id": "x", "config": {}})
     assert resp["status"] == "error"
     assert d.handle_command({"command": "frobnicate"})["status"] == "error"
+
+
+class _StubBacking:
+    """A process-owning backing whose liveness we can flip by hand."""
+
+    def __init__(self, alive=True, resolved=True):
+        self.node_id = 1 if resolved else None
+        self.owns_process = True
+        self.is_alive = alive
+        self.name = "fx_module"
+
+    def destroy(self):
+        pass
+
+    def stuck(self, grace_s):
+        return False
+
+
+class _FakeEffect(BackedNode):
+    """A backed node with a live module, used to exercise _node_health
+    without spawning a real PipeWire process."""
+
+    def __init__(self, node_id="fx"):
+        super().__init__(node_id, "fx")
+        self.backings = [_StubBacking()]
+
+    def structural_ok(self):
+        return True
+
+    def has_module(self):
+        return True
+
+    def module_backing(self):
+        return self.backings[0] if self.backings else None
+
+    def module_ok(self):
+        b = self.module_backing()
+        return bool(b is not None and b.is_alive)
+
+    def internal_links(self):
+        return [({"nodeName": "src"}, {"name": "dsp"})]
+
+    def ensure_structural(self):
+        pass
+
+    def ensure_module(self):
+        pass
+
+
+def test_node_health_ok_starting_and_dead():
+    d = fresh_daemon()
+    node = _FakeEffect("fx")
+    d.space.nodes["fx"] = node
+    d.space.public_nodes.add("fx")
+    d.space.node_internals_wired = lambda nid: True
+    assert d._node_health(node) == "ok"
+
+    # Interior never connected: structurally ready but acoustically dead.
+    d.space.node_internals_wired = lambda nid: False
+    assert d._node_health(node) == "dead"
+
+    # Module process gone -> dead regardless of the interior check.
+    d.space.node_internals_wired = lambda nid: True
+    node.backings[0].is_alive = False
+    assert d._node_health(node) == "dead"
+
+    # No module at all yet -> not ready, but not dead either.
+    node.backings = []
+    assert d._node_health(node) == "starting"
+
+    # The serialized shape carries it through to the GUI.
+    node.backings = [_StubBacking()]
+    assert d.handle_command({"command": "get_nodes"})["nodes"]["fx"]["health"] == "ok"
+
+
+class _LeafStub(Node):
+    def __init__(self, node_id, backing_node_name=None, **_kw):
+        super().__init__(node_id)
+
+
+class _RegularStub(BackedNode):
+    def __init__(self, node_id, backing_node_name="reg", **_kw):
+        super().__init__(node_id, backing_node_name)
+
+    def structural_ok(self):
+        return True
+
+    def ensure_structural(self):
+        pass
+
+
+class _FinickyStub(BackedNode):
+    def __init__(self, node_id, backing_node_name="fx", **_kw):
+        super().__init__(node_id, backing_node_name)
+
+    def structural_ok(self):
+        return True
+
+    def ensure_structural(self):
+        pass
+
+
+def test_load_session_wires_finicky_node_inputs_one_at_a_time(monkeypatch):
+    monkeypatch.setitem(main_mod.NODE_TYPE_REGISTRY, "leaf_stub", _LeafStub)
+    monkeypatch.setitem(main_mod.NODE_TYPE_REGISTRY, "regular_stub", _RegularStub)
+    monkeypatch.setitem(main_mod.NODE_TYPE_REGISTRY, "finicky_stub", _FinickyStub)
+    monkeypatch.setattr(main_mod, "_CAREFUL_NODE_TYPES", (_FinickyStub,))
+
+    d = fresh_daemon()
+    monkeypatch.setattr(
+        d,
+        "_create_node",
+        lambda node_type, node_id, config: main_mod.NODE_TYPE_REGISTRY[node_type](
+            node_id, config.get("backing_node_name") or f"patchbay_{node_id}"
+        ),
+    )
+    bringups = []
+    monkeypatch.setattr(
+        d, "_bring_node_up", lambda node: (bringups.append(node.id), True)[1]
+    )
+    internals = []
+    monkeypatch.setattr(
+        d,
+        "_wait_node_internals_wired",
+        lambda nid: (internals.append(nid), True)[1],
+    )
+    wired = []
+    relinked = []
+    real_store = d._store_session_edge
+
+    def fake_wire(edge):
+        wired.append(f"{edge['from']}->{edge['to']}")
+        return real_store(edge)
+
+    monkeypatch.setattr(d, "_wire_edge_carefully", fake_wire)
+
+    def fake_relink(edge):
+        relinked.append(f"{edge['from']}->{edge['to']}")
+        return ("", None, False, None)
+
+    monkeypatch.setattr(d, "_relink_edge_carefully", fake_relink)
+
+    config = {
+        "nodes": {
+            "src": {"type": "leaf_stub", "params": {}},
+            "fx": {"type": "finicky_stub", "params": {}},
+            "dst": {"type": "leaf_stub", "params": {}},
+            "src2": {"type": "leaf_stub", "params": {}},
+            "reg": {"type": "regular_stub", "params": {}},
+        },
+        "edges": [
+            # Output edge listed first on purpose - the careful pass must
+            # still wire the finicky node's INPUT before its output.
+            {"from": "fx", "to": "dst"},
+            {"from": "src", "to": "fx"},
+            {"from": "src2", "to": "reg"},
+        ],
+    }
+    result = d._load_session(config)
+
+    assert result["status"] == "ok"
+    # The regular backed node came up in the first pass; the finicky one
+    # was held back for the dedicated careful pass.
+    assert bringups == ["reg", "fx"]
+    assert internals == ["fx"]
+    assert wired == ["src->fx", "fx->dst"]
+    # And the downstream chain (fx->dst) is re-linked once the finicky
+    # node's interior is confirmed live.
+    assert relinked == ["fx->dst"]
+    assert "src2->reg" in result["edges_created"]
+    assert set(d.space.edges) == {"src->fx", "fx->dst", "src2->reg"}
+
+
+def test_downstream_edges_walks_signal_order_through_switches():
+    d = fresh_daemon()
+    edges = [
+        {"from": "fx", "to": "sw"},        # index 0 - directly downstream
+        {"from": "sw", "to": "a"},         # index 1
+        {"from": "sw", "to": "bypass"},    # index 2
+        {"from": "a", "to": "device"},     # index 3 - furthest downstream
+        {"from": "upstream", "to": "fx"},  # index 4 - upstream, excluded
+        {"from": "elsewhere", "to": "x"},  # index 5 - unrelated, excluded
+    ]
+    result = d._downstream_edges(["fx"], edges)
+    # Everything reachable from fx via from->to, closest first, then by
+    # config order; upstream/unrelated edges are not included.
+    assert result == [edges[0], edges[1], edges[2], edges[3]]

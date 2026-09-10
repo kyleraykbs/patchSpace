@@ -26,6 +26,13 @@ LAYOUT_TICK_MS = 33
 LAYOUT_SETTLE_TICKS = 20
 LAYOUT_SETTLE_EPSILON = 0.05
 
+# How long to wait after the node layout changes (drag end, anchor
+# toggle, the physics settling) before pushing the canvas positions +
+# anchored flags to the daemon to be persisted. Long enough to coalesce
+# a burst of changes into one set_node_layout, short enough that a
+# normal edit is saved well before the next get_nodes poll.
+LAYOUT_SAVE_DEBOUNCE_MS = 600
+
 ZOOM_MIN = 0.2
 ZOOM_MAX = 3.0
 ZOOM_STEP = 1.1

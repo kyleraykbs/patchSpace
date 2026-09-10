@@ -165,6 +165,13 @@ class MainWindow(Gtk.ApplicationWindow):
 
         add_node_panel = self.ps_widget.build_add_node_panel()
 
+        # Canvas + a thin tool strip pinned under it.  The strip and the
+        # canvas share the Paned's end child so the strip stays the same
+        # width as the canvas (not the whole window).
+        canvas_area = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        canvas_area.append(overlay)
+        canvas_area.append(self._build_patchspace_toolbar())
+
         # A Gtk.Paned instead of a plain Box+Separator: it draws its
         # own draggable handle, so the user can grab the edge between
         # the panel and the canvas to resize it, instead of the panel
@@ -179,7 +186,7 @@ class MainWindow(Gtk.ApplicationWindow):
         page.set_start_child(add_node_panel)
         page.set_resize_start_child(False)
         page.set_shrink_start_child(False)
-        page.set_end_child(overlay)
+        page.set_end_child(canvas_area)
         page.set_resize_end_child(True)
         page.set_shrink_end_child(True)
         page.set_position(ADD_NODE_PANEL_WIDTH)
@@ -193,6 +200,63 @@ class MainWindow(Gtk.ApplicationWindow):
         page.connect("notify::position", _clamp_panel_width)
 
         return page
+
+    def _build_patchspace_toolbar(self):
+        """Strip under the PatchSpace canvas.  Currently just the
+        right-drag selection's anchor control: select some nodes, then
+        pin or free them from the physics."""
+        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        bar.set_margin_top(4)
+        bar.set_margin_bottom(4)
+        bar.set_margin_start(8)
+        bar.set_margin_end(8)
+
+        self._ps_selection_label = Gtk.Label(label="No selection")
+        self._ps_selection_label.set_halign(Gtk.Align.START)
+        self._ps_selection_label.set_hexpand(True)
+        bar.append(self._ps_selection_label)
+
+        self._ps_group_button = Gtk.Button(label="Group")
+        self._ps_group_button.set_sensitive(False)
+        self._ps_group_button.set_tooltip_text(
+            "Wrap the selected nodes in a labelled, coloured group"
+        )
+        self._ps_group_button.connect(
+            "clicked", lambda _b: self.ps_widget.create_group_from_selection()
+        )
+        bar.append(self._ps_group_button)
+
+        self._ps_anchor_button = Gtk.Button(label="Anchor")
+        self._ps_anchor_button.set_sensitive(False)
+        self._ps_anchor_button.set_tooltip_text(
+            "Pin the selected nodes in place (they can still be dragged)"
+        )
+        self._ps_anchor_button.connect(
+            "clicked", lambda _b: self.ps_widget.toggle_anchor_selected()
+        )
+        bar.append(self._ps_anchor_button)
+
+        self.ps_widget.on_selection_changed.append(self._update_patchspace_toolbar)
+        self._update_patchspace_toolbar()
+        return bar
+
+    def _update_patchspace_toolbar(self):
+        widget = self.ps_widget
+        count = len(widget.selected_nodes)
+        if count == 0:
+            self._ps_selection_label.set_label("No selection")
+            self._ps_group_button.set_sensitive(False)
+            self._ps_anchor_button.set_sensitive(False)
+            self._ps_anchor_button.set_label("Anchor")
+            return
+        all_anchored = all(
+            nid in widget.anchored_nodes for nid in widget.selected_nodes
+        )
+        plural = "s" if count != 1 else ""
+        self._ps_selection_label.set_label(f"{count} node{plural} selected")
+        self._ps_group_button.set_sensitive(True)
+        self._ps_anchor_button.set_sensitive(True)
+        self._ps_anchor_button.set_label("Unanchor" if all_anchored else "Anchor")
 
     def process_responses(self):
         for resp in self.client.get_responses():

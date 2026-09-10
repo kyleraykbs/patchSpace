@@ -161,7 +161,7 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
     "gate": NodeSpec("Gate", ["in"], ["out"], control="gate"),
     "switcher": NodeSpec("Switcher", ["in"], ["a", "b"], control="switcher"),
     "inverse_switcher": NodeSpec(
-        "Inverse Switcher", ["a", "b"], ["out"], control="switcher"
+        "Inv. Switcher", ["a", "b"], ["out"], control="switcher"
     ),
     "exclude_filter": NodeSpec("Exclude (Regex)", ["in"], ["out"], field="pattern"),
     "volume": NodeSpec("Volume", ["in"], ["out"], control="volume"),

@@ -73,6 +73,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 import threading
 import time as _time
@@ -87,6 +88,18 @@ logger = logging.getLogger(__name__)
 
 NodeId = str
 EdgeId = str
+
+# PipeWire appends a numeric suffix (".99") to node.name when another
+# object with the same name shows up, so a hardware device can reappear
+# under a slightly different name than the one a Device Input/Output
+# node stored.  Comparing suffix-stripped base names lets the daemon
+# re-adopt the live name instead of silently going dead (no links, no
+# volume) until the user re-selects the device.
+_NAME_SUFFIX_RE = re.compile(r"\.\d+$")
+
+
+def _base_node_name(name: str) -> str:
+    return _NAME_SUFFIX_RE.sub("", name or "")
 
 # Reserved backing names for the daemon's built-in virtual sink/mic.
 # They are ordinary supervised VirtualSpeaker/VirtualMic nodes (added
@@ -166,6 +179,17 @@ def _store_ladspa_candidate(prefix: str, rel_path: str) -> Optional[str]:
 
 class Node:
     """Anything that can sit in the graph."""
+
+    # -- GUI layout state ------------------------------------------------
+    # Purely presentational, but owned by the daemon so it round-trips
+    # through get_nodes / export / the auto-saved last-session cache:
+    # where the node sits on the canvas and whether the force layout
+    # pins it.  None means "the GUI hasn't told us yet" (a freshly
+    # created node), which lets the GUI keep choosing a default slot
+    # instead of snapping everything to (0, 0).
+    x: Optional[float] = None
+    y: Optional[float] = None
+    anchored: Optional[bool] = None
 
     def __init__(self, node_id: NodeId):
         self.id = node_id
@@ -1858,12 +1882,17 @@ class PatchSpace:
         # edge id -> desired pairs connected as of the last sync.
         self._edge_links: Dict[EdgeId, _DesiredLinks] = {}
 
-        # Paced wire-up (see _apply_desired_links): at most one connect
-        # is in flight at a time, recorded here as (edge_id, pair,
-        # issued_at) until the live graph confirms it.  Any pair whose
-        # edge was removed while its connect was still in flight is
-        # queued for a best-effort disconnect so it can't land orphaned.
-        self._inflight_link: Optional[Tuple[EdgeId, Tuple[int, int], float]] = None
+        # Paced wire-up (see _apply_desired_links): pairs whose connect
+        # has been issued but not yet confirmed by the live graph,
+        # keyed by the pair itself -> (edge_id, issued_at). Unlike the
+        # old single-slot design, more than one pair can be in flight
+        # at once - only a candidate pair that shares a port with one
+        # already in flight is held back (see _apply_desired_links),
+        # so one slow-to-confirm link can no longer stall every other,
+        # unrelated edge in the graph. Any pair whose edge was removed
+        # while its connect was still in flight is queued for a
+        # best-effort disconnect so it can't land orphaned.
+        self._inflight_links: Dict[Tuple[int, int], Tuple[EdgeId, float]] = {}
         self._orphan_disconnects: Set[Tuple[int, int]] = set()
 
         # Per-(node, stage) repair backoff - see supervise().
@@ -2049,13 +2078,14 @@ class PatchSpace:
                 self._edges_out_of[edge.from_node].remove(edge)
             except ValueError:
                 pass
-        # If this edge's link was still waiting to be confirmed, stop
-        # waiting on it (it would otherwise block the paced wire-up for
-        # up to LINK_CONFIRM_TIMEOUT_S) and remember the pair so that if
-        # the connect does land after all, the next sync unlinks it.
-        if self._inflight_link is not None and self._inflight_link[0] == edge_id:
-            self._orphan_disconnects.add(self._inflight_link[1])
-            self._inflight_link = None
+        # If any of this edge's links were still waiting to be
+        # confirmed, stop waiting on them and remember the pairs so
+        # that if the connect does land after all, the next sync
+        # unlinks it.
+        for pair, (inflight_edge_id, _issued_at) in list(self._inflight_links.items()):
+            if inflight_edge_id == edge_id:
+                self._orphan_disconnects.add(pair)
+                del self._inflight_links[pair]
 
     # ------------------------------------------------------------------
     # resolving what feeds an edge
@@ -2110,6 +2140,63 @@ class PatchSpace:
             except Exception:
                 logger.exception("wake callback failed")
 
+    def _sync_device_bindings(self) -> None:
+        """Keep Device Input/Output nodes pointed at the live hardware
+        object.
+
+        Two failures this repairs without the user having to re-select
+        the device in the GUI:
+
+          * a node whose stored ``device_name`` is no longer in the graph
+            but reappeared under a suffixed sibling (PipeWire's
+            ``.99``-style duplicate suffix) - the stored name is updated
+            to the live one, so sync() links it again, and
+          * a node whose ``live_node_id`` is missing or stale (a
+            node-created event was missed) - it is re-bound so device
+            volume/profile keep being enforced.
+
+        Runs every supervise() tick, before sync()."""
+        graph = self.graph
+        live = graph.nodes()
+        by_base = {}
+        for live_id, data in live.items():
+            props = data.get("info", {}).get("props", {})
+            media_class = props.get("media.class")
+            name = props.get("node.name")
+            if name and media_class in ("Audio/Sink", "Audio/Source"):
+                by_base.setdefault(
+                    (media_class, _base_node_name(name)), (live_id, props, name)
+                )
+        if not by_base:
+            return
+        for node in list(self.nodes.values()):
+            if not isinstance(node, (DeviceInputNode, DeviceOutputNode)):
+                continue
+            name = getattr(node, "device_name", "")
+            if not name:
+                continue
+            live_id = graph.node_id_by_name(name)
+            if live_id is None:
+                media_class = (
+                    "Audio/Source"
+                    if isinstance(node, DeviceInputNode)
+                    else "Audio/Sink"
+                )
+                found = by_base.get((media_class, _base_node_name(name)))
+                if found is None:
+                    continue
+                live_id, props, live_name = found
+                if live_name != name:
+                    logger.info(
+                        "Device %r re-enumerated as %r - re-binding %r",
+                        name, live_name, node.id,
+                    )
+                    node.device_name = live_name
+                node.resolve_live(live_id, props)
+            elif node.live_node_id != live_id:
+                props = live.get(live_id, {}).get("info", {}).get("props", {})
+                node.resolve_live(live_id, props)
+
     def supervise(self) -> None:
         """Health pass.  Called by the daemon's tick thread under no
         lock held by the caller."""
@@ -2128,6 +2215,11 @@ class PatchSpace:
                     self._supervise_node(node)
                 except Exception as exc:
                     logger.warning("Supervision of %r failed: %s", node.id, exc)
+
+            # Re-bind device nodes whose hardware object changed/returned
+            # under a different name, before re-applying their settings
+            # and recomputing links.
+            self._sync_device_bindings()
 
             # Re-enforce device/effect settings that must continuously
             # match their configured values.
@@ -2352,26 +2444,39 @@ class PatchSpace:
         self._apply_desired_links(desired)
 
     def _apply_desired_links(self, desired: Dict[EdgeId, Set[Tuple[int, int]]]) -> None:
-        """Create the links in `desired` that aren't live yet, one at a
-        time.
+        """Create the links in `desired` that aren't live yet.
 
         The old code fired every missing ``pw-link`` back-to-back in one
         pass.  That races multi-stream effect nodes: an echo/noise-cancel
         filter chain's capture and playback ports show up asynchronously,
         and wiring its interior plus every user edge in a single burst
         could attach an edge to a dummy before the DSP sandwich existed,
-        leaving the node half-connected.  Instead exactly one connect is
-        issued per call and the next one isn't issued until the live graph
-        reports the first - so the periodic supervise() tick naturally
-        paces the reconcile, and a just-made link is given time to settle
-        before more are piled on top of it.
+        leaving the node half-connected.
+
+        A later fix addressed that by issuing exactly one connect per
+        call, globally, and refusing to issue another until the live
+        graph confirmed the first. That closed the race but overshot:
+        the one-connect gate was graph-wide, not node-local, so a single
+        pair that took a moment to show up in the live snapshot stalled
+        *every other, unrelated* pending link too - on a big session
+        import (many edges wired in one batch, see main.py's
+        _load_session) that could leave whole device outputs silent for
+        seconds at a time while completely independent parts of the
+        graph sat waiting on one slow confirmation.
+
+        This version keeps the *reason* for pacing (never attach an edge
+        to a dummy before its node's own interior is wired) but narrows
+        the gate to what actually needs it: a candidate pair is held
+        back only if one of its two ports is already used by another
+        pair still waiting on confirmation (self._inflight_links) - i.e.
+        only connects that could race the *same* node's own in-flight
+        wiring are serialized against each other. Pairs touching
+        entirely different nodes proceed in the same pass instead of
+        queuing up behind whatever happens to be slow this tick.
 
         Entries are still keyed off the live snapshot, so a link dropped
         out from under us (external ``pw-cli`` destroy, module reload) is
-        re-made on a later pass.  A real asynchronous graph makes this
-        return after one link and resume next tick; an in-memory graph
-        that reflects a link immediately (tests) drains the whole set in
-        one call."""
+        re-made on a later pass."""
         graph = self.graph
         live = graph.linked_pairs()
         now = _time.monotonic()
@@ -2386,21 +2491,25 @@ class PatchSpace:
             self._orphan_disconnects.discard(pair)
             live.discard(pair)
 
-        # Don't pile a new link on top of one whose connect hasn't been
-        # confirmed by the graph yet.
-        if self._inflight_link is not None:
-            edge_id, pair, issued_at = self._inflight_link
+        # Reconcile in-flight pairs against the live snapshot: confirmed
+        # ones are done, timed-out ones are logged and dropped (they'll
+        # be re-attempted below like any other missing pair, and won't
+        # block anything else in the meantime).
+        busy_ports: Set[int] = set()
+        for pair, (edge_id, issued_at) in list(self._inflight_links.items()):
             if pair in live:
-                self._inflight_link = None
-            elif now - issued_at >= LINK_CONFIRM_TIMEOUT_S:
+                del self._inflight_links[pair]
+                continue
+            if now - issued_at >= LINK_CONFIRM_TIMEOUT_S:
                 logger.warning(
                     "Link %s for %s was not confirmed by the live graph "
                     "within %.1fs - moving on",
                     pair, edge_id, LINK_CONFIRM_TIMEOUT_S,
                 )
-                self._inflight_link = None
-            else:
-                return
+                del self._inflight_links[pair]
+                continue
+            busy_ports.add(pair[0])
+            busy_ports.add(pair[1])
 
         # Record the full desired set on every edge (teardown accounting),
         # then build the ordered work list.  Internal DSP links go first
@@ -2423,6 +2532,11 @@ class PatchSpace:
         for edge_id, pair in internal + external:
             if pair in graph.linked_pairs():
                 continue
+            if pair[0] in busy_ports or pair[1] in busy_ports:
+                # One of this pair's ports already has an unconfirmed
+                # connect outstanding - wait for that to settle before
+                # racing another link onto the same port.
+                continue
             try:
                 graph.connect(*pair)
             except Exception as exc:
@@ -2432,12 +2546,85 @@ class PatchSpace:
                 "Wiring %s -> %s for %s", pair[0], pair[1], edge_id
             )
             if pair in graph.linked_pairs():
-                # Confirmed synchronously - keep the pace and move on.
+                # Confirmed synchronously - keep going, no need to wait.
                 continue
-            # A real, asynchronous graph: remember this link and wait for
-            # the monitor to report it before issuing another.
-            self._inflight_link = (edge_id, pair, _time.monotonic())
-            return
+            # A real, asynchronous graph: remember this link and let
+            # later pairs in this same pass proceed as long as they
+            # don't touch the same ports.
+            self._inflight_links[pair] = (edge_id, _time.monotonic())
+            busy_ports.add(pair[0])
+            busy_ports.add(pair[1])
+
+    # ------------------------------------------------------------------
+    # per-edge wiring status (for the GUI - see main.py's _serialize_edges)
+    # ------------------------------------------------------------------
+
+    def edge_wired(self, edge_id: EdgeId) -> bool:
+        """Whether every pair the last sync decided `edge_id` needs is
+        actually live right now. An edge with nothing desired (a gated/
+        switched-off path, or one not computed yet) counts as wired -
+        there is nothing pending for it to show as stuck."""
+        entry = self._edge_links.get(edge_id)
+        if entry is None or not entry.pairs:
+            return True
+        return entry.pairs.issubset(self.graph.linked_pairs())
+
+    def drop_edge_links(self, edge_id: EdgeId) -> None:
+        """Forget and disconnect an edge's live pairs so the next sync
+        re-derives and re-creates them from scratch.
+
+        sync() only fills in *missing* links; a link that exists but is
+        dead (e.g. a downstream device link created before its source
+        effect's module had settled) is left alone forever. Session load
+        uses this to emulate the manual unplug/replug that fixes such a
+        link: drop the pairs here, then let the next sync_locked()
+        reconnect them in the right order."""
+        with self._lock:
+            entry = self._edge_links.pop(edge_id, None)
+            # Any connect still in flight for this edge is void too.
+            for pair, (inflight_edge_id, _issued_at) in list(
+                self._inflight_links.items()
+            ):
+                if inflight_edge_id == edge_id:
+                    del self._inflight_links[pair]
+            if entry is None:
+                return
+            for pair in entry.pairs:
+                try:
+                    self.graph.disconnect(*pair)
+                except Exception as exc:
+                    logger.debug(
+                        "relink disconnect %s for %s failed: %s",
+                        pair, edge_id, exc,
+                    )
+
+    def node_internals_wired(self, node_id: NodeId) -> bool:
+        """Whether every internal link a BackedNode's own module needs
+        is currently live.
+
+        User-facing edges can all be wired while an effect's interior
+        sandwich (dummy -> module capture, module playback -> dummy - see
+        EchoCancelNode / _ChainEffect.internal_links) never connected:
+        the node is then structurally present and its edges look fine,
+        but no audio actually passes through it - acoustically dead.
+        That is exactly the Echo/Noise-Cancel failure mode this exposes.
+
+        Non-backed nodes and backed nodes with no internal links count
+        as wired. An internal link with an empty desired set does *not*
+        count: it means the module's stream never resolved, which is the
+        dead case rather than the trivially-wired one."""
+        node = self.nodes.get(node_id)
+        if not isinstance(node, BackedNode):
+            return True
+        links = node.internal_links()
+        if not links:
+            return True
+        live = self.graph.linked_pairs()
+        for i in range(len(links)):
+            entry = self._edge_links.get(f"__internal__:{node_id}:{i}")
+            if entry is None or not entry.pairs or not entry.pairs.issubset(live):
+                return False
+        return True
 
     def mark_graph_loaded(self) -> None:
         self._graph_loaded = True

@@ -19,6 +19,8 @@ from pwnodes import (
     SplitterNode,
     VolumeProcessNode,
     VirtualSpeakerNode,
+    DeviceOutputNode,
+    _base_node_name,
     Node,
     LINK_CONFIRM_TIMEOUT_S,
 )
@@ -437,7 +439,7 @@ def test_edges_with_same_nodes_but_different_source_ports_are_distinct():
     assert len(space.edges) == 2
 
 
-def test_wiring_is_paced_one_link_per_pass_until_confirmed():
+def test_wiring_issues_nonconflicting_links_in_one_pass():
     g = AsyncFakeGraph()
     src_ports = g.add_source(10, "app1")
     sink_ports = g.add_sink(20, "sink1")
@@ -448,22 +450,22 @@ def test_wiring_is_paced_one_link_per_pass_until_confirmed():
     space.add_edge("src", "snk")
 
     space.sync()
-    # Exactly one connect was issued and it is not yet visible.
-    assert g._pending_links == [(src_ports["FL"], sink_ports["FL"])]
+    # Both channel pairs touch distinct ports, so both are issued at
+    # once rather than one-per-pass.
+    assert set(g._pending_links) == {
+        (src_ports["FL"], sink_ports["FL"]),
+        (src_ports["FR"], sink_ports["FR"]),
+    }
     assert g.linked_pairs() == set()
 
-    # Another pass while it is unconfirmed must not pile on more.
+    # Another pass while they are unconfirmed must not pile on more.
     space.sync()
-    assert len(g._pending_links) == 1
-
-    g.flush()
-    space.sync()
-    assert len(g.linked_pairs()) == 1
-    assert len(g._pending_links) == 1
+    assert len(g._pending_links) == 2
 
     g.flush()
     space.sync()
     assert len(g.linked_pairs()) == 2
+    assert g._pending_links == []
 
 
 def test_wiring_connects_internal_dsp_links_before_user_edges():
@@ -479,8 +481,10 @@ def test_wiring_connects_internal_dsp_links_before_user_edges():
     space.add_edge("src", "n")
 
     space.sync()
-    # The internal sandwich link is issued first, not the user edge.
-    assert g._pending_links == [(dsp_ports["FL"], dsp_in_ports["FL"])]
+    # The internal sandwich link is issued first (so the module side
+    # exists before a user edge attaches to the dummy); the user edge
+    # may follow in the same pass because it touches different ports.
+    assert g._pending_links[0] == (dsp_ports["FL"], dsp_in_ports["FL"])
 
 
 def test_unconfirmed_link_times_out_and_pacing_continues():
@@ -494,18 +498,16 @@ def test_unconfirmed_link_times_out_and_pacing_continues():
     space.add_edge("src", "snk")
 
     space.sync()
-    assert len(g._pending_links) == 1
+    assert len(g._pending_links) == 2
 
     # Pretend a link has been waiting past the confirm timeout; the next
     # pass must retire it and carry on rather than block forever.
-    space._inflight_link = (
+    space._inflight_links[(999, 998)] = (
         "ghost",
-        (999, 998),
         time.monotonic() - LINK_CONFIRM_TIMEOUT_S - 1,
     )
     space.sync()
-    assert space._inflight_link is not None
-    assert space._inflight_link[1] != (999, 998)
+    assert (999, 998) not in space._inflight_links
 
 
 def test_removing_edge_with_inflight_link_does_not_stall():
@@ -519,10 +521,64 @@ def test_removing_edge_with_inflight_link_does_not_stall():
     space.add_edge("src", "snk")
 
     space.sync()
-    assert space._inflight_link is not None
+    assert space._inflight_links
     space.remove_edge("src->snk")
-    assert space._inflight_link is None
+    assert space._inflight_links == {}
+    assert space._orphan_disconnects
     space.sync()  # must not raise or block on the dead link
+
+
+def test_node_internals_wired_tracks_half_connected_effect():
+    g = AsyncFakeGraph()
+    g.add_source(30, "src_dsp")
+    g.add_sink(40, "dsp_in")
+    space = make_space(g)
+    space.mark_graph_loaded()
+    space.add_node(WiringBacked("n"))
+
+    # Nothing derived yet -> not wired.
+    assert not space.node_internals_wired("n")
+
+    space.sync()
+    # The internal connect is issued but hasn't shown up live yet.
+    assert not space.node_internals_wired("n")
+
+    g.flush()
+    space.sync()
+    assert space.node_internals_wired("n")
+
+
+def test_node_internals_wired_true_for_no_internal_links():
+    g = FakeGraph()
+    space = make_space(g)
+    space.mark_graph_loaded()
+    space.add_node(SrcNode("src"))
+    # A plain (non-backed) node, and a backed node with no interior,
+    # both count as wired - there is nothing to be half-connected.
+    assert space.node_internals_wired("src")
+    assert space.node_internals_wired("nonexistent")
+
+
+def test_drop_edge_links_forces_a_fresh_reconnect():
+    g = FakeGraph()
+    g.add_source(10, "app1")
+    g.add_sink(20, "sink1")
+    space = make_space(g)
+    space.mark_graph_loaded()
+    space.add_node(SrcNode("src"))
+    space.add_node(SinkNode("snk"))
+    space.add_edge("src", "snk")
+    space.sync()
+    assert len(g.linked_pairs()) == 2
+
+    # Drop the edge's live pairs the way session load's re-link pass does.
+    space.drop_edge_links("src->snk")
+    assert g.linked_pairs() == set()
+    assert "src->snk" not in space._edge_links
+
+    # The next sync re-derives and re-creates them.
+    space.sync()
+    assert len(g.linked_pairs()) == 2
 
 
 def test_internal_media_class_hides_plumbing_but_keeps_it_routable():
@@ -550,6 +606,23 @@ def test_chain_effect_dummy_sinks_use_internal_media_class():
     node.ensure_structural()
     assert recorded  # the two dummies
     assert all(cls == INTERNAL_MEDIA_CLASS for cls in recorded)
+
+
+def test_device_renamed_with_suffix_is_rebound():
+    g = FakeGraph()
+    g.add_sink(20, "sink1.3")  # the live hardware object, suffixed
+    space = make_space(g)
+    space.mark_graph_loaded()
+    node = DeviceOutputNode("out", "sink1")  # stores the unsuffixed name
+    node.apply_device_settings = lambda: None  # no wpctl in tests
+    space.add_node(node)
+
+    space._sync_device_bindings()
+
+    assert node.device_name == "sink1.3"
+    assert node.live_node_id == 20
+    # And sync() now links the source into the renamed sink.
+    assert _base_node_name("bluez_output.38_FB.1") == "bluez_output.38_FB"
 
 
 def test_removing_node_tears_down_and_unlinks():

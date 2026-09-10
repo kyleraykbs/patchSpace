@@ -34,6 +34,7 @@ from constants import (
     LAYOUT_TICK_MS,
     LAYOUT_SETTLE_TICKS,
     LAYOUT_SETTLE_EPSILON,
+    LAYOUT_SAVE_DEBOUNCE_MS,
     POST_MUTATION_REFRESH_MS,
     VOLUME_SEND_EPSILON,
     ADD_NODE_PANEL_MIN_WIDTH,
@@ -65,6 +66,7 @@ from node_specs import (
     color_name_for_node_type,
 )
 from portal_file_dialog import open_file, save_file
+from color_picker import ColorPicker
 
 
 class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
@@ -101,12 +103,45 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     # maths (how much room a stack of sockets needs) and the drawing can
     # never drift apart.
     SOCKET_RADIUS = 6
+    # How close the pointer has to get to a socket to start/land a
+    # connection. Much larger than the drawn circle: nodes drift under
+    # the force layout, so a tight target made wiring frustrating.
+    # find_socket_at returns the NEAREST socket within this radius, so
+    # neighbouring sockets (e.g. the Switcher's a/b, 22px apart) still
+    # resolve to the one you actually meant.
+    SOCKET_HIT_RADIUS = 16
+    # Horizontal room reserved in the node header for the anchor icon and
+    # three-dot menu, so a long type label wraps before running under them.
+    # Kept just wide enough for the widest type label ("Inv. Switcher")
+    # to stay on one line.
+    HEADER_ICON_RESERVE = 44
+    # A Splitter with no label renders as a plain square this many pixels
+    # on a side (just the three-dot menu and, dimmed, the anchor badge),
+    # so it stays out of the way instead of occupying a full node.  Give
+    # it a label and it grows back out to NODE_WIDTH to wrap the text.
+    SPLITTER_MIN_SIZE = 64
+    # Padding a group's dotted box leaves around its member nodes, and
+    # the default colour palette new groups cycle through.
+    GROUP_PADDING = 26
+    # Extra inset per group a group encloses, so a group that surrounds
+    # other groups leaves a visible gap instead of drawing its dotted box
+    # right on top of theirs.
+    GROUP_SPACING = 18
+    GROUP_COLORS = (
+        "#3584e4",  # blue
+        "#33d17a",  # green
+        "#f5c211",  # amber
+        "#e01b24",  # red
+        "#9141ac",  # purple
+        "#2ec27e",  # teal
+    )
 
     def __init__(self, client):
         super().__init__()
         self.client = client
         self.nodes = {}
         self.edges = {}
+        self.nodes_pending_wiring = set()
 
         self.pan_x = 0.0
         self.pan_y = 0.0
@@ -116,6 +151,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
         self.dragging_node = None
         self.drag_node_start = (0, 0)
+        # When a drag moves a multi-node selection, every dragged node's
+        # start position is remembered here (id -> (x, y)) so each can be
+        # offset by the same delta.
+        self.drag_node_starts: dict = {}
 
         self.connecting_from = None
         self.detaching_edge = None
@@ -140,6 +179,38 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._pending_effect_slider = {}
 
         self.pinned_nodes = set()
+
+        # -- anchoring / selection ------------------------------------
+        # Anchored nodes are held fixed by the force layout (they still
+        # push/pull their neighbours, they just don't move themselves).
+        # Nodes the user adds are anchored by default; nodes that arrive
+        # from the daemon (a loaded session, the builtins, ...) are not.
+        self.anchored_nodes = set()
+        self._user_created_nodes = set()
+        # Nodes currently marquee-selected (right-drag). Drives the
+        # bottom tool panel's Anchor button.
+        self.selected_nodes = set()
+        # Right-drag marquee state.
+        self.select_rect = None
+        self._right_drag_moved = False
+        self._right_drag_start_widget = (0.0, 0.0)
+        self._right_drag_start_world = (0.0, 0.0)
+        # Callbacks fired whenever the selection or anchor set changes,
+        # so the tool panel can keep its button in sync.
+        self.on_selection_changed: list = []
+        # GLib source id for the debounced "push layout to daemon" timer.
+        self._layout_save_source = 0
+
+        # Node groups: id -> {"label", "color" (#rrggbb), "nodes": set()}.
+        # Purely a canvas annotation, persisted through the daemon like
+        # positions/anchoring.  _pending_groups are ids the GUI just
+        # created and hasn't seen echoed back yet, so a get_nodes poll
+        # arriving first doesn't wipe them.
+        self.groups: dict = {}
+        self._pending_groups: set = set()
+        # Armed by a group's +/- header button: (group_id, "add"|"remove"),
+        # then the next node click adjusts that group's membership.
+        self._group_pick_mode = None
 
         # font_size -> single line's pixel height (measured once via
         # wrapped_text_height(), see _single_line_height()). Used to
@@ -194,13 +265,23 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # mode - and the pending-link grab with it - until restart.
         drag.connect("cancel", self.on_drag_cancel)
         self.add_controller(drag)
-        # Kept so a context menu can force a still-held drag to release
-        # before its popover takes a grab (see on_right_click).
+        # Kept so the right-button marquee/context handler can force a
+        # still-held left drag to release before it takes the pointer.
         self._drag_gesture = drag
 
-        right_click = Gtk.GestureClick(button=3)
-        right_click.connect("pressed", self.on_right_click)
-        self.add_controller(right_click)
+        # Right button: a plain click opens the context menu, a drag
+        # draws a marquee and selects the nodes inside it.  One gesture
+        # handles both so the two can't grab the pointer at once (the
+        # old separate GestureClick(button=3) opened the menu on press,
+        # before we could tell a click from a drag).
+        right_drag = Gtk.GestureDrag()
+        right_drag.set_button(Gdk.BUTTON_SECONDARY)
+        right_drag.connect("drag-begin", self.on_right_drag_begin)
+        right_drag.connect("drag-update", self.on_right_drag_update)
+        right_drag.connect("drag-end", self.on_right_drag_end)
+        right_drag.connect("cancel", self.on_right_drag_cancel)
+        self.add_controller(right_drag)
+        self._right_drag_gesture = right_drag
 
         # Accepts a node-type string dropped from the add-node side
         # panel (build_add_node_panel()) - the other half of that
@@ -341,20 +422,31 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     def update_from_daemon(self, data):
         daemon_nodes = data.get("nodes", {})
         daemon_edges = data.get("edges", {})
+        selection_before = set(self.selected_nodes)
+        anchored_before = set(self.anchored_nodes)
 
         for nid in list(self.nodes.keys()):
             if nid not in daemon_nodes:
                 del self.nodes[nid]
                 self._pending_effect_slider.pop(nid, None)
+                self.anchored_nodes.discard(nid)
+                self.selected_nodes.discard(nid)
+                self._user_created_nodes.discard(nid)
 
         for nid, ndata in daemon_nodes.items():
             ntype = normalize_node_type(ndata.get("type"))
             spec = spec_for(ntype)
             if nid not in self.nodes:
-                slot = len(self.nodes)
+                is_user_created = nid in self._user_created_nodes
                 if nid in self._pending_positions:
                     px, py = self._pending_positions.pop(nid)
+                elif ndata.get("x") is not None and ndata.get("y") is not None:
+                    # A layout the daemon already had (this GUI restarted
+                    # against a live daemon, or a session was imported):
+                    # restore exactly where it was.
+                    px, py = float(ndata["x"]), float(ndata["y"])
                 else:
+                    slot = len(self.nodes)
                     px = 100 + (slot % 4) * 300 + random.uniform(-15, 15)
                     py = 100 + (slot // 4) * 140 + random.uniform(-15, 15)
                 self.nodes[nid] = {
@@ -387,10 +479,25 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     # those as always-ready rather than flashing an
                     # "offline" badge nothing will ever clear.
                     "ready": ndata.get("ready", True),
+                    # "ok" / "starting" / "dead" - see main.py's
+                    # _node_health. Only backed nodes carry it; anything
+                    # else is treated as healthy.
+                    "health": ndata.get("health", "ok"),
                     "device_volume": ndata.get("device_volume", 1.0),
                     "profile_index": ndata.get("profile_index"),
                     "codec_label": ndata.get("profile_description", ""),
                 }
+                # A node the GUI itself asked the daemon to create is a
+                # user-spawned node -> anchor it by default.  Anything
+                # else that appears is a loaded/imported node, so use
+                # whatever anchored state the daemon saved for it (absent
+                # -> free to drift).
+                if is_user_created:
+                    anchored = True
+                else:
+                    anchored = bool(ndata.get("anchored", False))
+                if anchored:
+                    self.anchored_nodes.add(nid)
             else:
                 node = self.nodes[nid]
                 # Update all fields except volume if this node is being dragged
@@ -398,7 +505,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 node["inputs"] = spec.inputs
                 node["outputs"] = spec.outputs
                 node["meta"] = ndata
-                node["label"] = ndata.get("label", "")
+                new_label = ndata.get("label", "")
+                if node.get("label", "") != new_label and self._is_splitter_node(node):
+                    # A splitter grows to full width / shrinks to a square
+                    # as its label comes and goes, so re-run the layout.
+                    self.layout_awake = True
+                    self._settle_ticks = 0
+                node["label"] = new_label
                 node["enabled"] = ndata.get("enabled", True)
                 node["output"] = ndata.get("output", 0)
                 node["device_name"] = ndata.get("device_name", "")
@@ -407,6 +520,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 node["is_bluetooth"] = ndata.get("is_bluetooth", False)
                 node["selection_label"] = ndata.get("selection_label", "")
                 node["ready"] = ndata.get("ready", True)
+                node["health"] = ndata.get("health", "ok")
                 # Only update volume if not dragging this node
                 # Only update volume if not dragging this node
                 if self.slider_dragging != ("process", nid):
@@ -460,21 +574,67 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 "to_node": edata["to_node"],
                 "to_port": edata.get("to_port", "in"),
                 "from_port": edata.get("from_port", "out"),
+                # See main.py's _serialize_edges / PatchSpace.edge_wired.
+                # Absent (an older daemon) is treated as wired so a
+                # stale badge can never get stuck on.
+                "wired": edata.get("wired", True),
             }
             for eid, edata in daemon_edges.items()
         }
+
+        # Nodes touched by at least one not-yet-wired edge - drawn with
+        # a "still wiring" badge (see _draw_node / _header_blocks)
+        # instead of looking indistinguishable from a fully-connected
+        # node. Recomputed fresh every poll since wiring status changes
+        # as sync_locked() catches up in the background.
+        self.nodes_pending_wiring = {
+            nid
+            for e in self.edges.values()
+            if not e.get("wired", True)
+            for nid in (e["from_node"], e["to_node"])
+        }
+
+        # Groups: daemon is authoritative, but keep locally-created ones
+        # that haven't been echoed yet so they don't flicker away.
+        seen_groups = set()
+        for g in data.get("groups", []):
+            gid = g.get("id")
+            if not gid:
+                continue
+            seen_groups.add(gid)
+            self._pending_groups.discard(gid)
+            self.groups[gid] = {
+                "label": g.get("label", "Group"),
+                "color": g.get("color", self.GROUP_COLORS[0]),
+                "nodes": set(g.get("nodes", [])),
+            }
+        for gid in list(self.groups.keys()):
+            if gid not in seen_groups and gid not in self._pending_groups:
+                del self.groups[gid]
 
         new_node_ids = set(self.nodes.keys())
         new_edge_set = {
             (e["from_node"], e["to_node"], e["to_port"], e["from_port"])
             for e in self.edges.values()
         }
-        if new_node_ids != self._prev_node_ids or new_edge_set != self._prev_edge_set:
+        nodes_added = new_node_ids != self._prev_node_ids
+        if nodes_added or new_edge_set != self._prev_edge_set:
             self.layout_awake = True
             self._settle_ticks = 0
+        if nodes_added:
+            # Persist the position the GUI just chose for the new node(s).
+            self._mark_layout_dirty()
         self._prev_node_ids = new_node_ids
         self._prev_edge_set = new_edge_set
         self.force_layout.prune(new_node_ids)
+
+        # A poll can add/remove nodes (and thus anchored/selected ids);
+        # keep the tool panel in sync when it did.
+        if (
+            self.selected_nodes != selection_before
+            or self.anchored_nodes != anchored_before
+        ):
+            self._notify_selection_changed()
 
         self.queue_draw()
 
@@ -483,15 +643,21 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             return True
 
         positions = {nid: (n["x"], n["y"]) for nid, n in self.nodes.items()}
-        sizes = {nid: (self.NODE_WIDTH, self.node_height(nid)) for nid in self.nodes}
+        sizes = {nid: (self.node_width(nid), self.node_height(nid)) for nid in self.nodes}
         edges = [
             (e["from_node"], e["to_node"])
             for e in self.edges.values()
             if e["from_node"] in self.nodes and e["to_node"] in self.nodes
         ]
-        pinned = set(self.pinned_nodes)
+        # Anchored nodes behave exactly like a node being dragged:
+        # pinned (never moved by the physics) but still exerting their
+        # own forces on everything else.
+        pinned = set(self.pinned_nodes) | self.anchored_nodes
         if self.dragging_node is not None:
             pinned.add(self.dragging_node)
+        # A multi-node drag holds every node in the selection, not just
+        # the one under the pointer.
+        pinned.update(self.drag_node_starts)
         max_delta = self.force_layout.step(
             self.nodes.keys(), positions, sizes, edges, pinned
         )
@@ -505,6 +671,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             if self._settle_ticks > LAYOUT_SETTLE_TICKS:
                 self.layout_awake = False
                 self._awake_ticks = 0
+                # The physics just stopped moving things - persist the
+                # settled positions so a reload restores this layout.
+                self._mark_layout_dirty()
         else:
             self._settle_ticks = 0
 
@@ -518,6 +687,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self.layout_awake = False
             self._awake_ticks = 0
             self._settle_ticks = 0
+            self._mark_layout_dirty()
 
         self.queue_draw()
         return True
@@ -548,6 +718,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         separately."""
         label = node.get("label", "")
         desc = node.get("meta", {}).get("description", "")
+        if self._is_splitter_node(node):
+            # Splitters show nothing but their (optional) label - no type
+            # name, no node id, no "not connected" badge - so an
+            # unlabelled one is just a small blank square.
+            return [(label, 12, "text")] if label else []
         blocks = [(type_label(node["type"], nid), 10, "subtext")]
         if node["type"] in ("device_input", "device_output", "app_input", "app_output"):
             # Hardware / app nodes name an external device, so their
@@ -580,12 +755,25 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             blocks.append((str(nid), 9, "subtext"))
         else:
             blocks.append((str(nid), 12, "text"))
-        if not node.get("ready", True):
+        if node.get("health") == "dead":
+            # The node exists but its module died or its interior never
+            # connected, so no audio can pass - flag it distinctly from
+            # a node that's merely still coming up. See main.py's
+            # _node_health.
+            blocks.append(("\u2716 dead", 9, "error"))
+        elif not node.get("ready", True):
             # Backed node (echo cancel, noise cancel, volume, ...) whose
             # real PipeWire objects haven't all been confirmed present
             # yet - see main.py's _node_is_ready. Appended last so it
             # never displaces the identifying blocks above it.
             blocks.append(("\u25cf not connected yet", 9, "warning"))
+        elif nid in self.nodes_pending_wiring:
+            # Structurally fine, but at least one edge touching this
+            # node hasn't landed as a live PipeWire link yet - see
+            # main.py's _serialize_edges / PatchSpace.edge_wired. Only
+            # shown once "ready" is true so a node doesn't carry two
+            # overlapping badges while it's still coming up.
+            blocks.append(("\u25d0 wiring\u2026", 9, "warning"))
         return blocks
 
     def _device_header_bonus(self, node):
@@ -623,13 +811,40 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             # the type label (i == 0) shares its row with the
             # three-dot menu icon, so it wraps at a narrower width
             # than the lines below it.
-            max_width = self.NODE_WIDTH - (34 if i == 0 else 20)
+            max_width = self.node_width(node_id) - (
+                self.HEADER_ICON_RESERVE if i == 0 else 20
+            )
             wrapped_h = wrapped_text_height(self, text, max_width, font_size)
             extra += max(0.0, wrapped_h - self._single_line_height(font_size))
         return extra
 
+    @staticmethod
+    def _is_splitter_node(node) -> bool:
+        return node.get("type") == "splitter"
+
+    def _node_width_for(self, node):
+        """Width a node renders at: a splitter with no label collapses to
+        a square (SPLITTER_MIN_SIZE); every other node - and a labelled
+        splitter, which wraps its text - uses the normal node width."""
+        if self._is_splitter_node(node) and not node.get("label"):
+            return self.SPLITTER_MIN_SIZE
+        return self.NODE_WIDTH
+
+    def node_width(self, node_id):
+        return self._node_width_for(self.nodes[node_id])
+
     def node_height(self, node_id):
         node = self.nodes[node_id]
+        if self._is_splitter_node(node):
+            # A bare splitter is a square.  With a label, grow just enough
+            # for the wrapped text plus a centred in/out socket pair.
+            if not node.get("label"):
+                return self.SPLITTER_MIN_SIZE
+            header = self._header_stack_height(node_id, node)
+            return max(
+                self.SPLITTER_MIN_SIZE,
+                int(header + 2 * self.SOCKET_RADIUS + 16),
+            )
         base = self._base_node_height(node_id)
         # A node with more than one socket on EITHER side labels its
         # sockets and needs enough vertical room to lay them out at the
@@ -700,7 +915,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         blocks = self._header_blocks(node_id, node)
         total = self.HEADER_TOP_PAD
         for i, (text, font_size, _color) in enumerate(blocks):
-            max_width = self.NODE_WIDTH - (34 if i == 0 else 20)
+            max_width = self.node_width(node_id) - (
+                self.HEADER_ICON_RESERVE if i == 0 else 20
+            )
             total += wrapped_text_height(self, text, max_width, font_size)
             if i + 1 < len(blocks):
                 total += self.HEADER_BLOCK_GAP
@@ -719,6 +936,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         Multi-socket nodes that also have a bottom control (the two
         switchers) reserve just the control below, not a small pad, so
         the A/B toggle stays close to the sockets above it."""
+        if self._is_splitter_node(node):
+            # Bare square: sockets centred.  Labelled: label on top, the
+            # in/out pair centred in the space below it.
+            if not node.get("label"):
+                return 0, 0
+            return self._header_stack_height(node_id, node) + 4, 8
+
         if self._uses_compact_sockets(node):
             # Multi-socket nodes with a bottom control: sockets sit
             # right under the wrapped header, control reserved below.
@@ -754,7 +978,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         outputs are spaced identically and never overlap)."""
         node = self.nodes[node_id]
         ports = node["inputs"] if direction == "in" else node["outputs"]
-        x = node["x"] if direction == "in" else node["x"] + self.NODE_WIDTH
+        x = node["x"] if direction == "in" else node["x"] + self.node_width(node_id)
         total = len(ports)
         if total == 0:
             return (x, node["y"] + self.node_height(node_id) / 2)
@@ -797,23 +1021,27 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     def find_node_at(self, x, y):
         for nid, node in self.nodes.items():
-            if node["x"] <= x <= node["x"] + self.NODE_WIDTH and node["y"] <= y <= node[
+            if node["x"] <= x <= node["x"] + self.node_width(nid) and node["y"] <= y <= node[
                 "y"
             ] + self.node_height(nid):
                 return nid
         return None
 
     def find_socket_at(self, x, y):
+        """The socket nearest the pointer, within SOCKET_HIT_RADIUS.
+        Nearest (not first-hit) so the wide radius can't make two
+        adjacent sockets ambiguous."""
+        best = None
+        best_dist = self.SOCKET_HIT_RADIUS
         for nid, node in self.nodes.items():
-            for i in range(len(node["inputs"])):
-                sx, sy = self._socket_position(nid, "in", i)
-                if math.hypot(x - sx, y - sy) < 9:
-                    return (nid, "in", i)
-            for i in range(len(node["outputs"])):
-                sx, sy = self._socket_position(nid, "out", i)
-                if math.hypot(x - sx, y - sy) < 9:
-                    return (nid, "out", i)
-        return None
+            for direction, ports in (("in", node["inputs"]), ("out", node["outputs"])):
+                for i in range(len(ports)):
+                    sx, sy = self._socket_position(nid, direction, i)
+                    dist = math.hypot(x - sx, y - sy)
+                    if dist < best_dist:
+                        best_dist = dist
+                        best = (nid, direction, i)
+        return best
 
     def _edge_from_port_index(self, edge):
         """Which of the source node's output sockets `edge` leaves from -
@@ -1020,7 +1248,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     def find_three_dots_at(self, x, y):
         for nid, node in self.nodes.items():
-            dot_x, dot_y = node["x"] + self.NODE_WIDTH - 14, node["y"] + 12
+            dot_x = node["x"] + self.node_width(nid) - 14
+            dot_y = node["y"] + 12
             if dot_x - 10 <= x <= dot_x + 10 and dot_y - 10 <= y <= dot_y + 22:
                 return nid
         return None
@@ -1061,6 +1290,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
         draw_grid_background(cr, pal, self.pan_x, self.pan_y, self.zoom, w, h)
 
+        # Group boxes sit behind the graph; their headers are drawn on
+        # top of the nodes further down so the label stays clickable.
+        self._draw_group_boxes(cr, pal)
+
         cr.set_source_rgb(*pal["link"])
         cr.set_line_width(2)
         for eid, edge in self.edges.items():
@@ -1074,6 +1307,32 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
         for nid, node in self.nodes.items():
             self._draw_node(cr, pal, nid, node)
+
+        # Highlight the current marquee selection, then the rubber-band
+        # rectangle itself, above the nodes so both stay visible.
+        for nid in self.selected_nodes:
+            node = self.nodes.get(nid)
+            if node is None:
+                continue
+            draw_rounded_rect(
+                cr, node["x"], node["y"], self.node_width(nid), self.node_height(nid), 8
+            )
+            cr.set_source_rgb(*pal["select"])
+            cr.set_line_width(3)
+            cr.stroke()
+
+        # Group labels/ids/colour chips on top of the nodes.
+        self._draw_group_headers(cr, pal)
+
+        if self.select_rect:
+            x1, y1, x2, y2 = self.select_rect
+            cr.set_source_rgba(*pal["select"], 0.18)
+            cr.rectangle(x1, y1, x2 - x1, y2 - y1)
+            cr.fill()
+            cr.set_source_rgb(*pal["select"])
+            cr.set_line_width(1)
+            cr.rectangle(x1, y1, x2 - x1, y2 - y1)
+            cr.stroke()
 
         if self.connecting_from:
             nid, idx = self.connecting_from
@@ -1089,6 +1348,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     def _draw_node(self, cr, pal, nid, node):
         x, y = node["x"], node["y"]
         node_h = self.node_height(nid)
+        node_w = self.node_width(nid)
         spec = spec_for(node["type"])
 
         is_conn_source = (
@@ -1096,6 +1356,17 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         )
         is_conn_target = self.hover_target_node == nid
         is_offline = not node.get("ready", True)
+        # Module died or its interior never connected - see main.py's
+        # _node_health. Distinct from is_offline (still coming up):
+        # drawn with the theme's error colour, solid, and a "dead"
+        # badge rather than the neutral "not connected yet" one.
+        is_dead = node.get("health") == "dead"
+        # Structurally up but at least one edge touching it hasn't
+        # landed as a live link yet (see nodes_pending_wiring above).
+        # Only tracked separately from is_offline so the two don't
+        # double-dash the same border; is_offline already implies
+        # "don't trust this node's links yet" on its own.
+        is_wiring = (not is_offline) and (nid in self.nodes_pending_wiring)
         # Stable, category-assigned theme colour - same type always gets
         # the same border, and it comes from the GTK theme rather than a
         # per-process hash (see node_specs.color_name_for_node_type).
@@ -1103,26 +1374,35 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self, color_name_for_node_type(node["type"]), pal["node_border"]
         )
 
-        draw_rounded_rect(cr, x, y, self.NODE_WIDTH, node_h, 8)
+        draw_rounded_rect(cr, x, y, node_w, node_h, 8)
         cr.set_source_rgb(*pal["node_bg"])
         cr.fill_preserve()
         if is_conn_source or is_conn_target:
             cr.set_source_rgb(*pal["select"])
-        elif is_offline:
+        elif is_dead:
+            cr.set_source_rgb(*pal["error"])
+        elif is_offline or is_wiring:
             cr.set_source_rgb(*pal["warning"])
         else:
             cr.set_source_rgb(*border_color)
         cr.set_line_width(2)
-        if is_offline and not (is_conn_source or is_conn_target):
+        if (is_offline or is_wiring) and not is_dead and not (
+            is_conn_source or is_conn_target
+        ):
             # Dashed rather than solid - a glance at the canvas should
-            # tell "still coming up" apart from a category whose assigned
-            # colour happens to be amber (Hardware & Apps uses the
-            # theme's warning colour too).
-            cr.set_dash([4.0, 3.0])
+            # tell "still coming up"/"still wiring" apart from a
+            # category whose assigned colour happens to be amber
+            # (Hardware & Apps uses the theme's warning colour too).
+            # A tighter dash for "wiring" than "offline" so the two
+            # remain visually distinguishable at a glance too.
+            cr.set_dash([4.0, 3.0] if is_offline else [2.0, 2.0])
         cr.stroke()
         cr.set_dash([])
 
-        self._draw_three_dots(cr, x, y)
+        self._draw_anchor_icon(
+            cr, pal, x, y, node_w, nid in self.anchored_nodes
+        )
+        self._draw_three_dots(cr, x, y, node_w)
 
         self._draw_header(cr, pal, nid, node, x, y)
 
@@ -1216,14 +1496,63 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             # The first line (the type label) shares its row with the
             # three-dot menu icon in the top-right corner, so it gets
             # a narrower width than every line below it.
-            max_width = self.NODE_WIDTH - (34 if i == 0 else 20)
+            max_width = self.node_width(nid) - (
+                self.HEADER_ICON_RESERVE if i == 0 else 20
+            )
             block_h = draw_text_wrapped(
                 cr, x + 10, text_y, text, max_width, font_size, pal[color_key]
             )
             text_y += block_h + self.HEADER_BLOCK_GAP
 
-    def _draw_three_dots(self, cr, x, y):
-        dot_x = x + self.NODE_WIDTH - 14
+    @staticmethod
+    def _anchor_icon_center(x, y, width):
+        """Centre of the anchor badge - shared by drawing and hit-testing
+        so they can't drift.  Sits to the left of the three-dot menu,
+        vertically level with it."""
+        return (x + width - 33, y + 18)
+
+    def find_anchor_icon_at(self, x, y):
+        for nid, node in self.nodes.items():
+            icx, icy = self._anchor_icon_center(
+                node["x"], node["y"], self.node_width(nid)
+            )
+            # Ends at width - 42..-24, just clear of the three-dot hit
+            # region which starts at width - 24.
+            if icx - 9 <= x <= icx + 9 and icy - 12 <= y <= icy + 12:
+                return nid
+        return None
+
+    def _draw_anchor_icon(self, cr, pal, x, y, width, anchored):
+        """Little anchor glyph showing whether the node is pinned.  Bright
+        theme accent when anchored, dimmed when it can drift."""
+        icx, icy = self._anchor_icon_center(x, y, width)
+        if anchored:
+            color = pal["select"]
+        else:
+            color = pal["subtext"]
+        cr.set_source_rgb(*color)
+        cr.set_line_width(1.5)
+        # Ring at the top.
+        cr.arc(icx, icy - 5, 2.0, 0, 2 * math.pi)
+        cr.stroke()
+        # Shaft.
+        cr.move_to(icx, icy - 3)
+        cr.line_to(icx, icy + 5)
+        cr.stroke()
+        # Stock (crossbar).
+        cr.move_to(icx - 4, icy - 1)
+        cr.line_to(icx + 4, icy - 1)
+        cr.stroke()
+        # Flukes / curved arms at the bottom.
+        cr.arc(icx, icy + 1, 4, 0.15 * math.pi, 0.85 * math.pi)
+        cr.stroke()
+        if anchored:
+            # Filled ring reads as "locked" at a glance.
+            cr.arc(icx, icy - 5, 1.0, 0, 2 * math.pi)
+            cr.fill()
+
+    def _draw_three_dots(self, cr, x, y, width):
+        dot_x = x + width - 14
         start_y = y + 12
         for i in range(3):
             cr.arc(dot_x, start_y + i * 6, 2.2, 0, 2 * math.pi)
@@ -1528,7 +1857,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             or self.find_gate_toggle_at(wx, wy) is not None
             or self.find_switcher_toggle_at(wx, wy) is not None
             or self.find_three_dots_at(wx, wy) is not None
+            or self.find_anchor_icon_at(wx, wy) is not None
             or self.find_settings_gear_at(wx, wy) is not None
+            or self.find_group_label_at(wx, wy) is not None
+            or self.find_group_action_at(wx, wy) is not None
         ):
             self.set_cursor(Gdk.Cursor.new_from_name("pointer", None))
         else:
@@ -1543,6 +1875,31 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self.grab_focus()
         wx, wy = self.to_world(x, y)
 
+        # Group +/- buttons: arm a mode (click again to cancel).
+        hit = self.find_group_action_at(wx, wy)
+        if hit is not None:
+            self._group_pick_mode = None if self._group_pick_mode == hit else hit
+            self.queue_draw()
+            return
+
+        # A +/- mode is armed: the next node click adjusts membership.
+        if self._group_pick_mode is not None:
+            gid, action = self._group_pick_mode
+            nid = self.find_node_at(wx, wy)
+            if nid is not None:
+                if action == "add":
+                    self._add_node_to_group(gid, nid)
+                else:
+                    self._remove_node_from_group(gid, nid)
+            self._group_pick_mode = None
+            self.queue_draw()
+            return
+
+        gid = self.find_group_label_at(wx, wy)
+        if gid is not None:
+            self.show_group_settings_dialog(gid)
+            return
+
         nid = self.find_settings_gear_at(wx, wy)
         if nid is not None:
             self.show_settings_dialog(nid)
@@ -1551,6 +1908,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         nid = self.find_three_dots_at(wx, wy)
         if nid is not None:
             self.show_node_menu(nid, x, y)
+            return
+
+        nid = self.find_anchor_icon_at(wx, wy)
+        if nid is not None:
+            self.toggle_node_anchor(nid)
             return
 
         hit = self.find_device_row_at(wx, wy)
@@ -1985,6 +2347,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self.connecting_from = None
         self.detaching_edge = None
         self.dragging_node = None
+        self.drag_node_starts = {}
         self.hover_target_node = None
         self.panning = False
         if self.slider_dragging is not None:
@@ -2012,6 +2375,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         wx, wy = self.to_world(start_x, start_y)
         self.drag_start_xy = (wx, wy)
         self.drag_current_xy = (wx, wy)
+
+        # A group +/- mode is armed - the click is a membership pick,
+        # handled entirely by on_click; never start a drag/pan under it.
+        if self._group_pick_mode is not None:
+            return
 
         # Inline controls (slider / checkboxes / three-dot menu / text
         # field) all sit *inside* a node's rectangle. Resolving every
@@ -2098,8 +2466,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             or self.find_gate_toggle_at(wx, wy) is not None
             or self.find_switcher_toggle_at(wx, wy) is not None
             or self.find_three_dots_at(wx, wy) is not None
+            or self.find_anchor_icon_at(wx, wy) is not None
             or self.find_settings_gear_at(wx, wy) is not None
             or self.find_field_at(wx, wy) is not None
+            or self.find_group_label_at(wx, wy) is not None
+            or self.find_group_action_at(wx, wy) is not None
             or (device_row_hit is not None and device_row_hit[1] != "volume")
         ):
             # Single-click toggles/menus, handled entirely by
@@ -2128,13 +2499,24 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         nid = self.find_node_at(wx, wy)
         if nid is not None:
             self.dragging_node = nid
-            self.drag_node_start = (self.nodes[nid]["x"], self.nodes[nid]["y"])
+            # Dragging a node that's part of a multi-node selection moves
+            # the whole selection together; otherwise just that node.
+            if nid in self.selected_nodes and len(self.selected_nodes) > 1:
+                moving = [n for n in self.selected_nodes if n in self.nodes]
+            else:
+                moving = [nid]
+            self.drag_node_starts = {
+                n: (self.nodes[n]["x"], self.nodes[n]["y"]) for n in moving
+            }
+            self.drag_node_start = self.drag_node_starts[nid]
             self.layout_awake = True
             self._settle_ticks = 0
             return
 
+        # Pressing empty canvas starts a pan and drops any selection.
         self.panning = True
         self.pan_drag_start = (self.pan_x, self.pan_y)
+        self._set_selection(())
 
     def on_drag_update(self, gesture, offset_x, offset_y):
         if self.connecting_from:
@@ -2209,9 +2591,15 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             return
 
         if self.dragging_node is not None:
-            node = self.nodes[self.dragging_node]
-            node["x"] = self.drag_node_start[0] + offset_x / self.zoom
-            node["y"] = self.drag_node_start[1] + offset_y / self.zoom
+            # Offset every node in this drag (the whole selection, or
+            # just the one) by the same delta.
+            dx = offset_x / self.zoom
+            dy = offset_y / self.zoom
+            for nid, (sx, sy) in self.drag_node_starts.items():
+                node = self.nodes.get(nid)
+                if node is not None:
+                    node["x"] = sx + dx
+                    node["y"] = sy + dy
             self.queue_draw()
             return
 
@@ -2353,6 +2741,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
         if self.dragging_node is not None:
             self.dragging_node = None
+            # Persist where the user dropped it.
+            self._mark_layout_dirty()
             self.queue_draw()
             return
 
@@ -2628,6 +3018,23 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self.pinned_nodes.discard(old_id)
             self.pinned_nodes.add(new_id)
 
+        if old_id in self.anchored_nodes:
+            self.anchored_nodes.discard(old_id)
+            self.anchored_nodes.add(new_id)
+
+        if old_id in self.selected_nodes:
+            self.selected_nodes.discard(old_id)
+            self.selected_nodes.add(new_id)
+
+        if old_id in self._user_created_nodes:
+            self._user_created_nodes.discard(old_id)
+            self._user_created_nodes.add(new_id)
+
+        for group in self.groups.values():
+            if old_id in group["nodes"]:
+                group["nodes"].discard(old_id)
+                group["nodes"].add(new_id)
+
         if self.dragging_node == old_id:
             self.dragging_node = new_id
 
@@ -2789,19 +3196,440 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
         dialog.destroy()
 
-    # ---------- right-click / add node ----------
+    # ---------- right button: marquee select + context menu ----------
 
-    def on_right_click(self, gesture, n_press, x, y):
-        if n_press != 1:
+    def _notify_selection_changed(self):
+        for cb in self.on_selection_changed:
+            try:
+                cb()
+            except Exception:
+                pass
+
+    def _mark_layout_dirty(self):
+        """Queue a debounced push of the canvas layout (positions +
+        anchored flags) to the daemon, which persists it through
+        export/import and the last-session cache.  Debounced so a drag,
+        the physics settling, or a burst of anchor toggles all collapse
+        into a single command."""
+        if self._layout_save_source:
+            GLib.source_remove(self._layout_save_source)
+        self._layout_save_source = GLib.timeout_add(
+            LAYOUT_SAVE_DEBOUNCE_MS, self._flush_layout_save
+        )
+
+    def _flush_layout_save(self):
+        self._layout_save_source = 0
+        if not self.nodes:
+            return False
+        layout = {
+            nid: {
+                "x": float(node["x"]),
+                "y": float(node["y"]),
+                "anchored": nid in self.anchored_nodes,
+            }
+            for nid, node in self.nodes.items()
+        }
+        self.client.send({"command": "set_node_layout", "layout": layout})
+        return False
+
+    def _nodes_in_rect(self, rect):
+        """Ids of every node whose rectangle overlaps the selection
+        box (x1, y1, x2, y2) in world coords."""
+        x1, y1, x2, y2 = rect
+        found = set()
+        for nid, node in self.nodes.items():
+            nx, ny = node["x"], node["y"]
+            if (
+                nx < x2
+                and nx + self.node_width(nid) > x1
+                and ny < y2
+                and ny + self.node_height(nid) > y1
+            ):
+                found.add(nid)
+        return found
+
+    def _set_selection(self, ids):
+        ids = set(ids)
+        if ids == self.selected_nodes:
             return
-        self.grab_focus()
-        # A right-click often follows (or is chorded during) a left drag.
-        # If that drag gesture is still holding the pointer - e.g. its
-        # sequence never got a clean drag-end - the context popover's
-        # own grab fights it and the canvas stops responding.  Force the
-        # drag to release first; it is a no-op when no drag is active.
+        self.selected_nodes = ids
+        self._notify_selection_changed()
+        self.queue_draw()
+
+    # ---------- node groups ----------
+
+    @staticmethod
+    def _hex_to_rgb(value):
+        value = (value or "#3584e4").lstrip("#")
+        if len(value) != 6:
+            value = "3584e4"
+        try:
+            return tuple(int(value[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
+        except ValueError:
+            return (0.2, 0.5, 0.9)
+
+    def _text_size(self, text, font_size):
+        layout = self.create_pango_layout(text or "")
+        layout.set_font_description(
+            Pango.FontDescription.from_string(f"sans {font_size}")
+        )
+        return layout.get_pixel_size()
+
+    def _raw_group_bounds(self, group):
+        """Union of a group's member node rectangles, no padding, or None
+        if it has no live members."""
+        ids = [nid for nid in group.get("nodes", ()) if nid in self.nodes]
+        if not ids:
+            return None
+        x1 = min(self.nodes[n]["x"] for n in ids)
+        y1 = min(self.nodes[n]["y"] for n in ids)
+        x2 = max(self.nodes[n]["x"] + self.node_width(n) for n in ids)
+        y2 = max(self.nodes[n]["y"] + self.node_height(n) for n in ids)
+        return (x1, y1, x2, y2)
+
+    def _group_padding(self, gid):
+        """Base padding, plus one GROUP_SPACING step for each other group
+        this one's member bounds fully enclose - so a group surrounding
+        other groups expands past them with a visible gap."""
+        own = self._raw_group_bounds(self.groups[gid])
+        if own is None:
+            return self.GROUP_PADDING
+        sx1, sy1, sx2, sy2 = own
+        enclosed = 0
+        for other_id, other in self.groups.items():
+            if other_id == gid:
+                continue
+            rb = self._raw_group_bounds(other)
+            if rb is None:
+                continue
+            ox1, oy1, ox2, oy2 = rb
+            if sx1 <= ox1 and sy1 <= oy1 and ox2 <= sx2 and oy2 <= sy2:
+                enclosed += 1
+        return self.GROUP_PADDING + enclosed * self.GROUP_SPACING
+
+    def _group_bounds(self, gid, group):
+        """A group's dotted-box rectangle, padded out (with extra spacing
+        for each group it encloses), or None if it has no live members."""
+        raw = self._raw_group_bounds(group)
+        if raw is None:
+            return None
+        p = self._group_padding(gid)
+        x1, y1, x2, y2 = raw
+        return (x1 - p, y1 - p, x2 + p, y2 + p)
+
+    def _group_header_layout(self, gid, group):
+        """Geometry of a group's label / id / colour chip block, which sits
+        just above the top-left of its box.  One source of truth for both
+        drawing and hit-testing."""
+        bounds = self._group_bounds(gid, group)
+        if bounds is None:
+            return None
+        x1, y1, _x2, _y2 = bounds
+        label = group.get("label") or gid
+        lw, lh = self._text_size(label, 12)
+        iw, ih = self._text_size(gid, 9)
+        chip = 12
+        gap = 2
+        block_h = lh + gap + ih
+        top = y1 - 6 - block_h
+        mid_y = top + block_h / 2
+        chip_x = x1 + max(lw, iw) + 8
+        chip_y = mid_y - chip / 2
+        # Two small +/- buttons past the colour chip to add/remove
+        # members by clicking nodes.
+        btn = 15
+        btn_y = mid_y - btn / 2
+        add_x = chip_x + chip + 8
+        add_rect = (add_x, btn_y, add_x + btn, btn_y + btn)
+        rem_x = add_x + btn + 3
+        rem_rect = (rem_x, btn_y, rem_x + btn, btn_y + btn)
+        return {
+            "x": x1,
+            "top": top,
+            "label": label,
+            "color": group.get("color"),
+            "lw": lw,
+            "lh": lh,
+            "iw": iw,
+            "ih": ih,
+            "gap": gap,
+            "chip": chip,
+            "chip_x": chip_x,
+            "chip_y": chip_y,
+            "add_rect": add_rect,
+            "rem_rect": rem_rect,
+            "rect": (x1 - 2, top - 2, chip_x + chip + 2, top + block_h + 2),
+        }
+
+    def find_group_action_at(self, x, y):
+        """(group_id, "add"|"remove") for the +/- header buttons."""
+        for gid, group in self.groups.items():
+            info = self._group_header_layout(gid, group)
+            if info is None:
+                continue
+            for action, rect in (
+                ("add", info["add_rect"]),
+                ("remove", info["rem_rect"]),
+            ):
+                if rect[0] <= x <= rect[2] and rect[1] <= y <= rect[3]:
+                    return (gid, action)
+        return None
+
+    def find_group_label_at(self, x, y):
+        for gid, group in self.groups.items():
+            info = self._group_header_layout(gid, group)
+            if info is None:
+                continue
+            rx1, ry1, rx2, ry2 = info["rect"]
+            if rx1 <= x <= rx2 and ry1 <= y <= ry2:
+                return gid
+        return None
+
+    def _draw_group_boxes(self, cr, pal):
+        # Draw enclosing groups first (largest padding / lowest z), so a
+        # nested group's box ends up on top of its container's.
+        ordered = sorted(
+            self.groups.items(),
+            key=lambda kv: self._group_padding(kv[0]),
+            reverse=True,
+        )
+        for gid, group in ordered:
+            bounds = self._group_bounds(gid, group)
+            if bounds is None:
+                continue
+            x1, y1, x2, y2 = bounds
+            r, g, b = self._hex_to_rgb(group.get("color"))
+            cr.set_source_rgb(r, g, b)
+            cr.set_line_width(1.5)
+            cr.set_dash([2.0, 4.0], 0.0)
+            draw_rounded_rect(cr, x1, y1, x2 - x1, y2 - y1, 12)
+            cr.stroke()
+        cr.set_dash([])
+
+    def _draw_group_headers(self, cr, pal):
+        for gid, group in self.groups.items():
+            info = self._group_header_layout(gid, group)
+            if info is None:
+                continue
+            r, g, b = self._hex_to_rgb(group.get("color"))
+            draw_text_ellipsized(
+                cr, info["x"], info["top"], info["label"],
+                info["lw"] + 4, 12, (r, g, b),
+            )
+            id_y = info["top"] + info["lh"] + info["gap"]
+            draw_text_ellipsized(
+                cr, info["x"], id_y, gid, info["iw"] + 4, 9, pal["subtext"]
+            )
+            draw_rounded_rect(
+                cr, info["chip_x"], info["chip_y"], info["chip"], info["chip"], 3
+            )
+            cr.set_source_rgb(r, g, b)
+            cr.fill()
+
+            self._draw_group_button(
+                cr, pal, info["add_rect"], "+",
+                (gid, "add"), (r, g, b),
+            )
+            self._draw_group_button(
+                cr, pal, info["rem_rect"], "\u2212",
+                (gid, "remove"), (r, g, b),
+            )
+
+    def _draw_group_button(self, cr, pal, rect, symbol, mode, color):
+        x1, y1, x2, y2 = rect
+        armed = self._group_pick_mode == mode
+        draw_rounded_rect(cr, x1, y1, x2 - x1, y2 - y1, 3)
+        if armed:
+            cr.set_source_rgb(*color)
+            cr.fill()
+        else:
+            cr.set_source_rgb(*pal["node_bg"])
+            cr.fill_preserve()
+            cr.set_source_rgb(*color)
+            cr.set_line_width(1)
+            cr.stroke()
+        # A plus / minus glyph centred in the button.
+        fg = (0.06, 0.06, 0.07) if armed else color
+        cr.set_source_rgb(*fg)
+        cr.set_line_width(1.6)
+        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+        cr.move_to(cx - 4, cy)
+        cr.line_to(cx + 4, cy)
+        if symbol == "+":
+            cr.move_to(cx, cy - 4)
+            cr.line_to(cx, cy + 4)
+        cr.stroke()
+
+    def _new_group_id(self):
+        base = f"group_{int(time.time() * 1000)}"
+        gid = base
+        n = 2
+        while gid in self.groups:
+            gid = f"{base}_{n}"
+            n += 1
+        return gid
+
+    def create_group_from_selection(self):
+        """Tool-panel action: wrap the selected nodes in a new group."""
+        ids = [nid for nid in self.selected_nodes if nid in self.nodes]
+        if not ids:
+            return
+        gid = self._new_group_id()
+        color = self.GROUP_COLORS[len(self.groups) % len(self.GROUP_COLORS)]
+        label = "Group"
+        # Nodes may belong to any number of groups - membership here is
+        # additive, so other groups are left untouched.
+        self.groups[gid] = {"label": label, "color": color, "nodes": set(ids)}
+        self._pending_groups.add(gid)
+        self.client.send(
+            {"command": "add_group", "group_id": gid, "label": label,
+             "color": color, "nodes": ids}
+        )
+        self._set_selection(())
+        self.queue_draw()
+
+    def _add_node_to_group(self, gid, nid):
+        group = self.groups.get(gid)
+        if group is None or nid not in self.nodes or nid in group["nodes"]:
+            return
+        # Additive: a node can be in several groups at once.
+        group["nodes"].add(nid)
+        self.client.send(
+            {"command": "set_group", "group_id": gid,
+             "nodes": sorted(group["nodes"])}
+        )
+        self.queue_draw()
+
+    def _remove_node_from_group(self, gid, nid):
+        group = self.groups.get(gid)
+        if group is None or nid not in group["nodes"]:
+            return
+        group["nodes"].discard(nid)
+        self.client.send(
+            {"command": "set_group", "group_id": gid,
+             "nodes": sorted(group["nodes"])}
+        )
+        self.queue_draw()
+
+    def show_group_settings_dialog(self, gid):
+        group = self.groups.get(gid)
+        if group is None:
+            return
+
+        dialog = Gtk.Dialog(
+            title=f"Group \u2014 {gid}",
+            transient_for=self.get_root(),
+            modal=True,
+        )
+        content = dialog.get_content_area()
+        content.set_spacing(6)
+        content.set_margin_top(10)
+        content.set_margin_bottom(10)
+        content.set_margin_start(10)
+        content.set_margin_end(10)
+
+        id_entry = Gtk.Entry()
+        id_entry.set_text(gid)
+        id_entry.set_hexpand(True)
+        content.append(self._labeled_row("Group ID:", id_entry))
+
+        label_entry = Gtk.Entry()
+        label_entry.set_text(group.get("label", ""))
+        label_entry.set_hexpand(True)
+        content.append(self._labeled_row("Label:", label_entry))
+
+        # A self-drawn HSV picker (see color_picker.py) rather than
+        # Gtk.ColorButton, which aborts on systems with no GSettings
+        # schemas.
+        color_picker = ColorPicker(
+            group.get("color", self.GROUP_COLORS[0]), presets=self.GROUP_COLORS
+        )
+        content.append(self._labeled_row("Color:", color_picker))
+
+        dialog.add_button("Delete", Gtk.ResponseType.REJECT)
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Apply", Gtk.ResponseType.APPLY)
+
+        def on_response(dlg, response):
+            if response == Gtk.ResponseType.APPLY:
+                new_id = id_entry.get_text().strip()
+                if not new_id or (new_id != gid and new_id in self.groups):
+                    return  # empty or duplicate id - leave dialog open
+                new_color = color_picker.get_hex()
+                self._apply_group_edit(
+                    gid, new_id, label_entry.get_text(), new_color
+                )
+            elif response == Gtk.ResponseType.REJECT:
+                self.groups.pop(gid, None)
+                self._pending_groups.discard(gid)
+                self.client.send({"command": "remove_group", "group_id": gid})
+                self.queue_draw()
+            dlg.destroy()
+
+        dialog.connect("response", on_response)
+        dialog.present()
+
+    def _apply_group_edit(self, gid, new_id, label, color):
+        group = self.groups.pop(gid, None)
+        if group is None:
+            return
+        group["label"] = label
+        group["color"] = color
+        if new_id in self.groups:
+            self.groups[gid] = group  # duplicate guard; don't clobber
+            return
+        self.groups[new_id] = group
+        self._pending_groups.discard(gid)
+        self.client.send(
+            {"command": "set_group", "group_id": gid, "new_group_id": new_id,
+             "label": label, "color": color, "nodes": sorted(group["nodes"])}
+        )
+        self.queue_draw()
+
+    def on_right_drag_begin(self, gesture, start_x, start_y):
+        # A right press often follows (or is chorded during) a left
+        # drag; force any lingering left drag to release so its grab
+        # can't fight the marquee/menu.
         self._drag_gesture.reset()
         self._reset_drag_state()
+        self._right_drag_start_widget = (start_x, start_y)
+        self._right_drag_start_world = self.to_world(start_x, start_y)
+        self._right_drag_moved = False
+        self.select_rect = None
+
+    def on_right_drag_update(self, gesture, offset_x, offset_y):
+        # Small dead-zone so a click with a pixel of jitter still opens
+        # the menu instead of drawing a 1x1 selection box.
+        if offset_x * offset_x + offset_y * offset_y < 25.0:
+            return
+        self._right_drag_moved = True
+        sx, sy = self._right_drag_start_world
+        ex = sx + offset_x / self.zoom
+        ey = sy + offset_y / self.zoom
+        self.select_rect = (min(sx, ex), min(sy, ey), max(sx, ex), max(sy, ey))
+        self._set_selection(self._nodes_in_rect(self.select_rect))
+        # _set_selection only redraws when the set changed; the marquee
+        # rectangle itself moves on every update.
+        self.queue_draw()
+
+    def on_right_drag_end(self, gesture, offset_x, offset_y):
+        moved = self._right_drag_moved
+        self._right_drag_moved = False
+        self.select_rect = None
+        if moved:
+            self.queue_draw()
+            return
+        # No movement -> it was a plain right-click; open the menu.
+        x, y = self._right_drag_start_widget
+        self._open_context_menu(x, y)
+
+    def on_right_drag_cancel(self, gesture, sequence):
+        self._right_drag_moved = False
+        self.select_rect = None
+        self.queue_draw()
+
+    def _open_context_menu(self, x, y):
+        self.grab_focus()
         wx, wy = self.to_world(x, y)
 
         eid = self.find_edge_at(wx, wy)
@@ -2816,6 +3644,43 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             return
 
         self.show_add_node_menu(x, y)
+
+    # ---------- anchoring ----------
+
+    def _is_anchored(self, nid) -> bool:
+        return nid in self.anchored_nodes
+
+    def toggle_node_anchor(self, nid, anchored=None):
+        """Flip (or set) one node's anchored state.  Anchored means the
+        force layout treats it as pinned: it never moves under physics,
+        but still repels/attracts its neighbours, and the user can
+        still drag it directly."""
+        if nid not in self.nodes:
+            return
+        want = (nid not in self.anchored_nodes) if anchored is None else bool(anchored)
+        if want == (nid in self.anchored_nodes):
+            return
+        if want:
+            self.anchored_nodes.add(nid)
+        else:
+            self.anchored_nodes.discard(nid)
+            # Let physics pick it back up from wherever it currently is.
+            self.force_layout.velocities[nid] = [0.0, 0.0]
+        self.layout_awake = True
+        self._settle_ticks = 0
+        self._mark_layout_dirty()
+        self._notify_selection_changed()
+        self.queue_draw()
+
+    def toggle_anchor_selected(self):
+        """Tool-panel action: anchor the selection, or unanchor it if
+        every selected node is already anchored."""
+        ids = [nid for nid in self.selected_nodes if nid in self.nodes]
+        if not ids:
+            return
+        want = not all(nid in self.anchored_nodes for nid in ids)
+        for nid in ids:
+            self.toggle_node_anchor(nid, want)
 
     def show_add_node_menu(self, x, y):
         popover = Gtk.Popover()
@@ -2894,7 +3759,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # patchbay_mic_device) overwrite this with their own fixed
         # label, which is correct - they're id-locked to one instance,
         # so there's nothing to disambiguate.
-        config = {"label": self._unique_default_label(type_label(real_type, node_id))}
+        config: dict = {}
+        if real_type != "splitter":
+            # Splitters get no default label - an unlabelled one renders
+            # as a small blank square (see SPLITTER_MIN_SIZE).
+            config["label"] = self._unique_default_label(type_label(real_type, node_id))
         if node_type in ("regex_input", "regex_output"):
             config["pattern"] = ".*"
         elif node_type == "media_class_input":
@@ -2950,6 +3819,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     def _on_add_node(self, button, node_type, popover):
         real_type, node_id, config = self._build_add_node_command(node_type)
+        # Remember this as user-spawned so update_from_daemon anchors it
+        # by default (loaded/builtin nodes are not anchored).
+        self._user_created_nodes.add(node_id)
         self.client.send(
             {
                 "command": "add_node",
@@ -2967,8 +3839,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         it back (see _pending_positions / update_from_daemon). Used by
         the add-node side panel's drop handler."""
         real_type, node_id, config = self._build_add_node_command(node_type)
+        self._user_created_nodes.add(node_id)
+        half_w = (
+            self.SPLITTER_MIN_SIZE if real_type == "splitter" else self.NODE_WIDTH
+        ) / 2
         self._pending_positions[node_id] = (
-            wx - self.NODE_WIDTH / 2,
+            wx - half_w,
             wy - self.NODE_HEIGHT / 2,
         )
         self.client.send(
