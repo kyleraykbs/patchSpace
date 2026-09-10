@@ -88,12 +88,13 @@ def test_sensitivity_gets_hidden_bracketing_volume_nodes():
     # ...but the internal links that put them in the signal path exist.
     assert f"{pre}->sens" in d.space.edges
     assert f"sens->{post}" in d.space.edges
-    # Pre-gain swings below/above unity; post is the reciprocal makeup
-    # stage, so its own ceiling has to clear 1.0.
-    assert d.space.nodes[pre].volume_min == pwnodes.SensitivityGateNode.PRE_GAIN_MIN
-    assert d.space.nodes[pre].volume_max == pwnodes.SensitivityGateNode.PRE_GAIN_MAX
-    assert d.space.nodes[post].volume_min == 0.0
-    assert d.space.nodes[post].volume_max == pwnodes.SensitivityGateNode.POST_GAIN_MAX
+    # The gate itself moves its own live threshold now, so the hidden
+    # pre/post are pinned unity pass-throughs (kept only so the routing
+    # and saved sessions don't change).
+    assert d.space.nodes[pre].volume_min == 1.0
+    assert d.space.nodes[pre].volume_max == 1.0
+    assert d.space.nodes[post].volume_min == 1.0
+    assert d.space.nodes[post].volume_max == 1.0
 
 
 def test_user_edges_route_through_hidden_nodes_and_stay_logical():
@@ -132,12 +133,16 @@ def test_removing_logical_edge_removes_routed_edge():
     assert d.handle_command({"command": "get_nodes"})["edges"] == {}
 
 
-def test_sensitivity_property_drives_hidden_gains_reciprocally():
+def test_sensitivity_property_moves_gate_threshold_live():
     d = fresh_daemon()
     _add(d, "sensitivity_gate", "sens")
+    node = d.space.nodes["sens"]
     pre = d.space.nodes["__sens_pre__sens"]
     post = d.space.nodes["__sens_post__sens"]
 
+    """Sliding sensitivity moves the gate's load-time threshold and
+    schedules a debounced interior reload (the live set-param path is not
+    reliable through the daemon's pw-cli session)."""
     assert d.handle_command(
         {
             "command": "set_node_property",
@@ -146,11 +151,12 @@ def test_sensitivity_property_drives_hidden_gains_reciprocally():
             "value": 1.0,
         }
     )["status"] == "ok"
-    assert pre.volume == 1.0
-    pre_gain = pre.volume_min + (pre.volume_max - pre.volume_min) * pre.volume
-    post_gain = post.volume_min + (post.volume_max - post.volume_min) * post.volume
-    assert pre_gain * post_gain == pytest.approx(1.0)
+    assert node.sensitivity == 1.0
+    assert node.level == 0.0
+    assert node._reload_due is not None
+    assert '"threshold" = 0.005623' in node._module_command_args()
 
+    # Slider 0.0 = least sensitive -> level 100.
     assert d.handle_command(
         {
             "command": "set_node_property",
@@ -159,10 +165,11 @@ def test_sensitivity_property_drives_hidden_gains_reciprocally():
             "value": 0.0,
         }
     )["status"] == "ok"
-    assert pre.volume == 0.0
-    pre_gain = pre.volume_min + (pre.volume_max - pre.volume_min) * pre.volume
-    post_gain = post.volume_min + (post.volume_max - post.volume_min) * post.volume
-    assert pre_gain * post_gain == pytest.approx(1.0)
+    assert node.level == 100.0
+
+    # The hidden nodes stay unity pass-throughs regardless of the slider.
+    for n in (pre, post):
+        assert n.volume_min == 1.0 and n.volume_max == 1.0
 
     # Out-of-range values clamp rather than error.
     assert d.handle_command(
@@ -251,4 +258,70 @@ def test_export_hides_hidden_nodes_and_round_trips_sensitivity():
         )
     nodes = d2.handle_command({"command": "get_nodes"})["nodes"]
     assert nodes["sens"]["sensitivity"] == 0.5
-    assert d2.space.nodes["__sens_pre__sens"].volume == 0.5
+    # The hidden nodes are unity pass-throughs now, so nothing about the
+    # slider's value lives on them.
+    assert d2.space.nodes["__sens_pre__sens"].volume_max == 1.0
+
+
+def test_load_stages_hidden_nodes_so_a_mid_load_tick_cannot_prune_them(monkeypatch):
+    """Regression: a big session load holds the daemon lock for as long as
+    it takes to build every node's structural pieces.  While the lock is
+    held the graph's node-created callbacks cannot resolve any backing, so
+    a hidden sensitivity pre/post created early in the load looks 'stuck'
+    (alive but unresolved past RESOLVE_GRACE_S) the instant a supervision
+    tick runs, and gets torn down and rebuilt - the pre/post thrash that
+    killed the gate's audio.  The load must stage every backed node,
+    including those hidden ones, until its own bring-up turn."""
+
+    # Every fake backing looks stuck: alive but never resolving, exactly
+    # as the hidden pre/post look while the load holds the lock.
+    class StuckCli(FakeCli):
+        def stuck(self, grace_s):
+            return True
+
+    monkeypatch.setattr(pwnodes, "OwnedPwNode", StuckCli)
+    monkeypatch.setattr(pwnodes, "OwnedPwProcess", FakeProc)
+
+    d = fresh_daemon()
+
+    # Record which nodes a supervision tick (as the periodic ticker would
+    # run mid-load) actually supervises.
+    capturing = {"on": False}
+    supervised = []
+    real_supervise_node = d.space._supervise_node
+
+    def spy_supervise_node(node):
+        if capturing["on"]:
+            supervised.append(node.id)
+        return real_supervise_node(node)
+
+    monkeypatch.setattr(d.space, "_supervise_node", spy_supervise_node)
+
+    ticked = {"done": False}
+
+    def spy_bring_up(node):
+        if not ticked["done"]:
+            ticked["done"] = True
+            capturing["on"] = True
+            try:
+                with d._lock:
+                    d.space.supervise()
+            finally:
+                capturing["on"] = False
+        return True
+
+    monkeypatch.setattr(d, "_bring_node_up", spy_bring_up)
+
+    d._load_session(
+        {
+            "nodes": {"sens": {"type": "sensitivity_gate", "params": {}}},
+            "edges": [],
+        }
+    )
+
+    assert ticked["done"], "the load never reached its bring-up loop"
+    assert "__sens_pre__sens" not in supervised
+    assert "__sens_post__sens" not in supervised
+    # And they survived the load.
+    assert "__sens_pre__sens" in d.space.nodes
+    assert "__sens_post__sens" in d.space.nodes

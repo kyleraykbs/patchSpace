@@ -152,59 +152,43 @@ def test_reload_module_swaps_interior_keeps_sockets():
     assert "gate_out" in names()
 
 
-def test_sensitivity_drives_ladspa_gate_threshold_live():
-    """Sensitivity drives swh-plugins gate_1410's own LADSPA threshold
-    live, via set_param into the running module - no reload on a slider
-    tick, and no gain-staging trick around it."""
+def test_sensitivity_threshold_is_a_load_time_calf_lv2_control():
+    """SensitivityGateNode is Calf's LV2 Gate.  Its threshold is a
+    load-time filter-graph control (the live set-param path doesn't
+    reliably reach the plugin through the daemon's pw-cli session), so
+    the slider maps to a threshold baked into the module graph and a
+    change schedules an interior reload."""
     space = make_space(
         FakeGraph(), repair_gate=pwnodes.Backoff(initial_s=0, jitter_fraction=0)
     )
     space.mark_graph_loaded()
-    node = SensitivityGateNode(
-        "n",
-        "gate",
-        level=100.0,
-        ladspa_plugin="/plugins/gate_1410.so",
-        ladspa_label="gate",
-    )
+    node = SensitivityGateNode("n", "gate")
     space.add_node(node)
     space.supervise()
 
-    # Module graph is the real gate_1410 LADSPA plugin, not the
-    # filter-chain builtin noisegate that never passed signal.
     args = node._module_command_args()
-    assert "type = ladspa" in args
-    assert "plugin = /plugins/gate_1410.so" in args
-    assert "label = gate" in args
-    assert '"Threshold (dB)" = -60.00' in args  # level=100: most sensitive
-    assert '"Range (dB)" = -60.00' in args
-    assert '"Output select (-1 = key listen, 0 = gate, 1 = bypass)" = 0' in args
+    assert "type = lv2" in args
+    assert 'plugin = "http://calf.sourceforge.net/plugins/Gate"' in args
+    assert "type = ladspa" not in args
     assert "type = builtin" not in args
-    assert "label = noisegate" not in args
+    assert '"ratio"' in args and '"knee"' in args
 
-    module = node.module_backing()
-    assert module is not None and module.name == "gate"
-    assert module.set_params == []  # nothing pushed until node_id resolves
-
-    module.node_id = 101
-    node.refresh_live()
-    assert len(module.set_params) == 1
-    iface, body = module.set_params[0]
-    assert iface == "Props"
-    assert '"Threshold (dB)" -60.00' in body
-
-    # A second refresh at the same level is a no-op (cached).
-    node.refresh_live()
-    assert len(module.set_params) == 1
-
-    # level=0 is least sensitive - the threshold climbs back toward the
-    # louder end. Changing the level re-pushes live - no reload.
+    # level 0 = most sensitive -> -45 dB -> linear ~0.005623
     node.set_level(0.0)
+    assert '"threshold" = 0.005623' in node._module_command_args()
+    # level 100 = least sensitive -> -15 dB -> linear ~0.177828
+    node.set_level(100.0)
+    assert '"threshold" = 0.177828' in node._module_command_args()
+
+    # The 0..1 sensitivity slider maps inversely onto level.
+    node.set_sensitivity(1.0)
     assert node.level == 0.0
-    assert len(module.set_params) == 2
-    iface, body = module.set_params[-1]
-    assert iface == "Props"
-    assert '"Threshold (dB)" -10.00' in body
+    assert '"threshold" = 0.005623' in node._module_command_args()
+    node.set_sensitivity(0.0)
+    assert node.level == 100.0
+    assert '"threshold" = 0.177828' in node._module_command_args()
+
+
 
 
 def test_normalize_graph_links_compressor_and_lookahead_limiter():

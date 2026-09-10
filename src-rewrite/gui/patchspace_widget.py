@@ -131,6 +131,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     # other groups leaves a visible gap instead of drawing its dotted box
     # right on top of theirs.
     GROUP_SPACING = 18
+    # Extra clearance a container leaves above an enclosed group's name
+    # block (label/id/colour chip), on top of that block's own height, so
+    # a nested group's name never touches or pokes past its container's
+    # top edge.  A small deliberate bump, not a full GROUP_SPACING.
+    GROUP_NAME_BUMP = 6
     GROUP_COLORS = (
         "#3584e4",  # blue
         "#33d17a",  # green
@@ -3608,35 +3613,77 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         y2 = max(self.nodes[n]["y"] + self.node_height(n) for n in ids)
         return (x1, y1, x2, y2)
 
-    def _group_padding(self, gid):
-        """Base padding, plus one GROUP_SPACING step for each other group
-        this one's member bounds fully enclose - so a group surrounding
-        other groups expands past them with a visible gap."""
+    def _group_header_height(self, gid, group):
+        """Vertical space a group's name block occupies *above* its
+        dotted-box top: the 6px gap the header is drawn with, the wrapped
+        label + id heights, and GROUP_NAME_BUMP of breathing room so a
+        container's own edge can't touch the enclosed name."""
+        label = group.get("label") or gid
+        _lw, lh = self._text_size(label, 12)
+        _iw, ih = self._text_size(gid, 9)
+        block_h = lh + 2 + ih  # 2 == _group_header_layout's label/id gap
+        return 6 + block_h + self.GROUP_NAME_BUMP
+
+    def _encloses(self, outer_raw, inner_raw):
+        """Whether `outer_raw` (member bounds) fully contains `inner_raw`."""
+        if outer_raw is None or inner_raw is None:
+            return False
+        ox1, oy1, ox2, oy2 = outer_raw
+        ix1, iy1, ix2, iy2 = inner_raw
+        return ox1 <= ix1 and oy1 <= iy1 and ix2 <= ox2 and iy2 <= oy2
+
+    def _enclosed_group_ids(self, gid):
+        """Ids of the other groups whose member bounds this group fully
+        encloses (its children for layout purposes)."""
         own = self._raw_group_bounds(self.groups[gid])
         if own is None:
-            return self.GROUP_PADDING
-        sx1, sy1, sx2, sy2 = own
-        enclosed = 0
-        for other_id, other in self.groups.items():
-            if other_id == gid:
-                continue
-            rb = self._raw_group_bounds(other)
-            if rb is None:
-                continue
-            ox1, oy1, ox2, oy2 = rb
-            if sx1 <= ox1 and sy1 <= oy1 and ox2 <= sx2 and oy2 <= sy2:
-                enclosed += 1
-        return self.GROUP_PADDING + enclosed * self.GROUP_SPACING
+            return []
+        return [
+            other_id
+            for other_id, other in self.groups.items()
+            if other_id != gid
+            and self._encloses(own, self._raw_group_bounds(other))
+        ]
 
-    def _group_bounds(self, gid, group):
-        """A group's dotted-box rectangle, padded out (with extra spacing
-        for each group it encloses), or None if it has no live members."""
+    def _group_bounds(self, gid, group, _seen=None):
+        """A group's dotted-box rectangle, or None if it has no live
+        members.
+
+        The box is GROUP_PADDING around the group's own member nodes, then
+        grown by GROUP_SPACING (on every side) around each group it
+        encloses - and, on top only, by that child's whole *name block*
+        (see _group_header_height), so a nested group's label/id/chip sit
+        inside its container instead of poking out over its top edge.
+        Children are resolved recursively, so the clearance compounds
+        through any depth of nesting."""
         raw = self._raw_group_bounds(group)
         if raw is None:
             return None
-        p = self._group_padding(gid)
+        # Guard against identical/mutually-containing member bounds, which
+        # would otherwise recurse forever.
+        seen = set(_seen or ())
+        if gid in seen:
+            return None
+        seen.add(gid)
+
+        p = self.GROUP_PADDING
         x1, y1, x2, y2 = raw
-        return (x1 - p, y1 - p, x2 + p, y2 + p)
+        x1 -= p
+        y1 -= p
+        x2 += p
+        y2 += p
+        for child_id in self._enclosed_group_ids(gid):
+            child = self.groups[child_id]
+            cb = self._group_bounds(child_id, child, seen)
+            if cb is None:
+                continue
+            cx1, cy1, cx2, cy2 = cb
+            head = self._group_header_height(child_id, child)
+            x1 = min(x1, cx1 - self.GROUP_SPACING)
+            y1 = min(y1, cy1 - head - self.GROUP_SPACING)
+            x2 = max(x2, cx2 + self.GROUP_SPACING)
+            y2 = max(y2, cy2 + self.GROUP_SPACING)
+        return (x1, y1, x2, y2)
 
     def _group_header_layout(self, gid, group):
         """Geometry of a group's label / id / colour chip block, which sits
@@ -3707,11 +3754,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         return None
 
     def _draw_group_boxes(self, cr, pal):
-        # Draw enclosing groups first (largest padding / lowest z), so a
+        # Draw enclosing groups first (most nested children first), so a
         # nested group's box ends up on top of its container's.
         ordered = sorted(
             self.groups.items(),
-            key=lambda kv: self._group_padding(kv[0]),
+            key=lambda kv: len(self._enclosed_group_ids(kv[0])),
             reverse=True,
         )
         for gid, group in ordered:

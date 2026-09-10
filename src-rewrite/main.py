@@ -255,6 +255,7 @@ _SERIAL_ATTRS = (
     "monitor_mode",
     "ladspa_plugin",
     "ladspa_label",
+    "lv2_uri",
     "vad_threshold",
     "wet_dry",
     "level",
@@ -1152,7 +1153,7 @@ class PatchBayDaemon:
                     if hasattr(existing, "apply_device_settings"):
                         existing.apply_device_settings()
                     if isinstance(existing, SensitivityGateNode):
-                        self._ensure_sensitivity_internals(existing)
+                        backed_ids.extend(self._ensure_sensitivity_internals(existing))
                     updated.append(node_id)
                     if isinstance(existing, BackedNode):
                         backed_ids.append(node_id)
@@ -1193,6 +1194,20 @@ class PatchBayDaemon:
         # each one up on its own and then wires its inputs one at a
         # time, which must not overlap with the batch wiring of the rest
         # of the graph.
+        # Stage every backed node - including the hidden sensitivity
+        # pre/post that _ensure_sensitivity_internals just created, which
+        # are not in the config's to_stage list - until its own bring-up
+        # turn below.  The node-creation loop above holds the daemon lock
+        # for as long as it takes to build every node's structural
+        # pieces, and while it's held the graph's node-created callbacks
+        # can't resolve any backing; a hidden pre/post created near the
+        # start of a big load then looks "stuck" (past RESOLVE_GRACE_S)
+        # the moment the tick first runs and gets torn down and rebuilt -
+        # the pre/post thrash.  Staging keeps the tick off them until the
+        # load's own bring-up loop resolves them.
+        if backed_ids:
+            self.space.stage(backed_ids)
+
         careful_set = set(finicky_ids)
         regular_backed = [nid for nid in backed_ids if nid not in careful_set]
         not_ready = []
@@ -1536,8 +1551,7 @@ class PatchBayDaemon:
                 backing,
                 level=g("level", 25.0),
                 sensitivity=g("sensitivity", 0.0),
-                ladspa_plugin=g("ladspa_plugin", ""),
-                ladspa_label=g("ladspa_label", ""),
+                lv2_uri=g("lv2_uri", ""),
             )
         if cls is ReverbNode:
             return cls(
@@ -1769,12 +1783,16 @@ class PatchBayDaemon:
         post_id = _sens_post_id(gate_id)
         created = []
         if pre_id not in self.space.nodes:
+            # Unity pass-through (the real gate now moves its own live
+            # threshold - see SensitivityGateNode); kept only so the
+            # routing/serialization plumbing and saved sessions don't
+            # change.
             pre = VolumeProcessNode(
                 pre_id,
                 f"patchbay_{pre_id}",
-                initial_volume=gate.sensitivity,
-                volume_min=SensitivityGateNode.PRE_GAIN_MIN,
-                volume_max=SensitivityGateNode.PRE_GAIN_MAX,
+                initial_volume=1.0,
+                volume_min=1.0,
+                volume_max=1.0,
             )
             self.space.add_node(pre, public=False)
             created.append(pre_id)
@@ -1783,8 +1801,8 @@ class PatchBayDaemon:
                 post_id,
                 f"patchbay_{post_id}",
                 initial_volume=1.0,
-                volume_min=0.0,
-                volume_max=SensitivityGateNode.POST_GAIN_MAX,
+                volume_min=1.0,
+                volume_max=1.0,
             )
             self.space.add_node(post, public=False)
             created.append(post_id)
@@ -1799,32 +1817,20 @@ class PatchBayDaemon:
         return created
 
     def _apply_sensitivity(self, gate) -> None:
-        """Push a Sensitivity gate's 0..1 slider value onto its hidden
-        pre/post volume nodes: the pre node's gain swings across
-        PRE_GAIN_MIN..PRE_GAIN_MAX, the post node applies the exact
-        reciprocal so output loudness is unchanged. No-op (and never
-        raises) until both hidden nodes exist."""
+        """The gate's threshold is a load-time filter-graph control now
+        (Calf LV2 Gate, see SensitivityGateNode), so the hidden pre/post
+        VolumeProcessNodes are pure unity pass-throughs - kept only so
+        the routing/serialization plumbing and saved sessions don't
+        change.  No-op (never raises) until both hidden nodes exist."""
         pre = self.space.nodes.get(_sens_pre_id(gate.id))
         post = self.space.nodes.get(_sens_post_id(gate.id))
-        if not isinstance(pre, VolumeProcessNode) or not isinstance(
-            post, VolumeProcessNode
-        ):
-            return
-        fraction = max(0.0, min(1.0, getattr(gate, "sensitivity", 0.0)))
-        pre.set_volume(fraction)
-        pre_actual = pre.volume_min + (pre.volume_max - pre.volume_min) * fraction
-        if pre_actual <= 1e-6:
-            return
-        # The post node's own volume is a fraction of its range, not the
-        # gain itself - convert the desired reciprocal gain into that
-        # range so a post max above unity actually reaches the makeup
-        # level instead of being clamped at 1.0.
-        post_gain = 1.0 / pre_actual
-        span = post.volume_max - post.volume_min
-        if span <= 1e-9:
-            return
-        post_fraction = (post_gain - post.volume_min) / span
-        post.set_volume(post_fraction)
+        if isinstance(pre, VolumeProcessNode) and isinstance(post, VolumeProcessNode):
+            pre_span = pre.volume_max - pre.volume_min
+            if pre_span > 1e-9:
+                pre.set_volume((1.0 - pre.volume_min) / pre_span)
+            post_span = post.volume_max - post.volume_min
+            if post_span > 1e-9:
+                post.set_volume((1.0 - post.volume_min) / post_span)
 
     def _stored_endpoints(self, from_node: str, to_node: str):
         """Map a logical (GUI-visible) edge onto the daemon's stored
@@ -2034,13 +2040,17 @@ class PatchBayDaemon:
                 except (TypeError, ValueError):
                     return {"status": "error", "message": "level must be 0..100"}
                 node.set_level(new_val)
+                self._coalesce_reload(node)
             elif prop == "sensitivity" and isinstance(node, SensitivityGateNode):
                 try:
                     new_val = max(0.0, min(1.0, float(value)))
                 except (TypeError, ValueError):
                     return {"status": "error", "message": "sensitivity must be 0..1"}
-                node.sensitivity = new_val
-                self._apply_sensitivity(node)
+                node.set_sensitivity(new_val)
+                self._coalesce_reload(node)
+            elif prop == "lv2_uri" and isinstance(node, SensitivityGateNode):
+                node.lv2_uri = value or ""
+                self._coalesce_reload(node)
             elif prop == "wet_dry" and isinstance(node, ReverbNode):
                 try:
                     new_val = max(0.0, min(1.0, float(value)))
@@ -2081,14 +2091,10 @@ class PatchBayDaemon:
                     lo, hi = bounds[prop]
                     setattr(node, prop, max(lo, min(hi, new_val)))
                 self._coalesce_reload(node)
-            elif prop == "ladspa_plugin" and isinstance(
-                node, (NoiseCancelNode, SensitivityGateNode)
-            ):
+            elif prop == "ladspa_plugin" and isinstance(node, NoiseCancelNode):
                 node.ladspa_plugin = value
                 self._coalesce_reload(node)
-            elif prop == "ladspa_label" and isinstance(
-                node, (NoiseCancelNode, SensitivityGateNode)
-            ):
+            elif prop == "ladspa_label" and isinstance(node, NoiseCancelNode):
                 node.ladspa_label = value
                 self._coalesce_reload(node)
             elif prop in ("library_name", "aec_args", "monitor_mode") and isinstance(

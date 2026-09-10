@@ -320,12 +320,15 @@ NODE_TYPE_SPECS.update(
             settings=[
                 (
                     "level",
-                    "Fixed gate threshold (0-100, not live-adjustable):",
+                    "Gate threshold (0-100, 0 = most sensitive):",
                     "number",
                     {"min": 0, "max": 100, "step": 1},
                 ),
-                ("ladspa_plugin", "Override plugin path (blank = auto):", "text"),
-                ("ladspa_label", "Override plugin label (blank = auto):", "text"),
+                (
+                    "lv2_uri",
+                    "LV2 gate URI (blank = Calf Gate):",
+                    "text",
+                ),
             ],
         ),
         # Reverb's only real dial - the dry/wet mix - is drawn as an
