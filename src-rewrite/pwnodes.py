@@ -1,0 +1,2058 @@
+"""
+pwnodes.py
+
+The patch graph: a Blender-style node graph of Input / Process / Output
+nodes that the daemon drives against a live pwgraph.PipewireGraph.
+
+This module is a ground-up rewrite of the original patchSpace.py with
+one idea at its centre: **every real PipeWire object a node owns is
+supervised**.  The graph (PatchSpace) reconciles two things on every
+tick:
+
+  1. *structure* - the desired user-edited graph: which edges should be
+     connected, what the stable sockets of every node are;
+  2. *health* - for every backed node, that the processes owning its
+     real objects are still alive, restarting anything that died (with
+     bounded backoff so a permanently-broken node - a missing plugin,
+     say - is retried periodically instead of thrashed every tick).
+
+Why loading is deliberately lazy
+--------------------------------
+Creating an effect used to mean "load the DSP module right now", and a
+module load is the single most failure-prone step in the whole program
+(missing plugin, store not yet mounted, a module that rejects its args).
+The rewrite decouples the two:
+
+  * the *structural* pieces of a node - the plain null-audio-sink
+    adapter sockets and the keepalive streams - are created
+    synchronously when the node is added.  These basically cannot fail,
+    and they are what user edges attach to, so adding a node gives you
+    sockets immediately and never fails because of a DSP problem;
+  * the *module* (the actual filter-chain / echo-cancel engine, the
+    piece that can fail) is materialised by the supervision tick.  A
+    module that fails to load leaves the node healthy-but-silent and is
+    retried with backoff; fixing the config (or installing the plugin)
+    is picked up on the very next attempt, no restart required.
+
+This is what "loading nodes shouldn't cause as many failures as it
+does" means concretely: a load failure now degrades one node's interior,
+never the add-node operation, never the whole sync, and never the rest
+of the chain.
+
+Effect plumbing
+---------------
+Every effect is a *sandwich*:
+
+    real source -> [ in-dummy sink ] --link--> [ fx capture ] <-> DSP <-> [ fx playback ] --link--> [ out-dummy sink ] -> real sink
+
+The two dummy sinks are plain, stable, always-running null-audio-sink
+adapters - identical objects to every splitter/volume in the graph.
+User edges plug into the dummies, never into the DSP module, so a module
+reload (config change or crash recovery) only ever swaps the interior
+and can never drop or renegotiate a user edge.  The internal links
+between dummies and module are re-derived by name on every sync, so they
+self-heal across every reload for free.
+
+Echo-cancel is the same sandwich idea with three sockets (mic / probe /
+out) and one extra hidden playback drain, because its module really has
+four coordinated streams sharing one AEC state.
+
+Node taxonomy
+-------------
+  * InputNode / OutputNode        - leaves that match external nodes.
+  * LiveResolvableNode            - leaf that names an external device
+                                    or app; resolves to a live id when
+                                    the thing is present.
+  * TransparentNode               - pure pass-through (gate / exclude);
+                                    contributes no identity of its own.
+  * BackedNode                    - owns one or more real PipeWire
+                                    objects (see above for the contract).
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import subprocess
+import threading
+import time as _time
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+import pwmatch
+from pwgraph import PipewireGraph
+from pwproc import Backoff, OwnedPwNode, OwnedPwProcess
+
+logger = logging.getLogger(__name__)
+
+NodeId = str
+EdgeId = str
+
+# Reserved backing names for the daemon's built-in virtual sink/mic.
+# They are ordinary supervised VirtualSpeaker/VirtualMic nodes (added
+# hidden, see PatchSpace.add_node(public=...)) so they get exactly the
+# same supervision as any user-created device.  GUI convenience nodes
+# (patchbay_device / patchbay_mic_device) reference these names.
+PATCHBAY_VIRTUAL_SINK_NAME = "PatchBay"
+PATCHBAY_VIRTUAL_MIC_NAME = "PatchBay Mic"
+
+
+def _run_wpctl(*args, timeout: float = 2.0) -> bool:
+    """Best-effort `wpctl <args>`, swallowing failures - a value that
+    fails to apply now is retried on a later tick anyway."""
+    try:
+        subprocess.run(
+            ["wpctl", *[str(a) for a in args]],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        return True
+    except Exception as exc:
+        logger.warning("wpctl %s failed: %s", args, exc)
+        return False
+
+
+def _db_to_linear(db: float) -> float:
+    return 10.0 ** (db / 20.0)
+
+
+_NIX_STORE_CACHE: Dict[Tuple[str, str], Optional[str]] = {}
+
+
+def _store_ladspa_candidate(prefix: str, rel_path: str) -> Optional[str]:
+    """Look up (once, cached) whether /nix/store contains a
+    ``<prefix>-*`` output with ``rel_path`` under it - e.g. an
+    rnnoise-plugin install.  The store is where `nix develop` /
+    `nix profile` put packages, so this is how a plugin a dev shell adds
+    becomes discoverable without hardcoding a store hash."""
+    key = (prefix, rel_path)
+    if key in _NIX_STORE_CACHE:
+        return _NIX_STORE_CACHE[key]
+    found = None
+    try:
+        for entry in os.scandir("/nix/store"):
+            # Store paths are <hash>-<pkgname>-<version>...; match on the
+            # package-name part after the first dash, not the whole path.
+            if ("-" + prefix) not in entry.name:
+                continue
+            candidate = os.path.join(entry.path, rel_path)
+            if os.path.isfile(candidate):
+                found = candidate
+                break
+    except OSError:
+        pass
+    _NIX_STORE_CACHE[key] = found
+    return found
+
+
+# ---------------------------------------------------------------------------
+# Node base classes
+# ---------------------------------------------------------------------------
+
+
+class Node:
+    """Anything that can sit in the graph."""
+
+    def __init__(self, node_id: NodeId):
+        self.id = node_id
+
+    def is_transparent(self) -> bool:
+        return False
+
+    # -- serialization support: the config fields this node exposes ----
+    def config_fields(self) -> Dict[str, Any]:
+        """Canonical dict of this node's user-facing config, used for
+        export and for the daemon's set_node_property validation.  The
+        GUI reads these same keys back off get_nodes, so keeping one
+        source of truth here prevents drift."""
+        out: Dict[str, Any] = {}
+        for attr in ("pattern", "media_class", "description", "device_name",
+                     "app_name", "device_label", "device_volume",
+                     "profile_index", "profile_description", "label"):
+            if hasattr(self, attr):
+                out[attr] = getattr(self, attr)
+        return out
+
+
+class InputNode(Node):
+    def source_filters(self) -> List[dict]:
+        raise NotImplementedError
+
+
+class OutputNode(Node):
+    def sink_filters(self) -> List[dict]:
+        raise NotImplementedError
+
+
+class TransparentNode(Node):
+    def is_transparent(self) -> bool:
+        return True
+
+    def gate_open(self) -> bool:
+        return True
+
+
+class LiveResolvableNode:
+    """Mixin for a node that references an external object by a
+    persistent identity (device node.name / app application.name).  The
+    identity survives the object's absence; resolve_live(None) is normal,
+    not an error."""
+
+    def __init__(self):
+        self.live_node_id: Optional[int] = None
+        self.live_props: dict = {}
+
+    def matches_live_node(self, props: dict) -> bool:
+        raise NotImplementedError
+
+    def resolve_live(self, node_id, props) -> None:
+        self.live_node_id = node_id
+        self.live_props = dict(props) if props else {}
+        self._on_live_resolved()
+
+    def _on_live_resolved(self) -> None:
+        """Hook: a live device (re)resolved.  Subclasses push any
+        config that must be enforced on the live object."""
+        if hasattr(self, "apply_device_settings"):
+            self.apply_device_settings()
+
+
+class DeviceControlMixin:
+    """Persisted, continuously-re-enforced device volume + profile
+    (Bluetooth codec) config.  Values live on the node, so they
+    round-trip through export/import; apply_device_settings() re-pushes
+    them whenever the device (re)resolves and on every supervision tick,
+    so a Bluetooth reconnect resetting the codec gets corrected."""
+
+    def __init__(
+        self,
+        device_volume: float = 1.0,
+        profile_index: Optional[int] = None,
+        profile_description: str = "",
+    ):
+        self.device_volume = device_volume
+        self.profile_index = profile_index
+        self.profile_description = profile_description
+        # (device_id, profile_index) last successfully applied - profile
+        # changes visibly restart the device, so never re-issue an
+        # identical one (see apply_device_settings).
+        self._applied_profile: Optional[Tuple[Any, int]] = None
+
+    def apply_device_settings(self) -> None:
+        live_node_id = getattr(self, "live_node_id", None)
+        if live_node_id is not None:
+            _run_wpctl("set-volume", live_node_id, self.device_volume)
+        device_id = getattr(self, "live_props", {}).get("device.id")
+        if device_id is None or self.profile_index is None:
+            return
+        target = (device_id, self.profile_index)
+        if self._applied_profile == target:
+            return
+        if _run_wpctl("set-profile", device_id, self.profile_index):
+            self._applied_profile = target
+
+
+class BackedNode(Node):
+    """A process node that owns real PipeWire objects for as long as it
+    exists.
+
+    Contract with PatchSpace's supervision tick:
+
+      * ``structural_ok()`` / ``module_ok()`` report health cheaply;
+      * ``ensure_structural()`` creates whatever structural pieces are
+        missing (idempotent, name-based) - this is what add_node runs
+        synchronously and what the tick re-runs to repair deaths;
+      * effects additionally implement ``ensure_module()`` (create the
+        DSP module if it never came up) and ``reload_module()`` (swap an
+        existing module for a fresh one - config change / crash).
+
+    ``backings`` is the flat list of OwnedPwNode objects the node is
+    responsible for.  ``_reload_due`` is set by set_node_property for
+    load-time-only options; the tick performs the reload."""
+
+    def __init__(self, node_id: NodeId, backing_node_name: str):
+        super().__init__(node_id)
+        self.backing_node_name = backing_node_name
+        self.backings: List[OwnedPwNode] = []
+        self._reload_due: Optional[float] = None
+
+    # How long a backing gets to show up as a live PipeWire object,
+    # once its owning process is confirmed running, before we give up
+    # waiting and treat it the same as a crash (see OwnedPwNode.stuck).
+    # Deliberately longer than SESSION_LOAD_NODE_TIMEOUT_S's 5s bring-up
+    # window so a plugin that's merely slow to initialize on its first
+    # load isn't mistaken for one that will never come up - this only
+    # fires for a backing supervise() keeps seeing on tick after tick.
+    RESOLVE_GRACE_S = 8.0
+
+    # -- identities ------------------------------------------------------
+
+    def input_identity(self, port: str = "in") -> dict:
+        return {"name": self.backing_node_name}
+
+    def output_identity(self) -> dict:
+        # Exact node.name match ("nodeName") - node.name is unique, a
+        # loose "name" substring would select any sibling whose name
+        # merely contains ours.
+        return {"nodeName": self.backing_node_name}
+
+    def internal_links(self) -> List[Tuple[dict, dict]]:
+        return []
+
+    def has_module(self) -> bool:
+        return False
+
+    def module_backing(self) -> Optional[OwnedPwNode]:
+        return None
+
+    # -- health ----------------------------------------------------------
+
+    def dead_backings(self) -> List[OwnedPwNode]:
+        """Process-owning backings that need to be torn down and
+        recreated: ones whose process exited on its own, AND ones that
+        are still running but have been alive long enough that they
+        should have resolved in the live graph by now and never did
+        (see OwnedPwNode.stuck) - a stuck backing is functionally dead
+        even though nothing crashed."""
+        return [
+            b
+            for b in self.backings
+            if b.owns_process and (not b.is_alive or b.stuck(self.RESOLVE_GRACE_S))
+        ]
+
+    def structural_ok(self) -> bool:
+        raise NotImplementedError
+
+    def module_ok(self) -> bool:
+        return True
+
+    # -- lifecycle -------------------------------------------------------
+
+    def ensure_structural(self) -> None:
+        raise NotImplementedError
+
+    def ensure_module(self) -> None:
+        pass
+
+    def reload_module(self) -> None:
+        self.ensure_module()
+
+    def schedule_reload(self) -> None:
+        """Mark the interior module for reload on the next supervision
+        pass; the daemon debounces the exact timing."""
+        self._reload_due = _time.monotonic()
+
+    def teardown_backing(self) -> None:
+        """Destroy every owned backing at once instead of one at a time.
+
+        Each backing is an independent OS-level thing (its own pw-cli/
+        pw-cat subprocess, or none) - destroying them has no ordering
+        requirement the way *creating* them does, so serializing it was
+        pure waste. ``OwnedPwNode.destroy()`` can block for a couple of
+        seconds in the worst case (an in-band ``destroy``/``quit`` that
+        doesn't land cleanly escalates to SIGTERM then SIGKILL, each with
+        its own wait), and a single effect node can own eight-plus
+        backings (dummies + their keepalives + the module's own
+        streams) - one at a time that's "the whole chain takes forever
+        to delete"; concurrently it's bounded by the single slowest
+        destroy instead of their sum."""
+        backings, self.backings = self.backings, []
+        if len(backings) <= 1:
+            for owned in backings:
+                owned.destroy()
+            return
+        threads = [threading.Thread(target=b.destroy, daemon=True) for b in backings]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+    def resolve_backing(self, name: str, node_id: int) -> bool:
+        for owned in self.backings:
+            if owned.node_id is None and owned.name == name:
+                owned.resolve(node_id)
+                return True
+        return False
+
+    # -- shared spawn helpers ---------------------------------------------
+
+    def _find(self, name: str) -> Optional[OwnedPwNode]:
+        for b in self.backings:
+            if b.name == name:
+                return b
+        return None
+
+    def _drop(self, name: str) -> None:
+        b = self._find(name)
+        if b is not None:
+            b.destroy()
+            self.backings.remove(b)
+
+    def _prune_dead(self, names: Optional[Set[str]] = None) -> None:
+        """Drop (and destroy) process-owning backings whose process died
+        or that are stuck (alive but never resolved - see
+        OwnedPwNode.stuck), optionally restricted to a name set."""
+        for owned in list(self.backings):
+            if owned.owns_process and (
+                not owned.is_alive or owned.stuck(self.RESOLVE_GRACE_S)
+            ):
+                if names is None or owned.name in names:
+                    owned.destroy()
+                    if owned in self.backings:
+                        self.backings.remove(owned)
+
+    def _spawn_cli(self, name: str, create_line: str,
+                   pw_cli_command=("pw-cli",), settle: float = 0.3) -> Optional[OwnedPwNode]:
+        existing = self._find(name)
+        if existing is not None:
+            return existing
+        owned = OwnedPwNode(name, pw_cli_command, settle)
+        if not owned.create(create_line):
+            logger.error("Creating %r failed for %r", name, self.id)
+            return None
+        self.backings.append(owned)
+        return owned
+
+    def _ensure_null_sink(self, name: str, extra_props: str = "",
+                          description: Optional[str] = None,
+                          pw_cli_command=("pw-cli",), settle: float = 0.3,
+                          drop_keepalive: bool = True) -> Optional[OwnedPwNode]:
+        """Create one plain null-audio-sink adapter named ``name`` if it
+        is not already among self.backings.  When it has to be created
+        the old one is gone, so any keepalive aimed at it is aimed at a
+        vanished target and is dropped too (a pw-cat client does not
+        re-link on its own)."""
+        existing = self._find(name)
+        if existing is not None:
+            return existing
+        desc = description or name
+        config = (
+            "factory.name=support.null-audio-sink "
+            f'node.name="{name}" '
+            f'node.description="{desc}" '
+            "media.class=Audio/Sink "
+            "audio.position=[FL,FR]" + (f" {extra_props}" if extra_props else "")
+        )
+        owned = self._spawn_cli(name, f"create-node adapter {config}",
+                                pw_cli_command, settle)
+        if owned is None:
+            return None
+        if drop_keepalive:
+            self._drop(f"{name}_keepalive")
+        return owned
+
+    def _ensure_feed(self, name: str, target: str,
+                     pw_cli_command=("pw-cli",), settle: float = 0.3) -> Optional[OwnedPwNode]:
+        """A silent pw-cat --playback stream permanently feeding
+        ``target``, so that sink never drops to zero active links (and
+        therefore never gets suspended).
+
+        --properties pins node.name to ``name`` - without it pw-cat
+        registers under its own default stream name, which is never
+        what ``name`` says it is. That mismatch meant node_id_by_name
+        could never find this backing, so it never resolved a node_id -
+        which made _node_is_ready() (all backings resolved) return
+        False forever for every node with a keepalive, working or not,
+        and made stuck() (see OwnedPwNode) misdiagnose a perfectly
+        healthy keepalive as broken and tear it down on a loop."""
+        existing = self._find(name)
+        if existing is not None:
+            return existing
+        proc = OwnedPwProcess(name, pw_cli_command, settle)
+        command = (
+            "pw-cat", "--playback", "--volume", "0", "--target", target,
+            "--properties", f'{{ node.name = "{name}" node.description = "{name}" }}',
+            "--raw", "--format", "s16", "--rate", "48000", "--channels", "2",
+            "/dev/zero",
+        )
+        if not proc.create(command):
+            logger.error("Keepalive feed %r failed to start for %r", name, self.id)
+            return None
+        self.backings.append(proc)
+        return proc
+
+    def _ensure_drain(self, name: str, target: str,
+                      pw_cli_command=("pw-cli",), settle: float = 0.3) -> Optional[OwnedPwNode]:
+        """Output-side mirror of _ensure_feed: a silent pw-cat --record
+        stream permanently draining ``target`` (PipeWire satisfies a
+        record targeting a sink by tapping whatever feeds it).  Same
+        --properties reasoning as _ensure_feed above."""
+        existing = self._find(name)
+        if existing is not None:
+            return existing
+        proc = OwnedPwProcess(name, pw_cli_command, settle)
+        command = (
+            "pw-cat", "--record", "--target", target,
+            "--properties", f'{{ node.name = "{name}" node.description = "{name}" }}',
+            "--raw", "--format", "s16", "--rate", "48000", "--channels", "2",
+            "/dev/null",
+        )
+        if not proc.create(command):
+            logger.error("Keepalive drain %r failed to start for %r", name, self.id)
+            return None
+        self.backings.append(proc)
+        return proc
+
+
+# ---------------------------------------------------------------------------
+# Leaves: filters, devices, apps, patchbay conveniences
+# ---------------------------------------------------------------------------
+
+
+class RegexInputNode(InputNode):
+    def __init__(self, node_id, pattern: str = ""):
+        super().__init__(node_id)
+        self.pattern = pattern
+
+    def source_filters(self):
+        return [{"nameRegex": self.pattern}] if self.pattern else []
+
+
+class MediaClassInputNode(InputNode):
+    def __init__(self, node_id, media_class: str = ""):
+        super().__init__(node_id)
+        self.media_class = media_class
+
+    def source_filters(self):
+        return [{"mediaClass": self.media_class}] if self.media_class else []
+
+
+class DescriptionInputNode(InputNode):
+    def __init__(self, node_id, description: str = ""):
+        super().__init__(node_id)
+        self.description = description
+
+    def source_filters(self):
+        return [{"description": self.description}] if self.description else []
+
+
+class RegexOutputNode(OutputNode):
+    def __init__(self, node_id, pattern: str = "", port_type: Optional[str] = None):
+        super().__init__(node_id)
+        self.pattern = pattern
+        self.port_type = port_type
+
+    def sink_filters(self):
+        return [{"nameRegex": self.pattern, "type": self.port_type}] if self.pattern else []
+
+
+class MediaClassOutputNode(OutputNode):
+    def __init__(self, node_id, media_class: str = "", port_type: Optional[str] = None):
+        super().__init__(node_id)
+        self.media_class = media_class
+        self.port_type = port_type
+
+    def sink_filters(self):
+        return [{"mediaClass": self.media_class, "type": self.port_type}] if self.media_class else []
+
+
+class DescriptionOutputNode(OutputNode):
+    def __init__(self, node_id, description: str = "", port_type: Optional[str] = None):
+        super().__init__(node_id)
+        self.description = description
+        self.port_type = port_type
+
+    def sink_filters(self):
+        return [{"description": self.description, "type": self.port_type}] if self.description else []
+
+
+class PatchBayDeviceNode(InputNode, OutputNode):
+    """Convenience node for the daemon's built-in virtual sink: usable
+    as a target (apps route in) via its sink input, and as a source via
+    its monitor ports.  Both identities are exact-name because the mic
+    plumbing uses node.names that merely start with "PatchBay"."""
+
+    def source_filters(self):
+        return [{"nodeName": PATCHBAY_VIRTUAL_SINK_NAME}]
+
+    def sink_filters(self):
+        return [{"name": PATCHBAY_VIRTUAL_SINK_NAME}]
+
+
+class PatchBayMicDeviceNode(InputNode, OutputNode):
+    """Convenience node for the built-in virtual mic.  Routes in via the
+    underlying "{name}_sink", picked up downstream from the loopback's
+    Audio/Source (PATCHBAY_VIRTUAL_MIC_NAME)."""
+
+    def source_filters(self):
+        return [{"nodeName": PATCHBAY_VIRTUAL_MIC_NAME}]
+
+    def sink_filters(self):
+        return [{"name": f"{PATCHBAY_VIRTUAL_MIC_NAME}_sink"}]
+
+
+class DeviceInputNode(InputNode, LiveResolvableNode, DeviceControlMixin):
+    def __init__(self, node_id, device_name: str = "", description: str = "",
+                 device_volume: float = 1.0,
+                 profile_index: Optional[int] = None,
+                 profile_description: str = ""):
+        InputNode.__init__(self, node_id)
+        LiveResolvableNode.__init__(self)
+        DeviceControlMixin.__init__(self, device_volume, profile_index,
+                                    profile_description)
+        self.device_name = device_name
+        self.description = description
+
+    def source_filters(self):
+        if not self.device_name:
+            return []
+        return [{"nodeName": self.device_name, "mediaClass": "Audio/Source"}]
+
+    def matches_live_node(self, props):
+        return bool(self.device_name) and props.get("node.name") == self.device_name
+
+    def _on_live_resolved(self):
+        if self.live_props:
+            self.description = (
+                self.live_props.get("node.description")
+                or self.live_props.get("node.nick")
+                or self.description
+            )
+        super()._on_live_resolved()
+
+
+class DeviceOutputNode(OutputNode, LiveResolvableNode, DeviceControlMixin):
+    def __init__(self, node_id, device_name: str = "", description: str = "",
+                 device_volume: float = 1.0,
+                 profile_index: Optional[int] = None,
+                 profile_description: str = ""):
+        OutputNode.__init__(self, node_id)
+        LiveResolvableNode.__init__(self)
+        DeviceControlMixin.__init__(self, device_volume, profile_index,
+                                    profile_description)
+        self.device_name = device_name
+        self.description = description
+
+    def sink_filters(self):
+        if not self.device_name:
+            return []
+        return [{"name": self.device_name, "mediaClass": "Audio/Sink"}]
+
+    def matches_live_node(self, props):
+        return bool(self.device_name) and props.get("node.name") == self.device_name
+
+    def _on_live_resolved(self):
+        if self.live_props:
+            self.description = (
+                self.live_props.get("node.description")
+                or self.live_props.get("node.nick")
+                or self.description
+            )
+        super()._on_live_resolved()
+
+
+class AppInputNode(InputNode, LiveResolvableNode):
+    def __init__(self, node_id, app_name: str = ""):
+        InputNode.__init__(self, node_id)
+        LiveResolvableNode.__init__(self)
+        self.app_name = app_name
+
+    def source_filters(self):
+        return [{"name": self.app_name, "mediaClass": "Stream/Output/Audio"}] if self.app_name else []
+
+    def matches_live_node(self, props):
+        hay = props.get("application.name") or props.get("node.name") or ""
+        return bool(self.app_name) and hay == self.app_name
+
+
+class AppOutputNode(OutputNode, LiveResolvableNode):
+    def __init__(self, node_id, app_name: str = ""):
+        OutputNode.__init__(self, node_id)
+        LiveResolvableNode.__init__(self)
+        self.app_name = app_name
+
+    def sink_filters(self):
+        if not self.app_name:
+            return []
+        return [
+            {"name": self.app_name, "mediaClass": "Stream/Input/Audio"},
+            {"description": self.app_name, "mediaClass": "Stream/Input/Audio"},
+        ]
+
+    def matches_live_node(self, props):
+        hay = props.get("application.name") or props.get("node.name") or ""
+        return bool(self.app_name) and hay == self.app_name
+
+
+# ---------------------------------------------------------------------------
+# Transparent nodes
+# ---------------------------------------------------------------------------
+
+
+class GateNode(TransparentNode):
+    """The "should this pass" checkbox.  When disabled, sync() treats the
+    node as having no source, so every edge downstream is disconnected on
+    the very next pass."""
+
+    def __init__(self, node_id, enabled: bool = True):
+        super().__init__(node_id)
+        self.enabled = enabled
+
+    def gate_open(self):
+        return self.enabled
+
+
+class ExcludeFilterNode(TransparentNode):
+    """Pass-through that narrows whatever is upstream by excluding a
+    nameRegex.  Annotates upstream source filters with "exclude" entries
+    rather than touching the live graph."""
+
+    def __init__(self, node_id, pattern: str = ""):
+        super().__init__(node_id)
+        self.pattern = pattern
+
+    def exclude_filter(self) -> Optional[dict]:
+        if not self.pattern:
+            return None
+        return {"nameRegex": self.pattern}
+
+
+# ---------------------------------------------------------------------------
+# Simple backed nodes
+# ---------------------------------------------------------------------------
+
+
+class _SingleSinkNode(BackedNode):
+    """A single monitor-enabled null-audio-sink adapter, optionally with
+    monitor.channel-volumes so wpctl can drive a per-channel volume."""
+
+    def __init__(self, node_id, backing_node_name: str,
+                 pw_cli_command=("pw-cli",), settle: float = 0.3,
+                 extra_props: str = "", description: Optional[str] = None):
+        super().__init__(node_id, backing_node_name)
+        self._pw_cli_command = pw_cli_command
+        self._settle = settle
+        self._extra_props = extra_props
+        self._description = description
+
+    def structural_ok(self) -> bool:
+        b = self._find(self.backing_node_name)
+        return b is not None and (
+            not b.owns_process or (b.is_alive and not b.stuck(self.RESOLVE_GRACE_S))
+        )
+
+    def ensure_structural(self) -> None:
+        self._prune_dead()
+        self._ensure_null_sink(self.backing_node_name, self._extra_props,
+                               self._description, self._pw_cli_command, self._settle)
+
+
+class SplitterNode(_SingleSinkNode):
+    def __init__(self, node_id, backing_node_name: Optional[str] = None,
+                 pw_cli_command=("pw-cli",), settle: float = 0.3):
+        super().__init__(node_id, backing_node_name or f"splitter_{node_id}",
+                         pw_cli_command, settle, description=f"Splitter: {node_id}")
+
+
+class VirtualSpeakerNode(_SingleSinkNode):
+    def __init__(self, node_id, backing_node_name: str, device_label: str = "",
+                 pw_cli_command=("pw-cli",), settle: float = 0.3):
+        super().__init__(node_id, backing_node_name, pw_cli_command, settle,
+                         extra_props="monitor.channel-volumes=1",
+                         description=device_label or backing_node_name)
+        self.device_label = device_label
+
+    def config_fields(self):
+        out = super().config_fields()
+        out["backing_node_name"] = self.backing_node_name
+        return out
+
+
+class VolumeProcessNode(_SingleSinkNode):
+    """A volume slider backed by a channel-volume-enabled null sink -
+    the real object whose per-channel volume wpctl drives."""
+
+    def __init__(self, node_id, backing_node_name: str,
+                 initial_volume: float = 1.0,
+                 volume_min: float = 0.0, volume_max: float = 1.0,
+                 pw_cli_command=("pw-cli",), settle: float = 0.3):
+        super().__init__(node_id, backing_node_name, pw_cli_command, settle,
+                         extra_props="monitor.channel-volumes=1",
+                         description=backing_node_name)
+        self.volume = max(0.0, min(1.0, initial_volume))
+        self.volume_min = volume_min
+        self.volume_max = volume_max
+        self._volume_applied_to: Optional[int] = None
+
+    @property
+    def backing_node_id(self) -> Optional[int]:
+        b = self._find(self.backing_node_name)
+        return b.node_id if b else None
+
+    def _apply_volume(self) -> None:
+        b = self._find(self.backing_node_name)
+        if b is None or b.node_id is None:
+            return
+        if b.node_id == self._volume_applied_to:
+            return
+        actual = self.volume_min + (self.volume_max - self.volume_min) * self.volume
+        logger.info("Volume for %s set to %.2f (fraction %.2f)",
+                    self.backing_node_name, actual, self.volume)
+        _run_wpctl("set-volume", b.node_id, actual)
+        self._volume_applied_to = b.node_id
+
+    def set_volume(self, fraction: float) -> None:
+        self.volume = max(0.0, min(1.0, fraction))
+        self._volume_applied_to = None
+        self._apply_volume()
+
+    def set_volume_range(self, vmin: float, vmax: float) -> None:
+        self.volume_min = vmin
+        self.volume_max = vmax
+        self._volume_applied_to = None
+        self._apply_volume()
+
+    def refresh_live(self) -> None:
+        self._apply_volume()
+
+    def config_fields(self):
+        out = super().config_fields()
+        out["backing_node_name"] = self.backing_node_name
+        out["initial_volume"] = self.volume
+        out["volume_min"] = self.volume_min
+        out["volume_max"] = self.volume_max
+        return out
+
+
+class VirtualMicNode(BackedNode):
+    """A user-named virtual microphone: a null-audio-sink everything is
+    fed into, a standalone pw-loopback republishing its monitor as a real
+    Audio/Source (that is the object apps pick as a mic - a bare sink
+    monitor isn't offered as a microphone), and a permanent silent
+    keepalive feeding the sink so the mic never reads as idle."""
+
+    def __init__(self, node_id, backing_node_name: str, device_label: str = "",
+                 pw_cli_command=("pw-cli",), settle: float = 0.3):
+        super().__init__(node_id, backing_node_name)
+        self.device_label = device_label
+        self._pw_cli_command = pw_cli_command
+        self._settle = settle
+
+    @property
+    def _sink_name(self) -> str:
+        return f"{self.backing_node_name}_sink"
+
+    @property
+    def _loopback_name(self) -> str:
+        return self.backing_node_name
+
+    @property
+    def _keepalive_name(self) -> str:
+        return f"{self.backing_node_name}_keepalive"
+
+    def input_identity(self, port: str = "in") -> dict:
+        return {"name": self._sink_name}
+
+    def output_identity(self) -> dict:
+        return {"nodeName": self._loopback_name}
+
+    def structural_ok(self) -> bool:
+        for name in (self._sink_name, self._loopback_name, self._keepalive_name):
+            b = self._find(name)
+            if b is None:
+                return False
+            if b.owns_process and not b.is_alive:
+                return False
+        return True
+
+    def ensure_structural(self) -> None:
+        self._prune_dead()
+        if self._find(self._sink_name) is None:
+            desc = self.device_label or self.backing_node_name
+            config = (
+                "factory.name=support.null-audio-sink "
+                f'node.name="{self._sink_name}" '
+                f'node.description="{desc} (input)" '
+                "media.class=Audio/Sink "
+                "audio.position=[FL,FR] "
+                "monitor.channel-volumes=1"
+            )
+            sink = self._spawn_cli(self._sink_name, f"create-node adapter {config}",
+                                   self._pw_cli_command, self._settle)
+            if sink is None:
+                return
+            self._drop(self._keepalive_name)  # retarget on next ensure
+        if self._find(self._loopback_name) is None:
+            self._spawn_loopback()
+        self._ensure_feed(self._keepalive_name, self._sink_name,
+                          self._pw_cli_command, self._settle)
+
+    def _spawn_loopback(self) -> None:
+        # Deliberately pw-loopback (argv list, no shell quoting to get
+        # wrong) rather than a pw-cli load-module with a hand-escaped
+        # nested SPA-JSON props blob.  --playback-props/--capture-props
+        # are the property flags; -P/-C would be *target device names*.
+        desc = self.device_label or self.backing_node_name
+        capture_name = f"{self.backing_node_name}_capture"
+        playback_props = (
+            f'{{ node.name = "{self._loopback_name}" '
+            f'node.description = "{desc}" '
+            "media.class = Audio/Source }"
+        )
+        capture_props = (
+            f'{{ node.name = "{capture_name}" '
+            f'target.object = "{self._sink_name}" '
+            "stream.capture.sink = true "
+            "audio.position = [ FL FR ] }"
+        )
+        owned = OwnedPwProcess(self._loopback_name, self._pw_cli_command, self._settle)
+        command = (
+            "pw-loopback",
+            "--playback-props", playback_props,
+            "--capture-props", capture_props,
+        )
+        if owned.create(command):
+            self.backings.append(owned)
+        else:
+            logger.error("Virtual mic loopback creation failed for %r", self.id)
+
+    def config_fields(self):
+        out = super().config_fields()
+        out["backing_node_name"] = self.backing_node_name
+        return out
+
+
+# ---------------------------------------------------------------------------
+# Effects (real DSP sandwiches)
+# ---------------------------------------------------------------------------
+
+
+class _ChainEffect(BackedNode):
+    """Shared plumbing for an effect whose real DSP is a filter-chain
+    module sandwiched between two stable dummy sinks:
+
+        [ {name}_in ] -> link -> [ {name} (capture) <-> DSP <-> {name}_fx_out ] -> link -> [ {name}_out ]
+
+    User edges plug into the dummies (never the module), and the two
+    internal links are re-derived by name every sync - so reloading the
+    interior (option change, crash, plugin fix) never touches a user
+    edge.  The input dummy is permanently fed and the output dummy
+    permanently drained so neither side can ever be suspended for having
+    zero active links.
+
+    Subclasses provide the module command (``_module_command()``) and
+    any live controls.
+    """
+
+    def __init__(self, node_id, backing_node_name: str,
+                 pw_cli_command=("pw-cli",), settle: float = 0.3):
+        super().__init__(node_id, backing_node_name)
+        self._pw_cli_command = pw_cli_command
+        self._settle = settle
+
+    # -- naming ----------------------------------------------------------
+
+    @property
+    def _capture_name(self) -> str:
+        # The module's capture (sink) stream = primary/owning backing.
+        return self.backing_node_name
+
+    @property
+    def _playback_name(self) -> str:
+        return f"{self.backing_node_name}_fx_out"
+
+    @property
+    def _input_dummy_name(self) -> str:
+        return f"{self.backing_node_name}_in"
+
+    @property
+    def _output_dummy_name(self) -> str:
+        return f"{self.backing_node_name}_out"
+
+    @property
+    def _feed_name(self) -> str:
+        return f"{self._input_dummy_name}_keepalive"
+
+    @property
+    def _drain_name(self) -> str:
+        return f"{self._output_dummy_name}_keepalive"
+
+    # -- identities / internal plumbing ----------------------------------
+
+    def input_identity(self, port: str = "in") -> dict:
+        return {"name": self._input_dummy_name}
+
+    def output_identity(self) -> dict:
+        return {"nodeName": self._output_dummy_name}
+
+    def internal_links(self):
+        return [
+            ({"nodeName": self._input_dummy_name}, {"name": self._capture_name}),
+            ({"nodeName": self._playback_name}, {"name": self._output_dummy_name}),
+        ]
+
+    # -- health ----------------------------------------------------------
+
+    def has_module(self) -> bool:
+        return True
+
+    def module_backing(self) -> Optional[OwnedPwNode]:
+        return self._find(self._capture_name)
+
+    def module_ok(self) -> bool:
+        b = self.module_backing()
+        return b is not None and b.owns_process and b.is_alive and not b.stuck(
+            self.RESOLVE_GRACE_S
+        )
+
+    def structural_ok(self) -> bool:
+        for name in (self._input_dummy_name, self._output_dummy_name,
+                     self._feed_name, self._drain_name):
+            b = self._find(name)
+            if b is None:
+                return False
+            if b.owns_process and (not b.is_alive or b.stuck(self.RESOLVE_GRACE_S)):
+                return False
+        return True
+
+    # -- module command ---------------------------------------------------
+
+    def _module_command(self) -> Optional[str]:
+        raise NotImplementedError
+
+    def _module_command_args(self) -> str:
+        raise NotImplementedError
+
+    def _spawn_module(self) -> Optional[OwnedPwNode]:
+        capture_name = self._capture_name
+        playback_name = self._playback_name
+        if self._find(capture_name) is not None:
+            return self._find(capture_name)
+        command = "load-module libpipewire-module-filter-chain { " + self._module_command_args() + " }"
+        owned = OwnedPwNode(capture_name, self._pw_cli_command, self._settle)
+        if not owned.create(command):
+            logger.error("%s module creation failed for %r", type(self).__name__, self.id)
+            return None
+        self.backings.append(owned)
+        self.backings.append(OwnedPwNode(playback_name))
+        return owned
+
+    def _module_children(self) -> Set[str]:
+        return {self._capture_name, self._playback_name}
+
+    # -- lifecycle --------------------------------------------------------
+
+    def ensure_structural(self) -> None:
+        structural_names = {self._input_dummy_name, self._output_dummy_name,
+                            self._feed_name, self._drain_name}
+        self._prune_dead(structural_names)
+        self._ensure_null_sink(self._input_dummy_name, description=f"{self.id} input",
+                               pw_cli_command=self._pw_cli_command, settle=self._settle)
+        self._ensure_null_sink(self._output_dummy_name, description=f"{self.id} output",
+                               pw_cli_command=self._pw_cli_command, settle=self._settle)
+        self._ensure_feed(self._feed_name, self._input_dummy_name,
+                          self._pw_cli_command, self._settle)
+        self._ensure_drain(self._drain_name, self._output_dummy_name,
+                           self._pw_cli_command, self._settle)
+
+    def ensure_module(self) -> None:
+        """Spawn the module if it is missing, its process died, or it's
+        stuck (alive but never resolved a live node - see
+        OwnedPwNode.stuck; this is what actually catches an LV2/LADSPA
+        plugin that fails to instantiate without pw-cli's phantom-
+        creation guard noticing).  On a fresh spawn the output drain
+        must be re-pointed too: a pw-cat record targeting a sink taps
+        whichever stream is feeding it at start time, so one started
+        against the old module's playback stream does not follow a
+        freshly-loaded module."""
+        cap = self._find(self._capture_name)
+        fresh = cap is None or not (cap.owns_process and cap.is_alive) or cap.stuck(
+            self.RESOLVE_GRACE_S
+        )
+        if fresh:
+            for owned in list(self.backings):
+                if owned.name in self._module_children():
+                    owned.destroy()
+                    if owned in self.backings:
+                        self.backings.remove(owned)
+            self._spawn_module()
+        mod = self._find(self._capture_name)
+        if fresh and mod is not None and mod.is_alive:
+            self._drop(self._drain_name)
+        self.ensure_structural()
+
+    def reload_module(self) -> None:
+        """Swap only the interior: drop the module's own backings and the
+        output drain (its tap dies with the old module), then rebuild."""
+        drop_names = self._module_children() | {self._drain_name}
+        for owned in list(self.backings):
+            if owned.name in drop_names:
+                owned.destroy()
+                if owned in self.backings:
+                    self.backings.remove(owned)
+        self.ensure_module()
+
+    # teardown_backing() is inherited from BackedNode (parallel destroy
+    # of every owned backing) - _ChainEffect used to shadow it with an
+    # identical one-at-a-time loop; removed so there's exactly one
+    # implementation to keep in sync with.
+
+
+class NoiseCancelNode(_ChainEffect):
+    """RNNoise LADSPA denoiser (librnnoise_ladspa.so,
+    "noise_suppressor_mono").  ``vad_threshold`` is a live LADSPA
+    control pushed straight down the module's own pw-cli session -
+    no reload on every slider tick.
+
+    ensure_module() locates the plugin by probing the standard
+    non-/usr install locations: LADSPA_PATH (what the shell/daemon
+    exports), a user nix profile, the system profile, and a scan of
+    /nix/store.  Without this the module silently fails to load on a
+    distro that keeps plugins out of /usr (NixOS) - which takes the
+    whole node's audio with it."""
+
+    LABEL = "noise_suppressor_mono"
+    _CANDIDATES = (
+        "/usr/lib/ladspa/librnnoise_ladspa.so",
+        "/usr/lib/x86_64-linux-gnu/ladspa/librnnoise_ladspa.so",
+        "/usr/lib64/ladspa/librnnoise_ladspa.so",
+        "/usr/lib/ladspa/rnnoise_ladspa.so",
+    )
+
+    def __init__(self, node_id, backing_node_name: str,
+                 vad_threshold: float = 50.0,
+                 ladspa_plugin: str = "", ladspa_label: str = "",
+                 method: str = "rnnoise",
+                 pw_cli_command=("pw-cli",), settle: float = 0.3, **_ignored):
+        super().__init__(node_id, backing_node_name, pw_cli_command, settle)
+        self.vad_threshold = max(0.0, min(100.0, vad_threshold))
+        self.ladspa_plugin = ladspa_plugin
+        self.ladspa_label = ladspa_label
+        self._control_applied_to: Optional[int] = None
+
+    @classmethod
+    def _plugin_candidates(cls):
+        rel = "librnnoise_ladspa.so"
+        candidates = list(cls._CANDIDATES)
+        for base in cls._ladspa_search_paths():
+            candidates.append(os.path.join(base, rel))
+        for entry in os.environ.get("LADSPA_PATH", "").split(":"):
+            entry = entry.strip()
+            if entry:
+                candidates.append(os.path.join(entry, rel))
+        store = _store_ladspa_candidate("rnnoise-plugin", f"lib/ladspa/{rel}")
+        if store:
+            candidates.append(store)
+        return candidates
+
+    @staticmethod
+    def _ladspa_search_paths():
+        bases = [
+            os.path.expanduser("~/.nix-profile/lib/ladspa"),
+            os.path.expanduser("~/.nix-profile/lib64/ladspa"),
+            "/run/current-system/sw/lib/ladspa",
+        ]
+        user = os.environ.get("USER", "")
+        if user:
+            bases.append(f"/etc/profiles/per-user/{user}/lib/ladspa")
+        return bases
+
+    def _resolve_plugin(self):
+        """(plugin path, label) for the filter graph: the explicit config
+        override wins; otherwise the first candidate that actually exists
+        on this machine; otherwise the first candidate anyway so a load
+        failure at least names what was tried."""
+        if self.ladspa_plugin and self.ladspa_label:
+            return self.ladspa_plugin, self.ladspa_label
+        for path in self._plugin_candidates():
+            if path and os.path.isfile(path):
+                return path, self.LABEL
+        return self._CANDIDATES[0], self.LABEL
+
+    def _module_command_args(self) -> str:
+        plugin, label = self._resolve_plugin()
+        return (
+            f'node.description = "{self.id}" '
+            "filter.graph = { nodes = [ { "
+            "type = ladspa "
+            f"name = {self.backing_node_name}_plugin "
+            f"plugin = {plugin} "
+            f"label = {label} "
+            f'control = {{ "VAD Threshold (%)" = {self.vad_threshold:.2f} }} '
+            "} ] } "
+            "capture.props = { "
+            f'node.name = "{self._capture_name}" '
+            f'node.description = "{self._capture_name}" '
+            "media.class = Audio/Sink "
+            "audio.position = [ FL FR ] } "
+            "playback.props = { "
+            f'node.name = "{self._playback_name}" '
+            f'node.description = "{self._playback_name}" '
+            "media.class = Audio/Source "
+            "audio.position = [ FL FR ] }"
+        )
+
+    def _apply_control(self) -> None:
+        mod = self.module_backing()
+        if mod is None or mod.node_id is None:
+            return
+        if mod.node_id == self._control_applied_to:
+            return
+        mod.set_param("Props", f'{{ params = [ "VAD Threshold (%)" {self.vad_threshold:.2f} ] }}')
+        self._control_applied_to = mod.node_id
+
+    def set_vad_threshold(self, value: float) -> None:
+        self.vad_threshold = max(0.0, min(100.0, value))
+        self._control_applied_to = None
+        self._apply_control()
+
+    def refresh_live(self) -> None:
+        self._apply_control()
+
+
+class ReverbNode(_ChainEffect):
+    """CAPS "Plate" reverb.  wet_dry is a load-time filter-graph control,
+    so changing it schedules an interior-only module reload (the dummies
+    keep every user edge attached)."""
+
+    DEFAULT_LADSPA_PLUGIN = "/usr/lib/ladspa/caps.so"
+    DEFAULT_LADSPA_LABEL = "Plate"
+
+    def __init__(self, node_id, backing_node_name: str,
+                 ladspa_plugin: str = "", ladspa_label: str = "",
+                 wet_dry: float = 0.3,
+                 pw_cli_command=("pw-cli",), settle: float = 0.3):
+        super().__init__(node_id, backing_node_name, pw_cli_command, settle)
+        self.ladspa_plugin = ladspa_plugin or self.DEFAULT_LADSPA_PLUGIN
+        self.ladspa_label = ladspa_label or self.DEFAULT_LADSPA_LABEL
+        self.wet_dry = max(0.0, min(1.0, wet_dry))
+
+    def _module_command_args(self) -> str:
+        return (
+            f'node.description = "{self.id}" '
+            "filter.graph = { nodes = [ { "
+            "type = ladspa "
+            f"name = {self.backing_node_name}_plugin "
+            f"plugin = {self.ladspa_plugin} "
+            f"label = {self.ladspa_label} "
+            f'control = {{ "dry/wet" = {self.wet_dry} }} '
+            "} ] } "
+            "capture.props = { "
+            f'node.name = "{self._capture_name}" '
+            f'node.description = "{self._capture_name}" '
+            "media.class = Audio/Sink "
+            "audio.position = [ FL FR ] } "
+            "playback.props = { "
+            f'node.name = "{self._playback_name}" '
+            f'node.description = "{self._playback_name}" '
+            "media.class = Audio/Source "
+            "audio.position = [ FL FR ] }"
+        )
+
+
+class SensitivityGateNode(_ChainEffect):
+    """A Discord-style voice-activity gate backed by Calf's plain "Gate"
+    LV2 plugin (a real downward expander with a live-settable
+    threshold), instead of a hard-knee LADSPA gate whose threshold could
+    only change by reloading (glitchy) or by gain-staging workarounds.
+
+    ``level`` (0-100, higher = needs a louder signal) maps to Calf's
+    linear "threshold" control port and is pushed live via set-param -
+    no module reload, safe to call on every slider tick."""
+
+    LV2_URI = "http://calf.sourceforge.net/plugins/Gate"
+    RATIO = 4.0
+    ATTACK_MS = 5.0
+    RELEASE_MS = 200.0
+    KNEE = 6.0
+    MAKEUP = 1.0
+    # How far the gate ducks when the signal is below threshold.  Calf's
+    # default is only ~ -24 dB ("Max Gain Reduction"), which leaves a
+    # closed gate audibly open - a real gate has to go to the floor.
+    # 1e-4 is ~ -80 dB (Calf's own floor is ~ -96 dB), i.e. effectively
+    # silent when closed.
+    RANGE = 1.0e-4
+    # level 0..100 -> threshold in dB, most- to least-sensitive.  The
+    # top end reaches -3 dBFS (not -15 dBFS): mic signals in a typical
+    # chain sit around -15..-6 dBFS, and if the loudest threshold a user
+    # can set is below their signal the gate never closes no matter how
+    # far they drag the slider - which is what made the gate feel like it
+    # "didn't gate anything".
+    THRESHOLD_MIN_DB = -60.0
+    THRESHOLD_MAX_DB = -3.0
+
+    def __init__(self, node_id, backing_node_name: str,
+                 level: float = 25.0, lv2_uri: str = "",
+                 pw_cli_command=("pw-cli",), settle: float = 0.3, **_ignored):
+        super().__init__(node_id, backing_node_name, pw_cli_command, settle)
+        self.level = max(0.0, min(100.0, level))
+        self.lv2_uri = lv2_uri
+        self._control_applied_to: Optional[int] = None
+
+    def _resolve_uri(self) -> str:
+        return self.lv2_uri or self.LV2_URI
+
+    @classmethod
+    def _level_to_threshold(cls, level: float) -> float:
+        level = max(0.0, min(100.0, level))
+        db = cls.THRESHOLD_MIN_DB + (cls.THRESHOLD_MAX_DB - cls.THRESHOLD_MIN_DB) * (level / 100.0)
+        return _db_to_linear(db)
+
+    def _module_command_args(self) -> str:
+        threshold = self._level_to_threshold(self.level)
+        return (
+            f'node.description = "{self.id}" '
+            "filter.graph = { nodes = [ { "
+            "type = lv2 "
+            f"name = {self.backing_node_name}_plugin "
+            f'plugin = "{self._resolve_uri()}" '
+            "control = { "
+            f'"threshold" = {threshold:.6f} '
+            f'"ratio" = {self.RATIO:.2f} '
+            f'"attack" = {self.ATTACK_MS:.2f} '
+            f'"release" = {self.RELEASE_MS:.2f} '
+            f'"knee" = {self.KNEE:.4f} '
+            f'"makeup" = {self.MAKEUP:.2f} '
+            f'"range" = {self.RANGE:.6g} '
+            "} } ] } "
+            "capture.props = { "
+            f'node.name = "{self._capture_name}" '
+            f'node.description = "{self._capture_name}" '
+            "media.class = Audio/Sink "
+            "audio.position = [ FL FR ] } "
+            "playback.props = { "
+            f'node.name = "{self._playback_name}" '
+            f'node.description = "{self._playback_name}" '
+            "media.class = Audio/Source "
+            "audio.position = [ FL FR ] }"
+        )
+
+    def _apply_control(self) -> None:
+        mod = self.module_backing()
+        if mod is None or mod.node_id is None:
+            return
+        if mod.node_id == self._control_applied_to:
+            return
+        threshold = self._level_to_threshold(self.level)
+        mod.set_param("Props", f'{{ params = [ "threshold" {threshold:.6f} ] }}')
+        self._control_applied_to = mod.node_id
+
+    def set_level(self, value: float) -> None:
+        self.level = max(0.0, min(100.0, value))
+        self._control_applied_to = None
+        self._apply_control()
+
+    def refresh_live(self) -> None:
+        self._apply_control()
+
+
+class EchoCancelNode(BackedNode):
+    """PipeWire's own libpipewire-module-echo-cancel (WebRTC AEC),
+    exposed as three stable dummy sockets sharing one module:
+
+        mic   -> [ mic_in ]  --link->  module capture
+        probe -> [ probe_in ] --link->  module sink
+        module source --link-> [ out ]  (what consumers pick up)
+
+    The module's hidden playback stream is drained into a node-owned
+    throwaway sink so the AEC graph stays scheduled without ever
+    doubling the reference into the user's speakers.  ``monitor_mode``
+    makes the module auto-capture the default sink instead of waiting
+    for a manual probe feed.
+
+    ``library_name`` / ``aec_args`` / ``monitor_mode`` are load-time
+    module options; changing any schedules an interior-only reload."""
+
+    DEFAULT_AEC_LIBRARY = "aec/libspa-aec-webrtc"
+
+    def __init__(self, node_id, backing_node_name: str,
+                 library_name: str = "", aec_args: str = "",
+                 monitor_mode: bool = False,
+                 pw_cli_command=("pw-cli",), settle: float = 0.3):
+        super().__init__(node_id, backing_node_name)
+        self.library_name = library_name or self.DEFAULT_AEC_LIBRARY
+        self.aec_args = aec_args
+        self.monitor_mode = bool(monitor_mode)
+        self._pw_cli_command = pw_cli_command
+        self._settle = settle
+
+    # -- naming ----------------------------------------------------------
+
+    @property
+    def _mic_name(self) -> str:
+        return self.backing_node_name
+
+    @property
+    def _probe_name(self) -> str:
+        return f"{self.backing_node_name}_probe"
+
+    @property
+    def _source_name(self) -> str:
+        return f"{self.backing_node_name}_fx_out"
+
+    @property
+    def _playback_name(self) -> str:
+        return f"{self.backing_node_name}_playback"
+
+    @property
+    def _playback_sink_name(self) -> str:
+        return f"{self.backing_node_name}_playback_sink"
+
+    @property
+    def _mic_dummy_name(self) -> str:
+        return f"{self.backing_node_name}_mic_in"
+
+    @property
+    def _probe_dummy_name(self) -> str:
+        return f"{self.backing_node_name}_probe_in"
+
+    @property
+    def _out_dummy_name(self) -> str:
+        return f"{self.backing_node_name}_out"
+
+    def _kl(self, base: str) -> str:
+        return f"{base}_keepalive"
+
+    # -- identities / plumbing -------------------------------------------
+
+    def input_identity(self, port: str = "in") -> dict:
+        if port == "probe":
+            return {"name": self._probe_dummy_name}
+        return {"name": self._mic_dummy_name}
+
+    def output_identity(self) -> dict:
+        return {"nodeName": self._out_dummy_name}
+
+    def internal_links(self):
+        links = [
+            ({"nodeName": self._mic_dummy_name}, {"name": self._mic_name}),
+            ({"nodeName": self._probe_dummy_name}, {"name": self._probe_name}),
+            ({"nodeName": self._source_name}, {"name": self._out_dummy_name}),
+        ]
+        if not self.monitor_mode:
+            links.append(
+                ({"nodeName": self._playback_name}, {"name": self._playback_sink_name})
+            )
+        return links
+
+    # -- health ----------------------------------------------------------
+
+    def has_module(self) -> bool:
+        return True
+
+    def module_backing(self) -> Optional[OwnedPwNode]:
+        return self._find(self._mic_name)
+
+    def module_ok(self) -> bool:
+        b = self.module_backing()
+        return b is not None and b.owns_process and b.is_alive and not b.stuck(
+            self.RESOLVE_GRACE_S
+        )
+
+    def structural_ok(self) -> bool:
+        need = {self._mic_dummy_name, self._probe_dummy_name, self._out_dummy_name,
+                self._kl(self._mic_dummy_name), self._kl(self._out_dummy_name)}
+        if not self.monitor_mode:
+            need |= {self._probe_dummy_name, self._playback_sink_name,
+                     self._kl(self._probe_dummy_name), self._kl(self._playback_sink_name)}
+        for name in need:
+            b = self._find(name)
+            if b is None:
+                return False
+            if b.owns_process and (not b.is_alive or b.stuck(self.RESOLVE_GRACE_S)):
+                return False
+        return True
+
+    # -- module -----------------------------------------------------------
+
+    def _stream_props(self, name: str, autoconnect: bool = False) -> str:
+        extra = "" if autoconnect else " node.autoconnect = false"
+        return f'{{ node.name = "{name}" node.description = "{name}"{extra} }}'
+
+    def _spawn_module(self) -> Optional[OwnedPwNode]:
+        if self._find(self._mic_name) is not None:
+            return self._find(self._mic_name)
+        parts = [f"library.name = {self.library_name}"]
+        if self.monitor_mode:
+            parts.append("monitor.mode = true")
+        if (self.aec_args or "").strip():
+            parts.append(f"aec.args = {{ {self.aec_args} }}")
+        parts += [
+            f"capture.props = {self._stream_props(self._mic_name)}",
+            f"sink.props = {self._stream_props(self._probe_name, autoconnect=self.monitor_mode)}",
+            f"source.props = {self._stream_props(self._source_name)}",
+            f"playback.props = {self._stream_props(self._playback_name)}",
+        ]
+        command = "load-module libpipewire-module-echo-cancel { " + " ".join(parts) + " }"
+        owned = OwnedPwNode(self._mic_name, self._pw_cli_command, self._settle)
+        if not owned.create(command):
+            logger.error("Echo-cancel module creation failed for %r", self.id)
+            return None
+        self.backings.append(owned)
+        self.backings.append(OwnedPwNode(self._probe_name))
+        self.backings.append(OwnedPwNode(self._source_name))
+        if not self.monitor_mode:
+            self.backings.append(OwnedPwNode(self._playback_name))
+        return owned
+
+    def _module_children(self) -> Set[str]:
+        names = {self._mic_name, self._probe_name, self._source_name}
+        if not self.monitor_mode:
+            names.add(self._playback_name)
+        return names
+
+    # -- lifecycle --------------------------------------------------------
+
+    def ensure_structural(self) -> None:
+        kls = self._kl
+        structural = {self._mic_dummy_name, self._probe_dummy_name,
+                      self._out_dummy_name, self._playback_sink_name,
+                      kls(self._mic_dummy_name), kls(self._probe_dummy_name),
+                      kls(self._out_dummy_name), kls(self._playback_sink_name)}
+        self._prune_dead(structural)
+        self._ensure_null_sink(self._mic_dummy_name, description=f"{self.id} mic",
+                               pw_cli_command=self._pw_cli_command, settle=self._settle)
+        self._ensure_null_sink(self._probe_dummy_name, description=f"{self.id} probe",
+                               pw_cli_command=self._pw_cli_command, settle=self._settle)
+        self._ensure_null_sink(self._out_dummy_name, description=f"{self.id} out",
+                               pw_cli_command=self._pw_cli_command, settle=self._settle)
+        if not self.monitor_mode:
+            self._ensure_null_sink(self._playback_sink_name,
+                                   description=f"{self.id} playback",
+                                   pw_cli_command=self._pw_cli_command, settle=self._settle)
+        self._ensure_feed(kls(self._mic_dummy_name), self._mic_dummy_name,
+                          self._pw_cli_command, self._settle)
+        if self.monitor_mode:
+            # monitor.mode auto-captures the default sink - a manual
+            # probe feed would be a redundant second one, so make sure a
+            # stale one from an earlier non-monitor config is gone.
+            self._drop(kls(self._probe_dummy_name))
+        else:
+            self._ensure_feed(kls(self._probe_dummy_name), self._probe_dummy_name,
+                              self._pw_cli_command, self._settle)
+        self._ensure_drain(kls(self._out_dummy_name), self._out_dummy_name,
+                           self._pw_cli_command, self._settle)
+        if not self.monitor_mode:
+            self._ensure_drain(kls(self._playback_sink_name), self._playback_sink_name,
+                               self._pw_cli_command, self._settle)
+
+    def ensure_module(self) -> None:
+        mic = self._find(self._mic_name)
+        fresh = mic is None or not (mic.owns_process and mic.is_alive) or mic.stuck(
+            self.RESOLVE_GRACE_S
+        )
+        if fresh:
+            for owned in list(self.backings):
+                if owned.name in self._module_children():
+                    owned.destroy()
+                    if owned in self.backings:
+                        self.backings.remove(owned)
+            self._spawn_module()
+        mod = self._find(self._mic_name)
+        if fresh and mod is not None and mod.is_alive and not self.monitor_mode:
+            # The playback-sink drain taps the old module's playback
+            # stream; a fresh module needs a fresh tap.
+            self._drop(self._kl(self._playback_sink_name))
+        self.ensure_structural()
+
+    def reload_module(self) -> None:
+        """Interior-only reload: drop the module's own streams plus the
+        mode-dependent extras (playback sink + its drain), then rebuild
+        everything to the current config.  The mic/probe/out dummies and
+        their keepalives are untouched, so user edges never drop."""
+        drop_names = self._module_children() | {
+            self._playback_sink_name, self._kl(self._playback_sink_name),
+        }
+        for owned in list(self.backings):
+            if owned.name in drop_names:
+                owned.destroy()
+                if owned in self.backings:
+                    self.backings.remove(owned)
+        self.ensure_module()
+
+    # teardown_backing() is inherited from BackedNode (parallel destroy)
+    # - see the note on _ChainEffect.ensure_module above.
+
+
+# ---------------------------------------------------------------------------
+# The graph
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Edge:
+    id: EdgeId
+    from_node: NodeId
+    to_node: NodeId
+    to_port: str = "in"
+
+
+@dataclass
+class _DesiredLinks:
+    """Per-edge bookkeeping: the exact (output, input) port pairs the
+    last sync connected, plus a monotonic timestamp of the last time the
+    edge was observed healthy (used to spot edges that silently stopped
+    carrying audio)."""
+    pairs: Set[Tuple[int, int]] = field(default_factory=set)
+
+
+class PatchSpace:
+    """Owns the node graph, drives the live PipeWire graph to match it,
+    and supervises every backed node.
+
+    ``sync()`` is the structural reconciliation pass - run after any
+    edit.  ``supervise()`` is the health pass - run periodically by the
+    daemon - which repairs dead backings, performs due interior reloads,
+    re-enforces device/effect settings and then syncs again."""
+
+    def __init__(self, graph: PipewireGraph, repair_gate: Optional[Backoff] = None):
+        self.graph = graph
+        self._lock = threading.RLock()
+
+        self.nodes: Dict[NodeId, Node] = {}
+        self.public_nodes: Set[NodeId] = set()
+        self.edges: Dict[EdgeId, Edge] = {}
+        self._edges_into: Dict[NodeId, List[Edge]] = {}
+        self._edges_out_of: Dict[NodeId, List[Edge]] = {}
+
+        # edge id -> desired pairs connected as of the last sync.
+        self._edge_links: Dict[EdgeId, _DesiredLinks] = {}
+
+        # Per-(node, stage) repair backoff - see supervise().
+        self._repair_gate = repair_gate or Backoff(initial_s=1.0, max_s=30.0)
+
+        self.on_change: List[Any] = []
+        self._graph_loaded = False
+
+        # Node ids a caller (currently only _load_session) is bringing up
+        # one at a time itself - see stage()/unstage(). supervise() skips
+        # these entirely so the periodic tick can never race a staged
+        # node's own deliberately-throttled bring-up by kicking off its
+        # module load early. Nodes not in here are supervised as normal;
+        # this is additive, not a replacement for the regular health pass.
+        self._staging: Set[NodeId] = set()
+
+    # ------------------------------------------------------------------
+    # staged bring-up (see _load_session in main.py)
+    # ------------------------------------------------------------------
+
+    def stage(self, node_ids) -> None:
+        """Mark node ids as being brought up by someone else's own
+        sequenced logic, so supervise() leaves them alone until
+        unstage() is called - see the _staging docstring above."""
+        with self._lock:
+            self._staging.update(node_ids)
+
+    def unstage(self, node_id: NodeId) -> None:
+        """Release a node back to normal periodic supervision - call
+        this once its dedicated bring-up is done, whether it succeeded
+        or timed out, so it doesn't get skipped forever."""
+        with self._lock:
+            self._staging.discard(node_id)
+
+    # ------------------------------------------------------------------
+    # graph editing
+    # ------------------------------------------------------------------
+
+    def add_node(self, node: Node, public: bool = True) -> NodeId:
+        with self._lock:
+            self.nodes[node.id] = node
+            if public:
+                self.public_nodes.add(node.id)
+            # Structural pieces are created synchronously so the node has
+            # working sockets immediately.  DSP modules are materialised
+            # lazily by supervise() (see the module docstring for why).
+            if isinstance(node, BackedNode):
+                try:
+                    node.ensure_structural()
+                except Exception as exc:
+                    logger.warning("Failed to create structural backing for %r: %s",
+                                   node.id, exc)
+                # Kick module creation promptly rather than waiting for
+                # the next tick.
+                self._wake()
+            return node.id
+
+    def remove_node(self, node_id: NodeId) -> None:
+        with self._lock:
+            node = self.nodes.pop(node_id, None)
+            if node is None:
+                return
+            self.public_nodes.discard(node_id)
+            for edge in list(self._edges_into.get(node_id, [])) + list(
+                self._edges_out_of.get(node_id, [])
+            ):
+                self._remove_edge_locked(edge.id)
+            if isinstance(node, BackedNode):
+                try:
+                    node.teardown_backing()
+                except Exception as exc:
+                    logger.warning("Tearing down %r failed: %s", node_id, exc)
+            for key in ((node_id, "structural"), (node_id, "module")):
+                self._repair_gate.forget(key)
+
+    def add_edge(self, from_node: NodeId, to_node: NodeId, to_port: str = "in") -> EdgeId:
+        with self._lock:
+            if from_node not in self.nodes or to_node not in self.nodes:
+                raise KeyError("both endpoints must already be added")
+            target = self.nodes[to_node]
+            if target.is_transparent() and self._edges_into.get(to_node):
+                raise ValueError(
+                    f"{to_node} is a transparent node and already has an upstream edge"
+                )
+            edge_id = self._edge_id(from_node, to_node, to_port)
+            self.edges[edge_id] = Edge(edge_id, from_node, to_node, to_port)
+            self._edges_into.setdefault(to_node, []).append(self.edges[edge_id])
+            self._edges_out_of.setdefault(from_node, []).append(self.edges[edge_id])
+            return edge_id
+
+    def remove_edge(self, edge_id: EdgeId) -> None:
+        with self._lock:
+            self._remove_edge_locked(edge_id)
+
+    def rename_node(self, old_id: NodeId, new_id: NodeId) -> None:
+        with self._lock:
+            if old_id == new_id:
+                return
+            if old_id not in self.nodes:
+                raise KeyError(f"no such node {old_id!r}")
+            if new_id in self.nodes:
+                raise ValueError(f"node id {new_id!r} already in use")
+            node = self.nodes.pop(old_id)
+            node.id = new_id
+            self.nodes[new_id] = node
+            if old_id in self.public_nodes:
+                self.public_nodes.discard(old_id)
+                self.public_nodes.add(new_id)
+            for key in ((old_id, "structural"), (old_id, "module")):
+                self._repair_gate.forget(key)
+            affected = list(self._edges_into.pop(old_id, [])) + list(
+                self._edges_out_of.pop(old_id, [])
+            )
+            for old_edge in affected:
+                self.edges.pop(old_edge.id, None)
+                self._edge_links.pop(old_edge.id, None)
+                if old_edge.to_node == old_id:
+                    other_list = self._edges_out_of
+                    other_id = old_edge.from_node
+                else:
+                    other_list = self._edges_into
+                    other_id = old_edge.to_node
+                other_list.get(other_id, []).remove(old_edge)
+                new_from = new_id if old_edge.from_node == old_id else old_edge.from_node
+                new_to = new_id if old_edge.to_node == old_id else old_edge.to_node
+                new_edge = Edge(self._edge_id(new_from, new_to, old_edge.to_port),
+                                new_from, new_to, old_edge.to_port)
+                self.edges[new_edge.id] = new_edge
+                self._edges_into.setdefault(new_to, []).append(new_edge)
+                self._edges_out_of.setdefault(new_from, []).append(new_edge)
+
+    @staticmethod
+    def _edge_id(from_node: NodeId, to_node: NodeId, to_port: str) -> EdgeId:
+        if to_port == "in":
+            return f"{from_node}->{to_node}"
+        return f"{from_node}->{to_node}:{to_port}"
+
+    def _remove_edge_locked(self, edge_id: EdgeId) -> None:
+        edge = self.edges.pop(edge_id, None)
+        if edge is None:
+            return
+        # Note: _edge_links is deliberately left intact here - the next
+        # sync() disconnects the edge's stale pairs and then drops the
+        # bookkeeping, which is what actually unlinks the audio.
+        if edge.to_node in self._edges_into:
+            try:
+                self._edges_into[edge.to_node].remove(edge)
+            except ValueError:
+                pass
+        if edge.from_node in self._edges_out_of:
+            try:
+                self._edges_out_of[edge.from_node].remove(edge)
+            except ValueError:
+                pass
+
+    # ------------------------------------------------------------------
+    # resolving what feeds an edge
+    # ------------------------------------------------------------------
+
+    def _resolve_sources(self, node_id: NodeId) -> List[dict]:
+        node = self.nodes.get(node_id)
+        if node is None:
+            return []
+        if isinstance(node, InputNode):
+            return node.source_filters()
+        if isinstance(node, BackedNode):
+            return [node.output_identity()]
+        if isinstance(node, TransparentNode):
+            if not node.gate_open():
+                return []
+            upstream = self._edges_into.get(node_id, [])
+            if not upstream:
+                return []
+            sources = self._resolve_sources(upstream[0].from_node)
+            if isinstance(node, ExcludeFilterNode):
+                exclude = node.exclude_filter()
+                if exclude is not None:
+                    sources = [
+                        {**f, "exclude": [*f.get("exclude", []), exclude]}
+                        for f in sources
+                    ]
+            return sources
+        return []
+
+    # ------------------------------------------------------------------
+    # supervision
+    # ------------------------------------------------------------------
+
+    def _wake(self) -> None:
+        for cb in self.on_change:
+            try:
+                cb()
+            except Exception:
+                logger.exception("wake callback failed")
+
+    def supervise(self) -> None:
+        """Health pass.  Called by the daemon's tick thread under no
+        lock held by the caller."""
+        with self._lock:
+            for node in list(self.nodes.values()):
+                if not isinstance(node, BackedNode):
+                    continue
+                if node.id in self._staging:
+                    # Being brought up by _load_session's own one-at-a-
+                    # time loop right now - touching it here would race
+                    # that loop's deliberate throttling (see the _staging
+                    # docstring in __init__). It gets a normal repair
+                    # pass again the moment it's unstage()'d.
+                    continue
+                try:
+                    self._supervise_node(node)
+                except Exception as exc:
+                    logger.warning("Supervision of %r failed: %s", node.id, exc)
+
+            # Re-enforce device/effect settings that must continuously
+            # match their configured values.
+            for node in list(self.nodes.values()):
+                if node.id in self._staging:
+                    # Same staging contract as the health loop above: a
+                    # node mid-bring-up may be about to have its module
+                    # re-spawned, so don't push settings at the current
+                    # interior; _on_backing_resolved() re-applies them to
+                    # the fresh one.
+                    continue
+                try:
+                    if hasattr(node, "apply_device_settings"):
+                        node.apply_device_settings()
+                    if hasattr(node, "refresh_live"):
+                        node.refresh_live()
+                except Exception as exc:
+                    logger.warning("Settings re-apply for %r failed: %s", node.id, exc)
+
+            self.sync_locked()
+
+    def _supervise_node(self, node: BackedNode) -> None:
+        # -- structural health --------------------------------------------
+        s_key = (node.id, "structural")
+        if not node.structural_ok():
+            if self._repair_gate.ready(s_key):
+                logger.warning("Structural backing of %r (%s) degraded - repairing",
+                               node.id, type(node).__name__)
+                try:
+                    node.ensure_structural()
+                except Exception as exc:
+                    logger.warning("Structural repair of %r failed: %s", node.id, exc)
+                if node.structural_ok():
+                    self._repair_gate.record_success(s_key)
+                else:
+                    self._repair_gate.record_failure(s_key)
+        else:
+            self._repair_gate.record_success(s_key)
+
+        # -- module health / interior reload --------------------------------
+        if node.has_module():
+            m_key = (node.id, "module")
+            now = _time.monotonic()
+            reload_due = node._reload_due is not None and now >= node._reload_due
+            if reload_due:
+                node._reload_due = None
+            module = node.module_backing()
+            module_crashed = (
+                module is not None and module.owns_process and not module.is_alive
+            )
+
+            if reload_due or module_crashed or not node.module_ok():
+                if self._repair_gate.ready(m_key):
+                    logger.info(
+                        "Reloading %s module for %r (%s)",
+                        "crashed" if module_crashed else ("configured" if reload_due else "missing"),
+                        node.id, type(node).__name__,
+                    )
+                    try:
+                        if module_crashed or reload_due:
+                            node.reload_module()
+                        else:
+                            node.ensure_module()
+                    except Exception as exc:
+                        logger.warning("Module repair of %r failed: %s", node.id, exc)
+                    if node.module_ok():
+                        self._repair_gate.record_success(m_key)
+                    else:
+                        self._repair_gate.record_failure(m_key)
+            else:
+                self._repair_gate.record_success(m_key)
+
+        # -- (re)resolve any backing whose graph id we don't know -----------
+        self._resolve_backings(node)
+
+    def _resolve_backings(self, node: BackedNode) -> None:
+        for owned in node.backings:
+            if owned.node_id is not None:
+                continue
+            found = self.graph.node_id_by_name(owned.name)
+            if found is not None:
+                owned.resolve(found)
+                self._on_backing_resolved(node, owned)
+
+    def _on_backing_resolved(self, node: BackedNode, owned: OwnedPwNode) -> None:
+        """A backing object's id became known (first appearance or after
+        a recreate) - give the node a chance to push anything that must
+        live on the object."""
+        if isinstance(node, VolumeProcessNode):
+            node.refresh_live()
+        elif isinstance(node, (NoiseCancelNode, SensitivityGateNode)):
+            node.refresh_live()
+
+    def handle_node_removed(self, removed_id: int) -> None:
+        """A live object disappeared.  If it is one of our backings whose
+        owning process is *still alive*, the object was destroyed out
+        from under us (or a reload raced) - drop the owner so the next
+        supervise() respawns it."""
+        with self._lock:
+            for node in list(self.nodes.values()):
+                if not isinstance(node, BackedNode):
+                    continue
+                for owned in list(node.backings):
+                    if owned.node_id != removed_id:
+                        continue
+                    if owned.owns_process and owned.is_alive:
+                        logger.warning(
+                            "Live object for %r (%s) disappeared while its "
+                            "process was alive - restarting backing",
+                            node.id, owned.name,
+                        )
+                        owned.destroy()
+                        if owned in node.backings:
+                            node.backings.remove(owned)
+
+    # ------------------------------------------------------------------
+    # structural reconciliation (sync)
+    # ------------------------------------------------------------------
+
+    def sync(self) -> None:
+        with self._lock:
+            self.sync_locked()
+
+    def sync_locked(self) -> None:
+        if not self._graph_loaded:
+            return
+        graph = self.graph
+        desired: Dict[EdgeId, Set[Tuple[int, int]]] = {}
+        unresolved: Set[EdgeId] = set()
+
+        for node_id, node in self.nodes.items():
+            is_output = isinstance(node, OutputNode)
+            is_backed = isinstance(node, BackedNode)
+            if not (is_output or is_backed):
+                continue
+            if node_id in self._staging:
+                # A node a caller (_load_session) is bringing up
+                # one-at-a-time right now.  Its module can be destroyed
+                # and re-spawned mid-pass by ensure_module() (the "fresh
+                # spawn" path drops/re-points the interior and the output
+                # drain), so deriving or committing links for it here
+                # would wire against streams that are about to vanish.
+                # Leave whatever is currently attached alone by marking
+                # its links unresolved (the teardown loop below skips
+                # those), derive nothing into `desired`, and let the
+                # post-load supervise() - run once every node is
+                # unstage()'d - do the one deterministic wire-up.
+                for edge in list(self._edges_into.get(node_id, [])):
+                    unresolved.add(edge.id)
+                if is_backed:
+                    prefix = f"__internal__:{node_id}:"
+                    unresolved.update(
+                        k for k in self._edge_links if k.startswith(prefix)
+                    )
+                continue
+            for edge in list(self._edges_into.get(node_id, [])):
+                try:
+                    sink_filters = (
+                        node.sink_filters()
+                        if is_output
+                        else [node.input_identity(edge.to_port)]
+                    )
+                    sources = self._resolve_sources(edge.from_node)
+                    if not sources:
+                        desired[edge.id] = set()
+                        continue
+                    pairs: Set[Tuple[int, int]] = set()
+                    for src_id in pwmatch.find_source_nodes(graph, sources):
+                        for filt in sink_filters:
+                            for tgt_id in pwmatch.find_target_nodes(graph, filt):
+                                pairs |= pwmatch.resolve_channel_pairs(
+                                    graph, src_id, tgt_id, filt.get("type")
+                                )
+                    desired[edge.id] = pairs
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to compute desired links for edge %s (leaving "
+                        "current links in place): %s", edge.id, exc,
+                    )
+                    unresolved.add(edge.id)
+
+            if is_backed:
+                try:
+                    for i, (src_ident, sink_ident) in enumerate(node.internal_links()):
+                        link_id = f"__internal__:{node_id}:{i}"
+                        pairs = set()
+                        for src_id in pwmatch.find_source_nodes(graph, [src_ident]):
+                            for tgt_id in pwmatch.find_target_nodes(graph, sink_ident):
+                                pairs |= pwmatch.resolve_channel_pairs(
+                                    graph, src_id, tgt_id, sink_ident.get("type")
+                                )
+                        desired[link_id] = pairs
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to compute internal links for node %s (leaving "
+                        "current links in place): %s", node_id, exc,
+                    )
+                    prefix = f"__internal__:{node_id}:"
+                    unresolved.update(k for k in self._edge_links if k.startswith(prefix))
+
+        live = graph.linked_pairs()
+
+        # Tear down stale pairs first.  (The _edge_links entry for an
+        # edge that no longer exists is kept until this loop so its
+        # current links are disconnected here; it is deleted below.)
+        for edge_id, entry in list(self._edge_links.items()):
+            if edge_id in unresolved:
+                continue
+            new_pairs = desired.get(edge_id, set())
+            for pair in entry.pairs - new_pairs:
+                try:
+                    graph.disconnect(*pair)
+                except Exception as exc:
+                    logger.debug("disconnect %s for %s failed (already gone?): %s",
+                                 pair, edge_id, exc)
+            if edge_id not in desired:
+                del self._edge_links[edge_id]
+
+        # Then create anything the graph is not already carrying.  This
+        # keys off the *live* snapshot, not our own bookkeeping, so a
+        # link that was dropped out from under us (an external pw-cli
+        # destroy, a module reload) is re-made here instead of being
+        # skipped because we thought it was already up.
+        for edge_id, pairs in desired.items():
+            entry = self._edge_links.setdefault(edge_id, _DesiredLinks())
+            for pair in pairs:
+                if pair not in live:
+                    try:
+                        graph.connect(*pair)
+                    except Exception as exc:
+                        logger.warning("connect %s for %s failed: %s", pair, edge_id, exc)
+            entry.pairs = pairs
+
+    def mark_graph_loaded(self) -> None:
+        self._graph_loaded = True

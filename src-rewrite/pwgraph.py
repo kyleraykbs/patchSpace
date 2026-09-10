@@ -386,8 +386,7 @@ class PipewireGraph:
 
         The pid set is what makes real cleanup possible for anything
         spawned as a bare ``pw-cli`` session (every filter-chain/
-        create-node backing this project owns, i.e. everything except
-        the pw-loopback-based virtual mic): those sessions can't be
+        create-node backing this project owns): those sessions can't be
         found by matching argv the way _terminate_orphan_helpers finds
         pw-loopback/pw-cat, since the node name is only ever sent to
         pw-cli over stdin after it's already running, never on its
@@ -509,9 +508,7 @@ class PipewireGraph:
                 stderr=subprocess.PIPE,
             )
         except OSError as exc:
-            raise ProcessStartError(
-                f"failed to start {self._dump_command!r}: {exc}"
-            ) from exc
+            raise ProcessStartError(f"failed to start {self._dump_command!r}: {exc}") from exc
         self._stopping.clear()
         self._thread = threading.Thread(target=self._read_loop, daemon=True)
         self._thread.start()

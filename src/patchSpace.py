@@ -210,6 +210,42 @@ class BackedNode(Node):
         polling."""
         return [b for b in self.backings if b.owns_process and not b.is_alive]
 
+    def backing_incomplete(self) -> bool:
+        """True if this node's primary real object was never
+        successfully created in the first place - distinct from
+        dead_backings() (which only catches a backing that WAS created
+        and later died): a failed `create()` (e.g. a LADSPA plugin path
+        that doesn't exist) never gets appended to self.backings at
+        all, so it can never show up as "dead". Without this, a node
+        whose module failed to load on its very first ensure_backing()
+        call - a plugin briefly missing on a slow boot, a store not yet
+        mounted - was invisible to main.py's periodic repair loop
+        forever after: ensure_backing() is only re-run there when
+        dead_backings() is non-empty. Default False (most BackedNode
+        types either fully create or are handled by their own
+        reload/restart path already); a sandwich-style node
+        (_FilterChainNode, EchoCancelNode) overrides this to check for
+        its primary/module backing by name."""
+        return False
+
+    def module_backing(self) -> Optional[OwnedPwNode]:
+        """The one OwnedPwNode whose death means "this node's real DSP
+        work is gone, a full reload_backing() is needed" - as opposed
+        to a peripheral piece (a sandwich dummy, a keepalive) that
+        ensure_backing() alone can replace without disturbing anything
+        downstream. Used by main.py's _repair_backing to decide which
+        recovery path a dead backing needs; looked up by name rather
+        than assumed to be backings[0], since a sandwich-style node can
+        have peripheral backings and no module backing at all (e.g.
+        right after a failed load) with no consistent index.
+
+        Default: every non-sandwich BackedNode has exactly one backing
+        that IS the module (a single real object), so the first one -
+        or None, if it was never created - is correct as-is. Overridden
+        by _FilterChainNode/EchoCancelNode, which look this up via
+        their own _processor_backing()/_module_backing()."""
+        return self.backings[0] if self.backings else None
+
     def resolve_backing(self, name: str, node_id: int) -> bool:
         """Called by the daemon once a real node with `name` shows up
         in the live graph, so any OwnedPwNode still waiting to learn
@@ -880,8 +916,9 @@ class VolumeProcessNode(BackedNode):
 #   * libpipewire-module-echo-cancel - PipeWire's own WebRTC-based
 #     acoustic echo canceller (EchoCancelNode). A different module
 #     with a different (multi-stream) args shape - see that class's
-#     docstring. It is still directly exposed (its sockets map onto
-#     the module's own streams) rather than sandwiched.
+#     docstring - but sandwiched the same way: three small dummy
+#     sandwiches (mic/probe/out) instead of _FilterChainNode's one,
+#     sharing a single interior module.
 #
 # A LADSPA plugin (NoiseCancelNode/ReverbNode/SensitivityGateNode) has
 # to actually be installed on the machine running the daemon - unlike
@@ -968,6 +1005,49 @@ def _spawn_silent_drain(
         "/dev/null",
     )
     return proc if proc.create(command) else None
+
+
+def _ensure_null_sink_dummy(
+    node: "BackedNode",
+    name: str,
+    pw_cli_command: Tuple[str, ...],
+    pw_cli_settle: float,
+    extra_props: str = "",
+) -> Optional[OwnedPwNode]:
+    """Create one plain null-audio-sink adapter named `name` and append
+    it to node.backings, unless a backing with that name is already
+    there (checked by name, so a dummy that died on its own and was
+    pruned gets re-created here on a later repair pass - see
+    BackedNode.dead_backings). Returns the backing (existing or freshly
+    created), or None if creation was attempted and failed.
+
+    Shared by every sandwich-style BackedNode - _FilterChainNode's
+    input/output dummies and EchoCancelNode's mic/probe/out dummies -
+    so there is exactly one place that knows how to make one of these
+    adapters, instead of each node type hand-rolling its own copy of
+    the same `create-node adapter ...` call."""
+    existing = next((b for b in node.backings if b.name == name), None)
+    if existing is not None:
+        return existing
+    config = (
+        "factory.name=support.null-audio-sink "
+        f'node.name="{name}" '
+        f'node.description="{name}" '
+        "media.class=Audio/Sink "
+        "audio.position=[FL,FR]" + (f" {extra_props}" if extra_props else "")
+    )
+    command = f"create-node adapter {config}"
+    logger.info(
+        "Creating %s dummy %r with: %s", type(node).__name__, name, command
+    )
+    owned = OwnedPwNode(name, pw_cli_command, pw_cli_settle)
+    if not owned.create(command):
+        logger.error(
+            "%s dummy %r creation failed for %r", type(node).__name__, name, node.id
+        )
+        return None
+    node.backings.append(owned)
+    return owned
 
 
 class _FilterChainNode(BackedNode):
@@ -1124,6 +1204,19 @@ class _FilterChainNode(BackedNode):
     def _filter_graph_args(self) -> str:
         raise NotImplementedError
 
+    def _dummy_extra_props(self) -> str:
+        """Extra `key=value` adapter properties appended to both
+        sandwich dummies' create-node config, beyond the plain
+        null-audio-sink every dummy already gets (see _ensure_dummy).
+        Empty for every effect that only ever needs its dummies as
+        dumb pass-through endpoints. SensitivityGateNode overrides
+        this to add `monitor.channel-volumes=1`, which is what turns
+        the two dummies it already has into the pre-/post-gain stages
+        its sensitivity control needs - see that class's docstring for
+        why the gain lives on the dummies rather than on a
+        purpose-built volume object."""
+        return ""
+
     # ---- backing lifecycle ----
 
     def _processor_backing(self) -> Optional[OwnedPwNode]:
@@ -1134,6 +1227,30 @@ class _FilterChainNode(BackedNode):
         than by index so a partially-repaired list can't derail it."""
         for owned in self.backings:
             if owned.name == self._fx_capture_name:
+                return owned
+        return None
+
+    def backing_incomplete(self) -> bool:
+        # See BackedNode.backing_incomplete: True only when the DSP
+        # module itself never came up - the dummies/keepalives existing
+        # or not doesn't matter here, ensure_backing() already retries
+        # those independently by name every time it runs.
+        return self._processor_backing() is None
+
+    def module_backing(self) -> Optional[OwnedPwNode]:
+        # See BackedNode.module_backing: the filter-chain module is the
+        # capture-side backing, same lookup backing_incomplete() uses.
+        return self._processor_backing()
+
+    def _dummy_backing(self, name: str) -> Optional[OwnedPwNode]:
+        """Look up one of the sandwich's own dummies (by name, same
+        pattern as _processor_backing) so a subclass can drive it
+        directly - e.g. SensitivityGateNode running `wpctl set-volume`
+        against the input/output dummy's own resolved node_id, the
+        same live-control mechanism VolumeProcessNode already uses on
+        a bare (non-sandwiched) null-audio-sink."""
+        for owned in self.backings:
+            if owned.name == name:
                 return owned
         return None
 
@@ -1188,29 +1305,18 @@ class _FilterChainNode(BackedNode):
         unlinked stream."""
         if any(b.name == name for b in self.backings):
             return
-        config = (
-            "factory.name=support.null-audio-sink "
-            f'node.name="{name}" '
-            f'node.description="{name}" '
-            "media.class=Audio/Sink "
-            "audio.position=[FL,FR]"
+        extra = self._dummy_extra_props()
+        dummy = _ensure_null_sink_dummy(
+            self, name, self._pw_cli_command, self._pw_cli_settle, extra
         )
-        command = f"create-node adapter {config}"
-        logger.info("Creating %s sandwich dummy with: %s", type(self).__name__, command)
-        owned = OwnedPwNode(name, self._pw_cli_command, self._pw_cli_settle)
-        if not owned.create(command):
-            logger.error(
-                "%s sandwich dummy %r creation failed for %r",
-                type(self).__name__,
-                name,
-                self.id,
-            )
+        if dummy is None:
             return
-        self.backings.append(owned)
 
         # Drop the keepalive for the side this dummy replaced (if any) -
         # its old target is gone and it will not re-link on its own.
-        keepalive = self._feed_name if name == self._input_dummy_name else self._drain_name
+        keepalive = (
+            self._feed_name if name == self._input_dummy_name else self._drain_name
+        )
         for existing in list(self.backings):
             if existing.name == keepalive:
                 existing.destroy()
@@ -1537,162 +1643,219 @@ class SensitivityGateNode(_FilterChainNode):
     inline slider on the node (0-100; higher = a louder signal is
     needed to open it - dragging the sensitivity bar up in Discord).
 
-    Rebuilt from scratch around a single guiding rule: sensitivity is
-    a value that changes on every tick of a drag, so whatever path it
-    takes to reach the live gate has to be cheap and boring, not
-    "coalesce a module reload" or "juggle multiple owned processes".
-    Two previous designs got that wrong in different ways:
+    Sensitivity is a value that changes on every tick of a drag, so
+    whatever path it takes to reach the live gate has to be cheap and
+    boring. Three designs have been tried:
 
-      * Baking the slider straight into the LADSPA gate's own
-        "Threshold (dB)" control and reloading the filter-chain module
-        on every change (the same load-time-only path NoiseCancelNode/
-        ReverbNode use for *their* options, which only ever change
-        rarely via a settings dialog, not by dragging).
+      * Baking the slider straight into the SWH gate_1410 LADSPA
+        plugin's own "Threshold (dB)" control and reloading the
+        filter-chain module on every change - the same load-time-only
+        path NoiseCancelNode/ReverbNode use for *their* options, which
+        only change rarely via a settings dialog, not by dragging.
+        Constant reload/teardown of the module on every drag tick is
+        what was actually breaking the audio chain, not just the
+        gate's own signal but anything already chained through this
+        node's sockets.
 
-      * Working around that by never touching the gate itself again
-        after creation and instead wrapping it in TWO extra null-sink
-        gain stages, adjusted opposite-and-reciprocal via `wpctl` to
-        fake a threshold change. That traded one problem for three:
-        three independently-owned real objects to create, tear down
-        and keep resolved instead of one; a hand-rolled reciprocal
-        gain-doubling formula (with its own "-l" overdrive limit hack)
-        standing in for what should just be "set a number"; and two
-        brand-new `wpctl` *subprocesses* spawned per slider tick on
-        top of the pw-cli session the gate already needed - on a fast
-        drag that's a couple of processes forked per frame, which is
-        exactly the kind of load that made the whole chain (and
-        anything routed through it) flaky.
+      * Pushing the threshold to that same already-loaded gate live
+        via `set-param` down the filter-chain's own pw-cli stdin, so no
+        reload was needed - but gate_1410 visibly glitches the signal
+        passing through it on a live threshold change (see `git log`
+        on this file for the report), which is its own way of
+        breaking the audio chain, just less obviously than a full
+        module reload.
 
-    This version is a single filter-chain instance loaded exactly once
-    as the interior of the standard _FilterChainNode sandwich (see
-    that class's docstring) - so it plugs into the daemon's existing
-    generic BackedNode plumbing (ensure_backing/reload_backing/
-    teardown_backing/resolve_backing) with no special cases, and its
-    two sandwich dummies are created once and never rebuilt, so
-    nothing gate-specific is needed for plug/unplug stability any
-    more. The gate's own "Threshold (dB)" control IS the sensitivity
-    value - no gain staging, no reciprocal math, nothing bracketing it
-    - and it is updated live via `OwnedPwNode.set_param()`, which
-    writes one `set-param` line down the pw-cli stdin pipe the
-    filter-chain's own process already has open (see pw_owned.py). No
-    subprocess spawn, no module reload, nothing to resolve or resync -
-    just a number going out over a pipe that's already sitting there.
-    set_level() is safe to call on every tick of a slider drag.
+      * A workaround that kept gate_1410's threshold fixed at load
+        time and simulated "sensitivity" with an equal-and-opposite
+        pre-/post-gain pair on the sandwich's own dummies instead of
+        touching the gate at all. That avoided both problems above,
+        but only by working around gate_1410's real limitation: it is
+        a hard-knee, on/off gate with no live-adjustable control worth
+        touching, so the only way to make one dial feel like "more or
+        less sensitive" was gain trickery bolted on around it.
+
+    This version drops gate_1410 entirely and uses Calf's plain "Gate"
+    LV2 plugin instead (http://calf.sourceforge.net/plugins/Gate - the
+    plain one, NOT "Sidechain Gate": no external sidechain input is
+    wanted here, just a self-triggering gate on the one signal already
+    passing through). Calf's Gate is a genuine downward expander with
+    its own live-settable "threshold" and "knee" control ports - a
+    real soft-knee response, not a hard on/off flip - so the dial can
+    finally move the *actual* gate the way NoiseCancelNode's VAD dial
+    moves the *actual* RNNoise plugin: set_level() pushes "threshold"
+    straight down the filter-chain's own pw-cli stdin via
+    OwnedPwNode.set_param(), no reload, no gain-staging workaround, no
+    glitch (a soft-knee transition doesn't click the way gate_1410's
+    hard knee did). Every other control (ratio/attack/release/knee/
+    makeup) is fixed at load time, same as NoiseCancelNode fixes
+    everything except vad_threshold - this node exposes exactly one
+    dial, same as before.
+
+    The two sandwich dummies (`_input_dummy_name`/`_output_dummy_name`)
+    go back to being plain pass-through endpoints - `_dummy_extra_props`
+    is no longer overridden, so they don't need
+    `monitor.channel-volumes=1` any more, because nothing needs their
+    volume to double as a gain stage now that the real gate has a real
+    dial. Simpler than every earlier version: the sandwich just does
+    its normal job.
+
+    Unlike a LADSPA plugin, an LV2 plugin's `plugin` field is a fixed
+    URI (see _FilterChainNode's docstring on how the two module types
+    differ) resolved by PipeWire's own LV2 host, not a distro-specific
+    filesystem path - so there is no probing-multiple-install-paths
+    dance here the way NoiseCancelNode._resolve_plugin() has to do for
+    librnnoise_ladspa.so. `lv2_uri` is still exposed as a config
+    override (empty = use LV2_URI) for the rare case Calf ships under a
+    different URI on some system, but nothing needs to look at the
+    filesystem to find it. If calf.lv2 simply isn't installed, pw-cli
+    fails to load the module exactly like a missing LADSPA plugin does
+    (see pw_owned.OwnedPwNode.create()) - graceful and logged, not a
+    crash, and only the sandwich's interior is missing until it's
+    installed (needs pkgs.calf added wherever this daemon's LV2_PATH
+    comes from, e.g. the project flake).
     """
 
-    _CANDIDATES: Tuple[Tuple[str, str], ...] = (
-        ("/usr/lib/ladspa/gate_1410.so", "gate"),
-        ("/usr/lib/x86_64-linux-gnu/ladspa/gate_1410.so", "gate"),
-        ("/usr/lib64/ladspa/gate_1410.so", "gate"),
-    )
+    # The plain Calf Gate - a genuine downward expander with live
+    # "threshold"/"knee" ports - not "Sidechain Gate" (needs a second
+    # sidechain input this node has no use for) and not gate_1410 (see
+    # class docstring for why that one was dropped).
+    LV2_URI = "http://calf.sourceforge.net/plugins/Gate"
 
-    # sensitivity 0..100 -> LADSPA gate "Threshold (dB)" value,
-    # most-sensitive to least-sensitive. This range brackets a normal
-    # speaking voice comfortably: THRESHOLD_MIN_DB opens on nearly any
-    # sound (including quiet room tone - "opens on a whisper"),
-    # THRESHOLD_MAX_DB needs something close to full volume ("needs a
-    # shout"). Unlike the old design's fixed threshold + gain-staging
-    # workaround, this is the actual value the gate compares the
-    # incoming signal against - turning the slider really does move
-    # the threshold, live.
-    THRESHOLD_MIN_DB = -60.0  # level=0
-    THRESHOLD_MAX_DB = 0.0  # level=100
+    # Fixed "personality" of the gate - only threshold moves live (see
+    # set_level()). Port symbols below are Calf's own LV2 symbols (see
+    # calf/src/metadata.cpp upstream), not display names - unlike
+    # LADSPA control names, these are bare/lowercase and NOT the
+    # strings a GUI host would show.
+    RATIO = 4.0  # noticeable, clearly-a-gate reduction without brick-walling
+    ATTACK_MS = 5.0  # matches the old gate_1410 config's Attack (ms)
+    RELEASE_MS = 200.0  # matches the old config's combined Hold+Decay feel
+    KNEE = 6.0  # deliberately generous (max 8) - the whole point of
+    # switching plugins was a real soft knee, so use one, not Calf's
+    # own quieter default (~2.83)
+    MAKEUP = 1.0  # no makeup gain - this is a gate, not a compressor
+
+    # Calf's "threshold" control port is linear amplitude (0..1), not
+    # dB, despite being *labelled* dBFS in Calf's own UI (see
+    # calf/src/metadata.cpp: PF_SCALE_GAIN | PF_UNIT_DBFS - the unit
+    # flag there is display-only). THRESHOLD_MIN_DB/THRESHOLD_MAX_DB
+    # below are kept in dB, same as every other gain constant in this
+    # file, and converted with _db_to_linear() right before they go on
+    # the wire - this is purely this class's own choice of units,
+    # nothing to do with how the LV2 port itself is declared.
+    #
+    # sensitivity 0..100 -> effective threshold in dB, most- to
+    # least-sensitive. Deliberately the exact same effective range
+    # (-45dB..-15dB) the old fixed-gate/gain-staging design produced
+    # (FIXED_THRESHOLD_DB=-30 +/- GAIN_RANGE_DB=15) - that range was
+    # already tuned against real clipping/never-opens failures at
+    # wider spreads (see git history), and there is no reason for a
+    # plugin swap to also re-litigate the sensitivity curve users are
+    # already used to.
+    THRESHOLD_MIN_DB = -45.0  # level=0 - opens on a whisper
+    THRESHOLD_MAX_DB = -15.0  # level=100 - needs to be loud
 
     def __init__(
         self,
         node_id: NodeId,
         backing_node_name: str,
         level: float = 25.0,
-        ladspa_plugin: str = "",
-        ladspa_label: str = "",
+        lv2_uri: str = "",
         pw_cli_command: Tuple[str, ...] = ("pw-cli",),
         pw_cli_settle: float = 0.3,
+        # ladspa_plugin/ladspa_label are accepted (and ignored) only so
+        # a patch saved by the pre-Calf build still loads cleanly -
+        # same compatibility shim as NoiseCancelNode's `method` param.
+        **_ignored,
     ):
         super().__init__(node_id, backing_node_name, pw_cli_command, pw_cli_settle)
         self.level = max(0.0, min(100.0, level))
-        self.ladspa_plugin = ladspa_plugin
-        self.ladspa_label = ladspa_label
+        self.lv2_uri = lv2_uri
+
+    def _resolve_plugin_uri(self) -> str:
+        return self.lv2_uri or self.LV2_URI
 
     @classmethod
-    def level_to_threshold_db(cls, level: float) -> float:
-        """0-100 sensitivity -> gate threshold in dB. Linear, so the
-        slider's midpoint sits at the midpoint of the dB range too -
-        no perceptual curve to reason about when tuning
-        THRESHOLD_MIN_DB/THRESHOLD_MAX_DB."""
+    def _level_to_threshold_linear(cls, level: float) -> float:
+        """0-100 sensitivity -> Calf's linear "threshold" value. Linear
+        interpolation happens in dB space (see THRESHOLD_MIN_DB/
+        THRESHOLD_MAX_DB) so the slider still feels even across its
+        whole range, then converts to the amplitude value the LV2 port
+        actually wants."""
         level = max(0.0, min(100.0, level))
-        span = cls.THRESHOLD_MAX_DB - cls.THRESHOLD_MIN_DB
-        return cls.THRESHOLD_MIN_DB + span * (level / 100.0)
+        db = cls.THRESHOLD_MIN_DB + (
+            cls.THRESHOLD_MAX_DB - cls.THRESHOLD_MIN_DB
+        ) * (level / 100.0)
+        return cls._db_to_linear(db)
 
-    def _resolve_plugin(self) -> Tuple[str, str]:
-        if self.ladspa_plugin and self.ladspa_label:
-            return self.ladspa_plugin, self.ladspa_label
-        extra: List[Tuple[str, str]] = [
-            (p, "gate") for p in _ladspa_profile_paths("gate_1410.so")
-        ]
-        for prefix in (
-            "ladspaPlugins",
-            "pipewire-ladspa-plugins",
-            "ladspa_plugins",
-            "swh-plugins",
-        ):
-            store = _store_ladspa_candidate(prefix, "lib/ladspa/gate_1410.so")
-            if store:
-                extra.insert(0, (store, "gate"))
-                break
-        found = _first_existing_plugin(tuple(extra) + self._CANDIDATES)
-        return found if found else self._CANDIDATES[0]
+    @staticmethod
+    def _db_to_linear(db: float) -> float:
+        return 10.0 ** (db / 20.0)
 
     def _filter_graph_args(self) -> str:
-        # Only load-time here is the plugin choice and the fixed
-        # attack/hold/decay/range shape of the gate - the threshold
-        # itself is just its starting value; set_level() below updates
-        # it live from then on without ever touching this again.
-        plugin, label = self._resolve_plugin()
-        threshold = self.level_to_threshold_db(self.level)
+        # Only "threshold" ever changes after load - set_level() pushes
+        # it live from then on without ever rebuilding this string
+        # again (see class docstring).
+        uri = self._resolve_plugin_uri()
+        threshold = self._level_to_threshold_linear(self.level)
         return (
             "filter.graph = { nodes = [ { "
-            "type = ladspa "
+            "type = lv2 "
             f"name = {self.backing_node_name}_plugin "
-            f"plugin = {plugin} "
-            f"label = {label} "
+            f'plugin = "{uri}" '
             "control = { "
-            f'"Threshold (dB)" = {threshold:.2f} '
-            '"Attack (ms)" = 5 '
-            '"Hold (ms)" = 150 '
-            '"Decay (ms)" = 200 '
-            '"Range (dB)" = -90 '
-            '"Output select (-1 = key listen, 0 = gate, 1 = bypass)" = 0 '
+            f'"threshold" = {threshold:.6f} '
+            f'"ratio" = {self.RATIO:.2f} '
+            f'"attack" = {self.ATTACK_MS:.2f} '
+            f'"release" = {self.RELEASE_MS:.2f} '
+            f'"knee" = {self.KNEE:.4f} '
+            f'"makeup" = {self.MAKEUP:.2f} '
             "} } ] }"
         )
 
     def _apply_threshold(self) -> None:
         """Push the current sensitivity to the live gate. Safe to call
         before the backing has resolved a node_id (OwnedPwNode.set_param
-        just no-ops until then) - see set_level() and resolve_backing()."""
+        just no-ops until then) - see set_level() and resolve_backing(),
+        same contract as NoiseCancelNode._apply_vad_threshold()."""
         processor = self._processor_backing()
         if processor is None:
             return
-        threshold = self.level_to_threshold_db(self.level)
+        threshold = self._level_to_threshold_linear(self.level)
         processor.set_param(
-            "Props", f'{{ params = [ "Threshold (dB)" {threshold:.2f} ] }}'
+            "Props",
+            f'{{ params = [ "threshold" {threshold:.6f} ] }}',
         )
+
+    def apply_gain_settings(self) -> None:
+        """Re-push the current sensitivity unconditionally - the
+        safety-sync-tick counterpart to DeviceControlMixin's
+        apply_device_settings() (see that class's docstring). Kept
+        under this name (rather than renaming to match
+        _apply_threshold) because main.py's _safety_sync and
+        apply_config-replay path both duck-type on
+        "apply_gain_settings" being present, not on what it does
+        internally - same reasoning as before this rewrite, just a
+        live LV2 set-param now instead of a channelVolumes write."""
+        self._apply_threshold()
 
     def set_level(self, level: float) -> None:
         """Live sensitivity change - one set-param line down the
-        filter-chain's own pw-cli stdin, no module reload, no extra
-        subprocess, safe to call on every slider-drag tick."""
+        filter-chain's own pw-cli stdin, no module reload, no gain
+        staging. Safe to call on every slider-drag tick, same cadence
+        NoiseCancelNode.set_vad_threshold() already handles for the
+        VAD dial."""
         self.level = max(0.0, min(100.0, level))
         self._apply_threshold()
 
     def resolve_backing(self, name: str, node_id: int) -> bool:
         matched = super().resolve_backing(name, node_id)
         if matched and name == self.backing_node_name:
-            # Push our actual current sensitivity the moment the
-            # capture-side node resolves, same as the first-creation
-            # path (the module loads with THRESHOLD_MIN_DB..MAX_DB's
-            # level_to_threshold_db(self.level) baked in already, so
-            # this is mostly a no-op in practice - it only matters if
-            # set_level() was called while still unresolved).
+            # Push our actual current value the moment the capture-
+            # side node resolves, same as NoiseCancelNode's
+            # resolve_backing() - mostly a no-op since
+            # _filter_graph_args() already baked it in at load time,
+            # but it matters if set_level() was called while still
+            # unresolved.
             self._apply_threshold()
         return matched
 
@@ -1755,15 +1918,22 @@ class EchoCancelNode(BackedNode):
     "Echo Canceller" wraps, exposed here as a normal PatchSpace node so
     you don't need EasyEffects running to get echo-free audio.
 
-    NOTE: unlike the three _FilterChainNode effects (NoiseCancelNode/
-    ReverbNode/SensitivityGateNode), this node is still *directly*
-    exposed - its "mic"/"probe"/"out" sockets map straight onto the
-    echo-cancel module's own capture/sink/source streams rather than
-    onto stable sandwich dummies, because its module genuinely has
-    three separately-wired sides that share one AEC state. It therefore
-    gets its own keepalive coverage on every socket (see below) instead
-    of the sandwich's, and main.py still does a full reload on a new
-    edge into it (see _cmd_add_edge).
+    Like the three _FilterChainNode effects (NoiseCancelNode/
+    ReverbNode/SensitivityGateNode), this node's sockets are stable
+    sandwich dummies, not the echo-cancel module's own streams - its
+    module genuinely has three separately-wired sides that share one
+    AEC state, so it is three small dummy sandwiches (one per exposed
+    socket) sharing a single interior module rather than
+    _FilterChainNode's one. "mic"/"probe" plug into two input dummies
+    whose monitor feeds the module's capture/sink streams; "out" is fed
+    by a third dummy whose monitor is what output_identity() exposes,
+    driven by the module's source stream. Every user edge plugs into
+    one of the three dummies, never into the module directly, so an
+    option change or a crashed module - anything that needs
+    reload_backing() - only ever swaps the interior (see that method):
+    no edge into this node renegotiates or drops just because the AEC
+    module itself was recreated. See _ensure_null_sink_dummy and
+    _FilterChainNode's docstring for the general shape this reuses.
 
     PipeWire's module is really four coordinated streams (see
     libpipewire-module-echo-cancel(7)):
@@ -1803,7 +1973,12 @@ class EchoCancelNode(BackedNode):
     that same sink is what causes feedback/howling). It is only for
     the module-native wiring where the *app* feeds "probe" instead of
     your speakers, and you route "probe" onward to the speakers through
-    this node's playback leg in the raw patchbay view.
+    this node's playback leg in the raw patchbay view. Since this node
+    never exposes that leg, it feeds the stream into a silent,
+    node-owned sink instead (see internal_links/_ensure_playback_sink)
+    - both to keep the module's graph scheduled and so the module's
+    copy of the reference is discarded rather than doubled into
+    speakers you already hear through the probe feed.
 
     ``node.autoconnect`` is explicitly turned off on this node's
     capture/playback streams so WirePlumber never silently links them
@@ -1819,10 +1994,23 @@ class EchoCancelNode(BackedNode):
     the module's AEC buffers reset the moment any of these sides drops
     to zero active links, and reconnecting afterward makes the mic
     output stutter or drop out until the module re-aligns (see
-    ensure_backing for the full reasoning). The module's fourth,
-    unexposed stream (`playback`) is left unprotected - it's only ever
-    wired manually in the raw patchbay view (see above), not through
-    an edge a user routinely toggles.
+    ensure_backing for the full reasoning).
+
+    The module's fourth, unexposed stream (`playback`) is NOT left
+    unwired: it is permanently fed into a throwaway null-audio-sink
+    this node owns (`{backing_node_name}_playback_sink`), which is
+    then silently drained - see internal_links() and
+    _ensure_playback_sink(). The echo-cancel module's four streams
+    only run as part of an active graph, and its playback leg (which
+    in the conference-app topology plays out to the speakers) is what
+    normally gives it a driven side; with no socket exposing that leg
+    and nothing wired to it, the whole module would idle and no mic
+    audio would ever reach "out". Routing it into a node-owned sink
+    (never the user's speakers) and draining that sink keeps the
+    module scheduled without any audible side effect: the playback
+    stream only ever carries whatever is routed into "probe", which is
+    discarded silently rather than double-played through speakers the
+    user already hears through the probe feed.
 
     The AEC options below are the module's documented knobs:
 
@@ -1842,8 +2030,8 @@ class EchoCancelNode(BackedNode):
         the full-control "cancel exactly what I route into probe" case.
 
     Changing any of these on an existing node takes effect when the
-    backing is recreated (the daemon tears the module down and reloads
-    it - see main.py's set_node_property handling).
+    backing is recreated - reload_backing() below, interior-only, same
+    as _FilterChainNode's (see main.py's set_node_property handling).
     """
 
     DEFAULT_AEC_LIBRARY = "aec/libspa-aec-webrtc"
@@ -1867,18 +2055,42 @@ class EchoCancelNode(BackedNode):
 
     @property
     def _mic_name(self) -> str:
-        # The module's capture stream - what "mic" edges route into.
+        # The module's own capture stream (interior, never exposed
+        # directly - see _mic_dummy_name for the socket "mic" edges
+        # actually route into). Kept equal to backing_node_name, same
+        # convention _FilterChainNode._fx_capture_name uses, so this is
+        # still the name every live-control/log message keys off as
+        # "this node's primary backing".
         return self.backing_node_name
 
     @property
     def _probe_name(self) -> str:
-        # The module's sink stream - what "probe" (reference) edges
-        # route into.
+        # The module's own sink stream (interior - see
+        # _probe_dummy_name for the socket "probe" edges route into).
         return f"{self.backing_node_name}_probe"
 
     @property
-    def _source_name(self) -> str:
-        # The module's source stream - where the cleaned mic comes out.
+    def _fx_source_name(self) -> str:
+        # The module's own source stream (interior - see
+        # _out_dummy_name for the socket consumers actually pick the
+        # cleaned mic up from). Named like _FilterChainNode's
+        # _fx_playback_name, freeing up the "_out" suffix below for the
+        # stable dummy.
+        return f"{self.backing_node_name}_fx_out"
+
+    @property
+    def _mic_dummy_name(self) -> str:
+        # The stable input socket real audio wires into for "mic".
+        return f"{self.backing_node_name}_mic_in"
+
+    @property
+    def _probe_dummy_name(self) -> str:
+        # The stable input socket real audio wires into for "probe".
+        return f"{self.backing_node_name}_probe_in"
+
+    @property
+    def _out_dummy_name(self) -> str:
+        # The stable output socket whose monitor consumers wire from.
         return f"{self.backing_node_name}_out"
 
     @property
@@ -1890,18 +2102,84 @@ class EchoCancelNode(BackedNode):
         # default name would otherwise collide).
         return f"{self.backing_node_name}_playback"
 
+    @property
+    def _playback_sink_name(self) -> str:
+        # A throwaway null-audio-sink the module's hidden playback
+        # stream is permanently wired into (see internal_links). The
+        # module's four streams are only scheduled as part of an active
+        # graph, and its playback leg is the side that normally connects
+        # to a driven sink (the conference-app topology plays it out to
+        # the speakers, which is what keeps the AEC graph running); this
+        # node deliberately never exposes that leg as a socket, so
+        # without a dummy sink here the playback stream would sit
+        # unwired forever and the whole module would idle - mic audio
+        # would never make it through to "out". Feeding it into a sink
+        # the node itself owns (rather than the user's speakers) and
+        # permanently draining that sink's monitor keeps the module
+        # scheduled with zero audible side effects: the playback stream
+        # only ever carries the reference signal (what's routed into
+        # "probe"), which is discarded silently instead of being
+        # double-played through speakers the user already hears.
+        return f"{self.backing_node_name}_playback_sink"
+
+    @property
+    def _playback_sink_drain_name(self) -> str:
+        return f"{self._playback_sink_name}_keepalive"
+
     def input_identity(self, port: str = "in") -> dict:
         # Anything other than exactly "probe" (including the "in"
         # default every other node type actually uses) is treated as
         # the mic input - the primary/first socket, same convention
         # find_socket_at()/NODE_TYPE_SPECS use on the GUI side (index
-        # 0 = "mic").
+        # 0 = "mic"). Both route to a stable input dummy, never the
+        # module's own stream - see class docstring.
         if port == "probe":
-            return {"name": self._probe_name}
-        return {"name": self._mic_name}
+            return {"name": self._probe_dummy_name}
+        return {"name": self._mic_dummy_name}
 
     def output_identity(self) -> dict:
-        return {"nodeName": self._source_name}
+        # The stable output dummy's monitor, not the module's own
+        # source stream directly - same reasoning as
+        # _FilterChainNode.output_identity().
+        return {"nodeName": self._out_dummy_name}
+
+    def internal_links(self) -> List[Tuple[dict, dict]]:
+        # The sandwich's private plumbing, maintained by
+        # PatchSpace.sync() like any other internal link (synthetic
+        # edge ids) so it self-heals across every module reload for
+        # free: each input dummy's monitor feeds the matching module
+        # stream, and the module's source feeds the output dummy - the
+        # same two-link pattern _FilterChainNode.internal_links() uses,
+        # just times two on the input side. The probe link is always
+        # present (matching the probe dummy/backing always existing -
+        # see ensure_backing) even in monitor.mode, where the module's
+        # own sink additionally auto-captures the default sink's
+        # monitor; the two simply coexist. The module's hidden playback
+        # stream is fed into a throwaway null-audio-sink this node owns
+        # (see _playback_sink_name's comment for why), skipped entirely
+        # in monitor.mode where the module omits that stream.
+        links = [
+            (
+                {"nodeName": self._mic_dummy_name},
+                {"name": self._mic_name},
+            ),
+            (
+                {"nodeName": self._probe_dummy_name},
+                {"name": self._probe_name},
+            ),
+            (
+                {"nodeName": self._fx_source_name},
+                {"name": self._out_dummy_name},
+            ),
+        ]
+        if not self.monitor_mode:
+            links.append(
+                (
+                    {"nodeName": self._playback_name},
+                    {"name": self._playback_sink_name},
+                )
+            )
+        return links
 
     @staticmethod
     def _stream_props(name: str, autoconnect: bool = False) -> str:
@@ -1921,15 +2199,40 @@ class EchoCancelNode(BackedNode):
             "}"
         )
 
-    def ensure_backing(self) -> None:
+    def _module_backing(self) -> Optional[OwnedPwNode]:
+        """The OwnedPwNode owning the echo-cancel module's pw-cli
+        session (the mic-capture-side backing) - same role as
+        _FilterChainNode._processor_backing(). Looked up by name so a
+        partially-repaired backings list can't derail it."""
+        for owned in self.backings:
+            if owned.name == self._mic_name:
+                return owned
+        return None
+
+    def backing_incomplete(self) -> bool:
+        # See BackedNode.backing_incomplete: True only when the AEC
+        # module itself never came up - the three dummies/playback
+        # sink/keepalives are independently retried by ensure_backing()
+        # regardless.
+        return self._module_backing() is None
+
+    def module_backing(self) -> Optional[OwnedPwNode]:
+        # See BackedNode.module_backing: the AEC module is the mic
+        # (capture)-side backing, same lookup backing_incomplete() uses.
+        return self._module_backing()
+
+    def _spawn_module(self) -> Optional[OwnedPwNode]:
+        """Load the echo-cancel module: one pw-cli connection produces
+        all four of its streams at once. Only the primary (mic-side)
+        OwnedPwNode actually spawns a process; the rest are just names
+        for resolve_backing() to watch for - same trick
+        _FilterChainNode._spawn_processor() uses for its capture/
+        playback split (destroying the primary tears all four down
+        together, since one pw-cli connection owns them all)."""
         mic_name = self._mic_name
         probe_name = self._probe_name
-        source_name = self._source_name
+        fx_source_name = self._fx_source_name
         playback_name = self._playback_name
-
-        if self.backings:
-            self._ensure_keepalives(mic_name, probe_name, source_name)
-            return
 
         parts = [f"library.name = {self.library_name}"]
         if self.monitor_mode:
@@ -1942,7 +2245,7 @@ class EchoCancelNode(BackedNode):
             [
                 f"capture.props = {self._stream_props(mic_name)}",
                 f"sink.props = {self._stream_props(probe_name, autoconnect=self.monitor_mode)}",
-                f"source.props = {self._stream_props(source_name)}",
+                f"source.props = {self._stream_props(fx_source_name)}",
                 # playback.props is ignored by the module in monitor.mode.
                 f"playback.props = {self._stream_props(playback_name)}",
             ]
@@ -1952,90 +2255,168 @@ class EchoCancelNode(BackedNode):
         )
         logger.info("Creating echo-cancel node with: %s", command)
 
-        # One real pw-cli connection/module load produces the whole
-        # group of real nodes at once - only the primary (mic-side)
-        # OwnedPwNode actually spawns a process; the others are just
-        # names for resolve_backing() to watch for, same trick
-        # _FilterChainNode.ensure_backing() uses for its own two-node
-        # split (see that method's comment for why destroying just the
-        # primary is enough to tear all of them down together).
-        # monitor.mode makes the module omit the playback stream, so no
-        # backing is registered for a node that will never appear.
         owned = OwnedPwNode(mic_name, self._pw_cli_command, self._pw_cli_settle)
         if not owned.create(command):
             logger.error("Echo-cancel node creation failed for %r", self.id)
-            return
+            return None
         self.backings.append(owned)
         self.backings.append(OwnedPwNode(probe_name))
-        self.backings.append(OwnedPwNode(source_name))
+        self.backings.append(OwnedPwNode(fx_source_name))
+        # monitor.mode makes the module omit the playback stream, so no
+        # backing is registered for a node that will never appear.
         if not self.monitor_mode:
             self.backings.append(OwnedPwNode(playback_name))
+        return owned
 
-        self._ensure_keepalives(mic_name, probe_name, source_name)
+    def _ensure_dummy(self, name: str) -> None:
+        """Create one null-audio-sink dummy (any of the mic/probe/out
+        sockets, or the internal playback sink) if missing, checked by
+        name. When it has to be (re)created, any keepalive that was
+        aimed at it is aimed at a vanished target, so it is dropped
+        here too and re-spawned by _ensure_keepalives - same pattern as
+        _FilterChainNode._ensure_dummy, generalized via the shared
+        "{dummy}_keepalive" naming convention."""
+        if any(b.name == name for b in self.backings):
+            return
+        if _ensure_null_sink_dummy(
+            self, name, self._pw_cli_command, self._pw_cli_settle
+        ) is None:
+            return
+        keepalive_name = f"{name}_keepalive"
+        for existing in list(self.backings):
+            if existing.name == keepalive_name:
+                existing.destroy()
+                if existing in self.backings:
+                    self.backings.remove(existing)
 
-    def _ensure_keepalives(
-        self, mic_name: str, probe_name: str, source_name: str
-    ) -> None:
-        """Keep every exposed socket permanently active - see class
-        docstring for why. Silence in, silence drained out, so none of
-        this ever audibly interferes with whatever the user routes for
-        real. monitor_mode auto-captures the probe side itself, so a
-        manual probe keepalive would just be a second, redundant feed
-        fighting the session's own auto-connect - skip it in that mode
-        (mic and out still get theirs either way). Checked/added by
-        name, same as _FilterChainNode._ensure_keepalives, so a
-        keepalive that failed to start on a previous ensure_backing()
-        call gets retried on the next one instead of staying missing
-        forever."""
+    def _ensure_playback_sink(self) -> None:
+        """Create (if missing) the throwaway null-audio-sink that the
+        module's hidden playback stream is drained into - see
+        _playback_sink_name / internal_links. No-op in monitor.mode (no
+        playback stream exists)."""
+        if self.monitor_mode:
+            return
+        self._ensure_dummy(self._playback_sink_name)
+
+    def _ensure_keepalives(self) -> None:
+        """Keep every exposed socket permanently active by feeding/
+        draining its stable dummy - see class docstring for why.
+        Silence in, silence drained out, so none of this ever audibly
+        interferes with whatever the user routes for real. monitor_mode
+        auto-captures the probe side itself, so a manual probe feed
+        would just be a second, redundant one fighting the session's
+        own auto-connect - skipped in that mode (mic and out still get
+        theirs either way). Checked/added by name, so a keepalive that
+        failed to start on a previous ensure_backing() call gets
+        retried on the next one instead of staying missing forever."""
         have = {b.name for b in self.backings}
 
-        mic_keepalive_name = f"{mic_name}_keepalive"
-        if mic_keepalive_name not in have:
-            mic_keepalive = _spawn_silent_feed(
-                mic_keepalive_name, mic_name, self._pw_cli_command, self._pw_cli_settle
+        def _feed(dummy_name: str) -> None:
+            kname = f"{dummy_name}_keepalive"
+            if kname in have:
+                return
+            feed = _spawn_silent_feed(
+                kname, dummy_name, self._pw_cli_command, self._pw_cli_settle
             )
-            if mic_keepalive:
-                self.backings.append(mic_keepalive)
+            if feed:
+                self.backings.append(feed)
             else:
                 logger.error(
-                    "Echo-cancel mic keepalive failed to start for %r", self.id
+                    "Echo-cancel %s keepalive failed to start for %r",
+                    dummy_name,
+                    self.id,
                 )
 
+        def _drain(dummy_name: str) -> None:
+            kname = f"{dummy_name}_keepalive"
+            if kname in have:
+                return
+            drain = _spawn_silent_drain(
+                kname, dummy_name, self._pw_cli_command, self._pw_cli_settle
+            )
+            if drain:
+                self.backings.append(drain)
+            else:
+                logger.error(
+                    "Echo-cancel %s keepalive failed to start for %r",
+                    dummy_name,
+                    self.id,
+                )
+
+        _feed(self._mic_dummy_name)
         if not self.monitor_mode:
-            probe_keepalive_name = f"{probe_name}_keepalive"
-            if probe_keepalive_name not in have:
-                probe_keepalive = _spawn_silent_feed(
-                    probe_keepalive_name,
-                    probe_name,
-                    self._pw_cli_command,
-                    self._pw_cli_settle,
-                )
-                if probe_keepalive:
-                    self.backings.append(probe_keepalive)
-                else:
-                    logger.error(
-                        "Echo-cancel probe keepalive failed to start for %r", self.id
-                    )
+            _feed(self._probe_dummy_name)
+        _drain(self._out_dummy_name)
+        if not self.monitor_mode and any(
+            b.name == self._playback_sink_name for b in self.backings
+        ):
+            _drain(self._playback_sink_name)
 
-        source_keepalive_name = f"{source_name}_keepalive"
-        if source_keepalive_name not in have:
-            source_keepalive = _spawn_silent_drain(
-                source_keepalive_name,
-                source_name,
-                self._pw_cli_command,
-                self._pw_cli_settle,
-            )
-            if source_keepalive:
-                self.backings.append(source_keepalive)
-            else:
-                logger.error(
-                    "Echo-cancel out keepalive failed to start for %r", self.id
+    def _reorder_backings(self) -> None:
+        """Canonicalize self.backings so the module's primary (mic)
+        backing stays at index 0 regardless of which pieces a partial
+        repair re-created in what order - main.py's backing-health
+        logic relies on this, same as _FilterChainNode._reorder_backings."""
+        order = (
+            self._mic_name,
+            self._probe_name,
+            self._fx_source_name,
+            self._playback_name,
+            self._mic_dummy_name,
+            self._probe_dummy_name,
+            self._out_dummy_name,
+            self._playback_sink_name,
+        )
+        rank = {name: i for i, name in enumerate(order)}
+        self.backings.sort(key=lambda b: rank.get(b.name, len(order)))
+
+    def ensure_backing(self) -> None:
+        """Create whatever of the sandwich is missing, by name - module
+        first, then the three dummies, the playback sink, and the
+        keepalives. Idempotent, same contract as
+        _FilterChainNode.ensure_backing(): a call that finds the module
+        already up but a dummy or keepalive missing re-creates only the
+        missing piece."""
+        if self._module_backing() is None:
+            self._spawn_module()
+        self._ensure_dummy(self._mic_dummy_name)
+        self._ensure_dummy(self._probe_dummy_name)
+        self._ensure_dummy(self._out_dummy_name)
+        self._ensure_playback_sink()
+        self._ensure_keepalives()
+        self._reorder_backings()
+
+    def reload_backing(self) -> None:
+        """Swap ONLY the interior (the echo-cancel module's own four
+        streams), leaving the mic/probe/out dummies - and every user
+        edge drawn on them - untouched; see the class docstring for why
+        that is now the whole point of this node, exactly mirroring
+        _FilterChainNode.reload_backing(). Also drops the playback-sink
+        drain (its live tap is the old module's playback stream, which
+        dies here) and any process-owning backing that already died on
+        its own, so this doubles as the crash-recovery path."""
+        for owned in list(self.backings):
+            if (
+                owned.name
+                in (
+                    self._mic_name,
+                    self._probe_name,
+                    self._fx_source_name,
+                    self._playback_name,
                 )
+                or owned.name == self._playback_sink_drain_name
+                or (owned.owns_process and not owned.is_alive)
+            ):
+                owned.destroy()
+                if owned in self.backings:
+                    self.backings.remove(owned)
+        self.ensure_backing()
 
     def teardown_backing(self) -> None:
-        # Stop the keepalives before tearing the module down (their
-        # targets go away when the primary pw-cli dies), mirroring
-        # VirtualMicNode's reverse-order teardown for its own keepalive.
+        # Reverse creation order: the keepalives feed/drain the
+        # dummies, which in turn feed/are fed by the module - stop the
+        # clients before the nodes they target, then the dummies, then
+        # the module. Mirrors _FilterChainNode.teardown_backing().
         for owned in reversed(self.backings):
             owned.destroy()
         self.backings.clear()

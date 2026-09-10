@@ -641,6 +641,26 @@ class PatchBayDaemon:
             if backing_names:
                 self.graph.reap_stale_for_names(backing_names)
 
+            # Stage every id that will turn out to be a BackedNode
+            # *before* creating any of them - add_node() wakes the
+            # ticker the moment the first one lands, and the ticker
+            # only has to wait for this same lock to be released to
+            # run a full supervise() pass. Staging up front (rather
+            # than as each node is created) is what keeps that pass
+            # from grabbing a node we haven't gotten to yet in the
+            # one-at-a-time bring-up loop below - see the _staging
+            # docstring on PatchSpace.__init__ for the race this
+            # closes.
+            to_stage = [
+                node_id
+                for node_id, node_cfg in nodes_cfg.items()
+                if issubclass(
+                    NODE_TYPE_REGISTRY.get(node_cfg.get("type"), object), BackedNode
+                )
+            ]
+            if to_stage:
+                self.space.stage(to_stage)
+
             for node_id, node_cfg in nodes_cfg.items():
                 node_type = node_cfg.get("type")
                 params = node_cfg.get("params", {}) or {}
@@ -681,21 +701,36 @@ class PatchBayDaemon:
 
         # Outside the lock: bring backed nodes up one at a time so a
         # slow module load never blocks the whole load, or the rest of
-        # the daemon, for longer than it has to.
+        # the daemon, for longer than it has to. Each node is unstaged
+        # right after its own bring-up attempt (success or timeout) -
+        # not staged for the whole loop - so node 2's turn still runs
+        # under the same protection node 1's did, and a node that timed
+        # out still falls back to normal periodic repair afterward
+        # instead of being skipped forever.
         not_ready = []
-        for node_id in backed_ids:
-            node = self.space.nodes.get(node_id)
-            if node is None:
-                continue
-            logger.info("Bringing up %r before wiring its edges\u2026", node_id)
-            if not self._bring_node_up(node):
-                not_ready.append(node_id)
-                logger.warning(
-                    "%r did not become ready within %.1fs - wiring it anyway; "
-                    "the normal supervision tick will keep repairing it",
-                    node_id,
-                    SESSION_LOAD_NODE_TIMEOUT_S,
-                )
+        try:
+            for node_id in backed_ids:
+                node = self.space.nodes.get(node_id)
+                if node is None:
+                    continue
+                logger.info("Bringing up %r before wiring its edges\u2026", node_id)
+                try:
+                    if not self._bring_node_up(node):
+                        not_ready.append(node_id)
+                        logger.warning(
+                            "%r did not become ready within %.1fs - wiring it anyway; "
+                            "the normal supervision tick will keep repairing it",
+                            node_id,
+                            SESSION_LOAD_NODE_TIMEOUT_S,
+                        )
+                finally:
+                    self.space.unstage(node_id)
+        finally:
+            # Belt-and-suspenders: make sure nothing (a failed node
+            # lookup above, an exception from _bring_node_up itself)
+            # can leave an id staged forever.
+            for node_id in backed_ids:
+                self.space.unstage(node_id)
 
         edges_created, edge_failures = [], []
         with self._lock:
