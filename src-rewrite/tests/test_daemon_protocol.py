@@ -571,3 +571,162 @@ def test_load_session_only_reaps_backings_of_new_nodes(monkeypatch):
         }
     )
     assert reaped == [["fresh_backing"]]
+
+
+def test_speaker_mic_lines_share_builtin_volume_and_lock():
+    from pwnodes import (
+        PatchBayDeviceNode,
+        VirtualMicNode,
+        VirtualSpeakerNode,
+    )
+
+    d = fresh_daemon()
+    # Stand in for the daemon's built-in devices (start() creates these).
+    d.builtin_sink = VirtualSpeakerNode("__builtin_sink__", "PatchBay")
+    d.builtin_mic = VirtualMicNode("__builtin_mic__", "PatchBay Mic")
+
+    for node_id in ("spk1", "spk2"):
+        resp = d.handle_command(
+            {
+                "command": "add_node",
+                "node_type": "patchbay_device",
+                "node_id": node_id,
+                "config": {"label": "Speaker Line"},
+            }
+        )
+        assert resp["status"] == "ok", resp
+    assert d.handle_command(
+        {
+            "command": "add_node",
+            "node_type": "patchbay_mic_device",
+            "node_id": "mic1",
+            "config": {"label": "Mic Line"},
+        }
+    )["status"] == "ok"
+
+    # Several Speaker Lines coexist and all point at the one built-in
+    # sink (same source/sink identities), not separate devices.
+    assert isinstance(d.space.nodes["spk1"], PatchBayDeviceNode)
+    assert d._line_volume_target(d.space.nodes["spk1"]) is d.builtin_sink
+    assert d._line_volume_target(d.space.nodes["spk2"]) is d.builtin_sink
+    assert d._line_volume_target(d.space.nodes["mic1"]) is d.builtin_mic
+    assert d.space.nodes["spk1"].source_filters() == d.space.nodes[
+        "spk2"
+    ].source_filters()
+
+    # One line's slider drives the shared device and mirrors to siblings.
+    resp = d.handle_command(
+        {"command": "set_device_volume", "node_id": "spk1", "volume": 0.25}
+    )
+    assert resp["status"] == "ok", resp
+    assert abs(d.builtin_sink.device_volume - 0.25) < 1e-9
+    assert abs(d.space.nodes["spk1"].device_volume - 0.25) < 1e-9
+    assert abs(d.space.nodes["spk2"].device_volume - 0.25) < 1e-9
+    # The mic line is a different device and is untouched.
+    assert abs(d.builtin_mic.device_volume - 1.0) < 1e-9
+
+    # Lock is shared per device and mirrors to every line.
+    assert d.handle_command(
+        {
+            "command": "set_node_property",
+            "node_id": "spk2",
+            "property": "volume_locked",
+            "value": False,
+        }
+    )["status"] == "ok"
+    assert d.builtin_sink.volume_locked is False
+    assert d.space.nodes["spk1"].volume_locked is False
+    assert d.space.nodes["spk2"].volume_locked is False
+    assert d.builtin_mic.volume_locked is True
+
+    # And the state round-trips through serialization for the GUI.
+    nodes = d.handle_command({"command": "get_nodes"})["nodes"]
+    assert abs(nodes["spk1"]["device_volume"] - 0.25) < 1e-9
+    assert nodes["spk1"]["volume_locked"] is False
+
+
+def test_device_volume_lock_gates_constant_override(monkeypatch):
+    import pwnodes
+    from pwnodes import DeviceOutputNode
+
+    calls = []
+    monkeypatch.setattr(
+        pwnodes, "_run_wpctl", lambda *a, **k: calls.append(a) or True
+    )
+
+    node = DeviceOutputNode("out", "dev", device_volume=0.5)
+    node.live_node_id = 123
+    node.live_props = {}
+
+    # Locked (default): the configured value is re-asserted every apply.
+    calls.clear()
+    node.apply_device_settings()
+    assert ("set-volume", 123, 0.5) in calls
+
+    # Unlocked: the tick no longer overwrites the device...
+    node.volume_locked = False
+    calls.clear()
+    node.apply_device_settings()
+    assert calls == []
+
+    # ...but an explicit user drag still pushes immediately.
+    calls.clear()
+    node.apply_device_settings(push_volume=True)
+    assert ("set-volume", 123, 0.5) in calls
+
+
+def test_normalize_registry_spec_and_control_clamp():
+    from pwnodes import NormalizeNode
+    from gui import node_specs as ns
+
+    assert main_mod.NODE_TYPE_REGISTRY["normalize"] is NormalizeNode
+    assert NormalizeNode in main_mod._CAREFUL_NODE_TYPES
+    spec = ns.spec_for("normalize")
+    assert spec.label == "Normalize"
+    assert spec.control == "gain"
+    assert ns.normalize_node_type("NormalizeNode") == "normalize"
+    assert ("Normalize", "normalize") in ns.ADD_NODE_MENU_ITEMS
+
+    d = fresh_daemon()
+    node = NormalizeNode("nz", "norm")
+    d.space.nodes["nz"] = node
+    d.space.public_nodes.add("nz")
+
+    # Out-of-range values are clamped to the plugin's safe bounds and a
+    # (debounced) interior reload is scheduled for the load-time change.
+    assert d.handle_command(
+        {
+            "command": "set_node_property",
+            "node_id": "nz",
+            "property": "boost_db",
+            "value": 999,
+        }
+    )["status"] == "ok"
+    assert node.boost_db == NormalizeNode.BOOST_MAX_DB
+    assert node._reload_due is not None
+
+    assert d.handle_command(
+        {
+            "command": "set_node_property",
+            "node_id": "nz",
+            "property": "ceiling_db",
+            "value": -999,
+        }
+    )["status"] == "ok"
+    assert node.ceiling_db == NormalizeNode.CEILING_MIN_DB
+
+    assert d.handle_command(
+        {
+            "command": "set_node_property",
+            "node_id": "nz",
+            "property": "leveling",
+            "value": False,
+        }
+    )["status"] == "ok"
+    assert node.leveling is False
+
+    # Serialized for the GUI (and the inline boost slider reads boost_db).
+    data = d.handle_command({"command": "get_nodes"})["nodes"]["nz"]
+    assert data["type"] == "normalize"
+    assert data["boost_db"] == NormalizeNode.BOOST_MAX_DB
+    assert data["leveling"] is False

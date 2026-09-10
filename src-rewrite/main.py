@@ -47,6 +47,7 @@ from pwnodes import (
     NoiseCancelNode,
     SensitivityGateNode,
     ReverbNode,
+    NormalizeNode,
     EchoCancelNode,
     LightNoiseCancelNode,
     VirtualSpeakerNode,
@@ -106,7 +107,12 @@ SESSION_LOAD_EDGE_POLL_S = 0.1
 # a dedicated second pass: each node is brought up on its own and waited
 # on, then its edges are wired one at a time (inputs first), each
 # confirmed live before the next.
-_CAREFUL_NODE_TYPES = (EchoCancelNode, NoiseCancelNode, SensitivityGateNode)
+_CAREFUL_NODE_TYPES = (
+    EchoCancelNode,
+    NoiseCancelNode,
+    SensitivityGateNode,
+    NormalizeNode,
+)
 
 
 NODE_TYPE_REGISTRY: Dict[str, type] = {
@@ -125,6 +131,7 @@ NODE_TYPE_REGISTRY: Dict[str, type] = {
     "noise_cancel": NoiseCancelNode,
     "sensitivity_gate": SensitivityGateNode,
     "reverb": ReverbNode,
+    "normalize": NormalizeNode,
     "echo_cancel": EchoCancelNode,
     "light_noise_cancel": LightNoiseCancelNode,
     "device_input": DeviceInputNode,
@@ -196,6 +203,18 @@ _SERIAL_ATTRS = (
     "wet_dry",
     "level",
     "sensitivity",
+    "volume_locked",
+    "boost_db",
+    "max_boost_db",
+    "ceiling_db",
+    "leveling",
+    "threshold_db",
+    "ratio",
+    "attack_ms",
+    "release_ms",
+    "knee_db",
+    "limiter_release_s",
+    "ladspa_dir",
 )
 
 # GUI layout state a node may carry.  Serialized separately (only when
@@ -424,6 +443,88 @@ class PatchBayDaemon:
                     break
         return sink_id, mic_id
 
+    # ------------------------------------------------------------------
+    # Speaker Line / Mic Line shared volume
+    # ------------------------------------------------------------------
+    #
+    # The visible Speaker Line / Mic Line nodes own no backing - they all
+    # reference the daemon's single built-in virtual sink/mic.  The
+    # volume state lives on that built-in device (one source of truth,
+    # so several lines can't fight over it) and is mirrored onto every
+    # visible line node on the supervision tick.  When the built-in
+    # node's lock is on (default) its volume is re-asserted every tick;
+    # unlocked, external changes are adopted instead.
+
+    def _line_volume_target(self, node):
+        """The built-in device a Speaker/Mic Line node controls, or None
+        when `node` is not a line node."""
+        if isinstance(node, PatchBayDeviceNode):
+            return self.builtin_sink
+        if isinstance(node, PatchBayMicDeviceNode):
+            return self.builtin_mic
+        return None
+
+    def _line_nodes_for(self, target) -> list:
+        if target is self.builtin_sink:
+            cls = PatchBayDeviceNode
+        elif target is self.builtin_mic:
+            cls = PatchBayMicDeviceNode
+        else:
+            return []
+        return [n for n in self.space.nodes.values() if isinstance(n, cls)]
+
+    def _mirror_line_volume(self, target) -> None:
+        if target is None:
+            return
+        for line in self._line_nodes_for(target):
+            line.device_volume = target.device_volume
+            line.volume_locked = target.volume_locked
+
+    def _adopt_line_volume(self, node, config: dict) -> None:
+        """A line node created/loaded with an explicit device_volume /
+        volume_locked (an import round-trip) seeds the shared built-in
+        state; a GUI-created one leaves it alone so the built-in's
+        current volume flows onto the new line instead."""
+        target = self._line_volume_target(node)
+        if target is None:
+            return
+        if "volume_locked" in config:
+            target.volume_locked = bool(config["volume_locked"])
+        if "device_volume" in config:
+            try:
+                target.device_volume = max(
+                    0.0, min(1.0, float(config["device_volume"]))
+                )
+            except (TypeError, ValueError):
+                pass
+        self._mirror_line_volume(target)
+
+    def _enforce_volume_locks(self) -> None:
+        """Per-tick volume policy.  Hardware device nodes re-apply their
+        own volume in apply_device_settings() during supervise(); an
+        unlocked one instead adopts the live value here so the slider
+        follows external changes.  The built-in sink/mic are handled the
+        same way, plus mirroring onto every visible line node."""
+        for node in list(self.space.nodes.values()):
+            if not isinstance(node, (DeviceInputNode, DeviceOutputNode)):
+                continue
+            if getattr(node, "volume_locked", True):
+                continue
+            try:
+                node.sync_volume_from_live()
+            except Exception as exc:
+                logger.warning("Live volume sync for %r failed: %s", node.id, exc)
+        for target in (self.builtin_sink, self.builtin_mic):
+            if target is None:
+                continue
+            try:
+                target.apply_device_settings()
+                target.sync_volume_from_live()
+            except Exception as exc:
+                logger.warning("Volume enforcement for %r failed: %s",
+                               target.id, exc)
+            self._mirror_line_volume(target)
+
     def _assert_defaults(self) -> None:
         """Re-assert the builtins as default output/input, once per
         resolved id - a recreated device gets re-promoted on a later
@@ -482,6 +583,7 @@ class PatchBayDaemon:
         try:
             self.space.supervise()
             self._assert_defaults()
+            self._enforce_volume_locks()
         except Exception:
             logger.exception("supervision tick failed")
         if self._dirty:
@@ -972,6 +1074,7 @@ class PatchBayDaemon:
                     for key, value in params.items():
                         if hasattr(existing, key):
                             setattr(existing, key, value)
+                    self._adopt_line_volume(existing, params)
                     if hasattr(existing, "apply_device_settings"):
                         existing.apply_device_settings()
                     if isinstance(existing, SensitivityGateNode):
@@ -991,6 +1094,7 @@ class PatchBayDaemon:
                     node.label = params["label"]
                 _apply_layout_attrs(node, params)
                 self.space.add_node(node)
+                self._adopt_line_volume(node, params)
                 if isinstance(node, SensitivityGateNode):
                     backed_ids.extend(self._ensure_sensitivity_internals(node))
                 if isinstance(node, LiveResolvableNode):
@@ -1361,6 +1465,22 @@ class PatchBayDaemon:
                 g("ladspa_label", ""),
                 g("wet_dry", 0.3),
             )
+        if cls is NormalizeNode:
+            return cls(
+                node_id,
+                backing,
+                boost_db=g("boost_db", 15.0),
+                max_boost_db=g("max_boost_db", 24.0),
+                ceiling_db=g("ceiling_db", -1.0),
+                leveling=g("leveling", True),
+                threshold_db=g("threshold_db", -35.0),
+                ratio=g("ratio", 4.0),
+                attack_ms=g("attack_ms", 10.0),
+                release_ms=g("release_ms", 400.0),
+                knee_db=g("knee_db", 6.0),
+                limiter_release_s=g("limiter_release_s", 0.5),
+                ladspa_dir=g("ladspa_dir", ""),
+            )
         if cls in (EchoCancelNode, LightNoiseCancelNode):
             return cls(
                 node_id,
@@ -1377,15 +1497,22 @@ class PatchBayDaemon:
                 g("device_volume", 1.0),
                 g("profile_index"),
                 g("profile_description", ""),
+                g("volume_locked", True),
             )
         if cls in (AppInputNode, AppOutputNode):
             return cls(node_id, g("app_name", ""))
         if cls is PatchBayDeviceNode:
-            return cls(node_id)
+            return cls(node_id, g("device_volume", 1.0), g("volume_locked", True))
         if cls is PatchBayMicDeviceNode:
-            return cls(node_id)
+            return cls(node_id, g("device_volume", 1.0), g("volume_locked", True))
         if cls in (VirtualSpeakerNode, VirtualMicNode):
-            return cls(node_id, backing, g("device_label", ""))
+            return cls(
+                node_id,
+                backing,
+                g("device_label", ""),
+                g("device_volume", 1.0),
+                g("volume_locked", True),
+            )
         raise AssertionError(f"unhandled node type {node_type}")
 
     # ------------------------------------------------------------------
@@ -1422,6 +1549,7 @@ class PatchBayDaemon:
                         continue
                     if hasattr(existing, key):
                         setattr(existing, key, value)
+                self._adopt_line_volume(existing, config)
                 if isinstance(existing, VolumeProcessNode):
                     if "initial_volume" in config:
                         existing.set_volume(config["initial_volume"])
@@ -1458,6 +1586,7 @@ class PatchBayDaemon:
                 # contract as _load_session's careful pass).
                 self.space.stage([node_id])
             self.space.add_node(node)
+            self._adopt_line_volume(node, config)
             if isinstance(node, SensitivityGateNode):
                 self._ensure_sensitivity_internals(node)
             if isinstance(node, LiveResolvableNode):
@@ -1852,6 +1981,68 @@ class PatchBayDaemon:
                 else:
                     node.aec_args = value or ""
                 self._coalesce_reload(node)
+            elif prop == "volume_locked":
+                locked = bool(value)
+                target = self._line_volume_target(node)
+                if target is not None:
+                    target.volume_locked = locked
+                    self._mirror_line_volume(target)
+                    target.apply_device_settings()
+                elif hasattr(node, "volume_locked"):
+                    node.volume_locked = locked
+                    node.apply_device_settings()
+                else:
+                    return {
+                        "status": "error",
+                        "message": f"Node {node_id} has no volume lock",
+                    }
+            elif isinstance(node, NormalizeNode) and prop in (
+                "boost_db",
+                "max_boost_db",
+                "ceiling_db",
+                "leveling",
+                "threshold_db",
+                "ratio",
+                "attack_ms",
+                "release_ms",
+                "knee_db",
+                "limiter_release_s",
+                "ladspa_dir",
+            ):
+                if prop == "leveling":
+                    node.leveling = bool(value)
+                elif prop == "ladspa_dir":
+                    node.ladspa_dir = value or ""
+                else:
+                    try:
+                        new_val = float(value)
+                    except (TypeError, ValueError):
+                        return {
+                            "status": "error",
+                            "message": f"{prop} must be a number",
+                        }
+                    bounds = {
+                        "boost_db": (node.BOOST_MIN_DB, node.BOOST_MAX_DB),
+                        "max_boost_db": (node.BOOST_MIN_DB, node.BOOST_MAX_DB),
+                        "ceiling_db": (node.CEILING_MIN_DB, node.CEILING_MAX_DB),
+                        "threshold_db": (
+                            node.THRESHOLD_MIN_DB,
+                            node.THRESHOLD_MAX_DB,
+                        ),
+                        "ratio": (node.RATIO_MIN, node.RATIO_MAX),
+                        "attack_ms": (node.ATTACK_MIN_MS, node.ATTACK_MAX_MS),
+                        "release_ms": (node.RELEASE_MIN_MS, node.RELEASE_MAX_MS),
+                        "knee_db": (node.KNEE_MIN_DB, node.KNEE_MAX_DB),
+                        "limiter_release_s": (
+                            node.LIMITER_RELEASE_MIN_S,
+                            node.LIMITER_RELEASE_MAX_S,
+                        ),
+                    }
+                    lo, hi = bounds[prop]
+                    setattr(node, prop, max(lo, min(hi, new_val)))
+                # Load-time filter-graph values: debounce one interior
+                # reload rather than reloading per drag tick.
+                self._coalesce_reload(node)
             else:
                 return {
                     "status": "error",
@@ -1923,22 +2114,47 @@ class PatchBayDaemon:
 
     def _cmd_set_device_volume(self, cmd: dict) -> dict:
         node_id = cmd.get("node_id")
-        volume = cmd.get("volume", 1.0)
+        try:
+            volume = max(0.0, min(1.0, float(cmd.get("volume", 1.0))))
+        except (TypeError, ValueError):
+            return {"status": "error", "message": "volume must be a number"}
         with self._lock:
             node = self.space.nodes.get(node_id)
-            if not hasattr(node, "device_volume"):
+            if node is None:
+                return {"status": "error", "message": f"Node {node_id} not found"}
+            target = self._line_volume_target(node)
+            if target is not None:
+                # A Speaker/Mic Line slider drives the shared built-in
+                # device; mirror onto every sibling line so they agree.
+                target.device_volume = volume
+                self._mirror_line_volume(target)
+            elif hasattr(node, "device_volume"):
+                node.device_volume = volume
+            else:
                 return {
                     "status": "error",
                     "message": f"Node {node_id} has no controllable device",
                 }
-            node.device_volume = volume
-        node.apply_device_settings()
+
+        # A user drag always takes effect immediately, locked or not -
+        # the lock only governs the *continuous* override on the tick.
+        apply_node = target if target is not None else node
+        if hasattr(apply_node, "apply_device_settings"):
+            try:
+                apply_node.apply_device_settings(push_volume=True)
+            except Exception as exc:
+                logger.warning("Applying volume for %r failed: %s", node_id, exc)
         self._dirty = True
+        applied = (
+            target._volume_backing_node_id() is not None
+            if target is not None
+            else getattr(node, "live_node_id", None) is not None
+        )
         return {
             "status": "ok",
             "node_id": node_id,
             "volume": volume,
-            "applied": node.live_node_id is not None,
+            "applied": applied,
         }
 
     def _cmd_set_device_profile(self, cmd: dict) -> dict:

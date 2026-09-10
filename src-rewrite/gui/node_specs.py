@@ -249,6 +249,76 @@ NODE_TYPE_SPECS.update(
         # buried in its Settings menu; see the Reverb wet_dry handler in
         # main.py's set_node_property.
         "reverb": NodeSpec("Reverb", ["in"], ["out"], control="wetdry"),
+        # Loudness normalization: a lookahead-limiter sandwich that can
+        # lift quiet/far-from-mic speech without blasting on resume (see
+        # NormalizeNode). The inline slider is `boost_db`; the caps and
+        # compressor tuning live in the Settings gear. All of them are
+        # load-time filter-graph values, so a change schedules an
+        # interior-only reload (debounced) rather than a live set-param.
+        "normalize": NodeSpec(
+            "Normalize",
+            ["in"],
+            ["out"],
+            control="gain",
+            settings=[
+                (
+                    "boost_db",
+                    "Boost (dB):",
+                    "number",
+                    {"min": 0, "max": 30, "step": 0.5},
+                ),
+                (
+                    "max_boost_db",
+                    "Maximum boost cap (dB):",
+                    "number",
+                    {"min": 0, "max": 30, "step": 0.5},
+                ),
+                (
+                    "ceiling_db",
+                    "Output ceiling (dB):",
+                    "number",
+                    {"min": -20, "max": 0, "step": 0.5},
+                ),
+                ("leveling", "Leveling compressor (sc4)", "bool"),
+                (
+                    "threshold_db",
+                    "Compressor threshold (dB):",
+                    "number",
+                    {"min": -60, "max": 0, "step": 1},
+                ),
+                (
+                    "ratio",
+                    "Compressor ratio (1:n):",
+                    "number",
+                    {"min": 1, "max": 20, "step": 0.5},
+                ),
+                (
+                    "attack_ms",
+                    "Compressor attack (ms):",
+                    "number",
+                    {"min": 0.1, "max": 200, "step": 1},
+                ),
+                (
+                    "release_ms",
+                    "Compressor release (ms):",
+                    "number",
+                    {"min": 10, "max": 2000, "step": 10},
+                ),
+                (
+                    "knee_db",
+                    "Compressor knee (dB):",
+                    "number",
+                    {"min": 0, "max": 24, "step": 1},
+                ),
+                (
+                    "limiter_release_s",
+                    "Limiter release (s):",
+                    "number",
+                    {"min": 0.01, "max": 5, "step": 0.05},
+                ),
+                ("ladspa_dir", "LADSPA dir override (blank = auto):", "text"),
+            ],
+        ),
     }
 )
 
@@ -258,8 +328,8 @@ NODE_TYPE_SPECS.update(
         "device_output": NodeSpec("Hardware Output", ["in"], []),
         "app_input": NodeSpec("App Playback", [], ["out"]),
         "app_output": NodeSpec("App Mic", ["in"], []),
-        "patchbay_device": NodeSpec("PatchBay Device", ["in"], ["out"]),
-        "patchbay_mic_device": NodeSpec("PatchBay Mic Device", ["in"], ["out"]),
+        "patchbay_device": NodeSpec("Speaker Line", ["in"], ["out"]),
+        "patchbay_mic_device": NodeSpec("Mic Line", ["in"], ["out"]),
         "virtual_speaker": NodeSpec(
             "Virtual Speaker", ["in"], ["out"], field="device_label"
         ),
@@ -311,6 +381,7 @@ ADD_NODE_CATEGORIES = [
             ("Light Noise Cancel", "light_noise_cancel"),
             ("Sensitivity Gate", "sensitivity_gate"),
             ("Reverb", "reverb"),
+            ("Normalize", "normalize"),
         ],
     ),
     (
@@ -320,8 +391,8 @@ ADD_NODE_CATEGORIES = [
             ("Hardware Output", "device_output"),
             ("App Playback", "app_input"),
             ("App Mic", "app_output"),
-            ("PatchBay Device", "patchbay_device"),
-            ("PatchBay Mic Device", "patchbay_mic_device"),
+            ("Speaker Line", "patchbay_device"),
+            ("Mic Line", "patchbay_mic_device"),
         ],
     ),
     (
@@ -396,6 +467,7 @@ NODE_TYPE_ICONS: Dict[str, str] = {
     "light_noise_cancel": "microphone-sensitivity-low-symbolic",
     "sensitivity_gate": "microphone-sensitivity-high-symbolic",
     "reverb": "media-playlist-repeat-symbolic",
+    "normalize": "audio-volume-high-symbolic",
     "device_input": "audio-input-microphone-symbolic",
     "device_output": "audio-speakers-symbolic",
     "app_input": "application-x-executable-symbolic",
@@ -446,6 +518,7 @@ CLASS_NAME_TO_TYPE = {
     "NoiseCancelNode": "noise_cancel",
     "SensitivityGateNode": "sensitivity_gate",
     "ReverbNode": "reverb",
+    "NormalizeNode": "normalize",
     "EchoCancelNode": "echo_cancel",
     "LightNoiseCancelNode": "light_noise_cancel",
 }

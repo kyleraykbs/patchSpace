@@ -149,6 +149,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._dragging_volume = False
         self.pan_drag_start = (0.0, 0.0)
 
+        # Monotonic counter so two nodes added in the same millisecond
+        # (e.g. several Speaker/Mic Lines in a row) can't collide on id.
+        self._node_seq = 0
+
         self.dragging_node = None
         self.drag_node_start = (0, 0)
         # When a drag moves a multi-node selection, every dragged node's
@@ -374,6 +378,23 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             }
         )
 
+    def _apply_gain_slider(self, node_id, fraction):
+        """Normalize's inline boost slider: store the 0..1 fraction
+        locally and send it as `boost_db` (0..30 dB) to the daemon."""
+        node = self.nodes.get(node_id)
+        if node is None:
+            return
+        fraction = max(0.0, min(1.0, fraction))
+        node["gain"] = fraction
+        self.client.send(
+            {
+                "command": "set_node_property",
+                "node_id": node_id,
+                "property": "boost_db",
+                "value": fraction * 30.0,
+            }
+        )
+
     def _send_property(self, node_id, prop, value):
         self.client.send(
             {
@@ -468,6 +489,15 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     # _apply_sensitivity), so it survives reloads and is
                     # refreshed here like any other daemon field.
                     "sensitivity": ndata.get("sensitivity", 0.0),
+                    # Normalize's inline boost slider, as a 0..1 fraction
+                    # of its 0..30 dB range (the daemon stores boost_db).
+                    "gain": max(
+                        0.0,
+                        min(
+                            1.0,
+                            float(ndata.get("boost_db", 15.0) or 0.0) / 30.0,
+                        ),
+                    ),
                     "device_volume": 1.0,
                     "device_name": ndata.get("device_name", ""),
                     "app_name": ndata.get("app_name", ""),
@@ -486,6 +516,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     "device_volume": ndata.get("device_volume", 1.0),
                     "profile_index": ndata.get("profile_index"),
                     "codec_label": ndata.get("profile_description", ""),
+                    "volume_locked": ndata.get("volume_locked", True),
                 }
                 # A node the GUI itself asked the daemon to create is a
                 # user-spawned node -> anchor it by default.  Anything
@@ -555,6 +586,15 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     node["sensitivity"] = ndata.get(
                         "sensitivity", node.get("sensitivity", 0.0)
                     )
+                # Normalize's inline boost slider - same drag guard.
+                if self.slider_dragging != ("gain", nid):
+                    node["gain"] = max(
+                        0.0,
+                        min(
+                            1.0,
+                            float(ndata.get("boost_db", 15.0) or 0.0) / 30.0,
+                        ),
+                    )
                 # Always update min/max (they don't change during drag)
                 node["volume_min"] = ndata.get("volume_min", 0.0)
                 node["volume_max"] = ndata.get("volume_max", 1.0)
@@ -565,6 +605,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 # whatever was last confirmed by the daemon.
                 if self.slider_dragging != ("device", nid):
                     node["device_volume"] = ndata.get("device_volume", 1.0)
+                    node["volume_locked"] = ndata.get("volume_locked", True)
                 node["profile_index"] = ndata.get("profile_index")
                 node["codec_label"] = ndata.get("profile_description", "")
 
@@ -1127,6 +1168,25 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 return nid
         return None
 
+    def find_gain_slider_at(self, x, y):
+        """Normalize's boost slider - same bottom-of-node-body geometry
+        as the volume/wetdry/sensitivity sliders, control == "gain". The
+        drawn value is a 0..1 fraction of the plugin's 0..30 dB boost."""
+        for nid, node in self.nodes.items():
+            if spec_for(node["type"]).control != "gain":
+                continue
+            nx, ny = node["x"], node["y"]
+            node_h = self.node_height(nid)
+            slider_y = ny + node_h - self.SLIDER_HEIGHT - 5
+            slider_x = nx + self.SLIDER_MARGIN
+            slider_width = self.NODE_WIDTH - 2 * self.SLIDER_MARGIN
+            if (
+                slider_x <= x <= slider_x + slider_width
+                and slider_y - 6 <= y <= slider_y + 6
+            ):
+                return nid
+        return None
+
     def find_sensitivity_slider_at(self, x, y):
         """Sensitivity Gate's 0..1 gain-staging slider - same bottom-of-
         node-body geometry as the volume/wetdry sliders, control ==
@@ -1171,6 +1231,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         below, so a row can never be drawn without also being
         clickable."""
         ntype = node["type"]
+        if ntype in ("patchbay_device", "patchbay_mic_device"):
+            # Speaker Line / Mic Line nodes always show the shared
+            # built-in device's volume + lock.
+            return ["volume"]
         if ntype not in ("device_input", "device_output", "app_input", "app_output"):
             return []
         rows = ["select"]
@@ -1194,6 +1258,24 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         w = self.NODE_WIDTH - 2 * self.FIELD_MARGIN
         return (x, y, w, row_h)
 
+    # Width of the lock button reserved at the right of a volume row.
+    VOLUME_LOCK_SIZE = 18
+
+    def _volume_row_rects(self, nid):
+        """(slider_rect, lock_rect) for `nid`'s volume row.  The slider
+        stops short of the lock button so a press on the lock can't also
+        start a volume drag.  Shared by drawing, hit-testing and the
+        drag handlers so they can't drift."""
+        node = self.nodes[nid]
+        rows = self._device_rows(node)
+        rx, ry, rw, rh = self._device_row_rect(nid, rows.index("volume"))
+        size = self.VOLUME_LOCK_SIZE
+        gap = 6
+        slider_w = max(10, rw - size - gap)
+        slider = (rx, ry, slider_w, rh)
+        lock = (rx + rw - size, ry + (rh - size) / 2.0, size, size)
+        return slider, lock
+
     def find_device_row_at(self, x, y):
         for nid, node in self.nodes.items():
             rows = self._device_rows(node)
@@ -1204,9 +1286,23 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         return None
 
     def find_device_volume_slider_at(self, x, y):
-        hit = self.find_device_row_at(x, y)
-        if hit and hit[1] == "volume":
-            return hit[0]
+        for nid, node in self.nodes.items():
+            if "volume" not in self._device_rows(node):
+                continue
+            sx, sy, sw, sh = self._volume_row_rects(nid)[0]
+            if sx <= x <= sx + sw and sy <= y <= sy + sh:
+                return nid
+        return None
+
+    def find_volume_lock_at(self, x, y):
+        """The lock button at the right of a volume row (hardware device
+        or Speaker/Mic Line) - returns the node whose lock was clicked."""
+        for nid, node in self.nodes.items():
+            if "volume" not in self._device_rows(node):
+                continue
+            lx, ly, lw, lh = self._volume_row_rects(nid)[1]
+            if lx <= x <= lx + lw and ly <= y <= ly + lh:
+                return nid
         return None
 
     def find_gate_toggle_at(self, x, y):
@@ -1417,6 +1513,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self._draw_switcher_toggle(cr, nid, node.get("output", 0))
         elif spec.control == "wetdry":
             self._draw_wetdry_slider(cr, x, y, node_h, node.get("wet_dry", 0.3))
+        elif spec.control == "gain":
+            # Normalize's boost, drawn as a plain 0..1 slider (fraction
+            # of the plugin's 0..30 dB range - see find_gain_slider_at).
+            self._draw_volume_slider(cr, x, y, node_h, node.get("gain", 0.5))
         elif spec.control == "sensitivity":
             self._draw_threshold_slider(
                 cr, x, y, node_h, node.get("sensitivity", 0.0)
@@ -1585,6 +1685,30 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         cr.set_source_rgb(*amber)
         cr.arc(cx, cy, 2.2, 0, 2 * math.pi)
         cr.fill()
+        cr.restore()
+
+    def _draw_lock_button(self, cr, x, y, w, h, locked):
+        """Small padlock at the right of a volume row.  Filled amber when
+        locked (PatchBay re-asserts its volume every tick), a dim outline
+        when unlocked (the device's own volume is left alone)."""
+        color = (0.88, 0.70, 0.30) if locked else (0.5, 0.5, 0.53)
+        cx = x + w / 2.0
+        cy = y + h / 2.0
+        body_w = w * 0.62
+        body_h = h * 0.50
+        bx = cx - body_w / 2.0
+        by = cy - body_h / 2.0 + h * 0.12
+        cr.save()
+        cr.set_line_width(1.6)
+        cr.set_source_rgb(*color)
+        radius = body_w * 0.34
+        cr.arc(cx, by, radius, math.pi, 2 * math.pi)
+        cr.stroke()
+        cr.rectangle(bx, by, body_w, body_h)
+        if locked:
+            cr.fill()
+        else:
+            cr.stroke()
         cr.restore()
 
     def _draw_wetdry_slider(self, cr, x, y, node_h, mix):
@@ -1792,17 +1916,21 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         row_x, row_y, row_w, row_h = self._device_row_rect(nid, row_index)
 
         if row_kind == "volume":
+            (sx, sy, sw, sh), (lx, ly, lw, lh) = self._volume_row_rects(nid)
             volume = node.get("device_volume", 1.0)
             cr.set_source_rgb(0.3, 0.3, 0.3)
-            cr.rectangle(row_x, row_y + row_h / 2 - 2, row_w, 4)
+            cr.rectangle(sx, sy + sh / 2 - 2, sw, 4)
             cr.fill()
             cr.set_source_rgb(0.4, 0.7, 0.9)
-            cr.rectangle(row_x, row_y + row_h / 2 - 2, row_w * volume, 4)
+            cr.rectangle(sx, sy + sh / 2 - 2, sw * volume, 4)
             cr.fill()
-            handle_x = row_x + row_w * volume
-            cr.arc(handle_x, row_y + row_h / 2, 6, 0, 2 * math.pi)
+            handle_x = sx + sw * volume
+            cr.arc(handle_x, sy + sh / 2, 6, 0, 2 * math.pi)
             cr.set_source_rgb(0.9, 0.9, 0.9)
             cr.fill()
+            self._draw_lock_button(
+                cr, lx, ly, lw, lh, bool(node.get("volume_locked", True))
+            )
             return
 
         if row_kind == "select":
@@ -1849,10 +1977,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self.find_slider_at(wx, wy) is not None
             or self.find_wetdry_slider_at(wx, wy) is not None
             or self.find_sensitivity_slider_at(wx, wy) is not None
+            or self.find_gain_slider_at(wx, wy) is not None
+            or self.find_device_volume_slider_at(wx, wy) is not None
         ):
             self.set_cursor(Gdk.Cursor.new_from_name("ew-resize", None))
         elif (
             self.find_field_at(wx, wy) is not None
+            or self.find_volume_lock_at(wx, wy) is not None
             or self.find_mute_checkbox_at(wx, wy) is not None
             or self.find_gate_toggle_at(wx, wy) is not None
             or self.find_switcher_toggle_at(wx, wy) is not None
@@ -1913,6 +2044,16 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         nid = self.find_anchor_icon_at(wx, wy)
         if nid is not None:
             self.toggle_node_anchor(nid)
+            return
+
+        nid = self.find_volume_lock_at(wx, wy)
+        if nid is not None:
+            node = self.nodes[nid]
+            locked = not node.get("volume_locked", True)
+            node["volume_locked"] = locked
+            self._send_property(nid, "volume_locked", locked)
+            self.queue_draw()
+            GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
             return
 
         hit = self.find_device_row_at(wx, wy)
@@ -2412,10 +2553,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         device_slider_hit = self.find_device_volume_slider_at(wx, wy)
         if device_slider_hit is not None:
             nid = device_slider_hit
-            rows = self._device_rows(self.nodes[nid])
-            row_x, row_y, row_w, row_h = self._device_row_rect(
-                nid, rows.index("volume")
-            )
+            row_x, row_y, row_w, row_h = self._volume_row_rects(nid)[0]
             new_vol = max(0.0, min(1.0, (wx - row_x) / row_w))
             self.nodes[nid]["device_volume"] = new_vol
             self.client.send(
@@ -2460,6 +2598,21 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self.pinned_nodes.add(sensitivity_hit)
             return
 
+        gain_hit = self.find_gain_slider_at(wx, wy)
+        if gain_hit is not None:
+            node = self.nodes[gain_hit]
+            slider_left = node["x"] + self.SLIDER_MARGIN
+            slider_width = self.NODE_WIDTH - 2 * self.SLIDER_MARGIN
+            new_frac = max(0.0, min(1.0, (wx - slider_left) / slider_width))
+            self._apply_gain_slider(gain_hit, new_frac)
+            self.slider_dragging = ("gain", gain_hit)
+            self.slider_drag_start_x = wx
+            self.slider_initial_volume = new_frac
+            self._slider_last_sent = new_frac
+            self.queue_draw()
+            self.pinned_nodes.add(gain_hit)
+            return
+
         device_row_hit = self.find_device_row_at(wx, wy)
         if (
             self.find_mute_checkbox_at(wx, wy) is not None
@@ -2471,7 +2624,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             or self.find_field_at(wx, wy) is not None
             or self.find_group_label_at(wx, wy) is not None
             or self.find_group_action_at(wx, wy) is not None
-            or (device_row_hit is not None and device_row_hit[1] != "volume")
+            or device_row_hit is not None
         ):
             # Single-click toggles/menus, handled entirely by
             # on_click()'s "pressed" callback - just don't let this
@@ -2558,11 +2711,23 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     node["sensitivity"] = new_frac
                 self.queue_draw()
                 return
+            if kind == "gain":
+                slider_width = self.NODE_WIDTH - 2 * self.SLIDER_MARGIN
+                delta_frac = (offset_x / self.zoom) / slider_width
+                new_frac = max(
+                    0.0, min(1.0, self.slider_initial_volume + delta_frac)
+                )
+                if abs(new_frac - self._slider_last_sent) >= VOLUME_SEND_EPSILON:
+                    self._slider_last_sent = new_frac
+                    self._apply_gain_slider(nid, new_frac)
+                else:
+                    node["gain"] = new_frac
+                self.queue_draw()
+                return
             if kind == "process":
                 slider_width = self.NODE_WIDTH - 2 * self.SLIDER_MARGIN
             else:
-                rows = self._device_rows(node)
-                _, _, slider_width, _ = self._device_row_rect(nid, rows.index("volume"))
+                _, _, slider_width, _ = self._volume_row_rects(nid)[0]
             # Offset-based (not absolute-position-based) so this can't
             # be thrown off by anything else touching node["x"] mid-drag.
             delta_vol = (offset_x / self.zoom) / slider_width
@@ -2649,6 +2814,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     self._send_effect_slider(nid, "wetdry", "wet_dry", node["wet_dry"])
                 elif kind == "sensitivity":
                     self._apply_sensitivity_slider(nid, node["sensitivity"])
+                elif kind == "gain":
+                    self._apply_gain_slider(nid, node.get("gain", 0.5))
                 else:
                     self.client.send(
                         {
@@ -3735,30 +3902,21 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # no backend changes needed.
         is_mute = node_type == "mute"
         real_type = "volume" if is_mute else node_type
-        if node_type == "patchbay_device":
-            # Fixed, readable id instead of a timestamped one - there's
-            # only one such node conceptually (it always points at the
-            # daemon's single built-in virtual sink, see
-            # PatchBayDeviceNode's docstring), and add_node is
-            # idempotent on an id that already exists (main.py's
-            # _cmd_add_node returns already_existed=True instead of
-            # duplicating), so re-clicking "Add" is harmless.
-            node_id = "patchbay_speaker"
-        elif node_type == "patchbay_mic_device":
-            node_id = "patchbay_mic"
-        else:
-            node_id = f"{'mute' if is_mute else 'node'}_{int(time.time() * 1000)}"
+        # Every node, including Speaker/Mic Line, gets a unique id - any
+        # number of lines may exist, all referencing the same built-in
+        # virtual device.
+        self._node_seq += 1
+        node_id = (
+            f"{'mute' if is_mute else 'node'}_{int(time.time() * 1000)}"
+            f"_{self._node_seq}"
+        )
 
         # Default label: reuses type_label()'s own mute-switch check
         # (is_mute_node(node_id), keyed off the "mute_" id prefix we
         # just chose above) so "Mute Switch" comes out right without
         # a second special case here, then de-duplicated against every
         # label currently on the canvas so a second Volume node reads
-        # as "Volume 2" instead of an indistinguishable "Volume". The
-        # two idempotent singleton types below (patchbay_device/
-        # patchbay_mic_device) overwrite this with their own fixed
-        # label, which is correct - they're id-locked to one instance,
-        # so there's nothing to disambiguate.
+        # as "Volume 2" instead of an indistinguishable "Volume".
         config: dict = {}
         if real_type != "splitter":
             # Splitters get no default label - an unlabelled one renders
@@ -3775,7 +3933,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         elif node_type in ("volume", "mute"):
             config["backing_node_name"] = f"volume_{node_id}"
             config["initial_volume"] = 1.0
-        elif node_type in ("echo_cancel", "light_noise_cancel", "noise_cancel", "reverb"):
+        elif node_type in (
+            "echo_cancel",
+            "light_noise_cancel",
+            "noise_cancel",
+            "reverb",
+            "normalize",
+        ):
             # No inline field/control for these (see NODE_TYPE_SPECS) -
             # just a real backing name, like volume/virtual_speaker/
             # virtual_mic above. Everything else (which LADSPA plugin
@@ -3794,17 +3958,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 "Virtual Speaker" if node_type == "virtual_speaker" else "Virtual Mic"
             )
         elif node_type in ("patchbay_device", "patchbay_mic_device"):
-            # These two are otherwise no-config nodes (see
-            # PatchBayDeviceNode/PatchBayMicDeviceNode's docstrings in
-            # patchSpace.py) - "label" is the generic display-name
-            # property every node type already supports (set via
-            # setattr in main.py's add_node handling, read back by
-            # _draw_node() below), so a short human-readable default
-            # here needs no daemon changes, unlike device_label above
-            # which only those two backed node types understand.
-            config["label"] = (
-                "Speaker Line" if node_type == "patchbay_device" else "Mic Line"
-            )
+            # No config beyond the generic (de-duplicated) label set
+            # above: any number of Speaker/Mic Line nodes may exist and
+            # they all reference the same built-in virtual device.
+            pass
         # exclude_filter deliberately gets no default pattern here (it
         # falls through to config={}, i.e. an empty "pattern" once the
         # daemon fills in its default) - an empty pattern means

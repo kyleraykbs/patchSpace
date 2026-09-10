@@ -5,7 +5,7 @@ touches a live PipeWire server."""
 import pytest
 
 import pwnodes
-from pwnodes import NoiseCancelNode, SensitivityGateNode
+from pwnodes import NoiseCancelNode, SensitivityGateNode, NormalizeNode
 from tests.test_pwnodes import FakeGraph, make_space
 
 
@@ -205,3 +205,48 @@ def test_sensitivity_drives_ladspa_gate_threshold_live():
     iface, body = module.set_params[-1]
     assert iface == "Props"
     assert '"Threshold (dB)" -10.00' in body
+
+
+def test_normalize_graph_links_compressor_and_lookahead_limiter():
+    """Normalize builds a linked stereo graph: swh sc4 leveler into the
+    fastLookaheadLimiter, with the boost capped by max_boost_db."""
+    space = make_space(
+        FakeGraph(), repair_gate=pwnodes.Backoff(initial_s=0, jitter_fraction=0)
+    )
+    space.mark_graph_loaded()
+    node = NormalizeNode(
+        "n",
+        "norm",
+        boost_db=40.0,
+        max_boost_db=12.0,
+        ceiling_db=-3.0,
+        ladspa_dir="/plugins",
+    )
+    space.add_node(node)
+    space.supervise()
+
+    args = node._module_command_args()
+    assert "sc4_1882.so" in args
+    assert "fast_lookahead_limiter_1913.so" in args
+    assert "label = sc4" in args
+    assert "label = fastLookaheadLimiter" in args
+    # boost_db was clamped to 30, then capped to max_boost_db=12 at the
+    # limiter's input gain - the user's "maximum cap".
+    assert node.boost_db == NormalizeNode.BOOST_MAX_DB
+    assert node.effective_boost_db() == 12.0
+    assert '"Input gain (dB)" = 12.00' in args
+    assert '"Limit (dB)" = -3.00' in args
+    # The two stereo plugins are linked compressor-out -> limiter-in.
+    assert '"norm_comp:Left output" input = "norm_lim:Input 1"' in args
+    assert '"norm_comp:Right output" input = "norm_lim:Input 2"' in args
+    assert 'inputs = [ "norm_comp:Left input" "norm_comp:Right input" ]' in args
+    assert 'outputs = [ "norm_lim:Output 1" "norm_lim:Output 2" ]' in args
+
+
+def test_normalize_leveling_off_omits_compressor():
+    node = NormalizeNode("n", "norm", leveling=False)
+    args = node._module_command_args()
+    assert "sc4_1882.so" not in args
+    assert "fast_lookahead_limiter_1913.so" in args
+    assert "links" not in args
+    assert 'inputs = [ "norm_lim:Input 1" "norm_lim:Input 2" ]' in args

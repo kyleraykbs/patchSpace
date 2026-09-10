@@ -139,8 +139,38 @@ def _run_wpctl(*args, timeout: float = 2.0) -> bool:
         return False
 
 
+def _read_wpctl_volume(node_id) -> Optional[float]:
+    """Live volume of a device/node via `wpctl get-volume`, or None when
+    it can't be read.  Used to keep an *unlocked* slider in step with
+    changes made outside PatchBay (pactl/wpctl/a desktop applet) instead
+    of fighting them."""
+    try:
+        result = subprocess.run(
+            ["wpctl", "get-volume", str(node_id)],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            check=False,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    match = re.search(r"volume:\s*([0-9]*\.?[0-9]+)", result.stdout, re.IGNORECASE)
+    if match is None:
+        return None
+    try:
+        return max(0.0, min(1.0, float(match.group(1))))
+    except ValueError:
+        return None
+
+
 def _db_to_linear(db: float) -> float:
     return 10.0 ** (db / 20.0)
+
+
+def _clamp(value: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, value))
 
 
 _NIX_STORE_CACHE: Dict[Tuple[str, str], Optional[str]] = {}
@@ -279,25 +309,41 @@ class DeviceControlMixin:
     (Bluetooth codec) config.  Values live on the node, so they
     round-trip through export/import; apply_device_settings() re-pushes
     them whenever the device (re)resolves and on every supervision tick,
-    so a Bluetooth reconnect resetting the codec gets corrected."""
+    so a Bluetooth reconnect resetting the codec gets corrected.
+
+    ``volume_locked`` (default True) gates the volume half of that:
+    locked means the PatchBay value is authoritative and re-asserted
+    every tick, overriding anything else that changed the device; a
+    one-off push still happens on an explicit user drag regardless.
+    Unlocked leaves the device's own volume alone and mirrors it back
+    (sync_volume_from_live) so the slider follows external changes."""
 
     def __init__(
         self,
         device_volume: float = 1.0,
         profile_index: Optional[int] = None,
         profile_description: str = "",
+        volume_locked: bool = True,
     ):
         self.device_volume = device_volume
         self.profile_index = profile_index
         self.profile_description = profile_description
+        self.volume_locked = bool(volume_locked)
         # (device_id, profile_index) last successfully applied - profile
         # changes visibly restart the device, so never re-issue an
         # identical one (see apply_device_settings).
         self._applied_profile: Optional[Tuple[Any, int]] = None
 
-    def apply_device_settings(self) -> None:
+    def apply_device_settings(self, push_volume: Optional[bool] = None) -> None:
+        """Re-apply the configured volume/profile.  ``push_volume``
+        forces (True) or suppresses (False) the volume push; the default
+        (None) pushes only while locked.  Profile is always re-asserted
+        when it differs from what was last applied."""
         live_node_id = getattr(self, "live_node_id", None)
-        if live_node_id is not None:
+        if live_node_id is not None and (
+            push_volume is True
+            or (push_volume is None and getattr(self, "volume_locked", True))
+        ):
             _run_wpctl("set-volume", live_node_id, self.device_volume)
         device_id = getattr(self, "live_props", {}).get("device.id")
         if device_id is None or self.profile_index is None:
@@ -307,6 +353,18 @@ class DeviceControlMixin:
             return
         if _run_wpctl("set-profile", device_id, self.profile_index):
             self._applied_profile = target
+
+    def sync_volume_from_live(self) -> None:
+        """While unlocked, adopt the live volume so the slider reflects
+        changes made outside PatchBay instead of fighting them."""
+        if getattr(self, "volume_locked", True):
+            return
+        live_node_id = getattr(self, "live_node_id", None)
+        if live_node_id is None:
+            return
+        volume = _read_wpctl_volume(live_node_id)
+        if volume is not None:
+            self.device_volume = volume
 
 
 class BackedNode(Node):
@@ -623,7 +681,18 @@ class PatchBayDeviceNode(InputNode, OutputNode):
     """Convenience node for the daemon's built-in virtual sink: usable
     as a target (apps route in) via its sink input, and as a source via
     its monitor ports.  Both identities are exact-name because the mic
-    plumbing uses node.names that merely start with "PatchBay"."""
+    plumbing uses node.names that merely start with "PatchBay".
+
+    There can be several of these ("Speaker Line" nodes) at once; they
+    all reference the same built-in sink.  ``device_volume`` /
+    ``volume_locked`` are the shared volume state, mirrored from the
+    built-in device by the daemon (the line node owns no backing)."""
+
+    def __init__(self, node_id, device_volume: float = 1.0,
+                 volume_locked: bool = True):
+        super().__init__(node_id)
+        self.device_volume = max(0.0, min(1.0, float(device_volume)))
+        self.volume_locked = bool(volume_locked)
 
     def source_filters(self):
         return [{"nodeName": PATCHBAY_VIRTUAL_SINK_NAME}]
@@ -635,7 +704,16 @@ class PatchBayDeviceNode(InputNode, OutputNode):
 class PatchBayMicDeviceNode(InputNode, OutputNode):
     """Convenience node for the built-in virtual mic.  Routes in via the
     underlying "{name}_sink", picked up downstream from the loopback's
-    Audio/Source (PATCHBAY_VIRTUAL_MIC_NAME)."""
+    Audio/Source (PATCHBAY_VIRTUAL_MIC_NAME).
+
+    Several may exist at once; they all reference the same built-in mic.
+    ``device_volume`` / ``volume_locked`` mirror that shared device."""
+
+    def __init__(self, node_id, device_volume: float = 1.0,
+                 volume_locked: bool = True):
+        super().__init__(node_id)
+        self.device_volume = max(0.0, min(1.0, float(device_volume)))
+        self.volume_locked = bool(volume_locked)
 
     def source_filters(self):
         return [{"nodeName": PATCHBAY_VIRTUAL_MIC_NAME}]
@@ -648,11 +726,12 @@ class DeviceInputNode(InputNode, LiveResolvableNode, DeviceControlMixin):
     def __init__(self, node_id, device_name: str = "", description: str = "",
                  device_volume: float = 1.0,
                  profile_index: Optional[int] = None,
-                 profile_description: str = ""):
+                 profile_description: str = "",
+                 volume_locked: bool = True):
         InputNode.__init__(self, node_id)
         LiveResolvableNode.__init__(self)
         DeviceControlMixin.__init__(self, device_volume, profile_index,
-                                    profile_description)
+                                    profile_description, volume_locked)
         self.device_name = device_name
         self.description = description
 
@@ -678,11 +757,12 @@ class DeviceOutputNode(OutputNode, LiveResolvableNode, DeviceControlMixin):
     def __init__(self, node_id, device_name: str = "", description: str = "",
                  device_volume: float = 1.0,
                  profile_index: Optional[int] = None,
-                 profile_description: str = ""):
+                 profile_description: str = "",
+                 volume_locked: bool = True):
         OutputNode.__init__(self, node_id)
         LiveResolvableNode.__init__(self)
         DeviceControlMixin.__init__(self, device_volume, profile_index,
-                                    profile_description)
+                                    profile_description, volume_locked)
         self.device_name = device_name
         self.description = description
 
@@ -826,6 +906,41 @@ class ExcludeFilterNode(TransparentNode):
 # ---------------------------------------------------------------------------
 
 
+class _SinkVolumeMixin:
+    """Volume + lock for a backed node whose backing is a null-audio-sink
+    with monitor.channel-volumes (a built-in virtual line such as the
+    PatchBay sink/mic).  The backing's wpctl volume is what a Speaker
+    Line / Mic Line node's slider drives; the state lives here (the one
+    underlying device) and the daemon mirrors it onto each visible line
+    node.  Same lock contract as DeviceControlMixin."""
+
+    def _init_sink_volume(self, device_volume: float = 1.0,
+                          volume_locked: bool = True) -> None:
+        self.device_volume = max(0.0, min(1.0, float(device_volume)))
+        self.volume_locked = bool(volume_locked)
+
+    def _volume_backing_node_id(self) -> Optional[int]:
+        raise NotImplementedError
+
+    def apply_device_settings(self, push_volume: Optional[bool] = None) -> None:
+        node_id = self._volume_backing_node_id()
+        if node_id is not None and (
+            push_volume is True
+            or (push_volume is None and getattr(self, "volume_locked", True))
+        ):
+            _run_wpctl("set-volume", node_id, self.device_volume)
+
+    def sync_volume_from_live(self) -> None:
+        if getattr(self, "volume_locked", True):
+            return
+        node_id = self._volume_backing_node_id()
+        if node_id is None:
+            return
+        volume = _read_wpctl_volume(node_id)
+        if volume is not None:
+            self.device_volume = volume
+
+
 class _SingleSinkNode(BackedNode):
     """A single monitor-enabled null-audio-sink adapter, optionally with
     monitor.channel-volumes so wpctl can drive a per-channel volume.
@@ -871,13 +986,19 @@ class SplitterNode(_SingleSinkNode):
                          pw_cli_command, settle, description=f"Splitter: {node_id}")
 
 
-class VirtualSpeakerNode(_SingleSinkNode):
+class VirtualSpeakerNode(_SinkVolumeMixin, _SingleSinkNode):
     def __init__(self, node_id, backing_node_name: str, device_label: str = "",
+                 device_volume: float = 1.0, volume_locked: bool = True,
                  pw_cli_command=("pw-cli",), settle: float = 0.3):
         super().__init__(node_id, backing_node_name, pw_cli_command, settle,
                          extra_props="monitor.channel-volumes=1",
                          description=device_label or backing_node_name)
         self.device_label = device_label
+        self._init_sink_volume(device_volume, volume_locked)
+
+    def _volume_backing_node_id(self) -> Optional[int]:
+        b = self._find(self.backing_node_name)
+        return b.node_id if b else None
 
     def config_fields(self):
         out = super().config_fields()
@@ -951,7 +1072,7 @@ class VolumeProcessNode(_SingleSinkNode):
         return out
 
 
-class VirtualMicNode(BackedNode):
+class VirtualMicNode(_SinkVolumeMixin, BackedNode):
     """A user-named virtual microphone: a null-audio-sink everything is
     fed into, a standalone pw-loopback republishing its monitor as a real
     Audio/Source (that is the object apps pick as a mic - a bare sink
@@ -959,11 +1080,17 @@ class VirtualMicNode(BackedNode):
     keepalive feeding the sink so the mic never reads as idle."""
 
     def __init__(self, node_id, backing_node_name: str, device_label: str = "",
+                 device_volume: float = 1.0, volume_locked: bool = True,
                  pw_cli_command=("pw-cli",), settle: float = 0.3):
         super().__init__(node_id, backing_node_name)
         self.device_label = device_label
         self._pw_cli_command = pw_cli_command
         self._settle = settle
+        self._init_sink_volume(device_volume, volume_locked)
+
+    def _volume_backing_node_id(self) -> Optional[int]:
+        b = self._find(self._sink_name)
+        return b.node_id if b else None
 
     @property
     def _sink_name(self) -> str:
@@ -1386,6 +1513,191 @@ class ReverbNode(_ChainEffect):
             f'control = {{ "dry/wet" = {self.wet_dry} }} '
             "} ] } "
             "capture.props = { "
+            f'node.name = "{self._capture_name}" '
+            f'node.description = "{self._capture_name}" '
+            "media.class = Audio/Sink "
+            "audio.position = [ FL FR ] } "
+            "playback.props = { "
+            f'node.name = "{self._playback_name}" '
+            f'node.description = "{self._playback_name}" '
+            "media.class = Audio/Source "
+            "audio.position = [ FL FR ] }"
+        )
+
+
+class NormalizeNode(_ChainEffect):
+    """Loudness normalization / auto-gain that can't blast on resume.
+
+    Two swh-plugins LADSPA stages in one linked stereo filter-chain:
+
+        in -> sc4 (leveling compressor) -> fastLookaheadLimiter -> out
+
+    ``fastLookaheadLimiter`` is a lookahead brickwall limiter: it sees a
+    few ms ahead, so a high input gain can lift quiet, far-from-mic
+    speech without the momentary blast a feedback AGC produces when
+    speech resumes after silence (the classic "wait, then talk"
+    earrape).  ``sc4`` ahead of it is a *downward* compressor - it only
+    ever reduces gain, so it never winds up during silence - and it
+    tames loud, close speech before the limiter has to.
+
+    Unlike the mono effects (rnnoise/gate), these are stereo plugins, so
+    the graph names its ports and links explicitly rather than relying
+    on filter-chain's per-channel auto-duplication.
+
+    All controls are load-time filter-graph values: changing one
+    schedules an interior-only module reload (the dummies keep every
+    user edge attached), the same proven pattern ReverbNode uses.  The
+    live filter-chain ``Props`` set-param path is deliberately not
+    relied on - see SensitivityGateNode's caveat."""
+
+    # swh-plugins shared objects/labels (already a daemon dependency for
+    # SensitivityGateNode's gate_1410.so).
+    SC4_FILE = "sc4_1882.so"
+    SC4_LABEL = "sc4"
+    LIMITER_FILE = "fast_lookahead_limiter_1913.so"
+    LIMITER_LABEL = "fastLookaheadLimiter"
+
+    # Control ranges, clamped on the way in so a bad saved config or a
+    # mistyped Settings value can't ask for something absurd.
+    BOOST_MIN_DB, BOOST_MAX_DB = 0.0, 30.0
+    CEILING_MIN_DB, CEILING_MAX_DB = -20.0, 0.0
+    THRESHOLD_MIN_DB, THRESHOLD_MAX_DB = -60.0, 0.0
+    RATIO_MIN, RATIO_MAX = 1.0, 20.0
+    ATTACK_MIN_MS, ATTACK_MAX_MS = 0.1, 200.0
+    RELEASE_MIN_MS, RELEASE_MAX_MS = 10.0, 2000.0
+    KNEE_MIN_DB, KNEE_MAX_DB = 0.0, 24.0
+    LIMITER_RELEASE_MIN_S, LIMITER_RELEASE_MAX_S = 0.01, 5.0
+
+    def __init__(self, node_id, backing_node_name: str,
+                 boost_db: float = 15.0, max_boost_db: float = 24.0,
+                 ceiling_db: float = -1.0, leveling: bool = True,
+                 threshold_db: float = -35.0, ratio: float = 4.0,
+                 attack_ms: float = 10.0, release_ms: float = 400.0,
+                 knee_db: float = 6.0, limiter_release_s: float = 0.5,
+                 ladspa_dir: str = "",
+                 pw_cli_command=("pw-cli",), settle: float = 0.3, **_ignored):
+        super().__init__(node_id, backing_node_name, pw_cli_command, settle)
+        self.boost_db = _clamp(boost_db, self.BOOST_MIN_DB, self.BOOST_MAX_DB)
+        self.max_boost_db = _clamp(
+            max_boost_db, self.BOOST_MIN_DB, self.BOOST_MAX_DB
+        )
+        self.ceiling_db = _clamp(
+            ceiling_db, self.CEILING_MIN_DB, self.CEILING_MAX_DB
+        )
+        self.leveling = bool(leveling)
+        self.threshold_db = _clamp(
+            threshold_db, self.THRESHOLD_MIN_DB, self.THRESHOLD_MAX_DB
+        )
+        self.ratio = _clamp(ratio, self.RATIO_MIN, self.RATIO_MAX)
+        self.attack_ms = _clamp(attack_ms, self.ATTACK_MIN_MS, self.ATTACK_MAX_MS)
+        self.release_ms = _clamp(
+            release_ms, self.RELEASE_MIN_MS, self.RELEASE_MAX_MS
+        )
+        self.knee_db = _clamp(knee_db, self.KNEE_MIN_DB, self.KNEE_MAX_DB)
+        self.limiter_release_s = _clamp(
+            limiter_release_s,
+            self.LIMITER_RELEASE_MIN_S,
+            self.LIMITER_RELEASE_MAX_S,
+        )
+        self.ladspa_dir = ladspa_dir or ""
+
+    def effective_boost_db(self) -> float:
+        """The gain actually handed to the limiter: ``boost_db`` capped
+        by the user's ``max_boost_db`` ceiling."""
+        return min(self.boost_db, self.max_boost_db)
+
+    @classmethod
+    def _candidate_paths(cls, rel: str):
+        candidates = [
+            f"/usr/lib/ladspa/{rel}",
+            f"/usr/lib/x86_64-linux-gnu/ladspa/{rel}",
+            f"/usr/lib64/ladspa/{rel}",
+        ]
+        for base in _ladspa_search_paths():
+            candidates.append(os.path.join(base, rel))
+        for entry in os.environ.get("LADSPA_PATH", "").split(":"):
+            entry = entry.strip()
+            if entry:
+                candidates.append(os.path.join(entry, rel))
+        store = _store_ladspa_candidate("swh-plugins", f"lib/ladspa/{rel}")
+        if store:
+            candidates.append(store)
+        return candidates
+
+    def _resolve_plugins(self):
+        """(sc4_path, limiter_path).  A ``ladspa_dir`` override wins when
+        it actually holds both files; otherwise the standard swh install
+        dirs / LADSPA_PATH / nix store are probed.  A miss falls back to
+        the first candidate so a load failure at least names what was
+        tried."""
+        if self.ladspa_dir:
+            sc4 = os.path.join(self.ladspa_dir, self.SC4_FILE)
+            lim = os.path.join(self.ladspa_dir, self.LIMITER_FILE)
+            if os.path.isfile(sc4) and os.path.isfile(lim):
+                return sc4, lim
+        sc4_candidates = self._candidate_paths(self.SC4_FILE)
+        lim_candidates = self._candidate_paths(self.LIMITER_FILE)
+        sc4 = next(
+            (p for p in sc4_candidates if p and os.path.isfile(p)), sc4_candidates[0]
+        )
+        lim = next(
+            (p for p in lim_candidates if p and os.path.isfile(p)),
+            lim_candidates[0],
+        )
+        return sc4, lim
+
+    def _module_command_args(self) -> str:
+        comp = f"{self.backing_node_name}_comp"
+        lim = f"{self.backing_node_name}_lim"
+        sc4_path, lim_path = self._resolve_plugins()
+
+        nodes = "[ "
+        if self.leveling:
+            nodes += (
+                "{ type = ladspa "
+                f"name = {comp} plugin = {sc4_path} label = {self.SC4_LABEL} "
+                "control = { "
+                '"RMS/peak" = 1.0 '
+                f'"Attack time (ms)" = {self.attack_ms:.2f} '
+                f'"Release time (ms)" = {self.release_ms:.2f} '
+                f'"Threshold level (dB)" = {self.threshold_db:.2f} '
+                f'"Ratio (1:n)" = {self.ratio:.2f} '
+                f'"Knee radius (dB)" = {self.knee_db:.2f} '
+                '"Makeup gain (dB)" = 0.0 '
+                "} } "
+            )
+        nodes += (
+            "{ type = ladspa "
+            f"name = {lim} plugin = {lim_path} label = {self.LIMITER_LABEL} "
+            "control = { "
+            f'"Input gain (dB)" = {self.effective_boost_db():.2f} '
+            f'"Limit (dB)" = {self.ceiling_db:.2f} '
+            f'"Release time (s)" = {self.limiter_release_s:.3f} '
+            "} } "
+            "]"
+        )
+
+        if self.leveling:
+            graph = (
+                f"filter.graph = {{ nodes = {nodes} "
+                "links = [ "
+                f'{{ output = "{comp}:Left output" input = "{lim}:Input 1" }} '
+                f'{{ output = "{comp}:Right output" input = "{lim}:Input 2" }} '
+                "] "
+                f'inputs = [ "{comp}:Left input" "{comp}:Right input" ] '
+                f'outputs = [ "{lim}:Output 1" "{lim}:Output 2" ] }} '
+            )
+        else:
+            graph = (
+                f"filter.graph = {{ nodes = {nodes} "
+                f'inputs = [ "{lim}:Input 1" "{lim}:Input 2" ] '
+                f'outputs = [ "{lim}:Output 1" "{lim}:Output 2" ] }} '
+            )
+
+        return (
+            f'node.description = "{self.id}" '
+            + graph
+            + "capture.props = { "
             f'node.name = "{self._capture_name}" '
             f'node.description = "{self._capture_name}" '
             "media.class = Audio/Sink "
