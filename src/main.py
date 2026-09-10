@@ -431,7 +431,7 @@ class PatchBayDaemon:
         socket_thread = threading.Thread(target=self._socket_server, daemon=True)
         socket_thread.start()
 
-        logger.info("PatchBay daemon running. Press Ctrl+C to exit.")
+        logger.info("Patch Space daemon running. Press Ctrl+C to exit.")
         logger.info(f"Connect via: socat - UNIX-CONNECT:{SOCKET_PATH}")
         try:
             while self._running:
@@ -2602,6 +2602,15 @@ class PatchBayDaemon:
         threading.Thread(target=_run, daemon=True).start()
         return {"status": "ok", "started": True}
 
+    def _cmd_shutdown(self, cmd: dict) -> dict:
+        """Ask the daemon to exit cleanly.  Runs on the client-handler
+        thread; both the socket accept loop and start()'s main loop watch
+        self._running, so flipping it here begins teardown.  The reply is
+        written by the caller before its socket closes, so a client can
+        wait for this response rather than race the daemon's exit."""
+        self._running = False
+        return {"status": "ok", "message": "Shutting down"}
+
     # ------------------------------------------------------------------
     # serialization
     # ------------------------------------------------------------------
@@ -2783,6 +2792,8 @@ class PatchBayDaemon:
                 response = self._cmd_reset(cmd)
             elif command == "rebuild":
                 response = self._cmd_rebuild(cmd)
+            elif command == "shutdown":
+                response = self._cmd_shutdown(cmd)
             elif command == "ping":
                 response = {"status": "ok", "message": "pong"}
             else:

@@ -26,6 +26,7 @@ _FALLBACK_SELECT = (0.98, 0.76, 0.24)
 _FALLBACK_PENDING_LINK = (0.98, 0.76, 0.24)
 _FALLBACK_WARNING = (0.94, 0.65, 0.22)
 _FALLBACK_ERROR = (0.88, 0.20, 0.20)
+_FALLBACK_SUCCESS = (0.30, 0.72, 0.42)
 
 _THEME_COLOR_NAMES = [
     "accent_color",
@@ -75,6 +76,7 @@ def theme_palette(widget) -> dict:
         "pending_link": _FALLBACK_PENDING_LINK,
         "warning": _lookup(widget, "warning_color", _FALLBACK_WARNING),
         "error": _lookup(widget, "error_color", _FALLBACK_ERROR),
+        "success": _lookup(widget, "success_color", _FALLBACK_SUCCESS),
     }
 
 

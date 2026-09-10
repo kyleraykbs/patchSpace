@@ -75,11 +75,18 @@ class PatchBayClient:
                     buffer += chunk
                 line, buffer = buffer.split(b"\n", 1)
                 self.resp_queue.put(json.loads(line.decode()))
+            except (FileNotFoundError, ConnectionError):
+                # The daemon isn't there (no socket file, refused, reset,
+                # or it closed on us).  This is expected whenever the GUI
+                # is up before/without a daemon, and the window already
+                # shows a "not connected" badge - reporting it per command
+                # just spammed the log every poll.  Drop the connection so
+                # the next send() redials, and stay quiet.
+                self._drop_connection()
+                buffer = b""
             except Exception as e:
-                # Any failure (broken pipe, daemon restart, bad JSON,
-                # ...) drops the connection so the next send() dials a
-                # fresh one, and reports the error back to the caller
-                # instead of silently swallowing it.
+                # A genuine failure (bad JSON, a bug in the command, ...)
+                # still gets reported instead of silently swallowed.
                 self._drop_connection()
                 buffer = b""
                 self.resp_queue.put({"status": "error", "message": str(e)})

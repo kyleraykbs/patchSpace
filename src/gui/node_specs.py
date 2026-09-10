@@ -111,6 +111,9 @@ class NodeSpec:
         "settings",
         "boolean_inputs",
         "boolean_outputs",
+        "socket_labels",
+        "description",
+        "setting_tooltips",
     )
 
     def __init__(
@@ -123,10 +126,28 @@ class NodeSpec:
         settings: Optional[List[tuple]] = None,
         boolean_inputs: Optional[List[str]] = None,
         boolean_outputs: Optional[List[str]] = None,
+        socket_labels: bool = True,
+        description: str = "",
+        setting_tooltips: Optional[Dict[str, str]] = None,
     ):
         self.label = label
         self.inputs = inputs
         self.outputs = outputs
+        # One-line "what this node is for", shown as a hover tooltip on the
+        # add-node side panel and (after the normal GTK hover delay) on a
+        # node in the canvas.  Populated per type in NODE_DESCRIPTIONS below.
+        self.description = description
+        # Optional per-Settings-row hover text, keyed by the daemon
+        # property name (the first element of each `settings` tuple) - see
+        # SETTING_TOOLTIPS below.  A row with no entry falls back to its
+        # own label text so nothing is ever tooltip-less.
+        self.setting_tooltips = dict(setting_tooltips or {})
+        # Whether a multi-socket side draws each port's name next to its
+        # circle.  True for the nodes whose ports carry distinct meaning
+        # (Echo Cancel's "mic"/"probe", the Switcher's "on"/"off"); False
+        # for the symmetric boolean logic gates, whose two inputs are
+        # interchangeable so "a"/"b" labels are just noise.
+        self.socket_labels = socket_labels
         # Which of inputs/outputs carry a *boolean control signal*
         # rather than audio (gray sockets, gray edges, never a PipeWire
         # link).  Every port not listed here is audio.
@@ -235,6 +256,7 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
         ["out"],
         boolean_inputs=["a", "b"],
         boolean_outputs=["out"],
+        socket_labels=False,
     ),
     "boolean_or": NodeSpec(
         "OR",
@@ -242,6 +264,7 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
         ["out"],
         boolean_inputs=["a", "b"],
         boolean_outputs=["out"],
+        socket_labels=False,
     ),
     # Warps: named logical aliases. A Warp In publishes whatever is
     # plugged into it under `warp_name`; a Warp Out resolves to the
@@ -514,6 +537,153 @@ NODE_TYPE_SPECS.update(
         "virtual_mic": NodeSpec("Virtual Mic", ["in"], ["out"], field="device_label"),
     }
 )
+
+# ---------------------------------------------------------------------------
+# Descriptions + settings tooltips
+# ---------------------------------------------------------------------------
+# Kept as separate tables rather than repeating `description=` in every
+# NodeSpec(...) literal above, so adding a description for a new node type
+# is a one-line change here and the spec table stays scannable.
+
+NODE_DESCRIPTIONS: Dict[str, str] = {
+    # Filters
+    "regex_input": "Audio sources whose node name matches a regular "
+    "expression (e.g. every app playback stream).",
+    "regex_output": "A destination picked by matching a regular expression "
+    "against node names.",
+    "media_class_input": "Audio sources selected by their PipeWire media "
+    "class (hardware inputs, sink monitors, app playback).",
+    "media_class_output": "Destinations selected by their PipeWire media "
+    "class (hardware outputs, app recording streams).",
+    "description_input": "Audio sources selected by a text match on their "
+    "description.",
+    "description_output": "A destination selected by a text match on its "
+    "description.",
+    # Processing
+    "splitter": "Passes audio straight through; useful as a named junction "
+    "that several edges can share.",
+    "gate": "Passes or blocks audio, driven by a boolean control signal "
+    "(or its own on/off button when nothing is wired to ctrl).",
+    "switcher": "Routes its input to the On or Off output, chosen by a "
+    "boolean control signal.",
+    "inverse_switcher": "Takes two inputs (On/Off) and routes the selected "
+    "one to its output.",
+    "exclude_filter": "Passes audio through while excluding sources that "
+    "match a regular expression from the mix.",
+    "volume": "Adjusts the level of whatever passes through it.",
+    # Boolean control plane
+    "boolean_switch": "A manual On/Off control signal. Wire it into gates "
+    "and switches to drive them.",
+    "boolean_splitter": "Fans one boolean signal out to two destinations.",
+    "boolean_invert": "Inverts a boolean signal (NOT).",
+    "boolean_and": "True only when every wired input is true.",
+    "boolean_or": "True when any wired input is true.",
+    "warp_in": "Publishes whatever is plugged into it under a name, so a "
+    "Warp Out elsewhere can pull it in.",
+    "warp_out": "Pulls in everything published under a name (mixes multiple "
+    "publishers).",
+    "bool_warp_in": "Publishes a boolean control signal under a name.",
+    "bool_warp_out": "Reads the boolean control signal published under a "
+    "name.",
+    # Effects
+    "echo_cancel": "Removes speaker echo from a microphone using a probe/"
+    "reference feed (WebRTC acoustic echo cancellation).",
+    "noise_cancel": "AI (RNNoise) denoiser for a microphone signal.",
+    "light_noise_cancel": "Mic-only denoiser using the same engine as Echo "
+    "Cancel, with the probe input hidden.",
+    "sensitivity_gate": "A voice-activity gate that opens on speech and "
+    "closes on silence.",
+    "reverb": "Adds reverb; the inline slider sets the dry/wet mix.",
+    "normalize": "Loudness normalization with a lookahead limiter, so quiet "
+    "speech can be lifted without blasting when it resumes.",
+    # Hardware & apps
+    "device_input": "A hardware capture device (microphone, interface "
+    "input, ...).",
+    "device_output": "A hardware playback device (speakers, headphones, "
+    "...).",
+    "app_input": "An application's audio output (playback stream).",
+    "app_output": "An application's recording input.",
+    "patchbay_device": "A line to the built-in Patch Space speaker device.",
+    "patchbay_mic_device": "A line to the built-in Patch Space microphone "
+    "device.",
+    "virtual_speaker": "A named virtual speaker other applications can "
+    "play into.",
+    "virtual_mic": "A named virtual microphone other applications can "
+    "record from.",
+}
+
+# Per-Settings-row hover text, keyed by node type then daemon property name.
+# Rows without an entry fall back to their label text (see
+# show_settings_dialog), so every row has a tooltip.
+SETTING_TOOLTIPS: Dict[str, Dict[str, str]] = {
+    "echo_cancel": {
+        "library_name": "The AEC implementation to load. 'aec/libspa-aec-"
+        "webrtc' is the WebRTC echo canceller.",
+        "aec_args": "Extra options passed to the AEC library, e.g. "
+        "'analog_gain_control=0 digital_gain_control=1'.",
+        "monitor_mode": "Automatically use the default sink as the echo "
+        "reference instead of the probe input.",
+    },
+    "noise_cancel": {
+        "vad_threshold": "How confident RNNoise must be that a frame is "
+        "speech before passing it through. Higher = more aggressive.",
+        "ladspa_plugin": "Override the librnnoise_ladspa.so path. Blank = "
+        "find it automatically.",
+        "ladspa_label": "Override the RNNoise plugin label. Blank = auto "
+        "(uses the stereo variant).",
+    },
+    "light_noise_cancel": {
+        "library_name": "The AEC implementation to load.",
+        "aec_args": "Extra options passed to the AEC library; use these to "
+        "bias it toward noise suppression.",
+        "monitor_mode": "Automatically use the default sink as the "
+        "reference instead of a probe feed.",
+    },
+    "sensitivity_gate": {
+        "sensitivity": "0..1: how easily sound opens the gate (1 = most "
+        "sensitive).",
+        "ratio": "How hard the gate attenuates below the threshold.",
+        "attack_ms": "How quickly the gate opens when speech starts.",
+        "release_ms": "How long before the gate closes after speech stops.",
+        "knee_db": "Softness of the transition around the threshold.",
+        "makeup": "Gain added back after gating.",
+        "range_db": "Level the gate drops to when closed (-96 dB = "
+        "silence).",
+        "lv2_uri": "Override the LV2 gate plugin URI. Blank = Calf Gate.",
+    },
+    "reverb": {
+        "decay_time": "How long the reverb tail lasts.",
+        "room_size": "Apparent size of the simulated room.",
+        "diffusion": "Density/smoothness of the reverb tail.",
+        "hf_damp": "Frequency above which the tail is damped.",
+        "predelay": "Delay before the reverb starts, in milliseconds.",
+        "plugin_uri": "Override the LV2 plugin URI. Blank = Calf Reverb.",
+    },
+    "normalize": {
+        "boost_db": "Input gain applied before the limiter.",
+        "max_boost_db": "Ceiling that caps the boost.",
+        "ceiling_db": "Maximum output level (the brickwall limit).",
+        "leveling": "Enable the sc4 leveling compressor ahead of the "
+        "limiter.",
+        "threshold_db": "Compressor threshold: below this the compressor "
+        "does nothing.",
+        "ratio": "Compressor ratio.",
+        "attack_ms": "Compressor attack time.",
+        "release_ms": "Compressor release time.",
+        "knee_db": "Softness of the compressor knee.",
+        "limiter_release_s": "Limiter release time in seconds.",
+        "ladspa_dir": "Directory holding the swh LADSPA plugins. Blank = "
+        "find them automatically.",
+    },
+}
+
+for _type, _desc in NODE_DESCRIPTIONS.items():
+    if _type in NODE_TYPE_SPECS:
+        NODE_TYPE_SPECS[_type].description = _desc
+for _type, _tips in SETTING_TOOLTIPS.items():
+    if _type in NODE_TYPE_SPECS:
+        NODE_TYPE_SPECS[_type].setting_tooltips = dict(_tips)
+
 
 # Menu entries for the right-click "add node" popover and the add-node
 # side panel, grouped into the categories the side panel shows as
@@ -792,3 +962,14 @@ def type_label(node_type: str, node_id) -> str:
     if node_type == "volume" and is_mute_node(node_id):
         return "Mute Switch"
     return spec_for(node_type).label
+
+
+def description_for(node_type: str) -> str:
+    """One-line "what this node is" for tooltips; empty for unknown types."""
+    return spec_for(node_type).description
+
+
+def setting_tooltip(node_type: str, attr: str, label: str) -> str:
+    """Hover text for one Settings row, falling back to its label so every
+    row has something."""
+    return spec_for(node_type).setting_tooltips.get(attr, label)

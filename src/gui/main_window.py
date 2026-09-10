@@ -20,16 +20,18 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Gdk, GLib
+from gi.repository import Gtk, Gdk, GLib, Adw
 
 from constants import (
     POLL_RESPONSES_MS,
     LOG_POLL_MS,
+    DAEMON_POLL_MS,
     ADD_NODE_PANEL_WIDTH,
     ADD_NODE_PANEL_MIN_WIDTH,
     ADD_NODE_PANEL_MAX_WIDTH,
 )
 from socket_client import PatchBayClient
+from daemon_control import DaemonManager
 from pipewire_widget import PipeWireGraphWidget
 from patchspace_widget import PatchSpaceGraphWidget
 
@@ -228,9 +230,23 @@ class LogConsole(Gtk.Box):
 class MainWindow(Gtk.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app)
-        self.set_title("PatchBay")
+        self.set_title("Patch Space")
         self.set_default_size(1200, 800)
 
+        # Explicit titlebar with the program name (the default CSD title
+        # also shows it, but this makes the name unambiguous and matches
+        # the libadwaita look).
+        header = Adw.HeaderBar()
+        title_label = Gtk.Label(label="Patch Space")
+        title_label.add_css_class("title")
+        header.set_title_widget(title_label)
+        self.set_titlebar(header)
+
+        # Adopt a daemon that is already running, or start one in the
+        # background.  Only a daemon we started is ours to shut down (on
+        # close / via the menu) - see daemon_control.DaemonManager.
+        self.daemon = DaemonManager()
+        self.daemon.ensure_started()
         self.client = PatchBayClient()
 
         self.notebook = Gtk.Notebook()
@@ -245,11 +261,23 @@ class MainWindow(Gtk.ApplicationWindow):
         # there for inspection but isn't where you start working.
         self.notebook.set_current_page(1)
 
-        self.set_child(self.notebook)
+        # A small bottom-right "not connected" badge while the socket isn't
+        # answering, so a GUI launched before its daemon (or after a stop)
+        # reads as "not ready yet" rather than as a broken, empty app.  A
+        # periodic reachability poll toggles it.
+        self._root_overlay = Gtk.Overlay()
+        self._root_overlay.set_child(self.notebook)
+        self._disconnected_badge = self._build_disconnected_badge()
+        self._root_overlay.add_overlay(self._disconnected_badge)
+        self.set_child(self._root_overlay)
+
+        self._daemon_connected = self.daemon.is_running()
+        self._disconnected_badge.set_visible(not self._daemon_connected)
 
         self.pw_widget.refresh()
         self.ps_widget.refresh()
 
+        GLib.timeout_add(DAEMON_POLL_MS, self._poll_daemon_connection)
         GLib.timeout_add(POLL_RESPONSES_MS, self.process_responses)
         # Heartbeat + optional hang watchdog - see _arm_hang_watchdog.
         _heartbeat_time[0] = time.monotonic()
@@ -303,6 +331,9 @@ class MainWindow(Gtk.ApplicationWindow):
 
         export_btn = Gtk.Button(label="Export\u2026")
         export_btn.get_child().set_wrap(False)
+        export_btn.set_tooltip_text(
+            "Save the current graph to a file (or the clipboard)."
+        )
         export_btn.connect(
             "clicked",
             lambda _b: (popover.popdown(), self.ps_widget.show_export_dialog()),
@@ -311,6 +342,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
         import_btn = Gtk.Button(label="Import\u2026")
         import_btn.get_child().set_wrap(False)
+        import_btn.set_tooltip_text("Load a graph from a file.")
         import_btn.connect(
             "clicked",
             lambda _b: (popover.popdown(), self.ps_widget.show_import_dialog()),
@@ -323,6 +355,9 @@ class MainWindow(Gtk.ApplicationWindow):
         # PatchSpaceGraphWidget.show_import_last_session.
         import_last_btn = Gtk.Button(label="Import Last Session")
         import_last_btn.get_child().set_wrap(False)
+        import_last_btn.set_tooltip_text(
+            "Reload the daemon's auto-saved last session."
+        )
         import_last_btn.connect(
             "clicked",
             lambda _b: (popover.popdown(), self.ps_widget.show_import_last_session()),
@@ -347,6 +382,26 @@ class MainWindow(Gtk.ApplicationWindow):
             lambda _b: (popover.popdown(), self.ps_widget.rebuild_graph()),
         )
         box.append(rebuild_btn)
+
+        box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+
+        # Daemon lifecycle.  The GUI starts a background daemon on launch
+        # if none is running; these let the user start / stop / restart it
+        # explicitly (the actions run off the main thread so the wait for
+        # the socket never freezes the window - see _daemon_action).
+        for label, action, tip in (
+            ("Start Daemon", "start", "Start the background PatchBay daemon"),
+            ("Stop Daemon", "stop", "Stop the background PatchBay daemon"),
+            ("Restart Daemon", "restart", "Restart the background PatchBay daemon"),
+        ):
+            btn = Gtk.Button(label=label)
+            btn.get_child().set_wrap(False)
+            btn.set_tooltip_text(tip)
+            btn.connect(
+                "clicked",
+                lambda _b, a=action: (popover.popdown(), self._daemon_action(a)),
+            )
+            box.append(btn)
 
         popover.set_child(box)
         menu_button.set_popover(popover)
@@ -435,6 +490,41 @@ class MainWindow(Gtk.ApplicationWindow):
         sheet.set_visible(False)
         return sheet
 
+    def _build_disconnected_badge(self):
+        """A small "not connected" chip pinned to the window's bottom-right
+        while the daemon's socket isn't answering.  Deliberately not a
+        cover: it is click-through (can_target False) and tiny, so it just
+        clearly flags the state without getting in the way."""
+        self._install_loading_css()
+
+        badge = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        badge.add_css_class("disconnected-badge")
+        badge.set_halign(Gtk.Align.END)
+        badge.set_valign(Gtk.Align.END)
+        badge.set_margin_end(14)
+        badge.set_margin_bottom(14)
+        # Clicks pass straight through to the UI underneath.
+        badge.set_can_target(False)
+
+        badge.append(Gtk.Label(label="\u25cf"))  # filled dot
+        badge.append(Gtk.Label(label="Not connected to daemon"))
+
+        badge.set_visible(False)
+        return badge
+
+    def _poll_daemon_connection(self):
+        """Show/hide the "not connected" badge as the daemon's socket comes
+        and goes, and pull a fresh snapshot the moment it (re)connects."""
+        running = self.daemon.is_running()
+        if running != self._daemon_connected:
+            self._daemon_connected = running
+            if self._disconnected_badge is not None:
+                self._disconnected_badge.set_visible(not running)
+            if running:
+                self.pw_widget.refresh()
+                self.ps_widget.refresh()
+        return True
+
     def _install_loading_css(self):
         # GTK4 has no per-widget background-color setter; a display-wide
         # provider with one class is the sanctioned way to get the faint
@@ -446,6 +536,10 @@ class MainWindow(Gtk.ApplicationWindow):
         css = Gtk.CssProvider()
         css.load_from_data(
             b".loading-overlay { background-color: rgba(0, 0, 0, 0.28); }"
+            b".disconnected-badge {"
+            b"  background-color: rgba(150, 44, 44, 0.92);"
+            b"  border-radius: 10px; padding: 5px 10px; }"
+            b".disconnected-badge label { color: #ffffff; font-size: 12px; }"
         )
         display = Gdk.Display.get_default()
         if display is not None:
@@ -610,7 +704,49 @@ class MainWindow(Gtk.ApplicationWindow):
                 traceback.print_exc()
         return True
 
+    def _daemon_action(self, action):
+        """Run a daemon start/stop/restart off the GTK main thread - each
+        waits on the Unix socket to appear/disappear - then refresh once
+        it's done so the canvases repopulate (or clear)."""
+        if getattr(self, "_daemon_busy", False):
+            return
+        self._daemon_busy = True
+
+        def _run():
+            try:
+                if action == "start":
+                    ok = self.daemon.start()
+                elif action == "stop":
+                    ok = self.daemon.stop()
+                else:
+                    ok = self.daemon.restart()
+                logger.info("Daemon %s %s", action, "ok" if ok else "failed")
+            except Exception:
+                logger.exception("Daemon %s failed", action)
+            finally:
+                GLib.idle_add(self._daemon_action_done)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _daemon_action_done(self):
+        self._daemon_busy = False
+        # The old connection (if any) is to a daemon that may be gone or
+        # replaced; drop it so the client redials on the next command.
+        try:
+            self.client._drop_connection()
+        except Exception:
+            pass
+        self.pw_widget.refresh()
+        self.ps_widget.refresh()
+        return False
+
     def on_close(self, *args):
         if self.log_console is not None:
             self.log_console.stop()
+        # Tear down the daemon only if this GUI started it; an adopted
+        # daemon is deliberately left running.
+        try:
+            self.daemon.shutdown_owned()
+        except Exception:
+            logger.exception("Daemon shutdown on close failed")
         self.client.stop()

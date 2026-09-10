@@ -315,6 +315,33 @@ def test_rebuild_captures_then_tears_down_and_reloads(monkeypatch):
     assert d.handle_command({"command": "get_nodes"})["nodes"] == {}
 
 
+def test_shutdown_command_reports_ok_and_stops_the_daemon():
+    """The GUI's Stop/Restart menu and its on-close cleanup send this;
+    it must reply before flipping the run flag (the reply is what lets
+    the caller wait for a graceful exit rather than racing it)."""
+    d = fresh_daemon()
+    d._running = True
+    resp = d.handle_command({"command": "shutdown"})
+    assert resp["status"] == "ok"
+    assert d._running is False
+
+
+def test_every_node_type_has_a_description_and_setting_tooltips():
+    """Every node spec carries hover-ready text: a one-line description
+    (shown on the add-node panel and a long hover on the canvas) and a
+    tooltip for every Settings row (falling back to the label)."""
+    from gui import node_specs as ns
+
+    missing_desc = [
+        t for t, spec in ns.NODE_TYPE_SPECS.items() if not spec.description
+    ]
+    assert missing_desc == []
+    for node_type, spec in ns.NODE_TYPE_SPECS.items():
+        for row in spec.settings or []:
+            attr, label = row[0], row[1]
+            assert ns.setting_tooltip(node_type, attr, label), (node_type, attr)
+
+
 def test_unknown_type_and_bad_command_error():
     d = fresh_daemon()
     resp = d.handle_command({"command": "add_node", "node_type": "nope",

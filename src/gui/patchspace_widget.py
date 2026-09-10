@@ -69,6 +69,8 @@ from node_specs import (
     port_kind,
     is_mute_node,
     type_label,
+    description_for,
+    setting_tooltip,
     icon_for_add_node_type,
     color_name_for_node_type,
 )
@@ -124,10 +126,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     # Kept just wide enough for the widest type label ("Inv. Switcher")
     # to stay on one line.
     HEADER_ICON_RESERVE = 44
-    # A Splitter with no label renders as a plain square this many pixels
-    # on a side (just the three-dot menu and, dimmed, the anchor badge),
-    # so it stays out of the way instead of occupying a full node.  Give
-    # it a label and it grows back out to NODE_WIDTH to wrap the text.
+    # A *compact* node (see _COMPACT_NODE_TYPES: splitter and the boolean
+    # logic gates) with no label renders as a plain square this many
+    # pixels on a side (just the three-dot menu and, dimmed, the anchor
+    # badge), so it stays out of the way instead of occupying a full node.
+    # Give it a label and it grows back out to NODE_WIDTH to wrap the text.
     SPLITTER_MIN_SIZE = 64
     # Padding a group's dotted box leaves around its member nodes, and
     # the default colour palette new groups cycle through.
@@ -217,6 +220,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # is ignored instead of yanking the handle backwards.
         self._pending_effect_slider = {}
 
+        # Boolean on/off toggles (gate `enabled`, switcher / On-Off source
+        # `output`) we just flipped optimistically.  (node_id, field) ->
+        # value.  A get_nodes poll racing our in-flight set command would
+        # otherwise report the pre-click value and the switch would flash
+        # back to the opposite for a poll or two; keep our value until the
+        # daemon echoes it (see _accept_bool_echo).
+        self._pending_bool = {}
+
         self.pinned_nodes = set()
 
         # -- anchoring / selection ------------------------------------
@@ -301,6 +312,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self.set_hexpand(True)
         self.set_vexpand(True)
         self.set_can_focus(True)
+        # Hovering a node long enough (GTK's own tooltip delay) shows the
+        # node type + its description - see _on_query_tooltip.
+        self.set_has_tooltip(True)
+        self.connect("query-tooltip", self._on_query_tooltip)
 
         drag = Gtk.GestureDrag()
         # Left button only.  A GtkGestureSingle with no button set tracks
@@ -513,6 +528,22 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         daemon (main.py handles it as set_node_property "output")."""
         self._send_property(node_id, "output", output)
 
+    def _toggle_gate_state(self, nid):
+        """Flip a gate and remember the new value until the daemon echoes
+        it (see _accept_bool_echo)."""
+        node = self.nodes[nid]
+        node["enabled"] = not node.get("enabled", True)
+        self._pending_bool[(nid, "enabled")] = node["enabled"]
+        self._send_set_gate(nid, node["enabled"])
+
+    def _toggle_switch_state(self, nid):
+        """Flip a switcher / On-Off source and remember the new value until
+        the daemon echoes it (see _accept_bool_echo)."""
+        node = self.nodes[nid]
+        node["output"] = 0 if node.get("output") else 1
+        self._pending_bool[(nid, "output")] = node["output"]
+        self._send_switcher_output(nid, node["output"])
+
     # ---------- Sensitivity Gate slider ----------
     # The Sensitivity Gate's own live LADSPA threshold isn't reliable on
     # every build (see node_specs.py's sensitivity_gate spec comment), so
@@ -601,6 +632,23 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             return None
         return reported
 
+    def _accept_bool_echo(self, node_id, field, reported):
+        """Value to store for a boolean toggle field from a poll, or None
+        to keep our locally-flipped value.
+
+        Clicking a gate/switcher flips the node optimistically and sends
+        a command; the daemon's reply lands a poll or two later.  Keep the
+        optimistic value until the daemon reports it back, so the switch
+        can't flash to the opposite and back while the command is in
+        flight."""
+        pending = self._pending_bool.get((node_id, field))
+        if pending is not None:
+            if bool(reported) == bool(pending):
+                del self._pending_bool[(node_id, field)]
+                return reported
+            return None
+        return reported
+
     # ---------- daemon state -> local model ----------
 
     def update_from_daemon(self, data):
@@ -618,6 +666,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             if nid not in daemon_nodes:
                 del self.nodes[nid]
                 self._pending_effect_slider.pop(nid, None)
+                for key in [k for k in self._pending_bool if k[0] == nid]:
+                    del self._pending_bool[key]
                 self.anchored_nodes.discard(nid)
                 self.selected_nodes.discard(nid)
                 self._user_created_nodes.discard(nid)
@@ -711,14 +761,24 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 node["outputs"] = spec.outputs
                 node["meta"] = ndata
                 new_label = ndata.get("label", "")
-                if node.get("label", "") != new_label and self._is_splitter_node(node):
+                if node.get("label", "") != new_label and self._is_compact_node(node):
                     # A splitter grows to full width / shrinks to a square
                     # as its label comes and goes, so re-run the layout.
                     self.layout_awake = True
                     self._settle_ticks = 0
                 node["label"] = new_label
-                node["enabled"] = ndata.get("enabled", True)
-                node["output"] = ndata.get("output", 0)
+                # Guard a just-clicked toggle against a poll that raced
+                # our in-flight set command (see _accept_bool_echo).
+                enabled = self._accept_bool_echo(
+                    nid, "enabled", ndata.get("enabled", True)
+                )
+                if enabled is not None:
+                    node["enabled"] = enabled
+                output = self._accept_bool_echo(
+                    nid, "output", ndata.get("output", 0)
+                )
+                if output is not None:
+                    node["output"] = output
                 node["bool_driven"] = ndata.get("bool_driven", False)
                 node["bool_state"] = ndata.get("bool_state")
                 node["device_name"] = ndata.get("device_name", "")
@@ -963,11 +1023,20 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         separately."""
         label = node.get("label", "")
         desc = node.get("meta", {}).get("description", "")
-        if self._is_splitter_node(node):
-            # Splitters show nothing but their (optional) label - no type
-            # name, no node id, no "not connected" badge - so an
-            # unlabelled one is just a small blank square.
-            return [(label, 12, "text")] if label else []
+        if self._is_compact_node(node):
+            if node["type"] == "splitter":
+                # A splitter shows nothing but its (optional) label - no
+                # type name, no node id - so an unlabelled one is just a
+                # small blank square.
+                return [(label, 12, "text")] if label else []
+            # The boolean logic gates keep their type name at the top -
+            # an unlabelled AND/OR/Invert would otherwise be an
+            # indistinguishable square - then an optional user label.  No
+            # node id.
+            blocks = [(type_label(node["type"], nid), 10, "subtext")]
+            if label:
+                blocks.append((label, 12, "text"))
+            return blocks
         blocks = [(type_label(node["type"], nid), 10, "subtext")]
         if node["type"] in ("device_input", "device_output", "app_input", "app_output"):
             # Hardware / app nodes name an external device, so their
@@ -1039,19 +1108,30 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         )
         return 18 if (node.get("label") and device) else 0
 
+    @staticmethod
+    def _header_block_is_id(nid, text) -> bool:
+        """Whether a header block is the node's raw id.  The id is a long
+        opaque token (``node_1738...``), so it is drawn ellipsized on a
+        single line rather than wrapped onto several - wrapping it just
+        made the node tall for no readable gain."""
+        return text == str(nid)
+
     def _header_extra_height(self, node_id):
         """Extra vertical room node_id's header needs beyond what
         node_height()'s fixed base already budgets for single-line
-        text - 0 unless a label, description, or node id is long
-        enough to wrap onto more than one line at the node's current
-        width, in which case this is exactly enough to fit every
-        wrapped line without clipping (see _draw_header, which stacks
-        blocks using these same measurements)."""
+        text - 0 unless a label or description is long enough to wrap
+        onto more than one line at the node's current width, in which
+        case this is exactly enough to fit every wrapped line without
+        clipping (see _draw_header, which stacks blocks using these
+        same measurements).  The node id never contributes: it is
+        ellipsized, not wrapped."""
         node = self.nodes[node_id]
         extra = 0.0
         for i, (text, font_size, _color) in enumerate(
             self._header_blocks(node_id, node)
         ):
+            if self._header_block_is_id(node_id, text):
+                continue
             # Must match _draw_header's per-line max_width exactly -
             # the type label (i == 0) shares its row with the
             # three-dot menu icon, so it wraps at a narrower width
@@ -1063,16 +1143,35 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             extra += max(0.0, wrapped_h - self._single_line_height(font_size))
         return extra
 
-    @staticmethod
-    def _is_splitter_node(node) -> bool:
-        return node.get("type") == "splitter"
+    # Node types that render as a compact square when unlabelled (see
+    # _node_width_for / _compute_node_height / _header_blocks): a bare
+    # splitter is pure plumbing, and the boolean logic gates (AND/OR/
+    # Invert) are tiny control operators rather than signal processors.
+    # None needs the full type-label + node-id header, so with a label
+    # they show only the label and with none they collapse to a square.
+    _COMPACT_NODE_TYPES = frozenset(
+        {"splitter", "boolean_and", "boolean_or", "boolean_invert"}
+    )
+
+    @classmethod
+    def _is_compact_node(cls, node) -> bool:
+        return node.get("type") in cls._COMPACT_NODE_TYPES
 
     def _node_width_for(self, node):
-        """Width a node renders at: a splitter with no label collapses to
-        a square (SPLITTER_MIN_SIZE); every other node - and a labelled
-        splitter, which wraps its text - uses the normal node width."""
-        if self._is_splitter_node(node) and not node.get("label"):
-            return self.SPLITTER_MIN_SIZE
+        """Width a node renders at: a compact node (splitter / boolean
+        logic gate) with no label collapses to a square
+        (SPLITTER_MIN_SIZE); every other node - and a labelled compact
+        one, which wraps its text - uses the normal node width."""
+        if self._is_compact_node(node) and not node.get("label"):
+            if node["type"] == "splitter":
+                return self.SPLITTER_MIN_SIZE
+            # A gate still shows its type name at the top beside the
+            # three-dot menu, so it must be wide enough for that text -
+            # otherwise the name would wrap into a sliver.
+            tw, _ = self._text_size(type_label(node["type"], ""), 10)
+            return max(
+                self.SPLITTER_MIN_SIZE, int(tw) + self.HEADER_ICON_RESERVE + 16
+            )
         return self.NODE_WIDTH
 
     def node_width(self, node_id):
@@ -1091,16 +1190,20 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     def _compute_node_height(self, node_id):
         node = self.nodes[node_id]
-        if self._is_splitter_node(node):
-            # A bare splitter is a square.  With a label, grow just enough
-            # for the wrapped text plus a centred in/out socket pair.
-            if not node.get("label"):
-                return self.SPLITTER_MIN_SIZE
+        if self._is_compact_node(node):
             header = self._header_stack_height(node_id, node)
-            return max(
-                self.SPLITTER_MIN_SIZE,
-                int(header + 2 * self.SOCKET_RADIUS + 16),
-            )
+            if not header:
+                # A truly bare compact node (an unlabelled splitter) is a
+                # plain square with its sockets centred.
+                return self.SPLITTER_MIN_SIZE
+            # Gates carry a type-name header (and maybe a user label, both
+            # wrapped); reserve it and pack the sockets below at the
+            # standard step.
+            top, bottom = self._socket_margins(node_id, node)
+            count = max(len(node.get("inputs", [])), len(node.get("outputs", [])))
+            span = (count - 1) * self.SOCKET_MIN_STEP if count > 1 else 0
+            need = top + bottom + span + 2 * self.SOCKET_RADIUS
+            return max(self.SPLITTER_MIN_SIZE, int(need))
         base = self._base_node_height(node_id)
         # A node with more than one socket on EITHER side labels its
         # sockets and needs enough vertical room to lay them out at the
@@ -1179,7 +1282,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             max_width = self.node_width(node_id) - (
                 self.HEADER_ICON_RESERVE if i == 0 else 20
             )
-            total += wrapped_text_height(self, text, max_width, font_size)
+            if self._header_block_is_id(node_id, text):
+                # Ellipsized to a single line - see _draw_header.
+                total += self._single_line_height(font_size)
+            else:
+                total += wrapped_text_height(self, text, max_width, font_size)
             if i + 1 < len(blocks):
                 total += self.HEADER_BLOCK_GAP
         return total
@@ -1197,12 +1304,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         Multi-socket nodes that also have a bottom control (the two
         switchers) reserve just the control below, not a small pad, so
         the A/B toggle stays close to the sockets above it."""
-        if self._is_splitter_node(node):
-            # Bare square: sockets centred.  Labelled: label on top, the
-            # in/out pair centred in the space below it.
-            if not node.get("label"):
+        if self._is_compact_node(node):
+            header = self._header_stack_height(node_id, node)
+            if not header:
+                # Bare splitter: a square with its sockets centred.
                 return 0, 0
-            return self._header_stack_height(node_id, node) + 4, 8
+            # A gate reserves its type/label header on top, and a user
+            # label gets a little pad below the sockets too.
+            return header + 4, (8 if node.get("label") else 4)
 
         if self._uses_compact_sockets(node):
             # Multi-socket nodes with a bottom control: sockets sit
@@ -1245,7 +1354,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             return (x, node["y"] + self.node_height(node_id) / 2)
         top, bottom = self._socket_margins(node_id, node)
         band = self.node_height(node_id) - top - bottom
-        if self._uses_compact_sockets(node) and total > 1:
+        if (self._uses_compact_sockets(node) or self._is_compact_node(node)) and total > 1:
             # Packed at the standard step and centred in the (now tight)
             # band, instead of the proportional spread used elsewhere.
             span = (total - 1) * self.SOCKET_MIN_STEP
@@ -1642,6 +1751,21 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             return media_class_label(raw)
         return raw
 
+    def _on_query_tooltip(self, widget, x, y, keyboard_mode, tooltip):
+        """GTK "query-tooltip" handler: after the normal hover delay over
+        a node body, show its type name and description."""
+        wx, wy = self.to_world(x, y)
+        nid = self.find_node_at(wx, wy)
+        if nid is None:
+            return False
+        node = self.nodes.get(nid)
+        if node is None:
+            return False
+        label = type_label(node["type"], nid)
+        desc = description_for(node["type"])
+        tooltip.set_text(f"{label}\n{desc}" if desc else label)
+        return True
+
     # ---------- drawing ----------
 
     def on_draw(self, area, cr, w, h):
@@ -1806,7 +1930,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         elif spec.control == "switcher":
             self._draw_switcher_toggle(cr, nid, node.get("output", 0))
         elif spec.control == "boolean":
-            self._draw_boolean_toggle(cr, nid, node.get("output", 0))
+            self._draw_boolean_toggle(cr, pal, nid, node.get("output", 0))
         elif spec.control == "fallback_onoff":
             # Gate/switch on/off button.  With nothing wired into the
             # boolean ctrl input it is the interactive control (a gate
@@ -1823,7 +1947,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             else:
                 stored = node.get("output", 0)
             output = (1 if state else 0) if (driven and state is not None) else stored
-            self._draw_boolean_toggle(cr, nid, output, driven=driven)
+            self._draw_boolean_toggle(cr, pal, nid, output, driven=driven)
         elif spec.control == "wetdry":
             self._draw_wetdry_slider(cr, x, y, node_h, node.get("wet_dry", 0.3))
         elif spec.control == "gain":
@@ -1864,7 +1988,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             # type had exactly that until EchoCancelNode - only label
             # sockets when there's more than one to tell apart (e.g.
             # "mic" vs "probe"), so ordinary nodes stay uncluttered.
-            if multi_input:
+            # spec.socket_labels opts a node out entirely (the symmetric
+            # AND/OR gates).
+            if multi_input and spec.socket_labels:
                 draw_text_ellipsized(
                     cr,
                     sx + 9,
@@ -1891,7 +2017,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             # Multi-output nodes (today only the Switcher's "a"/"b") get
             # their sockets labelled, right-aligned inside the node body;
             # a lone "out" socket is self-explanatory and left unlabelled.
-            if multi_output:
+            if multi_output and spec.socket_labels:
                 draw_text_ellipsized(
                     cr,
                     sx - 25,
@@ -1903,15 +2029,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 )
 
     def _draw_header(self, cr, pal, nid, node, x, y):
-        """Draw every _header_blocks() line, wrapped (not
-        ellipsized - see draw_text_wrapped) and stacked top to
-        bottom by each block's own measured height, so a long label
-        or node id is always fully visible instead of cut off with
-        "...". node_height() already grew the node to
-        fit this same stack (via _header_extra_height, which uses the
-        identical per-block measurements) before this ever draws, so
-        there's no clipping against the node's bottom edge or the
-        control/ports area below it."""
+        """Draw every _header_blocks() line, stacked top to bottom by each
+        block's own measured height.  A label or description wraps (so
+        it's always fully readable); the node id is a long opaque token
+        and is ellipsized to a single line instead.  node_height() already
+        grew the node to fit this same stack (via _header_extra_height,
+        which uses the identical per-block measurements) before this ever
+        draws, so there's no clipping against the node's bottom edge or
+        the control/ports area below it."""
         text_y = y + self.HEADER_TOP_PAD
         for i, (text, font_size, color_key) in enumerate(
             self._header_blocks(nid, node)
@@ -1922,9 +2047,17 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             max_width = self.node_width(nid) - (
                 self.HEADER_ICON_RESERVE if i == 0 else 20
             )
-            block_h = draw_text_wrapped(
-                cr, x + 10, text_y, text, max_width, font_size, pal[color_key]
-            )
+            if self._header_block_is_id(nid, text):
+                draw_text_ellipsized(
+                    cr, x + 10, text_y, text, max_width, font_size,
+                    pal[color_key],
+                )
+                block_h = self._single_line_height(font_size)
+            else:
+                block_h = draw_text_wrapped(
+                    cr, x + 10, text_y, text, max_width, font_size,
+                    pal[color_key],
+                )
             text_y += block_h + self.HEADER_BLOCK_GAP
 
     @staticmethod
@@ -2205,10 +2338,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             cr.move_to(text_x, text_y)
             cr.show_text(label)
 
-    def _draw_boolean_toggle(self, cr, nid, output, driven=False):
+    def _draw_boolean_toggle(self, cr, pal, nid, output, driven=False):
         """On/Off button for the boolean source node - the A/B button's
-        shape with On/Off labels.  The active segment is filled green so
-        a glance shows the value being broadcast to any gate/switcher
+        shape with On/Off labels.  The active segment is filled with the
+        GTK theme's success colour when On and its error colour when Off,
+        so a glance shows the value being broadcast to any gate/switcher
         wired to this node.
 
         ``driven`` renders the same button read-only and white: it is a
@@ -2228,19 +2362,20 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         cr.set_line_width(1.5)
         cr.stroke()
 
-        # On = left/true, Off = right/false.
+        # On = left/true (theme success green), Off = right/false (theme
+        # error red).  A driven switch stays white - see docstring.
         active = 0 if output else 1
+        if driven:
+            active_color = (0.92, 0.92, 0.95)
+        else:
+            active_color = pal["success"] if active == 0 else pal["error"]
         cr.select_font_face("sans")
         cr.set_font_size(11)
         for i, label in enumerate(("On", "Off")):
             seg_x = x + i * half
             if i == active:
                 draw_rounded_rect(cr, seg_x + 2, y + 2, half - 4, h - 4, radius - 2)
-                if driven:
-                    # White, not green: externally driven, not user-set.
-                    cr.set_source_rgb(0.92, 0.92, 0.95)
-                else:
-                    cr.set_source_rgb(0.30, 0.72, 0.42)
+                cr.set_source_rgb(*active_color)
                 cr.fill()
             extents = cr.text_extents(label)
             text_x = seg_x + (half - extents.width) / 2 - extents.x_bearing
@@ -2248,8 +2383,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             if i == active:
                 if driven:
                     cr.set_source_rgb(0.10, 0.10, 0.12)
-                else:
+                elif active == 0:
+                    # Dark text reads on the success green.
                     cr.set_source_rgb(0.06, 0.16, 0.09)
+                else:
+                    # Light text reads on the error red.
+                    cr.set_source_rgb(0.98, 0.96, 0.96)
             else:
                 cr.set_source_rgb(0.78, 0.78, 0.80)
             cr.move_to(text_x, text_y)
@@ -2445,37 +2584,28 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
         nid = self.find_gate_toggle_at(wx, wy)
         if nid is not None:
-            node = self.nodes[nid]
-            node["enabled"] = not node["enabled"]
-            self._send_set_gate(nid, node["enabled"])
+            self._toggle_gate_state(nid)
             self.queue_draw()
             return
 
         nid = self.find_switcher_toggle_at(wx, wy)
         if nid is not None:
-            node = self.nodes[nid]
-            node["output"] = 0 if node.get("output") else 1
-            self._send_switcher_output(nid, node["output"])
+            self._toggle_switch_state(nid)
             self.queue_draw()
             return
 
         nid = self.find_boolean_toggle_at(wx, wy)
         if nid is not None:
-            node = self.nodes[nid]
-            node["output"] = 0 if node.get("output") else 1
-            self._send_switcher_output(nid, node["output"])
+            self._toggle_switch_state(nid)
             self.queue_draw()
             return
 
         nid = self.find_fallback_toggle_at(wx, wy)
         if nid is not None:
-            node = self.nodes[nid]
-            if node["type"] == "gate":
-                node["enabled"] = not node.get("enabled", True)
-                self._send_set_gate(nid, node["enabled"])
+            if self.nodes[nid]["type"] == "gate":
+                self._toggle_gate_state(nid)
             else:
-                node["output"] = 0 if node.get("output") else 1
-                self._send_switcher_output(nid, node["output"])
+                self._toggle_switch_state(nid)
             self.queue_draw()
             return
 
@@ -3426,6 +3556,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         id_entry = Gtk.Entry()
         id_entry.set_text(node_id)
         id_entry.set_hexpand(True)
+        id_entry.set_tooltip_text(
+            "The node's unique id. Renaming it updates every edge that "
+            "references it."
+        )
         content.append(self._labeled_row("Node ID:", id_entry))
 
         id_error_label = Gtk.Label(label="")
@@ -3438,6 +3572,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         label_entry = Gtk.Entry()
         label_entry.set_text(node.get("label", ""))
         label_entry.set_hexpand(True)
+        label_entry.set_tooltip_text("The name shown on the node in the canvas.")
         content.append(self._labeled_row("Label:", label_entry))
 
         # Control widget (gate / volume)
@@ -3534,6 +3669,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             for row in spec.settings:
                 attr, label, kind = row[0], row[1], row[2]
                 extra = dict(row[3]) if len(row) > 3 else {}
+                # Every settings row gets a hover description: the spec's
+                # per-attr text when it has one, else the row label.
+                tip = setting_tooltip(node["type"], attr, label)
                 if kind == "bool":
                     widget = Gtk.CheckButton(label=label)
                     widget.set_active(bool(node.get("meta", {}).get(attr, False)))
@@ -3567,6 +3705,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     widget.set_text(node.get("meta", {}).get(attr, "") or "")
                     widget.set_hexpand(True)
                     content.append(self._labeled_row(label, widget))
+                widget.set_tooltip_text(tip)
                 param_widgets.append((attr, kind, widget, extra))
 
         dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
@@ -4312,11 +4451,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         id_entry = Gtk.Entry()
         id_entry.set_text(gid)
         id_entry.set_hexpand(True)
+        id_entry.set_tooltip_text("The group's unique id.")
         content.append(self._labeled_row("Group ID:", id_entry))
 
         label_entry = Gtk.Entry()
         label_entry.set_text(group.get("label", ""))
         label_entry.set_hexpand(True)
+        label_entry.set_tooltip_text("The title shown above the group box.")
         content.append(self._labeled_row("Label:", label_entry))
 
         # A self-drawn HSV picker (see color_picker.py) rather than
@@ -4325,6 +4466,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         color_picker = ColorPicker(
             group.get("color", self.GROUP_COLORS[0]), presets=self.GROUP_COLORS
         )
+        color_picker.set_tooltip_text("The group's outline / title colour.")
         content.append(self._labeled_row("Color:", color_picker))
 
         dialog.add_button("Delete", Gtk.ResponseType.REJECT)
@@ -4486,29 +4628,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             row_label.set_halign(Gtk.Align.START)
             content.append(row_label)
             btn.set_child(content)
+            desc = description_for(ntype)
+            btn.set_tooltip_text(f"{label}\n{desc}" if desc else label)
             btn.connect("clicked", self._on_add_node, ntype, popover)
             box.append(btn)
         popover.set_child(box)
         self.popup_context_menu(popover, x, y)
-
-    def _unique_default_label(self, base_label):
-        """`base_label` itself if no currently-known node already
-        carries that label, otherwise the lowest-numbered "base_label
-        N" (N >= 2) that isn't taken yet - "Volume", then "Volume 2",
-        "Volume 3", ... Checked against self.nodes' live "label"
-        values (not node ids, which are timestamp-based and never
-        collide on their own), so this is really asking "would this
-        default be ambiguous to a human looking at the canvas" -
-        independent of type, so a "Volume" node and a differently
-        typed node someone manually renamed to "Volume" still count
-        as a clash."""
-        existing = {n.get("label", "") for n in self.nodes.values()}
-        if base_label not in existing:
-            return base_label
-        n = 2
-        while f"{base_label} {n}" in existing:
-            n += 1
-        return f"{base_label} {n}"
 
     def _build_add_node_command(self, node_type):
         """Node-type-specific (real_type, node_id, config) for an
@@ -4539,10 +4664,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # label currently on the canvas so a second Volume node reads
         # as "Volume 2" instead of an indistinguishable "Volume".
         config: dict = {}
-        if real_type != "splitter":
-            # Splitters get no default label - an unlabelled one renders
-            # as a small blank square (see SPLITTER_MIN_SIZE).
-            config["label"] = self._unique_default_label(type_label(real_type, node_id))
+        if real_type not in self._COMPACT_NODE_TYPES:
+            # Compact nodes get no default label: a bare splitter is a
+            # blank square, and the boolean gates already show their type
+            # name at the top, so a default label would just duplicate it.
+            # Everything else takes its plain type name (never "Volume 2",
+            # "Gate 3", ...).
+            config["label"] = type_label(real_type, node_id)
         if node_type in ("regex_input", "regex_output"):
             config["pattern"] = ".*"
         elif node_type == "media_class_input":
@@ -4674,7 +4802,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # the tooltip below is just a hover-friendly backup, not a
         # substitute for the visible name.
         row_label.set_ellipsize(Pango.EllipsizeMode.END)
-        row.set_tooltip_text(label)
+        desc = description_for(node_type)
+        row.set_tooltip_text(f"{label}\n{desc}" if desc else label)
         content.append(row_label)
         row.set_child(content)
 

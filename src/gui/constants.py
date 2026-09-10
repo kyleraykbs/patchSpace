@@ -22,6 +22,11 @@ REFRESH_INTERVAL_MS = 400
 POLL_RESPONSES_MS = 50
 POST_MUTATION_REFRESH_MS = 150
 
+# How often the window checks whether the daemon's socket is reachable, to
+# show/hide the "Waiting for daemon…" cover. Cheap: it skips straight to
+# False when the socket file doesn't exist.
+DAEMON_POLL_MS = 500
+
 # How often the log console (main_window.LogConsole) asks the daemon for
 # new log lines while it is open. Slower than REFRESH_INTERVAL_MS - log
 # output is bursty and there's no point polling it as hard as the graph.
