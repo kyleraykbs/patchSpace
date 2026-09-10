@@ -42,6 +42,8 @@ import threading
 import time as _time
 from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
+from pwmatch import INTERNAL_MEDIA_CLASS, INTERNAL_SOURCE_MEDIA_CLASS
+
 logger = logging.getLogger(__name__)
 
 NODE_TYPE = "PipeWire:Interface:Node"
@@ -52,7 +54,7 @@ CLIENT_TYPE = "PipeWire:Interface:Client"
 OnChange = Callable[["PipewireGraph"], None]
 OnError = Callable[[Exception], None]
 NodeCreatedCallback = Callable[[int, dict], None]
-NodeRemovedCallback = Callable[[int], None]
+NodeRemovedCallback = Callable[[int, dict], None]
 
 
 class GraphMonitorError(Exception):
@@ -71,6 +73,79 @@ class LinkError(GraphMonitorError):
     """Raised only for genuine pw-link failures.  "Already linked" /
     "already unlinked" are treated as success - the graph dump can lag a
     link/unlink by a cycle, so callers shouldn't have to special-case it."""
+
+
+def _name_is_backing_of(name: str, marker: str) -> bool:
+    """True if ``name`` is exactly ``marker`` or one of its ``_``-suffixed
+    siblings (``marker_in``, ``marker_fx_out``, ``marker_in_keepalive``,
+    ...).
+
+    Deliberately NOT a bare prefix match.  Every real object this project
+    creates is ``{backing}`` or ``{backing}_<suffix>``, so requiring the
+    underscore keeps a marker from matching a *different* node whose
+    backing merely starts with it
+    (``noise_cancel_..._1`` vs ``noise_cancel_..._10``).  With a bare
+    ``startswith`` the reap for a newly added node could kill a live
+    sibling node's nodes/owning processes - the "adding another effect
+    tears down the existing one, killing all audio" failure class."""
+    return name == marker or name.startswith(marker + "_")
+
+
+def _name_matches_marker(name: str, marker: str) -> bool:
+    """Whether a live node name belongs to the object(s) a sweep
+    ``marker`` identifies.  Markers come in two deliberately different
+    shapes:
+
+      * an **exact backing name** (``noise_cancel_node_..._1``) - covers
+        itself and its ``_``-suffixed siblings only (see
+        ``_name_is_backing_of``); the reap on add uses this shape so it
+        can never spill onto a differently named node, and
+      * an **owned prefix** - the daemon's ``_OWNED_PREFIXES`` and the
+        startup sweep markers built from them, all ending in ``_``
+        (``noise_cancel_node_``, ``patchbay_``, ...).  These are not
+        backing names, so they must stay a plain prefix match; scoping
+        them like a backing name made every owned object invisible to
+        the crash-recovery sweep, so a crashed run's stale echo/noise
+        streams lingered and a fresh AI Noise Cancel wired against them
+        and took the chain silent."""
+    if marker.endswith("_"):
+        return name.startswith(marker)
+    return _name_is_backing_of(name, marker)
+
+
+def _owned_backings(node_datas) -> Set[str]:
+    """Derive the ``backing_node_name`` of every one of this project's
+    objects present in a node snapshot, from the objects themselves.
+
+    The known-prefix list can only cover backings this project *generates*
+    (``normalize_node_...``); an effect an old/imported config created
+    under an arbitrary backing (``fx``, ``nc_a``) would otherwise never be
+    swept, and its dead dummies/keepalives stay wired into the default
+    devices forever.  Our plumbing is unmistakable: the dummies use the
+    reserved non-Pulse ``Audio/{Sink,Source}/Internal`` media class, and
+    every keepalive stream is named ``{dummy}_keepalive``.  Reducing each
+    to its backing and then matching with ``_name_is_backing_of`` also
+    catches the module's own ``{backing}`` / ``{backing}_fx_out``
+    streams."""
+    backings: Set[str] = set()
+    for data in node_datas:
+        props = data.get("info", {}).get("props", {}) if isinstance(data, dict) else {}
+        name = props.get("node.name") or ""
+        media_class = props.get("media.class") or ""
+        if not name:
+            continue
+        base = ""
+        if media_class in (INTERNAL_MEDIA_CLASS, INTERNAL_SOURCE_MEDIA_CLASS):
+            if name.endswith("_in") or name.endswith("_out"):
+                base = name.rsplit("_", 1)[0]
+        elif name.endswith("_keepalive"):
+            stem = name[: -len("_keepalive")]
+            if stem.endswith("_in") or stem.endswith("_out"):
+                stem = stem.rsplit("_", 1)[0]
+            base = stem
+        if base:
+            backings.add(base)
+    return backings
 
 
 def _read_available(pipe, timeout: float) -> str:
@@ -283,7 +358,8 @@ class PipewireGraph:
     # leftover-object cleanup (crash recovery)
     # ------------------------------------------------------------------
 
-    def reap_stale_for_names(self, markers: Sequence[str]) -> int:
+    def reap_stale_for_names(self, markers: Sequence[str],
+                             owned_sweep: bool = False) -> int:
         """Best-effort removal of anything a previous (uncleanly-killed)
         daemon left behind under ``markers``, before this daemon creates
         its own objects with those names.
@@ -300,12 +376,19 @@ class PipewireGraph:
         Name matching is prefix-based so one marker per
         ``backing_node_name`` covers every ``{name}_in``/``{name}_out``
         sibling.  Purely best-effort; every step is guarded.  Returns how
-        many stale objects/processes were cleaned up."""
+        many stale objects/processes were cleaned up.
+
+        ``owned_sweep`` additionally reaps anything in the snapshot that
+        is recognisably this project's own plumbing (see
+        ``_owned_backings``) even when its backing name is not in
+        ``markers``.  Only the startup crash-recovery sweep passes it -
+        a targeted reap at add time must NOT, or it would tear down the
+        live dummies of the other nodes already in the graph."""
         markers = [m for m in markers if m]
-        if not markers:
+        if not markers and not owned_sweep:
             return 0
         swept = self._terminate_orphan_helpers(set(markers))
-        stale, owner_pids = self._snapshot_stale(markers)
+        stale, owner_pids = self._snapshot_stale(markers, owned_sweep)
         # Kill the actual owning process first, not just the node id.
         # Per pwproc.py's ownership model this is the one teardown path
         # the server always honors atomically and completely - a client
@@ -341,7 +424,46 @@ class PipewireGraph:
         # a client whose application.process.id wasn't reported, or a
         # node whose owning client already exited on its own).
         swept += self._destroy_nodes(stale)
+        # Wait for the graph snapshot to actually drop the reaped
+        # objects before returning.  If the caller immediately creates a
+        # replacement with the same name, PipeWire can hand the new node
+        # the just-freed id, and a lagging node-removed event for the old
+        # object then matches (by id) the new backing and tears it down -
+        # the "live object disappeared while alive" reaping thrash.
+        self._wait_markers_gone(markers, owned_sweep=owned_sweep, timeout=3.0)
         return swept
+
+    def _wait_markers_gone(self, markers: Sequence[str],
+                           owned_sweep: bool = False,
+                           timeout: float = 3.0) -> bool:
+        """Poll until no live node matches any marker (or the timeout
+        elapses).  Best-effort; used by reap_stale_for_names to let the
+        removal events drain before a same-named replacement is
+        created."""
+        deadline = _time.monotonic() + timeout
+        while _time.monotonic() < deadline:
+            if not self._live_names_matching(markers, owned_sweep):
+                return True
+            _time.sleep(0.05)
+        return False
+
+    def _live_names_matching(self, markers: Sequence[str],
+                             owned_sweep: bool = False) -> list:
+        try:
+            nodes = self.nodes()
+        except Exception:
+            return []
+        owned = _owned_backings(nodes.values()) if owned_sweep else set()
+        hits = []
+        for data in nodes.values():
+            name = data.get("info", {}).get("props", {}).get("node.name", "")
+            if not name:
+                continue
+            if any(_name_matches_marker(name, m) for m in markers) or any(
+                _name_is_backing_of(name, b) for b in owned
+            ):
+                hits.append(name)
+        return hits
 
     def _terminate_orphan_helpers(self, markers: Set[str]) -> int:
         """SIGTERM every pw-loopback / pw-cat helper whose command line
@@ -377,17 +499,17 @@ class PipewireGraph:
         return reaped
 
     def _snapshot_stale(
-        self, markers: Sequence[str]
+        self, markers: Sequence[str], owned_sweep: bool = False
     ) -> Tuple[Dict[int, str], Set[int]]:
-        """One-shot full pw-dump -> ({node_id: name} for nodes whose
-        name starts with any marker, {pid, ...} of the OS processes
-        that own those nodes' client connections).  Returns ({}, set())
-        if the dump fails (cleanup is best-effort).
+        """One-shot full pw-dump -> ({node_id: name} for nodes matching
+        any marker (or, with ``owned_sweep``, recognisably this project's
+        own plumbing - see ``_owned_backings``), {pid, ...} of the OS
+        processes that own those nodes' client connections).  Returns
+        ({}, set()) if the dump fails (cleanup is best-effort).
 
         The pid set is what makes real cleanup possible for anything
         spawned as a bare ``pw-cli`` session (every filter-chain/
-        create-node backing this project owns, i.e. everything except
-        the pw-loopback-based virtual mic): those sessions can't be
+        create-node backing this project owns): those sessions can't be
         found by matching argv the way _terminate_orphan_helpers finds
         pw-loopback/pw-cat, since the node name is only ever sent to
         pw-cli over stdin after it's already running, never on its
@@ -430,17 +552,25 @@ class PipewireGraph:
             except (TypeError, ValueError):
                 continue
 
+        node_objs = [
+            obj
+            for obj in objects
+            if isinstance(obj, dict) and obj.get("type") == NODE_TYPE
+        ]
+        owned = _owned_backings(node_objs) if owned_sweep else set()
+
         found: Dict[int, str] = {}
         pids: Set[int] = set()
-        for obj in objects:
-            if not isinstance(obj, dict) or obj.get("type") != NODE_TYPE:
-                continue
+        for obj in node_objs:
             node_id = obj.get("id")
             props = obj.get("info", {}).get("props", {})
             name = props.get("node.name")
             if node_id is None or not name:
                 continue
-            if not any(name.startswith(m) for m in markers):
+            if not (
+                any(_name_matches_marker(name, m) for m in markers)
+                or any(_name_is_backing_of(name, b) for b in owned)
+            ):
                 continue
             found[node_id] = name
             pid = client_pids.get(props.get("client.id"))
@@ -509,9 +639,7 @@ class PipewireGraph:
                 stderr=subprocess.PIPE,
             )
         except OSError as exc:
-            raise ProcessStartError(
-                f"failed to start {self._dump_command!r}: {exc}"
-            ) from exc
+            raise ProcessStartError(f"failed to start {self._dump_command!r}: {exc}") from exc
         self._stopping.clear()
         self._thread = threading.Thread(target=self._read_loop, daemon=True)
         self._thread.start()
@@ -657,9 +785,13 @@ class PipewireGraph:
             self._stage_pending_node(node_id, new_nodes[node_id])
         for node_id in old_ids - new_ids:
             self._cancel_pending_node(node_id)
+            # Pass the node's last-known data too: PipeWire reuses node
+            # ids after a node is destroyed, so a consumer matching a
+            # removal by id alone can tear down an unrelated object that
+            # has since taken the id. The name lets it verify identity.
             for cb in self._node_removed_callbacks:
                 try:
-                    cb(node_id)
+                    cb(node_id, old_nodes.get(node_id, {}))
                 except Exception as exc:
                     logger.error("Error in node_removed callback: %s", exc)
         for node_id in old_ids & new_ids:
@@ -725,7 +857,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
     def on_initial(g):
-        print(f"Initial dump: {len(g.nodes())} nodes, {len(g.ports())} ports")
+        logger.info("Initial dump: %d nodes, %d ports", len(g.nodes()), len(g.ports()))
 
     graph = PipewireGraph()
     graph.on_initial_sync(on_initial)

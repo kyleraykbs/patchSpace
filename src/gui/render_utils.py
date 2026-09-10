@@ -9,6 +9,7 @@ takes what it needs as arguments.
 from __future__ import annotations
 
 import math
+import zlib
 
 from gi.repository import Pango, PangoCairo
 
@@ -19,9 +20,12 @@ _FALLBACK_TEXT = (0.93, 0.93, 0.94)
 _FALLBACK_SUBTEXT = (0.63, 0.63, 0.66)
 _FALLBACK_INPUT_PORT = (0.35, 0.78, 0.51)
 _FALLBACK_OUTPUT_PORT = (0.94, 0.47, 0.42)
+_FALLBACK_BOOLEAN_PORT = (0.55, 0.55, 0.58)
 _FALLBACK_LINK = (0.42, 0.65, 0.98)
 _FALLBACK_SELECT = (0.98, 0.76, 0.24)
 _FALLBACK_PENDING_LINK = (0.98, 0.76, 0.24)
+_FALLBACK_WARNING = (0.94, 0.65, 0.22)
+_FALLBACK_ERROR = (0.88, 0.20, 0.20)
 
 _THEME_COLOR_NAMES = [
     "accent_color",
@@ -29,7 +33,6 @@ _THEME_COLOR_NAMES = [
     "warning_color",
     "error_color",
     "destructive_color",
-    "suggested_color",
 ]
 
 
@@ -41,6 +44,22 @@ def _lookup(widget, name, fallback):
     return fallback
 
 
+def theme_color(widget, name, fallback):
+    """Public named-colour lookup from the running GTK theme (e.g.
+    "accent_color", "success_color"), so callers can assign stable,
+    theme-consistent colours to specific things instead of hashing an
+    arbitrary string.  Falls back to `fallback` when the theme doesn't
+    define `name`."""
+    return _lookup(widget, name, fallback)
+
+
+def _stable_index(text: str, modulo: int) -> int:
+    """A process-stable hash of `text` (Python's built-in hash() is
+    salted per process, which made the same string pick a different
+    colour every time the app restarted)."""
+    return zlib.crc32(text.encode("utf-8")) % modulo
+
+
 def theme_palette(widget) -> dict:
     return {
         "bg": _lookup(widget, "window_bg_color", _FALLBACK_BG),
@@ -50,9 +69,12 @@ def theme_palette(widget) -> dict:
         "subtext": _lookup(widget, "dim_label_color", _FALLBACK_SUBTEXT),
         "input_port": _FALLBACK_INPUT_PORT,
         "output_port": _FALLBACK_OUTPUT_PORT,
+        "boolean_port": _FALLBACK_BOOLEAN_PORT,
         "link": _lookup(widget, "accent_color", _FALLBACK_LINK),
         "select": _FALLBACK_SELECT,
         "pending_link": _FALLBACK_PENDING_LINK,
+        "warning": _lookup(widget, "warning_color", _FALLBACK_WARNING),
+        "error": _lookup(widget, "error_color", _FALLBACK_ERROR),
     }
 
 
@@ -65,7 +87,7 @@ def theme_class_color(widget, class_str, fallback=None):
         fallback = _lookup(widget, "borders", _FALLBACK_NODE_BORDER)
     if not class_str:
         return fallback
-    idx = (hash(class_str) & 0xFFFFFFFF) % len(_THEME_COLOR_NAMES)
+    idx = _stable_index(class_str, len(_THEME_COLOR_NAMES))
     return _lookup(widget, _THEME_COLOR_NAMES[idx], fallback)
 
 
@@ -91,6 +113,23 @@ def draw_text_ellipsized(cr, x, y, text, max_width, font_size, color):
     layout.set_font_description(Pango.FontDescription.from_string(f"sans {font_size}"))
     layout.set_width(int(max_width * Pango.SCALE))
     layout.set_ellipsize(Pango.EllipsizeMode.END)
+    PangoCairo.update_layout(cr, layout)
+    cr.set_source_rgb(*color)
+    cr.move_to(x, y)
+    PangoCairo.show_layout(cr, layout)
+
+
+def draw_text_unbounded(cr, x, y, text, font_size, color):
+    """Draw one line of text with no width/ellipsis constraint.
+
+    Used for a group's title: it sits above its box and the box never
+    constrains it, so it must always read in full.  The ellipsized
+    variant measured the text in unscaled world units but let
+    PangoCairo apply the view's zoom to the font, so as soon as you
+    zoomed in the fixed width clipped the title to an ellipsis."""
+    layout = PangoCairo.create_layout(cr)
+    layout.set_text(text or "", -1)
+    layout.set_font_description(Pango.FontDescription.from_string(f"sans {font_size}"))
     PangoCairo.update_layout(cr, layout)
     cr.set_source_rgb(*color)
     cr.move_to(x, y)
@@ -124,6 +163,19 @@ def draw_text_wrapped(cr, x, y, text, max_width, font_size, color):
     return layout.get_pixel_size()[1]
 
 
+# Node sizing calls wrapped_text_height hundreds of times per redraw
+# (node_height -> header/extra height, the group bounds walk, the force
+# layout), always for the same handful of (label, width, font) tuples.
+# Each call built a throwaway Pango layout; profiling a ~35-node graph
+# showed this was ~44% of on_draw's cost.  The height is a pure function
+# of the text and the widget's font setup, so memoise it.  Keyed by
+# id(widget) so the two graph widgets can't bleed into each other; the
+# entry count is bounded so a session that renames nodes constantly can't
+# grow it without limit.
+_WRAPPED_HEIGHT_CACHE: dict = {}
+_WRAPPED_HEIGHT_CACHE_MAX = 8192
+
+
 def wrapped_text_height(widget, text, max_width, font_size):
     """Pixel height `text` would occupy if drawn with
     draw_text_wrapped() at the same max_width/font_size - without
@@ -134,14 +186,24 @@ def wrapped_text_height(widget, text, max_width, font_size):
     PangoCairo.create_layout(), which is the only reason this needs a
     widget and draw_text_wrapped() above doesn't - text metrics come
     from the same font/fontconfig setup either way, so the two stay
-    in agreement."""
+    in agreement.
+
+    Memoised - see _WRAPPED_HEIGHT_CACHE above."""
     if not text:
         return 0
+    key = (id(widget), text, max_width, font_size)
+    cached = _WRAPPED_HEIGHT_CACHE.get(key)
+    if cached is not None:
+        return cached
     layout = widget.create_pango_layout(text)
     layout.set_font_description(Pango.FontDescription.from_string(f"sans {font_size}"))
     layout.set_width(int(max_width * Pango.SCALE))
     layout.set_wrap(Pango.WrapMode.WORD_CHAR)
-    return layout.get_pixel_size()[1]
+    height = layout.get_pixel_size()[1]
+    if len(_WRAPPED_HEIGHT_CACHE) >= _WRAPPED_HEIGHT_CACHE_MAX:
+        _WRAPPED_HEIGHT_CACHE.clear()
+    _WRAPPED_HEIGHT_CACHE[key] = height
+    return height
 
 
 def draw_bezier_link(cr, x1, y1, x2, y2):

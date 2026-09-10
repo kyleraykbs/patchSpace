@@ -9,6 +9,7 @@ whichever tab it belongs to.
 
 from __future__ import annotations
 
+import logging
 import os
 import signal
 import sys
@@ -19,10 +20,11 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, GLib
+from gi.repository import Gtk, Gdk, GLib
 
 from constants import (
     POLL_RESPONSES_MS,
+    LOG_POLL_MS,
     ADD_NODE_PANEL_WIDTH,
     ADD_NODE_PANEL_MIN_WIDTH,
     ADD_NODE_PANEL_MAX_WIDTH,
@@ -30,6 +32,8 @@ from constants import (
 from socket_client import PatchBayClient
 from pipewire_widget import PipeWireGraphWidget
 from patchspace_widget import PatchSpaceGraphWidget
+
+logger = logging.getLogger(__name__)
 
 # Wall-clock heartbeat of the GTK main thread, updated by _heartbeat() on
 # a GLib timeout. Only used by the PATCHBAY_TRACE_HANG watchdog below.
@@ -66,6 +70,161 @@ def _arm_hang_watchdog() -> None:
     threading.Thread(target=_watcher, daemon=True).start()
 
 
+class LogConsole(Gtk.Box):
+    """A read-only, monospace log view fed by the daemon's get_logs
+    command (see main.py's _cmd_get_logs / in-memory ring handler).
+
+    It owns a *dedicated* daemon connection and drains its own responses
+    rather than sharing the main window's request/response routing, so
+    it can never have its replies consumed by (or miss replies during) a
+    burst of graph refreshes.  Hidden until the toolbar's console button
+    toggles it on, then polled while visible."""
+
+    MAX_LINES = 2000
+
+    def __init__(self):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL)
+        self.client = PatchBayClient()
+        self._active = False
+        self._since = 0
+        self._line_count = 0
+        self._poll_id = 0
+        self._outstanding = False
+
+        self._buffer = Gtk.TextBuffer()
+        view = Gtk.TextView()
+        view.set_buffer(self._buffer)
+        view.set_editable(False)
+        view.set_cursor_visible(False)
+        view.set_monospace(True)
+        view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        self._view = view
+
+        # Auto-follow: stay pinned to the newest line while the user is
+        # at the bottom, but stop following the moment they scroll up.
+        # `value-changed` only fires on an actual value change (user
+        # scroll or our own programmatic scroll), not on the upper bound
+        # growing as text is appended, so growing the log never flips
+        # following off by itself.
+        self._follow = True
+        vadj = self._view.get_vadjustment()
+        if vadj is not None:
+            vadj.connect("value-changed", self._on_scrolled)
+
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.set_child(view)
+        scrolled.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        scrolled.set_vexpand(True)
+        scrolled.set_size_request(-1, 200)
+        self.append(scrolled)
+        self.set_visible(False)
+
+    @property
+    def active(self) -> bool:
+        return self._active
+
+    def _at_bottom(self) -> bool:
+        adj = self._view.get_vadjustment()
+        if adj is None:
+            return True
+        return (adj.get_value() + adj.get_page_size()) >= (adj.get_upper() - 2.0)
+
+    def _on_scrolled(self, adj) -> None:
+        # A user scroll (or our own follow scroll) moved the viewport:
+        # follow only while it's still at the bottom.
+        self._follow = self._at_bottom()
+
+    def _scroll_to_bottom(self):
+        if self._active and self._follow:
+            self._view.scroll_to_iter(
+                self._buffer.get_end_iter(), 0.0, True, 0.0, 1.0
+            )
+        return False
+
+    def set_active(self, active: bool) -> None:
+        self._active = bool(active)
+        self.set_visible(self._active)
+        if self._active:
+            # Pull everything the daemon still has buffered and jump to
+            # the newest line.
+            self._since = 0
+            self._outstanding = False
+            self._follow = True
+            if self._poll_id == 0:
+                self._poll_id = GLib.timeout_add(LOG_POLL_MS, self._poll)
+            self._poll()
+            GLib.idle_add(self._scroll_to_bottom)
+        elif self._poll_id:
+            GLib.source_remove(self._poll_id)
+            self._poll_id = 0
+
+    def _poll(self):
+        if not self._active:
+            self._poll_id = 0
+            return False
+        # Drain any reply from the previous request first, then ask for
+        # the next batch - one request outstanding at a time.
+        self._drain()
+        if not self._outstanding:
+            self._outstanding = True
+            self.client.send({"command": "get_logs", "since": self._since})
+        return True
+
+    def _drain(self) -> None:
+        for resp in self.client.get_responses():
+            self._outstanding = False
+            if resp.get("status") == "ok" and "lines" in resp:
+                self.append_lines(
+                    resp.get("lines", []), resp.get("last_seq", 0)
+                )
+            elif resp.get("status") == "error":
+                self._append_text(
+                    f"[log console] daemon error: {resp.get('message')}"
+                )
+
+    def _append_text(self, text: str) -> None:
+        self._buffer.insert(self._buffer.get_end_iter(), text + "\n")
+        self._line_count += 1
+
+    def append_lines(self, lines, last_seq) -> None:
+        # A last_seq below what we've seen means the daemon restarted
+        # (its sequence resets); start over and pull from the top.
+        if last_seq and last_seq < self._since:
+            self._buffer.set_text("")
+            self._line_count = 0
+            self._since = 0
+            self._outstanding = False
+            return
+
+        for item in lines:
+            self._since = max(self._since, int(item.get("seq", 0)))
+            self._append_text(str(item.get("text", "")))
+        if not lines:
+            return
+        self._trim()
+        # Follow the tail only if we were already at the bottom; after
+        # layout, so the new upper bound is known.
+        if self._follow:
+            GLib.idle_add(self._scroll_to_bottom)
+
+    def _trim(self) -> None:
+        if self._line_count > self.MAX_LINES:
+            self._buffer.delete(
+                self._buffer.get_start_iter(),
+                self._buffer.get_iter_at_line(
+                    self._line_count - self.MAX_LINES
+                ),
+            )
+            self._line_count = self.MAX_LINES
+
+    def stop(self) -> None:
+        if self._poll_id:
+            GLib.source_remove(self._poll_id)
+            self._poll_id = 0
+        self.client.stop()
+
+
+
 class MainWindow(Gtk.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app)
@@ -82,6 +241,9 @@ class MainWindow(Gtk.ApplicationWindow):
         self.notebook.append_page(
             self._build_patchspace_page(), Gtk.Label(label="PatchSpace Graph")
         )
+        # Open on the editable PatchSpace canvas; the raw PipeWire graph is
+        # there for inspection but isn't where you start working.
+        self.notebook.set_current_page(1)
 
         self.set_child(self.notebook)
 
@@ -103,10 +265,19 @@ class MainWindow(Gtk.ApplicationWindow):
         itself is a plain Gtk.DrawingArea with no room for child
         widgets, so the menu button lives in a Gtk.Overlay wrapped
         around it instead of inside it."""
+        # Filled in below; the loading overlay is created after the
+        # toolbar so _on_console_toggled/_console_button exist.
+        self._loading_overlay = None
+        self._loading_spinner = None
+        self._console_auto_opened = False
+
         overlay = Gtk.Overlay()
         overlay.set_child(self.ps_widget)
         overlay.set_hexpand(True)
         overlay.set_vexpand(True)
+        # Kept so _on_loading_changed can add/remove the loading overlay
+        # on top of the canvas.
+        self.ps_overlay = overlay
 
         menu_button = Gtk.MenuButton()
         menu_button.set_icon_name("open-menu-symbolic")
@@ -163,7 +334,28 @@ class MainWindow(Gtk.ApplicationWindow):
 
         overlay.add_overlay(menu_button)
 
+        # Transparent loading wheel + faint dim over the canvas, shown
+        # while a session import stages its nodes (see
+        # PatchSpaceGraphWidget.on_loading_changed).  Created here so it
+        # sits above the menu button; _on_loading_changed toggles it.
+        self._loading_overlay = self._build_loading_overlay()
+        overlay.add_overlay(self._loading_overlay)
+
         add_node_panel = self.ps_widget.build_add_node_panel()
+
+        # Canvas + a thin tool strip pinned under it, plus an optional
+        # log console that slides in beneath the strip (toggled by the
+        # console button at the strip's left).  The strip and the canvas
+        # share the Paned's end child so the strip stays the same width
+        # as the canvas (not the whole window).
+        self.log_console = LogConsole()
+        canvas_area = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        canvas_area.append(overlay)
+        canvas_area.append(self._build_patchspace_toolbar())
+        canvas_area.append(self.log_console)
+        # Load progress (start/stop) drives the overlay + console
+        # auto-open/collapse; see _on_loading_changed.
+        self.ps_widget.on_loading_changed.append(self._on_loading_changed)
 
         # A Gtk.Paned instead of a plain Box+Separator: it draws its
         # own draggable handle, so the user can grab the edge between
@@ -179,7 +371,7 @@ class MainWindow(Gtk.ApplicationWindow):
         page.set_start_child(add_node_panel)
         page.set_resize_start_child(False)
         page.set_shrink_start_child(False)
-        page.set_end_child(overlay)
+        page.set_end_child(canvas_area)
         page.set_resize_end_child(True)
         page.set_shrink_end_child(True)
         page.set_position(ADD_NODE_PANEL_WIDTH)
@@ -194,14 +386,211 @@ class MainWindow(Gtk.ApplicationWindow):
 
         return page
 
+    def _build_loading_overlay(self):
+        """A translucent full-canvas sheet with a centered Gtk.Spinner,
+        hidden until a session load starts.  Gtk.Overlay overlay children
+        are only as big as their natural size unless they expand, so the
+        sheet sets hexpand/vexpand + FILL alignment to cover the whole
+        canvas."""
+        self._install_loading_css()
+
+        sheet = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        sheet.add_css_class("loading-overlay")
+        sheet.set_halign(Gtk.Align.FILL)
+        sheet.set_valign(Gtk.Align.FILL)
+        sheet.set_hexpand(True)
+        sheet.set_vexpand(True)
+
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        card.set_halign(Gtk.Align.CENTER)
+        card.set_valign(Gtk.Align.CENTER)
+
+        self._loading_spinner = Gtk.Spinner()
+        self._loading_spinner.set_size_request(48, 48)
+        card.append(self._loading_spinner)
+
+        label = Gtk.Label(label="Loading nodes\u2026")
+        card.append(label)
+
+        sheet.append(card)
+        sheet.set_visible(False)
+        return sheet
+
+    def _install_loading_css(self):
+        # GTK4 has no per-widget background-color setter; a display-wide
+        # provider with one class is the sanctioned way to get the faint
+        # dim behind the spinner.  Added once (re-adding would stack
+        # providers on every window).
+        if getattr(self, "_loading_css_installed", False):
+            return
+        self._loading_css_installed = True
+        css = Gtk.CssProvider()
+        css.load_from_data(
+            b".loading-overlay { background-color: rgba(0, 0, 0, 0.28); }"
+        )
+        display = Gdk.Display.get_default()
+        if display is not None:
+            Gtk.StyleContext.add_provider_for_display(
+                display,
+                css,
+                Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+            )
+
+    def _on_loading_changed(self, loading):
+        """Show/hide the loading wheel and keep the log console visible
+        for the duration of a session import.  On finish, only collapse
+        the console if WE opened it - a console the user opened stays
+        open."""
+        if self._loading_overlay is not None:
+            self._loading_overlay.set_visible(loading)
+        if self._loading_spinner is not None:
+            if loading:
+                self._loading_spinner.start()
+            else:
+                self._loading_spinner.stop()
+
+        button = getattr(self, "_console_button", None)
+        if button is None:
+            return
+        if loading:
+            if not self.log_console.active:
+                self._console_auto_opened = True
+                button.set_active(True)
+        elif self._console_auto_opened:
+            self._console_auto_opened = False
+            button.set_active(False)
+
+    def _build_patchspace_toolbar(self):
+        """Strip under the PatchSpace canvas: the log-console toggle, the
+        view controls (Recenter / Rebuild), the selection readout, and the
+        selection actions (Group / Anchor).  Every button carries a hover
+        tooltip explaining what it does."""
+        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        bar.set_margin_top(4)
+        bar.set_margin_bottom(4)
+        bar.set_margin_start(8)
+        bar.set_margin_end(8)
+
+        # Console toggle on the left of the strip - opens/closes the log
+        # console beneath it (see LogConsole).  Icon + text so it stays
+        # visible even on a theme missing the symbolic icon.
+        self._console_button = Gtk.ToggleButton()
+        self._console_button.set_tooltip_text("Show/hide the daemon log console")
+        console_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        console_box.append(
+            Gtk.Image.new_from_icon_name("utilities-terminal-symbolic")
+        )
+        console_box.append(Gtk.Label(label="Logs"))
+        self._console_button.set_child(console_box)
+        self._console_button.connect("toggled", self._on_console_toggled)
+        bar.append(self._console_button)
+
+        # "Recenter" sits immediately right of Logs: re-frames the whole
+        # canvas (PatchSpaceGraphWidget.zoom_to_fit) - horizontally AND
+        # vertically centred - so a graph that has drifted off-screen (or
+        # been zoomed way out) comes back into view.
+        self._recenter_button = Gtk.Button()
+        self._recenter_button.set_tooltip_text("Recenter and fit all nodes")
+        recenter_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        recenter_box.append(
+            Gtk.Image.new_from_icon_name("zoom-fit-best-symbolic")
+        )
+        recenter_box.append(Gtk.Label(label="Recenter"))
+        self._recenter_button.set_child(recenter_box)
+        self._recenter_button.connect(
+            "clicked", lambda _b: self.ps_widget.zoom_to_fit()
+        )
+        bar.append(self._recenter_button)
+
+        # "Rebuild" sits immediately right of Recenter: tears the live
+        # PatchSpace graph down and rebuilds it from a snapshot of itself
+        # (main.py's rebuild command) - the user's "turn it off and on
+        # again" when a node's routing has wedged.  Nothing is lost; it is
+        # the same graph, recreated.
+        self._rebuild_button = Gtk.Button()
+        self._rebuild_button.set_tooltip_text(
+            "Tear down and rebuild the graph in place (restart the live nodes)"
+        )
+        rebuild_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        rebuild_box.append(
+            Gtk.Image.new_from_icon_name("view-refresh-symbolic")
+        )
+        rebuild_box.append(Gtk.Label(label="Rebuild"))
+        self._rebuild_button.set_child(rebuild_box)
+        self._rebuild_button.connect(
+            "clicked", lambda _b: self.ps_widget.rebuild_graph()
+        )
+        bar.append(self._rebuild_button)
+
+        self._ps_selection_label = Gtk.Label(label="No selection")
+        self._ps_selection_label.set_halign(Gtk.Align.START)
+        self._ps_selection_label.set_hexpand(True)
+        bar.append(self._ps_selection_label)
+
+        self._ps_group_button = Gtk.Button(label="Group")
+        self._ps_group_button.set_sensitive(False)
+        self._ps_group_button.set_tooltip_text(
+            "Wrap the selected nodes in a labelled, coloured group"
+        )
+        self._ps_group_button.connect(
+            "clicked", lambda _b: self.ps_widget.create_group_from_selection()
+        )
+        bar.append(self._ps_group_button)
+
+        self._ps_anchor_button = Gtk.Button(label="Anchor")
+        self._ps_anchor_button.set_sensitive(False)
+        self._ps_anchor_button.set_tooltip_text(
+            "Pin the selected nodes in place (they can still be dragged)"
+        )
+        self._ps_anchor_button.connect(
+            "clicked", lambda _b: self.ps_widget.toggle_anchor_selected()
+        )
+        bar.append(self._ps_anchor_button)
+
+        # Vertically centre every strip control; a horizontal Gtk.Box
+        # otherwise FILLs each child to the bar's full height, which left
+        # the short icon+label buttons sitting taller than they needed to.
+        for widget in (
+            self._console_button,
+            self._recenter_button,
+            self._rebuild_button,
+            self._ps_selection_label,
+            self._ps_group_button,
+            self._ps_anchor_button,
+        ):
+            widget.set_valign(Gtk.Align.CENTER)
+
+        self.ps_widget.on_selection_changed.append(self._update_patchspace_toolbar)
+        self._update_patchspace_toolbar()
+        return bar
+
+    def _update_patchspace_toolbar(self):
+        widget = self.ps_widget
+        count = len(widget.selected_nodes)
+        if count == 0:
+            self._ps_selection_label.set_label("No selection")
+            self._ps_group_button.set_sensitive(False)
+            self._ps_anchor_button.set_sensitive(False)
+            self._ps_anchor_button.set_label("Anchor")
+            return
+        all_anchored = all(
+            nid in widget.anchored_nodes for nid in widget.selected_nodes
+        )
+        plural = "s" if count != 1 else ""
+        self._ps_selection_label.set_label(f"{count} node{plural} selected")
+        self._ps_group_button.set_sensitive(True)
+        self._ps_anchor_button.set_sensitive(True)
+        self._ps_anchor_button.set_label("Unanchor" if all_anchored else "Anchor")
+
+    def _on_console_toggled(self, button):
+        if self.log_console is not None:
+            self.log_console.set_active(button.get_active())
+
     def process_responses(self):
         for resp in self.client.get_responses():
             if resp.get("status") != "ok":
                 if resp.get("status") == "error":
-                    print(
-                        f"[patchbay] daemon error: {resp.get('message')}",
-                        file=sys.stderr,
-                    )
+                    logger.warning("daemon error: %s", resp.get("message"))
                 continue
             try:
                 if "graph" in resp:
@@ -223,4 +612,6 @@ class MainWindow(Gtk.ApplicationWindow):
         return True
 
     def on_close(self, *args):
+        if self.log_console is not None:
+            self.log_console.stop()
         self.client.stop()

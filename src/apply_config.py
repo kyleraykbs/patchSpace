@@ -48,9 +48,15 @@ def apply_config(config_file):
             from_node = edge.get("from")
             to_node = edge.get("to")
             to_port = edge.get("to_port", "in")
-            result = client.add_edge(from_node, to_node, to_port)
+            from_port = edge.get("from_port", "out")
+            result = client.add_edge(from_node, to_node, to_port, from_port)
             status = result.get("status")
-            port_suffix = f" (port {to_port})" if to_port != "in" else ""
+            suffix = ""
+            if to_port != "in":
+                suffix += f" (to port {to_port})"
+            if from_port != "out":
+                suffix += f" (from port {from_port})"
+            port_suffix = suffix
             if status == "ok":
                 if result.get("already_existed"):
                     print(

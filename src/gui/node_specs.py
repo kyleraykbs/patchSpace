@@ -29,6 +29,7 @@ FIELD_LABELS = {
     "media_class": "Media Class:",
     "description": "Description:",
     "device_label": "Name:",
+    "warp_name": "Warp name:",
 }
 
 # Human-readable labels for the raw PipeWire media.class strings that
@@ -101,7 +102,16 @@ def media_class_label(value: Optional[str]) -> str:
 
 
 class NodeSpec:
-    __slots__ = ("label", "inputs", "outputs", "control", "field", "settings")
+    __slots__ = (
+        "label",
+        "inputs",
+        "outputs",
+        "control",
+        "field",
+        "settings",
+        "boolean_inputs",
+        "boolean_outputs",
+    )
 
     def __init__(
         self,
@@ -111,16 +121,25 @@ class NodeSpec:
         control: Optional[str] = None,
         field: Optional[str] = None,
         settings: Optional[List[tuple]] = None,
+        boolean_inputs: Optional[List[str]] = None,
+        boolean_outputs: Optional[List[str]] = None,
     ):
         self.label = label
         self.inputs = inputs
         self.outputs = outputs
-        # None | "gate" | "volume" | "wetdry" | "threshold" - which
+        # Which of inputs/outputs carry a *boolean control signal*
+        # rather than audio (gray sockets, gray edges, never a PipeWire
+        # link).  Every port not listed here is audio.
+        self.boolean_inputs = set(boolean_inputs or ())
+        self.boolean_outputs = set(boolean_outputs or ())
+        # None | "gate" | "volume" | "wetdry" | "sensitivity" - which
         # inline control (if any) is drawn on the node body and wired
         # to a daemon command. "gate" is the on/off toggle, "volume"
         # the gain slider, "wetdry" the 0..1 dry/wet mix slider
-        # (Reverb), "threshold" the 0-100 sensitivity slider
-        # (Sensitivity Gate).
+        # (Reverb), "sensitivity" the Sensitivity Gate's 0..1
+        # gain-staging slider (handed to the daemon, which drives the
+        # hidden pre/post Volume nodes it owns - see that node's
+        # comment below).
         self.control = control
         # None | "pattern" | "media_class" | "description" - which
         # single string property (if any) is edited via an inline
@@ -156,9 +175,95 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
     "description_input": NodeSpec("Description In", [], ["out"], field="description"),
     "description_output": NodeSpec("Description Out", ["in"], [], field="description"),
     "splitter": NodeSpec("Splitter", ["in"], ["out"]),
-    "gate": NodeSpec("Gate", ["in"], ["out"], control="gate"),
+    # Gate and the two switches are bool-controlled: a boolean signal on
+    # the gray "ctrl" input drives them.  When nothing is wired there
+    # they show an on/off fallback button instead (control
+    # "fallback_onoff"), which the widget hides as soon as ctrl is
+    # connected.  Their two channels are "on"/"off".
+    "gate": NodeSpec(
+        "Gate",
+        ["in", "ctrl"],
+        ["out"],
+        control="fallback_onoff",
+        boolean_inputs=["ctrl"],
+    ),
+    "switcher": NodeSpec(
+        "Switcher",
+        ["in", "ctrl"],
+        ["on", "off"],
+        control="fallback_onoff",
+        boolean_inputs=["ctrl"],
+    ),
+    "inverse_switcher": NodeSpec(
+        "Inv. Switcher",
+        ["on", "off", "ctrl"],
+        ["out"],
+        control="fallback_onoff",
+        boolean_inputs=["ctrl"],
+    ),
     "exclude_filter": NodeSpec("Exclude (Regex)", ["in"], ["out"], field="pattern"),
     "volume": NodeSpec("Volume", ["in"], ["out"], control="volume"),
+    # Boolean control-signal nodes (gray ports/edges; never a PipeWire
+    # link). The On/Off source's button flips a boolean output; the
+    # splitter fans one boolean out to two; Invert negates its single input;
+    # AND/OR combine their two inputs (an unwired input is ignored, so a
+    # gate with one input wired passes that value through).
+    "boolean_switch": NodeSpec(
+        "On/Off",
+        [],
+        ["out"],
+        control="boolean",
+        boolean_outputs=["out"],
+    ),
+    "boolean_splitter": NodeSpec(
+        "Bool Splitter",
+        ["in"],
+        ["out1", "out2"],
+        boolean_inputs=["in"],
+        boolean_outputs=["out1", "out2"],
+    ),
+    "boolean_invert": NodeSpec(
+        "Invert",
+        ["in"],
+        ["out"],
+        boolean_inputs=["in"],
+        boolean_outputs=["out"],
+    ),
+    "boolean_and": NodeSpec(
+        "AND",
+        ["a", "b"],
+        ["out"],
+        boolean_inputs=["a", "b"],
+        boolean_outputs=["out"],
+    ),
+    "boolean_or": NodeSpec(
+        "OR",
+        ["a", "b"],
+        ["out"],
+        boolean_inputs=["a", "b"],
+        boolean_outputs=["out"],
+    ),
+    # Warps: named logical aliases. A Warp In publishes whatever is
+    # plugged into it under `warp_name`; a Warp Out resolves to the
+    # matching publisher(s). Audio warps mix multiple publishers;
+    # boolean warps are a separate namespace (first match wins). The
+    # inline `warp_name` text box is the pairing key.
+    "warp_in": NodeSpec("Warp In", ["in"], [], field="warp_name"),
+    "warp_out": NodeSpec("Warp Out", [], ["out"], field="warp_name"),
+    "bool_warp_in": NodeSpec(
+        "Bool Warp In",
+        ["in"],
+        [],
+        field="warp_name",
+        boolean_inputs=["in"],
+    ),
+    "bool_warp_out": NodeSpec(
+        "Bool Warp Out",
+        [],
+        ["out"],
+        field="warp_name",
+        boolean_outputs=["out"],
+    ),
 }
 
 NODE_TYPE_SPECS.update(
@@ -174,7 +279,7 @@ NODE_TYPE_SPECS.update(
             ],
         ),
         "noise_cancel": NodeSpec(
-            "Noise Cancel",
+            "AI Noise Cancel",
             ["in"],
             ["out"],
             settings=[
@@ -188,14 +293,210 @@ NODE_TYPE_SPECS.update(
                 ("ladspa_label", "Override plugin label (blank = auto):", "text"),
             ],
         ),
+        # Same backing module as Echo Cancel (libpipewire-module-echo-
+        # cancel, its dummies, keepalives and interior streams), but the
+        # "probe" input is deliberately not surfaced: it reads as a plain
+        # one-in/one-out noise suppressor. The probe stream still exists
+        # privately inside the module - see LightNoiseCancelNode.
+        "light_noise_cancel": NodeSpec(
+            "Light Noise Cancel",
+            ["mic"],
+            ["out"],
+            settings=[
+                ("library_name", "AEC library:", "text"),
+                ("aec_args", "AEC args:", "text"),
+                ("monitor_mode", "Monitor mode (auto-capture default sink)", "bool"),
+            ],
+        ),
+        # control="sensitivity" is the Sensitivity Gate's 0..1 inline
+        # slider; the Settings dialog edits the *same* `sensitivity` value
+        # (not the raw 0..100 `level`, which the daemon derives from it),
+        # so the two always agree.  The daemon invisibly brackets every
+        # Sensitivity gate with two hidden VolumeProcessNodes - a pre-gain
+        # and an equal-and-opposite post-gain (main.py's
+        # _ensure_sensitivity_internals) - and routes the user's edges
+        # through them; they are unity pass-throughs now that the gate
+        # itself is Calf LV2.  The slider just sends
+        # set_node_property("sensitivity", <0..1>) and the daemon bakes
+        # the matching threshold into the module graph.  The remaining
+        # Calf Gate controls (ratio/attack/release/knee/makeup) are
+        # load-time filter-graph values too - each change schedules the
+        # same debounced interior reload (see SensitivityGateNode's
+        # docstring).
         "sensitivity_gate": NodeSpec(
-            "Sensitivity", ["in"], ["out"], control="threshold"
+            "Sensitivity",
+            ["in"],
+            ["out"],
+            control="sensitivity",
+            settings=[
+                (
+                    "sensitivity",
+                    "Sensitivity (0-1, 1 = most sensitive):",
+                    "number",
+                    {"min": 0, "max": 1, "step": 0.01},
+                ),
+                (
+                    "ratio",
+                    "Gate ratio (1-20):",
+                    "number",
+                    {"min": 1, "max": 20, "step": 0.5},
+                ),
+                (
+                    "attack_ms",
+                    "Attack (ms):",
+                    "number",
+                    {"min": 0, "max": 200, "step": 1},
+                ),
+                (
+                    "release_ms",
+                    "Release / decay (ms):",
+                    "number",
+                    {"min": 0, "max": 2000, "step": 10},
+                ),
+                (
+                    "knee_db",
+                    "Knee (dB):",
+                    "number",
+                    {"min": 0, "max": 12, "step": 0.5},
+                ),
+                (
+                    "makeup",
+                    "Makeup gain:",
+                    "number",
+                    {"min": 0, "max": 10, "step": 0.1},
+                ),
+                (
+                    "range_db",
+                    "Closed-gate level (dB, -96 = silence):",
+                    "number",
+                    {"min": -96, "max": 0, "step": 1},
+                ),
+                (
+                    "lv2_uri",
+                    "LV2 gate URI (blank = Calf Gate):",
+                    "text",
+                ),
+            ],
         ),
         # Reverb's only real dial - the dry/wet mix - is drawn as an
         # inline slider on the node body (control="wetdry") rather than
         # buried in its Settings menu; see the Reverb wet_dry handler in
         # main.py's set_node_property.
-        "reverb": NodeSpec("Reverb", ["in"], ["out"], control="wetdry"),
+        "reverb": NodeSpec(
+            "Reverb",
+            ["in"],
+            ["out"],
+            control="wetdry",
+            # Calf Reverb (LV2). The inline slider is wet/dry; the rest
+            # is reverb character, all load-time filter-graph values.
+            settings=[
+                (
+                    "decay_time",
+                    "Decay time (s):",
+                    "number",
+                    {"min": 0.4, "max": 15, "step": 0.1},
+                ),
+                (
+                    "room_size",
+                    "Room size (0-5):",
+                    "number",
+                    {"min": 0, "max": 5, "step": 0.1},
+                ),
+                (
+                    "diffusion",
+                    "Diffusion (0-1):",
+                    "number",
+                    {"min": 0, "max": 1, "step": 0.05},
+                ),
+                (
+                    "hf_damp",
+                    "High-freq damping (Hz):",
+                    "number",
+                    {"min": 2000, "max": 20000, "step": 100},
+                ),
+                (
+                    "predelay",
+                    "Pre-delay (ms):",
+                    "number",
+                    {"min": 0, "max": 500, "step": 1},
+                ),
+                (
+                    "plugin_uri",
+                    "LV2 plugin URI (blank = Calf Reverb):",
+                    "text",
+                ),
+            ],
+        ),
+        # Loudness normalization: a lookahead-limiter sandwich that can
+        # lift quiet/far-from-mic speech without blasting on resume (see
+        # NormalizeNode). The inline slider is `boost_db`; the caps and
+        # compressor tuning live in the Settings gear. All of them are
+        # load-time filter-graph values, so a change schedules an
+        # interior-only reload (debounced) rather than a live set-param.
+        "normalize": NodeSpec(
+            "Normalize",
+            ["in"],
+            ["out"],
+            control="gain",
+            settings=[
+                (
+                    "boost_db",
+                    "Boost (dB):",
+                    "number",
+                    {"min": 0, "max": 30, "step": 0.5},
+                ),
+                (
+                    "max_boost_db",
+                    "Maximum boost cap (dB):",
+                    "number",
+                    {"min": 0, "max": 30, "step": 0.5},
+                ),
+                (
+                    "ceiling_db",
+                    "Output ceiling (dB):",
+                    "number",
+                    {"min": -20, "max": 0, "step": 0.5},
+                ),
+                ("leveling", "Leveling compressor (sc4)", "bool"),
+                (
+                    "threshold_db",
+                    "Compressor threshold (dB):",
+                    "number",
+                    {"min": -60, "max": 0, "step": 1},
+                ),
+                (
+                    "ratio",
+                    "Compressor ratio (1:n):",
+                    "number",
+                    {"min": 1, "max": 20, "step": 0.5},
+                ),
+                (
+                    "attack_ms",
+                    "Compressor attack (ms):",
+                    "number",
+                    {"min": 0.1, "max": 200, "step": 1},
+                ),
+                (
+                    "release_ms",
+                    "Compressor release (ms):",
+                    "number",
+                    {"min": 10, "max": 2000, "step": 10},
+                ),
+                (
+                    "knee_db",
+                    "Compressor knee (dB):",
+                    "number",
+                    {"min": 0, "max": 24, "step": 1},
+                ),
+                (
+                    "limiter_release_s",
+                    "Limiter release (s):",
+                    "number",
+                    {"min": 0.01, "max": 5, "step": 0.05},
+                ),
+                ("ladspa_dir", "LADSPA dir override (blank = auto):", "text"),
+            ],
+        ),
     }
 )
 
@@ -205,8 +506,8 @@ NODE_TYPE_SPECS.update(
         "device_output": NodeSpec("Hardware Output", ["in"], []),
         "app_input": NodeSpec("App Playback", [], ["out"]),
         "app_output": NodeSpec("App Mic", ["in"], []),
-        "patchbay_device": NodeSpec("PatchBay Device", ["in"], ["out"]),
-        "patchbay_mic_device": NodeSpec("PatchBay Mic Device", ["in"], ["out"]),
+        "patchbay_device": NodeSpec("Speaker Line", ["in"], ["out"]),
+        "patchbay_mic_device": NodeSpec("Mic Line", ["in"], ["out"]),
         "virtual_speaker": NodeSpec(
             "Virtual Speaker", ["in"], ["out"], field="device_label"
         ),
@@ -243,18 +544,41 @@ ADD_NODE_CATEGORIES = [
         "Processing",
         [
             ("Splitter", "splitter"),
-            ("Gate (checkbox)", "gate"),
+            ("Gate (bool)", "gate"),
+            ("Switcher (On/Off out)", "switcher"),
+            ("Inverse Switcher (On/Off in)", "inverse_switcher"),
             ("Exclude Filter (regex)", "exclude_filter"),
             ("Volume (slider)", "volume"),
+        ],
+    ),
+    (
+        "Boolean",
+        [
+            ("On/Off", "boolean_switch"),
+            ("Invert", "boolean_invert"),
+            ("AND", "boolean_and"),
+            ("OR", "boolean_or"),
+            ("Bool Splitter", "boolean_splitter"),
+        ],
+    ),
+    (
+        "Warp",
+        [
+            ("Warp In", "warp_in"),
+            ("Warp Out", "warp_out"),
+            ("Bool Warp In", "bool_warp_in"),
+            ("Bool Warp Out", "bool_warp_out"),
         ],
     ),
     (
         "Effects",
         [
             ("Echo Cancel", "echo_cancel"),
-            ("Noise Cancel", "noise_cancel"),
+            ("AI Noise Cancel", "noise_cancel"),
+            ("Light Noise Cancel", "light_noise_cancel"),
             ("Sensitivity Gate", "sensitivity_gate"),
             ("Reverb", "reverb"),
+            ("Normalize", "normalize"),
         ],
     ),
     (
@@ -264,8 +588,8 @@ ADD_NODE_CATEGORIES = [
             ("Hardware Output", "device_output"),
             ("App Playback", "app_input"),
             ("App Mic", "app_output"),
-            ("PatchBay Device", "patchbay_device"),
-            ("PatchBay Mic Device", "patchbay_mic_device"),
+            ("Speaker Line", "patchbay_device"),
+            ("Mic Line", "patchbay_mic_device"),
         ],
     ),
     (
@@ -280,6 +604,40 @@ ADD_NODE_CATEGORIES = [
 ADD_NODE_MENU_ITEMS = [
     item for _category, items in ADD_NODE_CATEGORIES for item in items
 ]
+
+# One stable border colour per node, picked from the running GTK theme
+# (see render_utils.theme_color) rather than hashing the type name.
+# Colour is assigned by the same category the add-node menu groups by,
+# so every "Filters" node is the same accent, every "Effects" node the
+# same, and so on - and it never changes between runs or machines the
+# way the old process-salted hash() did.  A type the theme has no name
+# for (or one added to NODE_TYPE_SPECS without a menu entry) falls back
+# to the theme accent.
+CATEGORY_COLOR_NAMES = {
+    "Filters": "accent_color",
+    "Processing": "success_color",
+    "Boolean": "dim_label_color",
+    "Warp": "accent_color",
+    "Effects": "warning_color",
+    "Hardware & Apps": "error_color",
+    "Virtual Devices": "destructive_color",
+}
+
+DEFAULT_NODE_COLOR_NAME = "accent_color"
+
+NODE_TYPE_COLOR_NAMES = {
+    node_type: CATEGORY_COLOR_NAMES.get(category, DEFAULT_NODE_COLOR_NAME)
+    for category, items in ADD_NODE_CATEGORIES
+    for _label, node_type in items
+}
+
+
+def color_name_for_node_type(node_type: str) -> str:
+    """GTK theme colour name assigned to `node_type` - see
+    CATEGORY_COLOR_NAMES above.  Falls back to the theme accent for an
+    unknown type so it still gets a consistent colour rather than a
+    random one."""
+    return NODE_TYPE_COLOR_NAMES.get(node_type, DEFAULT_NODE_COLOR_NAME)
 
 # Best-effort symbolic icon per add-node entry, used by the sidebar
 # panel and the right-click "add node" popover. Purely cosmetic - a
@@ -297,14 +655,27 @@ NODE_TYPE_ICONS: Dict[str, str] = {
     "description_output": "text-x-generic-symbolic",
     "splitter": "network-transmit-receive-symbolic",
     "gate": "view-reveal-symbolic",
+    "switcher": "object-flip-horizontal-symbolic",
+    "inverse_switcher": "object-flip-horizontal-symbolic",
     "sensitivity_gate": "microphone-sensitivity-high-symbolic",
     "exclude_filter": "action-unavailable-symbolic",
+    "boolean_switch": "object-select-symbolic",
+    "boolean_splitter": "network-transmit-receive-symbolic",
+    "boolean_invert": "action-unavailable-symbolic",
+    "boolean_and": "checkbox-checked-symbolic",
+    "boolean_or": "list-add-symbolic",
+    "warp_in": "insert-link-symbolic",
+    "warp_out": "insert-link-symbolic",
+    "bool_warp_in": "insert-link-symbolic",
+    "bool_warp_out": "insert-link-symbolic",
     "volume": "audio-volume-high-symbolic",
     "mute": "audio-volume-muted-symbolic",
     "echo_cancel": "audio-input-microphone-symbolic",
     "noise_cancel": "microphone-sensitivity-muted-symbolic",
+    "light_noise_cancel": "microphone-sensitivity-low-symbolic",
     "sensitivity_gate": "microphone-sensitivity-high-symbolic",
     "reverb": "media-playlist-repeat-symbolic",
+    "normalize": "audio-volume-high-symbolic",
     "device_input": "audio-input-microphone-symbolic",
     "device_output": "audio-speakers-symbolic",
     "app_input": "application-x-executable-symbolic",
@@ -348,12 +719,25 @@ CLASS_NAME_TO_TYPE = {
     "DescriptionOutputNode": "description_output",
     "SplitterNode": "splitter",
     "GateNode": "gate",
+    "SwitcherNode": "switcher",
+    "InverseSwitcherNode": "inverse_switcher",
     "ExcludeFilterNode": "exclude_filter",
+    "BooleanSourceNode": "boolean_switch",
+    "BooleanSplitterNode": "boolean_splitter",
+    "BooleanInvertNode": "boolean_invert",
+    "BooleanAndNode": "boolean_and",
+    "BooleanOrNode": "boolean_or",
+    "WarpInNode": "warp_in",
+    "WarpOutNode": "warp_out",
+    "BooleanWarpInNode": "bool_warp_in",
+    "BooleanWarpOutNode": "bool_warp_out",
     "VolumeProcessNode": "volume",
     "NoiseCancelNode": "noise_cancel",
     "SensitivityGateNode": "sensitivity_gate",
     "ReverbNode": "reverb",
+    "NormalizeNode": "normalize",
     "EchoCancelNode": "echo_cancel",
+    "LightNoiseCancelNode": "light_noise_cancel",
 }
 
 CLASS_NAME_TO_TYPE.update(
@@ -385,6 +769,15 @@ def spec_for(node_type: str) -> NodeSpec:
     with no control so an unrecognized type still renders instead of
     raising."""
     return NODE_TYPE_SPECS.get(node_type, _FALLBACK_SPEC)
+
+
+def port_kind(node_type: str, port: str, direction: str) -> str:
+    """"audio" or "boolean" for one of `node_type`'s ports.  Shared by
+    socket/edge coloring and by edge-drop validation so the GUI can't
+    create a boolean-to-audio connection the daemon would reject."""
+    spec = spec_for(node_type)
+    kinds = spec.boolean_inputs if direction == "in" else spec.boolean_outputs
+    return "boolean" if port in kinds else "audio"
 
 
 def is_mute_node(node_id) -> bool:

@@ -61,7 +61,11 @@ class PatchBayClient:
         )
 
     def add_edge(
-        self, from_node: str, to_node: str, to_port: str = "in"
+        self,
+        from_node: str,
+        to_node: str,
+        to_port: str = "in",
+        from_port: str = "out",
     ) -> Dict[str, Any]:
         return self._send(
             {
@@ -69,6 +73,7 @@ class PatchBayClient:
                 "from_node": from_node,
                 "to_node": to_node,
                 "to_port": to_port,
+                "from_port": from_port,
             }
         )
 
