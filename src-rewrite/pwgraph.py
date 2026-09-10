@@ -73,6 +73,44 @@ class LinkError(GraphMonitorError):
     link/unlink by a cycle, so callers shouldn't have to special-case it."""
 
 
+def _name_is_backing_of(name: str, marker: str) -> bool:
+    """True if ``name`` is exactly ``marker`` or one of its ``_``-suffixed
+    siblings (``marker_in``, ``marker_fx_out``, ``marker_in_keepalive``,
+    ...).
+
+    Deliberately NOT a bare prefix match.  Every real object this project
+    creates is ``{backing}`` or ``{backing}_<suffix>``, so requiring the
+    underscore keeps a marker from matching a *different* node whose
+    backing merely starts with it
+    (``noise_cancel_..._1`` vs ``noise_cancel_..._10``).  With a bare
+    ``startswith`` the reap for a newly added node could kill a live
+    sibling node's nodes/owning processes - the "adding another effect
+    tears down the existing one, killing all audio" failure class."""
+    return name == marker or name.startswith(marker + "_")
+
+
+def _name_matches_marker(name: str, marker: str) -> bool:
+    """Whether a live node name belongs to the object(s) a sweep
+    ``marker`` identifies.  Markers come in two deliberately different
+    shapes:
+
+      * an **exact backing name** (``noise_cancel_node_..._1``) - covers
+        itself and its ``_``-suffixed siblings only (see
+        ``_name_is_backing_of``); the reap on add uses this shape so it
+        can never spill onto a differently named node, and
+      * an **owned prefix** - the daemon's ``_OWNED_PREFIXES`` and the
+        startup sweep markers built from them, all ending in ``_``
+        (``noise_cancel_node_``, ``patchbay_``, ...).  These are not
+        backing names, so they must stay a plain prefix match; scoping
+        them like a backing name made every owned object invisible to
+        the crash-recovery sweep, so a crashed run's stale echo/noise
+        streams lingered and a fresh AI Noise Cancel wired against them
+        and took the chain silent."""
+    if marker.endswith("_"):
+        return name.startswith(marker)
+    return _name_is_backing_of(name, marker)
+
+
 def _read_available(pipe, timeout: float) -> str:
     """Non-blocking read of everything a still-running subprocess has
     written to a pipe within ``timeout`` seconds."""
@@ -371,7 +409,7 @@ class PipewireGraph:
         hits = []
         for data in nodes.values():
             name = data.get("info", {}).get("props", {}).get("node.name", "")
-            if name and any(name.startswith(m) for m in markers):
+            if name and any(_name_matches_marker(name, m) for m in markers):
                 hits.append(name)
         return hits
 
@@ -471,7 +509,7 @@ class PipewireGraph:
             name = props.get("node.name")
             if node_id is None or not name:
                 continue
-            if not any(name.startswith(m) for m in markers):
+            if not any(_name_matches_marker(name, m) for m in markers):
                 continue
             found[node_id] = name
             pid = client_pids.get(props.get("client.id"))

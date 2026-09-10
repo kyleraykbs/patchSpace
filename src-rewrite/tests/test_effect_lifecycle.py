@@ -5,7 +5,13 @@ touches a live PipeWire server."""
 import pytest
 
 import pwnodes
-from pwnodes import NoiseCancelNode, SensitivityGateNode, NormalizeNode
+from pwnodes import (
+    EchoCancelNode,
+    NoiseCancelNode,
+    NormalizeNode,
+    ReverbNode,
+    SensitivityGateNode,
+)
 from tests.test_pwnodes import FakeGraph, make_space
 
 
@@ -71,6 +77,140 @@ def _fake_processes(monkeypatch):
 
 def names():
     return {i.name for i in FakeCli.instances}
+
+
+class OrderGraph(FakeGraph):
+    """FakeGraph that records the order links are made, so a test can
+    assert one call happened after another."""
+
+    def __init__(self):
+        super().__init__()
+        self.events = []
+
+    def connect(self, out_port, in_port):
+        self.events.append(("connect", out_port, in_port))
+        return super().connect(out_port, in_port)
+
+
+def _add_duplex(g, node_id, name, media_class):
+    """One node with both playback (in) and monitor (out) ports, the way
+    a real null-audio-sink appears - unlike FakeGraph.add_sink /
+    add_source, which model only one direction."""
+    g._nodes[node_id] = {
+        "info": {"props": {"node.name": name, "media.class": media_class}}
+    }
+    for ch in ("FL", "FR"):
+        for direction, port_name in (("in", "playback"), ("out", "monitor")):
+            pid = g._next_port
+            g._next_port += 1
+            g._ports[pid] = {
+                "info": {
+                    "props": {
+                        "node.id": node_id,
+                        "port.direction": direction,
+                        "port.name": f"{port_name}_{ch}",
+                        "audio.channel": ch,
+                    }
+                }
+            }
+    return g
+
+
+def _run_fresh_effect(factory, target_names):
+    """Add `factory()` to a space whose live graph already has the module
+    streams and a duplex dummy for each name in `target_names`, run one
+    supervision tick, and return (graph, node).  `graph.events` records
+    interior connects and every backing drop during the tick (the
+    structural drops from add_node are cleared first)."""
+    g = OrderGraph()
+    for offset, name in enumerate(target_names):
+        _add_duplex(g, 52 + offset, name, "Audio/Sink/Internal")
+    g.add_sink(50, "fx", media_class="Audio/Sink")             # module capture
+    g.add_source(51, "fx_fx_out", media_class="Audio/Source")  # module playback
+
+    space = make_space(g, repair_gate=pwnodes.Backoff(initial_s=0, jitter_fraction=0))
+    space.mark_graph_loaded()
+
+    node = factory()
+    real_drop = node._drop
+
+    def recording_drop(name):
+        g.events.append(("drop", name))
+        return real_drop(name)
+
+    node._drop = recording_drop
+    space.add_node(node)
+    g.events.clear()
+    space.supervise()
+    return g, node
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        pytest.param(lambda: NoiseCancelNode("n", "fx"), id="noise_cancel"),
+        pytest.param(lambda: SensitivityGateNode("n", "fx"), id="sensitivity_gate"),
+        pytest.param(lambda: NormalizeNode("n", "fx"), id="normalize"),
+        pytest.param(lambda: ReverbNode("n", "fx"), id="reverb"),
+    ],
+)
+def test_chain_effect_keeps_its_output_drain_through_module_spawn(factory):
+    """Regression: the output dummy is drained by a silent
+    ``pw-cat --record --target {out}`` that taps whatever feeds the dummy
+    when it starts.  ``ensure_module`` used to drop and re-create that
+    drain on every module spawn, leaving the out-dummy with no consumer
+    at all for a moment; a timing-sensitive module (RNNoise) then had
+    nothing to run into and stalled silent, so whether the chain survived
+    depended on user wiring order (output wired first worked, input first
+    died).
+
+    The drain targets the stable out-dummy, not the module, so it must be
+    created once (by add_node) and left alone across a module spawn - for
+    every chain effect, not just Noise Cancel."""
+    g, node = _run_fresh_effect(factory, ["fx_in", "fx_out"])
+
+    dropped = [e[1] for e in g.events if e[0] == "drop"]
+    assert "fx_out_keepalive" not in dropped, g.events
+    # The interior links were still derived/wired.
+    assert any(e[0] == "connect" for e in g.events), g.events
+    assert node._find("fx_out_keepalive") is not None
+
+
+def test_echo_cancel_out_drain_is_created_once_and_left_alone():
+    """Echo Cancel likewise leaves its out-dummy drain alone: only its
+    module-stream playback-sink tap is re-pointed, by ensure_module."""
+    g = OrderGraph()
+    _add_duplex(g, 60, "fx_mic_in", "Audio/Sink/Internal")
+    _add_duplex(g, 61, "fx_probe_in", "Audio/Sink/Internal")
+    _add_duplex(g, 62, "fx_out", "Audio/Sink/Internal")
+    _add_duplex(g, 63, "fx_playback_sink", "Audio/Sink/Internal")
+    g.add_sink(50, "fx", media_class="Audio/Sink")               # mic capture
+    g.add_sink(51, "fx_probe", media_class="Audio/Sink")         # probe sink
+    g.add_source(52, "fx_fx_out", media_class="Audio/Source")    # source
+    g.add_source(53, "fx_playback", media_class="Audio/Source")  # playback
+
+    space = make_space(g, repair_gate=pwnodes.Backoff(initial_s=0, jitter_fraction=0))
+    space.mark_graph_loaded()
+
+    node = EchoCancelNode("n", "fx")
+    dropped = []
+    real_drop = node._drop
+
+    def recording_drop(name):
+        dropped.append(name)
+        return real_drop(name)
+
+    node._drop = recording_drop
+    space.add_node(node)
+    dropped.clear()
+    space.supervise()
+
+    # The out-dummy drain is untouched; the module-stream tap is re-pointed.
+    assert "fx_out_keepalive" not in dropped
+    assert "fx_playback_sink_keepalive" in dropped
+
+
+
 
 
 def test_effect_gets_stable_sockets_first_module_later():
@@ -266,3 +406,82 @@ def test_reverb_plugin_uri_override():
 
     node = ReverbNode("n", "rev", plugin_uri="http://example.com/custom")
     assert 'plugin = "http://example.com/custom"' in node._module_command_args()
+
+
+def test_two_noise_cancel_nodes_keep_distinct_interiors():
+    """Regression: adding a second AI Noise Cancel must not disturb the
+    first - each node owns its own module backing, capture/playback
+    streams and interior links, so nothing about one can match the
+    other (this is the multi-instance failure the user hit: the first
+    AI Noise Cancel worked, later ones broke)."""
+    space = make_space(
+        FakeGraph(), repair_gate=pwnodes.Backoff(initial_s=0, jitter_fraction=0)
+    )
+    space.mark_graph_loaded()
+    a = NoiseCancelNode("a", "nc_a")
+    b = NoiseCancelNode("b", "nc_b")
+    space.add_node(a)
+    space.add_node(b)
+    space.supervise()
+
+    assert a.module_backing() is not None
+    assert b.module_backing() is not None
+    assert a.module_backing() is not b.module_backing()
+    assert a.module_backing().name == "nc_a"
+    assert b.module_backing().name == "nc_b"
+
+    # Distinct interior identities - the by-name sync can never wire one
+    # node's dummy to the other node's module streams.
+    assert a._capture_name != b._capture_name
+    assert a._playback_name != b._playback_name
+    assert a.internal_links() != b.internal_links()
+    assert a._module_command_args() != b._module_command_args()
+
+    # A second supervision pass leaves both healthy (no cross-teardown).
+    space.supervise()
+    assert a.module_ok()
+    assert b.module_ok()
+    assert a.module_backing().is_alive
+    assert b.module_backing().is_alive
+
+
+def test_sensitivity_gate_refresh_live_is_callable():
+    """The shared supervision path (pwnodes._on_backing_resolved) calls
+    refresh_live() on every resolved backing.  SensitivityGateNode lacked
+    it, so resolving the gate's module raised AttributeError and aborted
+    the node's supervision step (seen as repeated "Bring-up step ... has
+    no attribute 'refresh_live'" warnings)."""
+    node = SensitivityGateNode("n", "gate")
+    node.refresh_live()  # must not raise
+
+
+def test_noise_cancel_defaults_to_the_stereo_rnnoise_label():
+    """Regression: the node's capture/playback are stereo, but the module
+    used the mono RNNoise label - a mono plugin between stereo streams
+    collapsed/dropped a channel, which is the inconsistent "AI Noise
+    Cancel breaks the audio" report.  Default to the stereo label, while
+    still honoring an explicit override."""
+    node = NoiseCancelNode("n", "nc")
+    args = node._module_command_args()
+    assert "label = noise_suppressor_stereo" in args
+    assert "label = noise_suppressor_mono" not in args
+    assert "audio.position = [ FL FR ]" in args
+
+    # The stereo plugin is 2-in/2-out, so its ports are named explicitly
+    # rather than left to filter-chain auto-wiring (which loaded the
+    # module but moved no audio).
+    assert 'inputs = [ "nc_plugin:Input (L)" "nc_plugin:Input (R)" ]' in args
+    assert 'outputs = [ "nc_plugin:Output (L)" "nc_plugin:Output (R)" ]' in args
+
+    # An explicit override (older installs / saved sessions) still wins,
+    # and gets the mono plugin's single port pair.
+    mono = NoiseCancelNode(
+        "n", "nc", ladspa_plugin="/x/librnnoise_ladspa.so",
+        ladspa_label="noise_suppressor_mono",
+    )
+    mono_args = mono._module_command_args()
+    assert "label = noise_suppressor_mono" in mono_args
+    assert 'inputs = [ "nc_plugin:Input" ]' in mono_args
+    assert 'outputs = [ "nc_plugin:Output" ]' in mono_args
+
+

@@ -1196,8 +1196,30 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         )
         return out_x, out_y, in_x, in_y
 
+    def _hit_nodes(self, x=None, y=None):
+        """Nodes in hit-test order: top-most (last drawn) first.
+
+        Nodes are painted in insertion order (see on_draw), so the most
+        recently added one is visually on top.  Every find_* hit test
+        below iterates through this - NOT self.nodes directly - so a
+        click on an overlap lands on the node the user actually sees.
+
+        When (x, y) is supplied and falls inside some node's body, only
+        that top-most node is yielded: a node on top owns every click
+        within its rectangle, so the click can't fall through to a
+        slider/body of a node drawn underneath.  Callers that hit-test
+        things outside any body (sockets, the canvas itself) still get
+        every node, top-first."""
+        if x is not None and y is not None:
+            for nid, node in reversed(self.nodes.items()):
+                if node["x"] <= x <= node["x"] + self.node_width(nid) and node[
+                    "y"
+                ] <= y <= node["y"] + self.node_height(nid):
+                    return iter(((nid, node),))
+        return reversed(self.nodes.items())
+
     def find_node_at(self, x, y):
-        for nid, node in self.nodes.items():
+        for nid, node in self._hit_nodes(x, y):
             if node["x"] <= x <= node["x"] + self.node_width(nid) and node["y"] <= y <= node[
                 "y"
             ] + self.node_height(nid):
@@ -1210,7 +1232,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         adjacent sockets ambiguous."""
         best = None
         best_dist = self.SOCKET_HIT_RADIUS
-        for nid, node in self.nodes.items():
+        for nid, node in self._hit_nodes(x, y):
             for direction, ports in (("in", node["inputs"]), ("out", node["outputs"])):
                 for i in range(len(ports)):
                     sx, sy = self._socket_position(nid, direction, i)
@@ -1270,7 +1292,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         return None
 
     def find_slider_at(self, x, y):
-        for nid, node in self.nodes.items():
+        for nid, node in self._hit_nodes(x, y):
             if spec_for(node["type"]).control != "volume" or is_mute_node(nid):
                 continue
             nx, ny = node["x"], node["y"]
@@ -1289,7 +1311,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         """Reverb's dry/wet mix slider - same geometry as the volume
         slider (both live at the bottom of the node body) but only on
         control == "wetdry" nodes."""
-        for nid, node in self.nodes.items():
+        for nid, node in self._hit_nodes(x, y):
             if spec_for(node["type"]).control != "wetdry":
                 continue
             nx, ny = node["x"], node["y"]
@@ -1308,7 +1330,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         """Normalize's boost slider - same bottom-of-node-body geometry
         as the volume/wetdry/sensitivity sliders, control == "gain". The
         drawn value is a 0..1 fraction of the plugin's 0..30 dB boost."""
-        for nid, node in self.nodes.items():
+        for nid, node in self._hit_nodes(x, y):
             if spec_for(node["type"]).control != "gain":
                 continue
             nx, ny = node["x"], node["y"]
@@ -1330,7 +1352,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         hidden pre/post Volume nodes it owns) rather than to this node's
         own threshold - see _apply_sensitivity_slider and
         node_specs.py's sensitivity_gate spec comment for why."""
-        for nid, node in self.nodes.items():
+        for nid, node in self._hit_nodes(x, y):
             if spec_for(node["type"]).control != "sensitivity":
                 continue
             nx, ny = node["x"], node["y"]
@@ -1350,7 +1372,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         the node whose Settings dialog should open when it's clicked.
         Only nodes with spec.settings (extra controls beyond the
         generic ID/label rows) draw one, so nothing to hit otherwise."""
-        for nid, node in self.nodes.items():
+        for nid, node in self._hit_nodes(x, y):
             if not spec_for(node["type"]).settings:
                 continue
             node_h = self.node_height(nid)
@@ -1413,7 +1435,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         return slider, lock
 
     def find_device_row_at(self, x, y):
-        for nid, node in self.nodes.items():
+        for nid, node in self._hit_nodes(x, y):
             rows = self._device_rows(node)
             for i, row_kind in enumerate(rows):
                 rx, ry, rw, rh = self._device_row_rect(nid, i)
@@ -1422,7 +1444,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         return None
 
     def find_device_volume_slider_at(self, x, y):
-        for nid, node in self.nodes.items():
+        for nid, node in self._hit_nodes(x, y):
             if "volume" not in self._device_rows(node):
                 continue
             sx, sy, sw, sh = self._volume_row_rects(nid)[0]
@@ -1433,7 +1455,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     def find_volume_lock_at(self, x, y):
         """The lock button at the right of a volume row (hardware device
         or Speaker/Mic Line) - returns the node whose lock was clicked."""
-        for nid, node in self.nodes.items():
+        for nid, node in self._hit_nodes(x, y):
             if "volume" not in self._device_rows(node):
                 continue
             lx, ly, lw, lh = self._volume_row_rects(nid)[1]
@@ -1442,7 +1464,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         return None
 
     def find_gate_toggle_at(self, x, y):
-        for nid, node in self.nodes.items():
+        for nid, node in self._hit_nodes(x, y):
             if spec_for(node["type"]).control != "gate":
                 continue
             gx, gy, gw, gh = self._gate_rect(nid)
@@ -1451,7 +1473,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         return None
 
     def find_switcher_toggle_at(self, x, y):
-        for nid, node in self.nodes.items():
+        for nid, node in self._hit_nodes(x, y):
             if spec_for(node["type"]).control != "switcher":
                 continue
             gx, gy, gw, gh = self._gate_rect(nid)
@@ -1462,7 +1484,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     def find_boolean_toggle_at(self, x, y):
         """The On/Off button on a boolean source node - same geometry as
         the old gate/switcher toggles (see _gate_rect)."""
-        for nid, node in self.nodes.items():
+        for nid, node in self._hit_nodes(x, y):
             if spec_for(node["type"]).control != "boolean":
                 continue
             gx, gy, gw, gh = self._gate_rect(nid)
@@ -1474,7 +1496,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         """The on/off fallback button on a gate/switcher whose boolean
         ctrl input is unwired (it disappears once something is plugged
         into ctrl - see _bottom_control_height)."""
-        for nid, node in self.nodes.items():
+        for nid, node in self._hit_nodes(x, y):
             if spec_for(node["type"]).control != "fallback_onoff":
                 continue
             if node.get("ctrl_connected"):
@@ -1494,7 +1516,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     def _find_bottom_checkbox_at(self, x, y, predicate):
         size = 14
-        for nid, node in self.nodes.items():
+        for nid, node in self._hit_nodes(x, y):
             if not predicate(node, nid):
                 continue
             node_h = self.node_height(nid)
@@ -1504,7 +1526,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         return None
 
     def find_three_dots_at(self, x, y):
-        for nid, node in self.nodes.items():
+        for nid, node in self._hit_nodes(x, y):
             dot_x = node["x"] + self.node_width(nid) - 14
             dot_y = node["y"] + 12
             if dot_x - 10 <= x <= dot_x + 10 and dot_y - 10 <= y <= dot_y + 22:
@@ -1512,7 +1534,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         return None
 
     def find_field_at(self, x, y):
-        for nid, node in self.nodes.items():
+        for nid, node in self._hit_nodes(x, y):
             if not spec_for(node["type"]).field:
                 continue
             node_h = self.node_height(nid)

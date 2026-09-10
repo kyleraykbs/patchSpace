@@ -423,6 +423,10 @@ class BackedNode(Node):
         self.backing_node_name = backing_node_name
         self.backings: List[OwnedPwNode] = []
         self._reload_due: Optional[float] = None
+        # Defaults for the shared backing spawn helpers; effect subclasses
+        # override them with their real pw-cli command/settle.
+        self._pw_cli_command = ("pw-cli",)
+        self._settle = 0.3
 
     # How long a backing gets to show up as a live PipeWire object,
     # once its owning process is confirmed running, before we give up
@@ -1477,11 +1481,19 @@ class _ChainEffect(BackedNode):
         stuck (alive but never resolved a live node - see
         OwnedPwNode.stuck; this is what actually catches an LV2/LADSPA
         plugin that fails to instantiate without pw-cli's phantom-
-        creation guard noticing).  On a fresh spawn the output drain
-        must be re-pointed too: a pw-cat record targeting a sink taps
-        whichever stream is feeding it at start time, so one started
-        against the old module's playback stream does not follow a
-        freshly-loaded module."""
+        creation guard noticing).
+
+        The output drain is deliberately NOT touched here.  It targets
+        the stable out-dummy sink, not the module, and its record stream
+        keeps consuming that dummy's monitor straight through an interior
+        reload.  Dropping and re-creating it on every spawn used to open
+        a window in which the out-dummy had no consumer at all; a
+        timing-sensitive module (RNNoise) then had nothing to run into
+        and stalled silent, so whether the chain survived depended on
+        user wiring order (output wired first worked, input first died).
+        Echo Cancel never dropped its out drain and never showed the bug.
+        If the drain process itself dies, ensure_structural() replaces it
+        like any other structural backing."""
         cap = self._find(self._capture_name)
         fresh = cap is None or not (cap.owns_process and cap.is_alive) or cap.stuck(
             self.RESOLVE_GRACE_S
@@ -1493,15 +1505,14 @@ class _ChainEffect(BackedNode):
                     if owned in self.backings:
                         self.backings.remove(owned)
             self._spawn_module()
-        mod = self._find(self._capture_name)
-        if fresh and mod is not None and mod.is_alive:
-            self._drop(self._drain_name)
         self.ensure_structural()
 
     def reload_module(self) -> None:
-        """Swap only the interior: drop the module's own backings and the
-        output drain (its tap dies with the old module), then rebuild."""
-        drop_names = self._module_children() | {self._drain_name}
+        """Swap only the interior: drop the module's own backings, then
+        rebuild.  The dummies and their feed/drain keepalives are
+        untouched, so user edges never drop and the out side never loses
+        its consumer across the reload."""
+        drop_names = set(self._module_children())
         for owned in list(self.backings):
             if owned.name in drop_names:
                 owned.destroy()
@@ -1535,9 +1546,26 @@ def _ladspa_search_paths():
 
 class NoiseCancelNode(_ChainEffect):
     """RNNoise LADSPA denoiser (librnnoise_ladspa.so,
-    "noise_suppressor_mono").  ``vad_threshold`` is a live LADSPA
+    "noise_suppressor_stereo").  ``vad_threshold`` is a live LADSPA
     control pushed straight down the module's own pw-cli session -
     no reload on every slider tick.
+
+    ``noise_suppressor_stereo`` (not ``_mono``): the node's capture and
+    playback streams are stereo ``[ FL FR ]``, and placing the *mono*
+    variant between them made the module collapse/drop a channel - the
+    "AI Noise Cancel is inconsistent / kills the audio" report.  The
+    plugin ships both labels (rnnoise-plugin >= 1.10); the stereo one
+    keeps both channels intact.  A session saved with an explicit
+    ``ladspa_label`` override still wins, so nothing silently changes
+    for anyone who picked the mono label on purpose.
+
+    Its filter graph names the plugin's audio ports explicitly (``inputs``
+    / ``outputs``) instead of relying on filter-chain's auto-wiring.  The
+    stereo plugin is 2-in/2-out; auto-wiring it to the 2-channel
+    capture/playback produced a module that loaded but carried no audio,
+    leaving the node a dead insert in the chain.  NormalizeNode - the
+    other LADSPA effect - always named its ports and never showed this.
+    The mono legacy label keeps its single ``Input``/``Output`` names.
 
     ensure_module() locates the plugin by probing the standard
     non-/usr install locations: LADSPA_PATH (what the shell/daemon
@@ -1546,7 +1574,10 @@ class NoiseCancelNode(_ChainEffect):
     distro that keeps plugins out of /usr (NixOS) - which takes the
     whole node's audio with it."""
 
-    LABEL = "noise_suppressor_mono"
+    LABEL = "noise_suppressor_stereo"
+    # Older rnnoise-ladspa builds only ship the mono label; configs that
+    # explicitly set ladspa_label still override this.
+    LEGACY_MONO_LABEL = "noise_suppressor_mono"
     _CANDIDATES = (
         "/usr/lib/ladspa/librnnoise_ladspa.so",
         "/usr/lib/x86_64-linux-gnu/ladspa/librnnoise_ladspa.so",
@@ -1594,15 +1625,32 @@ class NoiseCancelNode(_ChainEffect):
 
     def _module_command_args(self) -> str:
         plugin, label = self._resolve_plugin()
+        node_name = f"{self.backing_node_name}_plugin"
+        # Name the plugin's audio ports explicitly instead of relying on
+        # filter-chain's auto-wiring.  This is the only LADSPA effect left
+        # that did not (NormalizeNode always has), and the stereo RNNoise
+        # variant is 2-in/2-out: auto-wiring a 2-channel capture/playback
+        # onto it produced a module that loaded but moved no audio, so the
+        # node sat in the chain as a dead insert - the "AI Noise Cancel
+        # breaks the chain" report.  The mono legacy label has one port
+        # pair, so keep its names for an explicit override to mono.
+        if label == self.LEGACY_MONO_LABEL:
+            inputs = f'"{node_name}:Input"'
+            outputs = f'"{node_name}:Output"'
+        else:
+            inputs = f'"{node_name}:Input (L)" "{node_name}:Input (R)"'
+            outputs = f'"{node_name}:Output (L)" "{node_name}:Output (R)"'
         return (
             f'node.description = "{self.id}" '
             "filter.graph = { nodes = [ { "
             "type = ladspa "
-            f"name = {self.backing_node_name}_plugin "
+            f"name = {node_name} "
             f"plugin = {plugin} "
             f"label = {label} "
             f'control = {{ "VAD Threshold (%)" = {self.vad_threshold:.2f} }} '
-            "} ] } "
+            "} ] "
+            f"inputs = [ {inputs} ] "
+            f"outputs = [ {outputs} ] }} "
             "capture.props = { "
             f'node.name = "{self._capture_name}" '
             f'node.description = "{self._capture_name}" '
@@ -2105,6 +2153,20 @@ class SensitivityGateNode(_ChainEffect):
         self.sensitivity = _clamp(value, 0.0, 1.0)
         self.level = self.sensitivity_to_level(self.sensitivity)
 
+    def refresh_live(self) -> None:
+        """No live control to push.
+
+        The gate's threshold/tuning are baked into the filter graph at
+        load time, and the hidden pre/post volume nodes are unity
+        pass-throughs (see main.py's _apply_sensitivity), so there is
+        nothing to re-apply here.  The method exists only because the
+        shared supervision path calls it on every resolved backing
+        (pwnodes._on_backing_resolved) - without it that call raised
+        AttributeError, aborting the rest of the node's supervision step
+        (the "Bring-up step ... has no attribute 'refresh_live'" warnings
+        in the daemon log)."""
+        return None
+
 
 class EchoCancelNode(BackedNode):
     """PipeWire's own libpipewire-module-echo-cancel (WebRTC AEC),
@@ -2260,6 +2322,13 @@ class EchoCancelNode(BackedNode):
         if not self.monitor_mode:
             names.add(self._playback_name)
         return names
+
+    # Echo Cancel keeps its out-dummy drain created once and left alone -
+    # restarting it was measured to lose the AEC's output entirely.  Its
+    # one module-stream tap (the playback-sink drain) is re-pointed by
+    # ensure_module below, which covers both the fresh-spawn and reload
+    # paths.  _ChainEffect now follows the same "never tear down the out
+    # drain" rule; do not add a re-point step back for either.
 
     # -- lifecycle --------------------------------------------------------
 
