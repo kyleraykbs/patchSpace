@@ -9,7 +9,7 @@ that's all here.
 
 from __future__ import annotations
 
-from gi.repository import Gdk, Gtk, Graphene
+from gi.repository import Gdk, GLib, Gtk, Graphene
 
 from constants import ZOOM_MIN, ZOOM_MAX, ZOOM_STEP, UNDO_LIMIT
 
@@ -19,6 +19,10 @@ class GraphViewMixin:
         self.zoom = 1.0
         self._last_pointer = (400.0, 300.0)
         self.undo_stack = []
+        # Only ever one context popover at a time - a second right-click
+        # pops the previous one down first, so their grabs can't stack
+        # and leave the widget unresponsive.
+        self._context_popover = None
 
         self.middle_pan_gesture = Gtk.GestureDrag()
         self.middle_pan_gesture.set_button(Gdk.BUTTON_MIDDLE)
@@ -106,6 +110,16 @@ class GraphViewMixin:
         Show a popover context menu at the specified (x, y) coordinates.
         This method works reliably with GTK4's Python bindings.
         """
+        # 0. Dismiss any menu that is already open before opening this
+        #    one, so two popovers never hold the pointer at once.
+        if self._context_popover is not None:
+            try:
+                self._context_popover.popdown()
+            except Exception:
+                pass
+            self._context_popover = None
+        self._context_popover = popover
+
         # 1. Set the popover's parent to the current widget
         popover.set_parent(self)
 
@@ -121,7 +135,21 @@ class GraphViewMixin:
         popover.set_pointing_to(rect)
 
         # 4. Ensure the popover is cleaned up when closed
-        popover.connect("closed", lambda p: p.unparent())
+        def _on_closed(p):
+            p.unparent()
+            if self._context_popover is p:
+                self._context_popover = None
 
-        # 5. Display the popover
-        popover.popup()
+        popover.connect("closed", _on_closed)
+
+        # 5. Display the popover - deferred to an idle so it isn't
+        # shown (and doesn't take its input grab) in the middle of the
+        # button-press/drag event that opened it.  Popping up
+        # synchronously from a gesture handler can leave that gesture
+        # and the popover fighting over the pointer, which showed up as
+        # the canvas going unresponsive after "drag, then right-click".
+        def _show():
+            popover.popup()
+            return GLib.SOURCE_REMOVE
+
+        GLib.idle_add(_show)

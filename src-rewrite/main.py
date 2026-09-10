@@ -38,6 +38,9 @@ from pwnodes import (
     BackedNode,
     LiveResolvableNode,
     GateNode,
+    ABSwitchNode,
+    SwitcherNode,
+    InverseSwitcherNode,
     ExcludeFilterNode,
     VolumeProcessNode,
     NoiseCancelNode,
@@ -92,6 +95,8 @@ NODE_TYPE_REGISTRY: Dict[str, type] = {
     "description_output": DescriptionOutputNode,
     "splitter": SplitterNode,
     "gate": GateNode,
+    "switcher": SwitcherNode,
+    "inverse_switcher": InverseSwitcherNode,
     "exclude_filter": ExcludeFilterNode,
     "volume": VolumeProcessNode,
     "noise_cancel": NoiseCancelNode,
@@ -154,6 +159,7 @@ _SERIAL_ATTRS = (
     "profile_index",
     "profile_description",
     "enabled",
+    "output",
     "volume_min",
     "volume_max",
     "backing_node_name",
@@ -542,13 +548,13 @@ class PatchBayDaemon:
                 logical = self._logical_edge(e)
                 if logical is None:
                     continue
-                from_node, to_node, to_port = logical
-                if to_port == "in":
-                    edges.append({"from": from_node, "to": to_node})
-                else:
-                    edges.append(
-                        {"from": from_node, "to": to_node, "to_port": to_port}
-                    )
+                from_node, to_node, to_port, from_port = logical
+                entry = {"from": from_node, "to": to_node}
+                if to_port != "in":
+                    entry["to_port"] = to_port
+                if from_port != "out":
+                    entry["from_port"] = from_port
+                edges.append(entry)
         return {"nodes": nodes, "edges": edges}
 
     def _auto_export_session(self) -> None:
@@ -775,16 +781,21 @@ class PatchBayDaemon:
             for edge in edges_cfg:
                 from_node, to_node = edge.get("from"), edge.get("to")
                 to_port = edge.get("to_port", "in")
+                from_port = edge.get("from_port", "out")
                 if not from_node or not to_node:
                     edge_failures.append((edge, "missing from/to"))
                     continue
-                logical_id = PatchSpace._edge_id(from_node, to_node, to_port)
+                logical_id = PatchSpace._edge_id(
+                    from_node, to_node, to_port, from_port
+                )
                 stored_from, stored_to = self._stored_endpoints(from_node, to_node)
-                stored_id = PatchSpace._edge_id(stored_from, stored_to, to_port)
+                stored_id = PatchSpace._edge_id(
+                    stored_from, stored_to, to_port, from_port
+                )
                 if stored_id in self.space.edges:
                     continue
                 try:
-                    self._store_edge(from_node, to_node, to_port)
+                    self._store_edge(from_node, to_node, to_port, from_port)
                     edges_created.append(logical_id)
                 except (KeyError, ValueError) as exc:
                     edge_failures.append((logical_id, str(exc)))
@@ -883,6 +894,8 @@ class PatchBayDaemon:
             return cls(node_id, backing)
         if cls is GateNode:
             return cls(node_id, g("enabled", True))
+        if cls in (SwitcherNode, InverseSwitcherNode):
+            return cls(node_id, g("output", 0))
         if cls is ExcludeFilterNode:
             return cls(node_id, g("pattern", ""))
         if cls is VolumeProcessNode:
@@ -1152,13 +1165,19 @@ class PatchBayDaemon:
             to_node = _sens_pre_id(to_node)
         return from_node, to_node
 
-    def _store_edge(self, from_node: str, to_node: str, to_port: str = "in") -> str:
+    def _store_edge(
+        self,
+        from_node: str,
+        to_node: str,
+        to_port: str = "in",
+        from_port: str = "out",
+    ) -> str:
         stored_from, stored_to = self._stored_endpoints(from_node, to_node)
-        return self.space.add_edge(stored_from, stored_to, to_port)
+        return self.space.add_edge(stored_from, stored_to, to_port, from_port)
 
     def _logical_edge(self, edge):
-        """(from_node, to_node, to_port) as the GUI should see `edge`,
-        or None if `edge` is one of the hidden internal links
+        """(from_node, to_node, to_port, from_port) as the GUI should
+        see `edge`, or None if `edge` is one of the hidden internal links
         (pre->gate / gate->post) that must never surface."""
         from_node, to_node = edge.from_node, edge.to_node
         if from_node.startswith(_SENS_PRE_PREFIX):
@@ -1167,7 +1186,7 @@ class PatchBayDaemon:
             return None
         from_node = _hidden_sensitivity_gate_for(from_node) or from_node
         to_node = _hidden_sensitivity_gate_for(to_node) or to_node
-        return from_node, to_node, edge.to_port
+        return from_node, to_node, edge.to_port, edge.from_port
 
     def _stored_edge_id_for(self, logical_id: str):
         """The daemon's stored edge id whose GUI-visible form is
@@ -1177,24 +1196,27 @@ class PatchBayDaemon:
             logical = self._logical_edge(edge)
             if logical is None:
                 continue
-            lf, lt, port = logical
-            if PatchSpace._edge_id(lf, lt, port) == logical_id:
+            lf, lt, port, from_port = logical
+            if PatchSpace._edge_id(lf, lt, port, from_port) == logical_id:
                 return stored_id
         return None
 
     def _cmd_add_edge(self, cmd: dict) -> dict:
         from_node, to_node = cmd.get("from_node"), cmd.get("to_node")
         to_port = cmd.get("to_port", "in")
+        from_port = cmd.get("from_port", "out")
         if not from_node or not to_node:
             return {"status": "error", "message": "from_node and to_node required"}
         with self._lock:
-            logical_id = PatchSpace._edge_id(from_node, to_node, to_port)
+            logical_id = PatchSpace._edge_id(from_node, to_node, to_port, from_port)
             stored_from, stored_to = self._stored_endpoints(from_node, to_node)
-            stored_id = PatchSpace._edge_id(stored_from, stored_to, to_port)
+            stored_id = PatchSpace._edge_id(
+                stored_from, stored_to, to_port, from_port
+            )
             if stored_id in self.space.edges:
                 return {"status": "ok", "edge_id": logical_id, "already_existed": True}
             try:
-                self._store_edge(from_node, to_node, to_port)
+                self._store_edge(from_node, to_node, to_port, from_port)
             except (KeyError, ValueError) as exc:
                 return {"status": "error", "message": str(exc)}
             self.space.sync()
@@ -1268,6 +1290,8 @@ class PatchBayDaemon:
 
             if prop == "label":
                 node.label = value
+            elif prop == "output" and isinstance(node, ABSwitchNode):
+                node.output = 1 if value else 0
             elif prop in ("pattern", "media_class", "description", "port_type"):
                 if hasattr(node, prop):
                     setattr(node, prop, value)
@@ -1577,13 +1601,14 @@ class PatchBayDaemon:
             logical = self._logical_edge(e)
             if logical is None:
                 continue
-            from_node, to_node, to_port = logical
-            eid = PatchSpace._edge_id(from_node, to_node, to_port)
+            from_node, to_node, to_port, from_port = logical
+            eid = PatchSpace._edge_id(from_node, to_node, to_port, from_port)
             result[eid] = {
                 "id": eid,
                 "from_node": from_node,
                 "to_node": to_node,
                 "to_port": to_port,
+                "from_port": from_port,
             }
         return result
 

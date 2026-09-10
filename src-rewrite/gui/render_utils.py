@@ -9,6 +9,7 @@ takes what it needs as arguments.
 from __future__ import annotations
 
 import math
+import zlib
 
 from gi.repository import Pango, PangoCairo
 
@@ -30,7 +31,6 @@ _THEME_COLOR_NAMES = [
     "warning_color",
     "error_color",
     "destructive_color",
-    "suggested_color",
 ]
 
 
@@ -40,6 +40,22 @@ def _lookup(widget, name, fallback):
     if ok:
         return (rgba.red, rgba.green, rgba.blue)
     return fallback
+
+
+def theme_color(widget, name, fallback):
+    """Public named-colour lookup from the running GTK theme (e.g.
+    "accent_color", "success_color"), so callers can assign stable,
+    theme-consistent colours to specific things instead of hashing an
+    arbitrary string.  Falls back to `fallback` when the theme doesn't
+    define `name`."""
+    return _lookup(widget, name, fallback)
+
+
+def _stable_index(text: str, modulo: int) -> int:
+    """A process-stable hash of `text` (Python's built-in hash() is
+    salted per process, which made the same string pick a different
+    colour every time the app restarted)."""
+    return zlib.crc32(text.encode("utf-8")) % modulo
 
 
 def theme_palette(widget) -> dict:
@@ -67,7 +83,7 @@ def theme_class_color(widget, class_str, fallback=None):
         fallback = _lookup(widget, "borders", _FALLBACK_NODE_BORDER)
     if not class_str:
         return fallback
-    idx = (hash(class_str) & 0xFFFFFFFF) % len(_THEME_COLOR_NAMES)
+    idx = _stable_index(class_str, len(_THEME_COLOR_NAMES))
     return _lookup(widget, _THEME_COLOR_NAMES[idx], fallback)
 
 

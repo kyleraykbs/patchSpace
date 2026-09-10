@@ -41,7 +41,7 @@ from constants import (
 )
 from render_utils import (
     theme_palette,
-    theme_class_color,
+    theme_color,
     draw_rounded_rect,
     draw_text_ellipsized,
     draw_text_wrapped,
@@ -62,6 +62,7 @@ from node_specs import (
     is_mute_node,
     type_label,
     icon_for_add_node_type,
+    color_name_for_node_type,
 )
 from portal_file_dialog import open_file, save_file
 
@@ -86,11 +87,15 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     GATE_MARGIN = 14
     GATE_BOTTOM_MARGIN = 10
     GATE_AREA_HEIGHT = GATE_HEIGHT + GATE_BOTTOM_MARGIN + 8
-    # Minimum pixel gap between consecutive socket centres on a node
-    # that labels its sockets (multi-input types such as Echo Cancel).
-    # Big enough that the label text next to one socket never runs into
-    # the socket/label of its neighbour once the sockets are pushed
-    # below the header (see _socket_margins/_socket_position).
+    # THE standard vertical spacing between neighbouring socket circles
+    # on a node, in pixels, whenever a node has more than one socket on a
+    # side: Echo Cancel's two inputs ("mic"/"probe") and the Switcher's
+    # two outputs ("a"/"b") both lay out at this gap.  node_height()
+    # reserves enough room for it and _socket_position() distributes the
+    # circles evenly across that room, so the same rule governs where
+    # sockets are drawn, where they are hit-tested and where edges land.
+    # Big enough that the label text beside one socket never runs into
+    # its neighbour.
     SOCKET_MIN_STEP = 22
 
     def __init__(self, client):
@@ -166,10 +171,28 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self.set_can_focus(True)
 
         drag = Gtk.GestureDrag()
+        # Left button only.  A GtkGestureSingle with no button set tracks
+        # EVERY button, so without this a right/middle press would also
+        # run on_drag_begin() - starting a node-drag/pan/connection right
+        # as the right-click popover opens - and the two grabs fought,
+        # leaving the canvas unclickable after "drag, then right-click".
+        # Middle-button panning has its own gesture (see
+        # GraphViewMixin._init_view_controls), and right-click its own
+        # GestureClick, so neither is lost by narrowing this one.
+        drag.set_button(Gdk.BUTTON_PRIMARY)
         drag.connect("drag-begin", self.on_drag_begin)
         drag.connect("drag-update", self.on_drag_update)
         drag.connect("drag-end", self.on_drag_end)
+        # A drag whose sequence is claimed by a parent controller (or
+        # otherwise cancelled, e.g. the pointer released over another
+        # window) gets ::cancel rather than a reliable drag-end; without
+        # this the canvas could stay stuck in "connecting"/"panning"
+        # mode - and the pending-link grab with it - until restart.
+        drag.connect("cancel", self.on_drag_cancel)
         self.add_controller(drag)
+        # Kept so a context menu can force a still-held drag to release
+        # before its popover takes a grab (see on_right_click).
+        self._drag_gesture = drag
 
         right_click = Gtk.GestureClick(button=3)
         right_click.connect("pressed", self.on_right_click)
@@ -232,6 +255,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self.client.send(
             {"command": "set_gate", "node_id": node_id, "enabled": enabled}
         )
+
+    def _send_switcher_output(self, node_id, output):
+        """Push a Switcher's selected output (0="a", 1="b") to the
+        daemon (main.py handles it as set_node_property "output")."""
+        self._send_property(node_id, "output", output)
 
     # ---------- Sensitivity Gate slider ----------
     # The Sensitivity Gate's own live LADSPA threshold isn't reliable on
@@ -334,6 +362,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     "meta": ndata,
                     "label": ndata.get("label", ""),
                     "enabled": ndata.get("enabled", True),
+                    "output": ndata.get("output", 0),
                     "volume": ndata.get("volume", 1.0),
                     "wet_dry": ndata.get("wet_dry", 0.3),
                     "level": ndata.get("level", 25.0),
@@ -367,6 +396,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 node["meta"] = ndata
                 node["label"] = ndata.get("label", "")
                 node["enabled"] = ndata.get("enabled", True)
+                node["output"] = ndata.get("output", 0)
                 node["device_name"] = ndata.get("device_name", "")
                 node["app_name"] = ndata.get("app_name", "")
                 node["connected"] = ndata.get("connected", False)
@@ -425,13 +455,15 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 "from_node": edata["from_node"],
                 "to_node": edata["to_node"],
                 "to_port": edata.get("to_port", "in"),
+                "from_port": edata.get("from_port", "out"),
             }
             for eid, edata in daemon_edges.items()
         }
 
         new_node_ids = set(self.nodes.keys())
         new_edge_set = {
-            (e["from_node"], e["to_node"], e["to_port"]) for e in self.edges.values()
+            (e["from_node"], e["to_node"], e["to_port"], e["from_port"])
+            for e in self.edges.values()
         }
         if new_node_ids != self._prev_node_ids or new_edge_set != self._prev_edge_set:
             self.layout_awake = True
@@ -595,12 +627,18 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     def node_height(self, node_id):
         node = self.nodes[node_id]
         base = self._base_node_height(node_id)
-        # A node that labels its input sockets (multi-input types such
-        # as Echo Cancel) needs enough room below the header to spread
-        # those sockets out - see _socket_margins/_socket_position.
-        if len(node.get("inputs", [])) > 1:
+        # A node with more than one socket on EITHER side labels its
+        # sockets and needs enough vertical room to lay them out at the
+        # standard SOCKET_MIN_STEP gap - multi-input types (Echo Cancel's
+        # "mic"/"probe") spread below the header, multi-output types (the
+        # Switcher's "a"/"b") spread above the bottom control. Both use
+        # the same per-socket step so the circles never overlap; see
+        # _socket_margins/_socket_position, which this mirrors so the
+        # drawn sockets, hit-testing and edge endpoints all agree.
+        socket_count = max(len(node.get("inputs", [])), len(node.get("outputs", [])))
+        if socket_count > 1:
             top, bottom = self._socket_margins(node_id, node)
-            need = top + bottom + self.SOCKET_MIN_STEP * (len(node["inputs"]) + 1)
+            need = top + bottom + self.SOCKET_MIN_STEP * (socket_count + 1)
             base = max(base, int(need))
         return base
 
@@ -614,14 +652,24 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             base += 20
         base += self._device_header_bonus(node)
         base += self._header_extra_height(node_id)
+        base += self._bottom_control_height(node)
+        return base
+
+    def _bottom_control_height(self, node):
+        """Pixels a node's inline bottom control needs - the generic
+        "has an extra row" bump, the bigger gate/switcher toggle area, or
+        the device/app rows currently on show.  Shared by
+        _base_node_height() and _socket_margins() so labelled sockets are
+        laid out above exactly the same block the control is drawn in."""
         rows = self._device_rows(node)
         if rows:
-            base += len(rows) * (self.FIELD_HEIGHT + 4) + 5
-        elif spec_for(node["type"]).control == "gate":
-            base += self.GATE_AREA_HEIGHT
-        elif spec_for(node["type"]).has_extra_row:
-            base += 25
-        return base
+            return len(rows) * (self.FIELD_HEIGHT + 4) + 5
+        spec = spec_for(node["type"])
+        if spec.control in ("gate", "switcher"):
+            return self.GATE_AREA_HEIGHT
+        if spec.has_extra_row:
+            return 25
+        return 0
 
     def _header_stack_height(self, node_id, node):
         """Pixel height of everything drawn in the node's header block,
@@ -653,24 +701,26 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 offset += 20
             offset += self._device_header_bonus(node)
             offset += self._header_extra_height(node_id)
-            rows = self._device_rows(node)
-            if rows:
-                offset += len(rows) * (self.FIELD_HEIGHT + 4) + 5
-            elif spec_for(node["type"]).control == "gate":
-                offset += self.GATE_AREA_HEIGHT
-            elif spec_for(node["type"]).has_extra_row:
-                offset += 25
+            offset += self._bottom_control_height(node)
             return offset, offset
 
+        # Labelled sockets (more than one input, e.g. Echo Cancel or the
+        # Inverse Switcher): sit below the wrapped header on top and
+        # clear of the bottom control too, so an input switch's "a"/"b"
+        # circles never land on the A/B button.
         top = self._header_stack_height(node_id, node) + 4
-        return top, 8
+        bottom = 8 + self._bottom_control_height(node)
+        return top, bottom
 
     def _socket_position(self, node_id, direction, index):
         """The single source of truth for where a socket circle is (and
         therefore where an edge endpoint, hover highlight, and click hit-
         test must point too), so drawing and hit-testing can never drift
         apart. Distributed across the vertical band between
-        _socket_margins()'s top and bottom insets."""
+        _socket_margins()'s top and bottom insets, which node_height()
+        has already sized to hold this side's sockets at the standard
+        SOCKET_MIN_STEP gap (so Echo Cancel's inputs and the Switcher's
+        outputs are spaced identically and never overlap)."""
         node = self.nodes[node_id]
         ports = node["inputs"] if direction == "in" else node["outputs"]
         x = node["x"] if direction == "in" else node["x"] + self.NODE_WIDTH
@@ -700,7 +750,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         the drawn socket circles - the old code used the no-offset
         centre guess, which drifts away from a labelled multi-input
         socket (e.g. Echo Cancel's "probe")."""
-        out_x, out_y = self._socket_position(edge["from_node"], "out", 0)
+        out_x, out_y = self._socket_position(
+            edge["from_node"], "out", self._edge_from_port_index(edge)
+        )
         in_x, in_y = self._socket_position(
             edge["to_node"], "in", self._edge_to_port_index(edge)
         )
@@ -725,6 +777,19 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 if math.hypot(x - sx, y - sy) < 9:
                     return (nid, "out", i)
         return None
+
+    def _edge_from_port_index(self, edge):
+        """Which of the source node's output sockets `edge` leaves from -
+        0 unless its from_port names a later socket (the Switcher's "b").
+        Falls back to 0 for a from_port that isn't (or isn't yet) one of
+        the source's declared outputs."""
+        node = self.nodes.get(edge["from_node"])
+        if node is None:
+            return 0
+        try:
+            return node["outputs"].index(edge.get("from_port", "out"))
+        except ValueError:
+            return 0
 
     def _edge_to_port_index(self, edge):
         """Which of the target node's input sockets `edge` actually
@@ -888,6 +953,15 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 return nid
         return None
 
+    def find_switcher_toggle_at(self, x, y):
+        for nid, node in self.nodes.items():
+            if spec_for(node["type"]).control != "switcher":
+                continue
+            gx, gy, gw, gh = self._gate_rect(nid)
+            if gx <= x <= gx + gw and gy <= y <= gy + gh:
+                return nid
+        return None
+
     def find_mute_checkbox_at(self, x, y):
         return self._find_bottom_checkbox_at(
             x,
@@ -985,7 +1059,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         )
         is_conn_target = self.hover_target_node == nid
         is_offline = not node.get("ready", True)
-        border_color = theme_class_color(self, node["type"], pal["node_border"])
+        # Stable, category-assigned theme colour - same type always gets
+        # the same border, and it comes from the GTK theme rather than a
+        # per-process hash (see node_specs.color_name_for_node_type).
+        border_color = theme_color(
+            self, color_name_for_node_type(node["type"]), pal["node_border"]
+        )
 
         draw_rounded_rect(cr, x, y, self.NODE_WIDTH, node_h, 8)
         cr.set_source_rgb(*pal["node_bg"])
@@ -999,8 +1078,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         cr.set_line_width(2)
         if is_offline and not (is_conn_source or is_conn_target):
             # Dashed rather than solid - a glance at the canvas should
-            # tell "still coming up" apart from "this node's type has an
-            # amber accent colour" (theme_class_color can pick amber too).
+            # tell "still coming up" apart from a category whose assigned
+            # colour happens to be amber (Hardware & Apps uses the
+            # theme's warning colour too).
             cr.set_dash([4.0, 3.0])
         cr.stroke()
         cr.set_dash([])
@@ -1016,6 +1096,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 self._draw_volume_slider(cr, x, y, node_h, node["volume"])
         elif spec.control == "gate":
             self._draw_gate_toggle(cr, nid, node["enabled"])
+        elif spec.control == "switcher":
+            self._draw_switcher_toggle(cr, nid, node.get("output", 0))
         elif spec.control == "wetdry":
             self._draw_wetdry_slider(cr, x, y, node_h, node.get("wet_dry", 0.3))
         elif spec.control == "sensitivity":
@@ -1059,12 +1141,26 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     8,
                     pal["subtext"],
                 )
+        multi_output = len(node["outputs"]) > 1
         for i in range(len(node["outputs"])):
             sx, sy = self._socket_position(nid, "out", i)
             is_source = self.connecting_from == (nid, i)
             cr.set_source_rgb(*(pal["select"] if is_source else pal["output_port"]))
             cr.arc(sx, sy, 6, 0, 2 * math.pi)
             cr.fill()
+            # Multi-output nodes (today only the Switcher's "a"/"b") get
+            # their sockets labelled, right-aligned inside the node body;
+            # a lone "out" socket is self-explanatory and left unlabelled.
+            if multi_output:
+                draw_text_ellipsized(
+                    cr,
+                    sx - 25,
+                    sy - 5,
+                    node["outputs"][i],
+                    14,
+                    8,
+                    pal["subtext"],
+                )
 
     def _draw_header(self, cr, pal, nid, node, x, y):
         """Draw every _header_blocks() line, wrapped (not
@@ -1262,6 +1358,40 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         cr.move_to(text_x, text_y)
         cr.show_text(label)
 
+    def _draw_switcher_toggle(self, cr, nid, output):
+        """Two-segment A/B button for a Switcher node.  The selected
+        output is filled green, the inactive one grey, so a glance at
+        the node shows which of its two outputs is carrying audio."""
+        x, y, w, h = self._gate_rect(nid)
+        radius = 10
+        half = w / 2
+
+        draw_rounded_rect(cr, x, y, w, h, radius)
+        cr.set_source_rgb(0.20, 0.20, 0.22)
+        cr.fill_preserve()
+        cr.set_source_rgb(0.46, 0.46, 0.49)
+        cr.set_line_width(1.5)
+        cr.stroke()
+
+        active = 1 if output else 0
+        cr.select_font_face("sans")
+        cr.set_font_size(12)
+        for i, label in enumerate(("A", "B")):
+            seg_x = x + i * half
+            if i == active:
+                draw_rounded_rect(cr, seg_x + 2, y + 2, half - 4, h - 4, radius - 2)
+                cr.set_source_rgb(0.30, 0.72, 0.42)
+                cr.fill()
+            extents = cr.text_extents(label)
+            text_x = seg_x + (half - extents.width) / 2 - extents.x_bearing
+            text_y = y + (h - extents.height) / 2 - extents.y_bearing
+            if i == active:
+                cr.set_source_rgb(0.06, 0.16, 0.09)
+            else:
+                cr.set_source_rgb(0.78, 0.78, 0.80)
+            cr.move_to(text_x, text_y)
+            cr.show_text(label)
+
     def _draw_mute_checkbox(self, cr, x, y, node_h, volume):
         self._draw_check_row(cr, x, y, node_h, volume > 0.5, "Pass audio")
 
@@ -1359,6 +1489,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self.find_field_at(wx, wy) is not None
             or self.find_mute_checkbox_at(wx, wy) is not None
             or self.find_gate_toggle_at(wx, wy) is not None
+            or self.find_switcher_toggle_at(wx, wy) is not None
             or self.find_three_dots_at(wx, wy) is not None
             or self.find_settings_gear_at(wx, wy) is not None
         ):
@@ -1402,6 +1533,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             node = self.nodes[nid]
             node["enabled"] = not node["enabled"]
             self._send_set_gate(nid, node["enabled"])
+            self.queue_draw()
+            return
+
+        nid = self.find_switcher_toggle_at(wx, wy)
+        if nid is not None:
+            node = self.nodes[nid]
+            node["output"] = 0 if node.get("output") else 1
+            self._send_switcher_output(nid, node["output"])
             self.queue_draw()
             return
 
@@ -1799,8 +1938,40 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     # ---------- drag handling ----------
 
+    def _reset_drag_state(self):
+        """Forget any in-progress drag/connection.  Called at the start
+        of every new press and whenever the drag gesture is cancelled,
+        so a drag that ends without a usable drag-end (its sequence
+        claimed by a parent controller, the button released off-widget,
+        ...) can never leave the canvas stuck in "connecting" or
+        "panning" mode with no way to click out of it."""
+        self.connecting_from = None
+        self.detaching_edge = None
+        self.dragging_node = None
+        self.hover_target_node = None
+        self.panning = False
+        if self.slider_dragging is not None:
+            _kind, nid = self.slider_dragging
+            self.slider_dragging = None
+            self.pinned_nodes.discard(nid)
+            self.layout_awake = True
+            self._settle_ticks = 0
+
+    def on_drag_cancel(self, gesture, sequence):
+        """The drag gesture's sequence was taken away (parent claimed
+        it, window focus loss, ...) - there will be no drag-end, so
+        release every bit of drag state here."""
+        self._reset_drag_state()
+        self.set_cursor(None)
+        self.queue_draw()
+
     def on_drag_begin(self, gesture, start_x, start_y):
         self.grab_focus()
+        # A fresh press always starts from a clean slate - a previous
+        # interaction that ended via ::cancel (or that never produced a
+        # drag-end) must not leak its connection/node/pan state into
+        # this one.
+        self._reset_drag_state()
         wx, wy = self.to_world(start_x, start_y)
         self.drag_start_xy = (wx, wy)
         self.drag_current_xy = (wx, wy)
@@ -1810,7 +1981,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # control hit FIRST - before find_node_at()/panning - is what
         # stops a press on a control from also being read as "start
         # dragging the node". GestureDrag's drag-begin fires on every
-        # button press, immediately, before any movement, so it would
+        # left-button press, immediately, before any movement, so it would
         # otherwise win the race against GestureClick's "pressed"
         # handler (on_click) and grab the node out from under a
         # slider/checkbox press.
@@ -1888,6 +2059,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         if (
             self.find_mute_checkbox_at(wx, wy) is not None
             or self.find_gate_toggle_at(wx, wy) is not None
+            or self.find_switcher_toggle_at(wx, wy) is not None
             or self.find_three_dots_at(wx, wy) is not None
             or self.find_settings_gear_at(wx, wy) is not None
             or self.find_field_at(wx, wy) is not None
@@ -1908,7 +2080,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         eid = self.find_edge_at(wx, wy)
         if eid:
             edge = self.edges[eid]
-            self.connecting_from = (edge["from_node"], 0)
+            self.connecting_from = (
+                edge["from_node"],
+                self._edge_from_port_index(edge),
+            )
             self.detaching_edge = (eid, edge["from_node"])
             self.queue_draw()
             return
@@ -2009,16 +2184,30 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self.queue_draw()
 
     @staticmethod
-    def _edge_id(from_node, to_node, to_port="in"):
+    def _edge_id(from_node, to_node, to_port="in", from_port="out"):
         """Client-side mirror of PatchSpace._edge_id() on the daemon -
         needed here purely to predict what id an add_edge would get,
         for the "dragging onto an existing edge removes it" toggle
         below. Must stay in sync with that method."""
-        if to_port == "in":
-            return f"{from_node}->{to_node}"
-        return f"{from_node}->{to_node}:{to_port}"
+        base = f"{from_node}->{to_node}"
+        if to_port != "in":
+            base += f":{to_port}"
+        if from_port != "out":
+            base += f"@{from_port}"
+        return base
 
     def on_drag_end(self, gesture, offset_x, offset_y):
+        # Always clear the transient drag/connection state, even if a
+        # branch below raised (a stale detaching-edge lookup, a node
+        # removed mid-drag, ...).  Leaking it is what left the canvas
+        # unclickable after dropping a connection into empty space.
+        try:
+            self._handle_drag_end(gesture, offset_x, offset_y)
+        finally:
+            self._reset_drag_state()
+            self.queue_draw()
+
+    def _handle_drag_end(self, gesture, offset_x, offset_y):
         if self.slider_dragging is not None:
             kind, nid = self.slider_dragging
             node = self.nodes.get(nid)
@@ -2047,6 +2236,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             return
 
         if self.connecting_from:
+            out_nid, out_idx = self.connecting_from
+            out_node = self.nodes.get(out_nid)
+            source_port = (
+                out_node["outputs"][out_idx]
+                if out_node is not None and out_idx < len(out_node["outputs"])
+                else "out"
+            )
             end_x = self.drag_start_xy[0] + offset_x / self.zoom
             end_y = self.drag_start_xy[1] + offset_y / self.zoom
             socket_hit = self.find_socket_at(end_x, end_y)
@@ -2065,8 +2261,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
             if self.detaching_edge:
                 eid, from_nid = self.detaching_edge
-                old_to_nid = self.edges[eid]["to_node"]
-                old_to_port = self.edges[eid].get("to_port", "in")
+                # The edge can vanish under us (a get_nodes poll landing
+                # mid-drag, the daemon re-syncing) - treat that as "the
+                # thing we were dragging is gone" and just stop.
+                old_edge = self.edges.get(eid)
+                if old_edge is None:
+                    return
+                old_to_nid = old_edge["to_node"]
+                old_to_port = old_edge.get("to_port", "in")
                 if target_nid is not None:
                     if (
                         target_nid != old_to_nid or target_port != old_to_port
@@ -2078,6 +2280,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                                 "from_node": from_nid,
                                 "to_node": target_nid,
                                 "to_port": target_port,
+                                "from_port": source_port,
                             }
                         )
                         GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
@@ -2085,9 +2288,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     self.client.send({"command": "remove_edge", "edge_id": eid})
                     GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
             elif target_nid is not None:
-                out_nid, _ = self.connecting_from
                 if out_nid != target_nid:
-                    existing_eid = self._edge_id(out_nid, target_nid, target_port)
+                    existing_eid = self._edge_id(
+                        out_nid, target_nid, target_port, source_port
+                    )
                     if existing_eid in self.edges:
                         self.client.send(
                             {"command": "remove_edge", "edge_id": existing_eid}
@@ -2099,6 +2303,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                                 "from_node": out_nid,
                                 "to_node": target_nid,
                                 "to_port": target_port,
+                                "from_port": source_port,
                             }
                         )
                     GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
@@ -2553,6 +2758,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         if n_press != 1:
             return
         self.grab_focus()
+        # A right-click often follows (or is chorded during) a left drag.
+        # If that drag gesture is still holding the pointer - e.g. its
+        # sequence never got a clean drag-end - the context popover's
+        # own grab fights it and the canvas stops responding.  Force the
+        # drag to release first; it is a no-op when no drag is active.
+        self._drag_gesture.reset()
+        self._reset_drag_state()
         wx, wy = self.to_world(x, y)
 
         eid = self.find_edge_at(wx, wy)

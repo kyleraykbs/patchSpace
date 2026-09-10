@@ -89,6 +89,56 @@ def test_export_import_round_trip():
     assert set(state2["edges"]) == set(state2["edges"])  # stable
 
 
+def test_switcher_toggles_output_and_ports_round_trip():
+    d = fresh_daemon()
+    for cmd in [
+        {"command": "add_node", "node_type": "switcher", "node_id": "sw",
+         "config": {}},
+        {"command": "add_node", "node_type": "description_output", "node_id": "a",
+         "config": {"description": "A"}},
+        {"command": "add_node", "node_type": "description_output", "node_id": "b",
+         "config": {"description": "B"}},
+        {"command": "add_edge", "from_node": "sw", "to_node": "a",
+         "from_port": "a"},
+        {"command": "add_edge", "from_node": "sw", "to_node": "b",
+         "from_port": "b"},
+    ]:
+        assert d.handle_command(cmd)["status"] == "ok", cmd
+
+    nodes = d.handle_command({"command": "get_nodes"})["nodes"]
+    assert nodes["sw"]["type"] == "switcher"
+    assert nodes["sw"]["output"] == 0
+
+    edges = d.handle_command({"command": "get_nodes"})["edges"]
+    assert edges["sw->a@a"]["from_port"] == "a"
+    assert edges["sw->b@b"]["from_port"] == "b"
+
+    resp = d.handle_command({"command": "set_node_property", "node_id": "sw",
+                             "property": "output", "value": 1})
+    assert resp["status"] == "ok"
+    assert d.handle_command({"command": "get_nodes"})["nodes"]["sw"]["output"] == 1
+
+    # Export keeps the source port so a replay rewires the same branch.
+    export = d.handle_command({"command": "export_config"})["config"]
+    ports = {e["from_port"] for e in export["edges"]}
+    assert ports == {"a", "b"}
+
+
+def test_inverse_switcher_registered_and_toggles():
+    d = fresh_daemon()
+    resp = d.handle_command({"command": "add_node", "node_type": "inverse_switcher",
+                             "node_id": "inv", "config": {}})
+    assert resp["status"] == "ok"
+    nodes = d.handle_command({"command": "get_nodes"})["nodes"]
+    assert nodes["inv"]["type"] == "inverse_switcher"
+    assert nodes["inv"]["output"] == 0
+
+    resp = d.handle_command({"command": "set_node_property", "node_id": "inv",
+                             "property": "output", "value": 1})
+    assert resp["status"] == "ok"
+    assert d.handle_command({"command": "get_nodes"})["nodes"]["inv"]["output"] == 1
+
+
 def test_set_property_and_rename():
     d = fresh_daemon()
     d.handle_command({"command": "add_node", "node_type": "regex_input",

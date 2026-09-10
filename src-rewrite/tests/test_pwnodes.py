@@ -12,7 +12,10 @@ from pwnodes import (
     OutputNode,
     BackedNode,
     GateNode,
+    SwitcherNode,
+    InverseSwitcherNode,
     Node,
+    LINK_CONFIRM_TIMEOUT_S,
 )
 
 
@@ -118,6 +121,51 @@ class FakeGraph:
             self._links.remove((out_port, in_port))
             return True
         return False
+
+
+class AsyncFakeGraph(FakeGraph):
+    """FakeGraph whose freshly-made links are only visible to
+    linked_pairs() after flush() - mimicking a real pw-dump snapshot,
+    which lags a just-issued pw-link."""
+
+    def __init__(self):
+        super().__init__()
+        self._pending_links = []
+
+    def connect(self, out_port, in_port):
+        if (out_port, in_port) in self._links or (
+            out_port,
+            in_port,
+        ) in self._pending_links:
+            return False
+        self._pending_links.append((out_port, in_port))
+        return True
+
+    def flush(self):
+        for pair in self._pending_links:
+            if pair not in self._links:
+                self._links.append(pair)
+        self._pending_links.clear()
+
+    def linked_pairs(self):
+        return set(self._links)
+
+
+class WiringBacked(BackedNode):
+    def __init__(self, node_id, backing_node_name="fx"):
+        super().__init__(node_id, backing_node_name)
+
+    def ensure_structural(self):
+        pass
+
+    def structural_ok(self):
+        return True
+
+    def input_identity(self, port="in"):
+        return {"name": "dummy_in"}
+
+    def internal_links(self):
+        return [({"nodeName": "src_dsp"}, {"name": "dsp_in"})]
 
 
 class SrcNode(InputNode):
@@ -260,6 +308,216 @@ def test_gate_close_disconnects_downstream():
     space.nodes["gate"].enabled = True
     space.sync()
     assert len(g.linked_pairs()) == 2
+
+
+class NamedSink(OutputNode):
+    def __init__(self, node_id, name):
+        super().__init__(node_id)
+        self._name = name
+
+    def sink_filters(self):
+        return [{"name": self._name}]
+
+
+def test_switcher_only_routes_the_selected_output():
+    g = FakeGraph()
+    src_ports = g.add_source(10, "app1")
+    a_ports = g.add_sink(20, "sinkA")
+    b_ports = g.add_sink(30, "sinkB")
+    space = make_space(g)
+    space.mark_graph_loaded()
+    space.add_node(SrcNode("src"))
+    space.add_node(SwitcherNode("sw"))
+    space.add_node(NamedSink("a", "sinkA"))
+    space.add_node(NamedSink("b", "sinkB"))
+    space.add_edge("src", "sw")
+    space.add_edge("sw", "a", from_port="a")
+    space.add_edge("sw", "b", from_port="b")
+    space.sync()
+
+    # Output A selected: only the A branch carries audio.
+    assert (src_ports["FL"], a_ports["FL"]) in g.linked_pairs()
+    assert (src_ports["FL"], b_ports["FL"]) not in g.linked_pairs()
+
+    # Flip to B: A is torn down, B comes up.
+    space.nodes["sw"].output = 1
+    space.sync()
+    assert (src_ports["FL"], b_ports["FL"]) in g.linked_pairs()
+    assert (src_ports["FL"], a_ports["FL"]) not in g.linked_pairs()
+
+
+def test_switcher_state_propagates_through_downstream_transparent_nodes():
+    g = FakeGraph()
+    src_ports = g.add_source(10, "app1")
+    a_ports = g.add_sink(20, "sinkA")
+    b_ports = g.add_sink(30, "sinkB")
+    space = make_space(g)
+    space.mark_graph_loaded()
+    for node in (SrcNode("src"), SwitcherNode("sw"), GateNode("ga"), GateNode("gb"),
+                 NamedSink("a", "sinkA"), NamedSink("b", "sinkB")):
+        space.add_node(node)
+    space.add_edge("src", "sw")
+    space.add_edge("sw", "ga", from_port="a")
+    space.add_edge("ga", "a")
+    space.add_edge("sw", "gb", from_port="b")
+    space.add_edge("gb", "b")
+    space.sync()
+    assert (src_ports["FL"], a_ports["FL"]) in g.linked_pairs()
+    assert (src_ports["FL"], b_ports["FL"]) not in g.linked_pairs()
+
+    space.nodes["sw"].output = 1
+    space.sync()
+    assert (src_ports["FL"], b_ports["FL"]) in g.linked_pairs()
+    assert (src_ports["FL"], a_ports["FL"]) not in g.linked_pairs()
+
+
+class NamedSource(InputNode):
+    def __init__(self, node_id, name):
+        super().__init__(node_id)
+        self._name = name
+
+    def source_filters(self):
+        return [{"nodeName": self._name}]
+
+
+def test_inverse_switcher_only_passes_the_selected_input():
+    g = FakeGraph()
+    a_ports = g.add_source(10, "srcA")
+    b_ports = g.add_source(20, "srcB")
+    sink_ports = g.add_sink(30, "sink")
+    space = make_space(g)
+    space.mark_graph_loaded()
+    space.add_node(NamedSource("sa", "srcA"))
+    space.add_node(NamedSource("sb", "srcB"))
+    space.add_node(InverseSwitcherNode("inv"))
+    space.add_node(NamedSink("snk", "sink"))
+    space.add_edge("sa", "inv", to_port="a")
+    space.add_edge("sb", "inv", to_port="b")
+    space.add_edge("inv", "snk")
+    space.sync()
+
+    # Input A selected: only srcA reaches the sink.
+    assert (a_ports["FL"], sink_ports["FL"]) in g.linked_pairs()
+    assert (b_ports["FL"], sink_ports["FL"]) not in g.linked_pairs()
+
+    space.nodes["inv"].output = 1
+    space.sync()
+    assert (b_ports["FL"], sink_ports["FL"]) in g.linked_pairs()
+    assert (a_ports["FL"], sink_ports["FL"]) not in g.linked_pairs()
+
+
+def test_inverse_switcher_accepts_two_inputs_but_gate_does_not():
+    space = make_space(FakeGraph())
+    space.mark_graph_loaded()
+    space.add_node(NamedSource("sa", "srcA"))
+    space.add_node(NamedSource("sb", "srcB"))
+    space.add_node(InverseSwitcherNode("inv"))
+    space.add_node(GateNode("gate"))
+    space.add_edge("sa", "inv", to_port="a")
+    space.add_edge("sb", "inv", to_port="b")  # allowed: selectable inputs
+    space.add_edge("sa", "gate")
+    with pytest.raises(ValueError):
+        space.add_edge("sb", "gate")
+
+
+def test_edges_with_same_nodes_but_different_source_ports_are_distinct():
+    space = make_space(FakeGraph())
+    space.mark_graph_loaded()
+    space.add_node(SrcNode("src"))
+    space.add_node(SwitcherNode("sw"))
+    space.add_node(SinkNode("snk"))
+    id_a = space.add_edge("sw", "snk", from_port="a")
+    id_b = space.add_edge("sw", "snk", from_port="b")
+    assert id_a != id_b
+    assert len(space.edges) == 2
+
+
+def test_wiring_is_paced_one_link_per_pass_until_confirmed():
+    g = AsyncFakeGraph()
+    src_ports = g.add_source(10, "app1")
+    sink_ports = g.add_sink(20, "sink1")
+    space = make_space(g)
+    space.mark_graph_loaded()
+    space.add_node(SrcNode("src"))
+    space.add_node(SinkNode("snk"))
+    space.add_edge("src", "snk")
+
+    space.sync()
+    # Exactly one connect was issued and it is not yet visible.
+    assert g._pending_links == [(src_ports["FL"], sink_ports["FL"])]
+    assert g.linked_pairs() == set()
+
+    # Another pass while it is unconfirmed must not pile on more.
+    space.sync()
+    assert len(g._pending_links) == 1
+
+    g.flush()
+    space.sync()
+    assert len(g.linked_pairs()) == 1
+    assert len(g._pending_links) == 1
+
+    g.flush()
+    space.sync()
+    assert len(g.linked_pairs()) == 2
+
+
+def test_wiring_connects_internal_dsp_links_before_user_edges():
+    g = AsyncFakeGraph()
+    g.add_source(10, "app1")                 # user edge source
+    dsp_ports = g.add_source(30, "src_dsp")  # internal link source
+    dsp_in_ports = g.add_sink(40, "dsp_in")  # internal link target
+    g.add_sink(50, "dummy_in")               # user edge target
+    space = make_space(g)
+    space.mark_graph_loaded()
+    space.add_node(SrcNode("src"))
+    space.add_node(WiringBacked("n"))
+    space.add_edge("src", "n")
+
+    space.sync()
+    # The internal sandwich link is issued first, not the user edge.
+    assert g._pending_links == [(dsp_ports["FL"], dsp_in_ports["FL"])]
+
+
+def test_unconfirmed_link_times_out_and_pacing_continues():
+    g = AsyncFakeGraph()
+    g.add_source(10, "app1")
+    g.add_sink(20, "sink1")
+    space = make_space(g)
+    space.mark_graph_loaded()
+    space.add_node(SrcNode("src"))
+    space.add_node(SinkNode("snk"))
+    space.add_edge("src", "snk")
+
+    space.sync()
+    assert len(g._pending_links) == 1
+
+    # Pretend a link has been waiting past the confirm timeout; the next
+    # pass must retire it and carry on rather than block forever.
+    space._inflight_link = (
+        "ghost",
+        (999, 998),
+        time.monotonic() - LINK_CONFIRM_TIMEOUT_S - 1,
+    )
+    space.sync()
+    assert space._inflight_link is not None
+    assert space._inflight_link[1] != (999, 998)
+
+
+def test_removing_edge_with_inflight_link_does_not_stall():
+    g = AsyncFakeGraph()
+    g.add_source(10, "app1")
+    g.add_sink(20, "sink1")
+    space = make_space(g)
+    space.mark_graph_loaded()
+    space.add_node(SrcNode("src"))
+    space.add_node(SinkNode("snk"))
+    space.add_edge("src", "snk")
+
+    space.sync()
+    assert space._inflight_link is not None
+    space.remove_edge("src->snk")
+    assert space._inflight_link is None
+    space.sync()  # must not raise or block on the dead link
 
 
 def test_removing_node_tears_down_and_unlinks():

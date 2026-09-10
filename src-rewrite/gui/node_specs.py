@@ -159,6 +159,10 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
     "description_output": NodeSpec("Description Out", ["in"], [], field="description"),
     "splitter": NodeSpec("Splitter", ["in"], ["out"]),
     "gate": NodeSpec("Gate", ["in"], ["out"], control="gate"),
+    "switcher": NodeSpec("Switcher", ["in"], ["a", "b"], control="switcher"),
+    "inverse_switcher": NodeSpec(
+        "Inverse Switcher", ["a", "b"], ["out"], control="switcher"
+    ),
     "exclude_filter": NodeSpec("Exclude (Regex)", ["in"], ["out"], field="pattern"),
     "volume": NodeSpec("Volume", ["in"], ["out"], control="volume"),
 }
@@ -278,6 +282,8 @@ ADD_NODE_CATEGORIES = [
         [
             ("Splitter", "splitter"),
             ("Gate (checkbox)", "gate"),
+            ("Switcher (A/B out)", "switcher"),
+            ("Inverse Switcher (A/B in)", "inverse_switcher"),
             ("Exclude Filter (regex)", "exclude_filter"),
             ("Volume (slider)", "volume"),
         ],
@@ -315,6 +321,38 @@ ADD_NODE_MENU_ITEMS = [
     item for _category, items in ADD_NODE_CATEGORIES for item in items
 ]
 
+# One stable border colour per node, picked from the running GTK theme
+# (see render_utils.theme_color) rather than hashing the type name.
+# Colour is assigned by the same category the add-node menu groups by,
+# so every "Filters" node is the same accent, every "Effects" node the
+# same, and so on - and it never changes between runs or machines the
+# way the old process-salted hash() did.  A type the theme has no name
+# for (or one added to NODE_TYPE_SPECS without a menu entry) falls back
+# to the theme accent.
+CATEGORY_COLOR_NAMES = {
+    "Filters": "accent_color",
+    "Processing": "success_color",
+    "Effects": "warning_color",
+    "Hardware & Apps": "error_color",
+    "Virtual Devices": "destructive_color",
+}
+
+DEFAULT_NODE_COLOR_NAME = "accent_color"
+
+NODE_TYPE_COLOR_NAMES = {
+    node_type: CATEGORY_COLOR_NAMES.get(category, DEFAULT_NODE_COLOR_NAME)
+    for category, items in ADD_NODE_CATEGORIES
+    for _label, node_type in items
+}
+
+
+def color_name_for_node_type(node_type: str) -> str:
+    """GTK theme colour name assigned to `node_type` - see
+    CATEGORY_COLOR_NAMES above.  Falls back to the theme accent for an
+    unknown type so it still gets a consistent colour rather than a
+    random one."""
+    return NODE_TYPE_COLOR_NAMES.get(node_type, DEFAULT_NODE_COLOR_NAME)
+
 # Best-effort symbolic icon per add-node entry, used by the sidebar
 # panel and the right-click "add node" popover. Purely cosmetic - a
 # theme that lacks one of these just falls back to its own generic
@@ -331,6 +369,8 @@ NODE_TYPE_ICONS: Dict[str, str] = {
     "description_output": "text-x-generic-symbolic",
     "splitter": "network-transmit-receive-symbolic",
     "gate": "view-reveal-symbolic",
+    "switcher": "object-flip-horizontal-symbolic",
+    "inverse_switcher": "object-flip-horizontal-symbolic",
     "sensitivity_gate": "microphone-sensitivity-high-symbolic",
     "exclude_filter": "action-unavailable-symbolic",
     "volume": "audio-volume-high-symbolic",
@@ -382,6 +422,8 @@ CLASS_NAME_TO_TYPE = {
     "DescriptionOutputNode": "description_output",
     "SplitterNode": "splitter",
     "GateNode": "gate",
+    "SwitcherNode": "switcher",
+    "InverseSwitcherNode": "inverse_switcher",
     "ExcludeFilterNode": "exclude_filter",
     "VolumeProcessNode": "volume",
     "NoiseCancelNode": "noise_cancel",

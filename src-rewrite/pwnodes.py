@@ -96,6 +96,18 @@ EdgeId = str
 PATCHBAY_VIRTUAL_SINK_NAME = "PatchBay"
 PATCHBAY_VIRTUAL_MIC_NAME = "PatchBay Mic"
 
+# How long a single in-flight link may go unconfirmed by the live graph
+# before PatchSpace gives up waiting on it and moves to the next one.
+# Wiring is deliberately paced one link at a time (see
+# PatchSpace._apply_desired_links): creating a whole reconcile's worth
+# of ports in one burst races multi-stream effect nodes, whose capture
+# and playback ports (echo/noise cancel filter chains) appear
+# asynchronously - a burst could attach user edges before the DSP
+# sandwich existed and leave the node half-wired.  This bounds the wait
+# so one port that vanished before its link landed can't stall the
+# reconcile forever.
+LINK_CONFIRM_TIMEOUT_S = 3.0
+
 
 def _run_wpctl(*args, timeout: float = 2.0) -> bool:
     """Best-effort `wpctl <args>`, swallowing failures - a value that
@@ -170,7 +182,7 @@ class Node:
         out: Dict[str, Any] = {}
         for attr in ("pattern", "media_class", "description", "device_name",
                      "app_name", "device_label", "device_volume",
-                     "profile_index", "profile_description", "label"):
+                     "profile_index", "profile_description", "label", "output"):
             if hasattr(self, attr):
                 out[attr] = getattr(self, attr)
         return out
@@ -192,6 +204,25 @@ class TransparentNode(Node):
 
     def gate_open(self) -> bool:
         return True
+
+    def passes_output(self, from_port: str) -> bool:
+        """Whether an edge leaving `from_port` should carry audio.  Only
+        the Switcher overrides this; every other transparent node has a
+        single output, so anything routed through it passes."""
+        return True
+
+    def allows_multiple_inputs(self) -> bool:
+        """Whether this transparent node may have more than one inbound
+        edge.  Ordinary pass-throughs (gate, exclude, switcher) take a
+        single upstream; an input switch (InverseSwitcherNode) takes one
+        per selectable input."""
+        return False
+
+    def select_upstream(self, upstream: List["Edge"]) -> Optional["Edge"]:
+        """Which inbound edge feeds this node's output.  A single-input
+        transparent node has at most one, so the default is unambiguous;
+        InverseSwitcherNode picks by its selected input port."""
+        return upstream[0] if upstream else None
 
 
 class LiveResolvableNode:
@@ -692,6 +723,57 @@ class GateNode(TransparentNode):
 
     def gate_open(self):
         return self.enabled
+
+
+class ABSwitchNode(TransparentNode):
+    """Shared state for the two A/B switches.  Both carry an ``output``
+    flag (0 = channel "a", 1 = channel "b") flipped by the inline button
+    and persisted/round-tripped like any other node property - see
+    main.py's set_node_property("output") handler.  SwitcherNode sends
+    the chosen channel out of one of two outputs; InverseSwitcherNode
+    takes the chosen channel in through one of two inputs."""
+
+    OUTPUT_A = "a"
+    OUTPUT_B = "b"
+    OUTPUTS = (OUTPUT_A, OUTPUT_B)
+
+    def __init__(self, node_id, output: int = 0):
+        super().__init__(node_id)
+        self.output = 1 if output else 0
+
+    def active_output(self) -> str:
+        return self.OUTPUT_B if self.output else self.OUTPUT_A
+
+
+class SwitcherNode(ABSwitchNode):
+    """A one-in, two-out A/B switch.  Exactly one output - "a" or "b" -
+    is live at a time; the other resolves to no source, so sync()
+    disconnects everything downstream of it."""
+
+    def passes_output(self, from_port: str) -> bool:
+        """Whether audio arriving from the selected output port should
+        continue.  "out" (the single-output default) is treated as the
+        first output so a stray legacy edge keeps passing."""
+        if from_port in ("", None, "out"):
+            return self.output == 0
+        return from_port == self.active_output()
+
+
+class InverseSwitcherNode(ABSwitchNode):
+    """A two-in, one-out A/B switch - the mirror of SwitcherNode.
+    Edges arrive on inputs "a" and "b"; only the one matching the
+    button's selection feeds the single output, the other input is
+    ignored (so anything wired to it is left alone but silent)."""
+
+    def allows_multiple_inputs(self) -> bool:
+        return True
+
+    def select_upstream(self, upstream: List["Edge"]) -> Optional["Edge"]:
+        wanted = self.active_output()
+        for edge in upstream:
+            if edge.to_port == wanted:
+                return edge
+        return None
 
 
 class ExcludeFilterNode(TransparentNode):
@@ -1705,6 +1787,10 @@ class Edge:
     from_node: NodeId
     to_node: NodeId
     to_port: str = "in"
+    # Which of the source node's output sockets this edge leaves from.
+    # "out" is the single-output default every node type had until the
+    # Switcher; its two outputs are named "a"/"b" (see SwitcherNode).
+    from_port: str = "out"
 
 
 @dataclass
@@ -1737,6 +1823,14 @@ class PatchSpace:
 
         # edge id -> desired pairs connected as of the last sync.
         self._edge_links: Dict[EdgeId, _DesiredLinks] = {}
+
+        # Paced wire-up (see _apply_desired_links): at most one connect
+        # is in flight at a time, recorded here as (edge_id, pair,
+        # issued_at) until the live graph confirms it.  Any pair whose
+        # edge was removed while its connect was still in flight is
+        # queued for a best-effort disconnect so it can't land orphaned.
+        self._inflight_link: Optional[Tuple[EdgeId, Tuple[int, int], float]] = None
+        self._orphan_disconnects: Set[Tuple[int, int]] = set()
 
         # Per-(node, stage) repair backoff - see supervise().
         self._repair_gate = repair_gate or Backoff(initial_s=1.0, max_s=30.0)
@@ -1811,17 +1905,29 @@ class PatchSpace:
             for key in ((node_id, "structural"), (node_id, "module")):
                 self._repair_gate.forget(key)
 
-    def add_edge(self, from_node: NodeId, to_node: NodeId, to_port: str = "in") -> EdgeId:
+    def add_edge(
+        self,
+        from_node: NodeId,
+        to_node: NodeId,
+        to_port: str = "in",
+        from_port: str = "out",
+    ) -> EdgeId:
         with self._lock:
             if from_node not in self.nodes or to_node not in self.nodes:
                 raise KeyError("both endpoints must already be added")
             target = self.nodes[to_node]
-            if target.is_transparent() and self._edges_into.get(to_node):
+            if (
+                target.is_transparent()
+                and not target.allows_multiple_inputs()
+                and self._edges_into.get(to_node)
+            ):
                 raise ValueError(
                     f"{to_node} is a transparent node and already has an upstream edge"
                 )
-            edge_id = self._edge_id(from_node, to_node, to_port)
-            self.edges[edge_id] = Edge(edge_id, from_node, to_node, to_port)
+            edge_id = self._edge_id(from_node, to_node, to_port, from_port)
+            self.edges[edge_id] = Edge(
+                edge_id, from_node, to_node, to_port, from_port
+            )
             self._edges_into.setdefault(to_node, []).append(self.edges[edge_id])
             self._edges_out_of.setdefault(from_node, []).append(self.edges[edge_id])
             return edge_id
@@ -1861,17 +1967,36 @@ class PatchSpace:
                 other_list.get(other_id, []).remove(old_edge)
                 new_from = new_id if old_edge.from_node == old_id else old_edge.from_node
                 new_to = new_id if old_edge.to_node == old_id else old_edge.to_node
-                new_edge = Edge(self._edge_id(new_from, new_to, old_edge.to_port),
-                                new_from, new_to, old_edge.to_port)
+                new_edge = Edge(
+                    self._edge_id(
+                        new_from, new_to, old_edge.to_port, old_edge.from_port
+                    ),
+                    new_from,
+                    new_to,
+                    old_edge.to_port,
+                    old_edge.from_port,
+                )
                 self.edges[new_edge.id] = new_edge
                 self._edges_into.setdefault(new_to, []).append(new_edge)
                 self._edges_out_of.setdefault(new_from, []).append(new_edge)
 
     @staticmethod
-    def _edge_id(from_node: NodeId, to_node: NodeId, to_port: str) -> EdgeId:
-        if to_port == "in":
-            return f"{from_node}->{to_node}"
-        return f"{from_node}->{to_node}:{to_port}"
+    def _edge_id(
+        from_node: NodeId,
+        to_node: NodeId,
+        to_port: str = "in",
+        from_port: str = "out",
+    ) -> EdgeId:
+        """Stable id for an edge.  The common single-in/single-out case
+        keeps the historical ``a->b`` form (so existing persisted edges
+        are untouched); a named target port appends ``:port`` and a named
+        source port appends ``@port``, keeping the two unambiguous."""
+        base = f"{from_node}->{to_node}"
+        if to_port != "in":
+            base += f":{to_port}"
+        if from_port != "out":
+            base += f"@{from_port}"
+        return base
 
     def _remove_edge_locked(self, edge_id: EdgeId) -> None:
         edge = self.edges.pop(edge_id, None)
@@ -1890,12 +2015,21 @@ class PatchSpace:
                 self._edges_out_of[edge.from_node].remove(edge)
             except ValueError:
                 pass
+        # If this edge's link was still waiting to be confirmed, stop
+        # waiting on it (it would otherwise block the paced wire-up for
+        # up to LINK_CONFIRM_TIMEOUT_S) and remember the pair so that if
+        # the connect does land after all, the next sync unlinks it.
+        if self._inflight_link is not None and self._inflight_link[0] == edge_id:
+            self._orphan_disconnects.add(self._inflight_link[1])
+            self._inflight_link = None
 
     # ------------------------------------------------------------------
     # resolving what feeds an edge
     # ------------------------------------------------------------------
 
-    def _resolve_sources(self, node_id: NodeId) -> List[dict]:
+    def _resolve_sources(
+        self, node_id: NodeId, from_port: str = "out"
+    ) -> List[dict]:
         node = self.nodes.get(node_id)
         if node is None:
             return []
@@ -1906,10 +2040,21 @@ class PatchSpace:
         if isinstance(node, TransparentNode):
             if not node.gate_open():
                 return []
+            # A switcher only passes the output its button has selected;
+            # the other output resolves to nothing, which makes sync()
+            # tear down everything wired to it.
+            if not node.passes_output(from_port):
+                return []
             upstream = self._edges_into.get(node_id, [])
             if not upstream:
                 return []
-            sources = self._resolve_sources(upstream[0].from_node)
+            # A single-input transparent node has exactly one inbound
+            # edge; InverseSwitcherNode has one per input and picks the
+            # one its button selected (see select_upstream).
+            chosen = node.select_upstream(upstream)
+            if chosen is None:
+                return []
+            sources = self._resolve_sources(chosen.from_node, chosen.from_port)
             if isinstance(node, ExcludeFilterNode):
                 exclude = node.exclude_filter()
                 if exclude is not None:
@@ -2111,7 +2256,9 @@ class PatchSpace:
                         if is_output
                         else [node.input_identity(edge.to_port)]
                     )
-                    sources = self._resolve_sources(edge.from_node)
+                    sources = self._resolve_sources(
+                        edge.from_node, edge.from_port
+                    )
                     if not sources:
                         desired[edge.id] = set()
                         continue
@@ -2149,8 +2296,6 @@ class PatchSpace:
                     prefix = f"__internal__:{node_id}:"
                     unresolved.update(k for k in self._edge_links if k.startswith(prefix))
 
-        live = graph.linked_pairs()
-
         # Tear down stale pairs first.  (The _edge_links entry for an
         # edge that no longer exists is kept until this loop so its
         # current links are disconnected here; it is deleted below.)
@@ -2167,20 +2312,98 @@ class PatchSpace:
             if edge_id not in desired:
                 del self._edge_links[edge_id]
 
-        # Then create anything the graph is not already carrying.  This
-        # keys off the *live* snapshot, not our own bookkeeping, so a
-        # link that was dropped out from under us (an external pw-cli
-        # destroy, a module reload) is re-made here instead of being
-        # skipped because we thought it was already up.
-        for edge_id, pairs in desired.items():
+        # Then create whatever is missing - one link at a time, in a
+        # fixed order, each waited on before the next (see
+        # _apply_desired_links for why).
+        self._apply_desired_links(desired)
+
+    def _apply_desired_links(self, desired: Dict[EdgeId, Set[Tuple[int, int]]]) -> None:
+        """Create the links in `desired` that aren't live yet, one at a
+        time.
+
+        The old code fired every missing ``pw-link`` back-to-back in one
+        pass.  That races multi-stream effect nodes: an echo/noise-cancel
+        filter chain's capture and playback ports show up asynchronously,
+        and wiring its interior plus every user edge in a single burst
+        could attach an edge to a dummy before the DSP sandwich existed,
+        leaving the node half-connected.  Instead exactly one connect is
+        issued per call and the next one isn't issued until the live graph
+        reports the first - so the periodic supervise() tick naturally
+        paces the reconcile, and a just-made link is given time to settle
+        before more are piled on top of it.
+
+        Entries are still keyed off the live snapshot, so a link dropped
+        out from under us (external ``pw-cli`` destroy, module reload) is
+        re-made on a later pass.  A real asynchronous graph makes this
+        return after one link and resume next tick; an in-memory graph
+        that reflects a link immediately (tests) drains the whole set in
+        one call."""
+        graph = self.graph
+        live = graph.linked_pairs()
+        now = _time.monotonic()
+
+        # Retire any best-effort disconnect queued when an edge was
+        # removed while its connect was still in flight.
+        for pair in list(self._orphan_disconnects):
+            try:
+                graph.disconnect(*pair)
+            except Exception as exc:
+                logger.debug("orphan disconnect %s failed: %s", pair, exc)
+            self._orphan_disconnects.discard(pair)
+            live.discard(pair)
+
+        # Don't pile a new link on top of one whose connect hasn't been
+        # confirmed by the graph yet.
+        if self._inflight_link is not None:
+            edge_id, pair, issued_at = self._inflight_link
+            if pair in live:
+                self._inflight_link = None
+            elif now - issued_at >= LINK_CONFIRM_TIMEOUT_S:
+                logger.warning(
+                    "Link %s for %s was not confirmed by the live graph "
+                    "within %.1fs - moving on",
+                    pair, edge_id, LINK_CONFIRM_TIMEOUT_S,
+                )
+                self._inflight_link = None
+            else:
+                return
+
+        # Record the full desired set on every edge (teardown accounting),
+        # then build the ordered work list.  Internal DSP links go first
+        # so an effect's sandwich is whole before user edges attach to
+        # its dummies; everything else follows in a stable order.
+        internal: List[Tuple[EdgeId, Tuple[int, int]]] = []
+        external: List[Tuple[EdgeId, Tuple[int, int]]] = []
+        seen: Set[Tuple[int, int]] = set()
+        for edge_id in sorted(desired):
+            pairs = desired[edge_id]
             entry = self._edge_links.setdefault(edge_id, _DesiredLinks())
-            for pair in pairs:
-                if pair not in live:
-                    try:
-                        graph.connect(*pair)
-                    except Exception as exc:
-                        logger.warning("connect %s for %s failed: %s", pair, edge_id, exc)
             entry.pairs = pairs
+            bucket = internal if edge_id.startswith("__internal__:") else external
+            for pair in sorted(pairs):
+                if pair in live or pair in seen:
+                    continue
+                seen.add(pair)
+                bucket.append((edge_id, pair))
+
+        for edge_id, pair in internal + external:
+            if pair in graph.linked_pairs():
+                continue
+            try:
+                graph.connect(*pair)
+            except Exception as exc:
+                logger.warning("connect %s for %s failed: %s", pair, edge_id, exc)
+                continue
+            logger.info(
+                "Wiring %s -> %s for %s", pair[0], pair[1], edge_id
+            )
+            if pair in graph.linked_pairs():
+                # Confirmed synchronously - keep the pace and move on.
+                continue
+            # A real, asynchronous graph: remember this link and wait for
+            # the monitor to report it before issuing another.
+            self._inflight_link = (edge_id, pair, _time.monotonic())
+            return
 
     def mark_graph_loaded(self) -> None:
         self._graph_loaded = True
