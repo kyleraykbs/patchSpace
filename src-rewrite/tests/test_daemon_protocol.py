@@ -2,6 +2,8 @@
 so nothing touches a real PipeWire process.  Exercises the same command
 layer and serialization shapes the GUI depends on."""
 
+import threading
+
 from main import PatchBayDaemon
 from pwnodes import BackedNode, Node
 import main as main_mod
@@ -237,6 +239,45 @@ def test_remove_node_and_reset():
     d.handle_command({"command": "reset"})
     assert d.handle_command({"command": "get_nodes"})["nodes"] == {}
     assert d.handle_command({"command": "get_nodes"})["edges"] == {}
+
+
+def test_rebuild_captures_then_tears_down_and_reloads(monkeypatch):
+    """The rebuild command is "turn it off and on again": it snapshots the
+    current graph, tears the public nodes down, and stages the snapshot
+    back in on a background thread (same one-in-flight-protocol reason as
+    load_session).  Nothing may be lost in the round trip."""
+    d = fresh_daemon()
+    for cmd in [
+        {"command": "add_node", "node_type": "regex_input", "node_id": "in1",
+         "config": {"pattern": ".*", "label": "In"}},
+        {"command": "add_node", "node_type": "gate", "node_id": "g1",
+         "config": {"enabled": False}},
+        {"command": "add_edge", "from_node": "in1", "to_node": "g1"},
+    ]:
+        assert d.handle_command(cmd)["status"] == "ok", cmd
+
+    reloaded = {}
+    done = threading.Event()
+
+    def fake_load(config):
+        reloaded["config"] = config
+        done.set()
+
+    monkeypatch.setattr(d, "_load_session", fake_load)
+
+    resp = d.handle_command({"command": "rebuild"})
+    assert resp == {"status": "ok", "started": True}
+    assert done.wait(2.0), "rebuild never reached the reload step"
+
+    cfg = reloaded["config"]
+    assert set(cfg["nodes"]) == {"in1", "g1"}
+    assert cfg["nodes"]["in1"]["params"]["pattern"] == ".*"
+    assert cfg["nodes"]["g1"]["params"]["enabled"] is False
+    assert cfg["edges"] == [{"from": "in1", "to": "g1"}]
+
+    # The daemon tore the graph down before staging the reload, so the
+    # (stubbed) load starts from a clean space.
+    assert d.handle_command({"command": "get_nodes"})["nodes"] == {}
 
 
 def test_unknown_type_and_bad_command_error():

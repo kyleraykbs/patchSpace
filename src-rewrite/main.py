@@ -2493,20 +2493,81 @@ class PatchBayDaemon:
     def _cmd_export_config(self, cmd: dict) -> dict:
         return {"status": "ok", "config": self._build_export_config()}
 
-    def _cmd_reset(self, cmd: dict) -> dict:
+    @staticmethod
+    def _destroy_backings(backings) -> None:
+        """Terminate/park every backing concurrently.
+
+        Each ``OwnedPwNode.destroy`` can block for a couple of seconds
+        waiting for its process to exit before escalating to SIGTERM then
+        SIGKILL, and the naive teardown did that per node in sequence, so
+        deleting a graph with several effects took the *sum* of those
+        waits.  Destroying every backing at once bounds it by the single
+        slowest process.  Called outside the daemon lock."""
+        if not backings:
+            return
+        threads = [
+            threading.Thread(target=b.destroy, daemon=True) for b in backings
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+    def _teardown_public_graph(self) -> None:
+        """Remove every user-visible node (and the hidden sensitivity
+        children that go with a gate) plus all edges and groups, leaving
+        the daemon's built-in virtual devices untouched.  Shared by reset
+        and rebuild.
+
+        The model mutation happens under the lock; the slow process
+        teardown happens after it, in parallel and *without* the lock, so
+        the supervision tick and other commands keep flowing while the
+        old processes drain."""
         with self._lock:
-            for edge_id in list(self.space.edges.keys()):
-                self.space.remove_edge(edge_id)
-            for node_id in list(self.space.nodes.keys()):
-                if node_id in self.space.public_nodes:
-                    self.space.remove_node(node_id)
-            for node_id in list(self.space.nodes.keys()):
-                if _hidden_sensitivity_gate_for(node_id) is not None:
-                    self.space.remove_node(node_id)
+            doomed_ids = [
+                nid for nid in self.space.nodes if nid in self.space.public_nodes
+            ]
+            doomed_ids += [
+                nid
+                for nid in self.space.nodes
+                if _hidden_sensitivity_gate_for(nid) is not None
+            ]
+            backings = self.space.detach_nodes(doomed_ids)
             self.groups.clear()
             self.space.sync()
+        self._destroy_backings(backings)
+
+    def _cmd_reset(self, cmd: dict) -> dict:
+        self._teardown_public_graph()
+        with self._lock:
             self._dirty = True
-            return {"status": "ok", "message": "Graph reset"}
+        return {"status": "ok", "message": "Graph reset"}
+
+    def _cmd_rebuild(self, cmd: dict) -> dict:
+        """Tear the PatchSpace down and rebuild it exactly as it is now -
+        a user-facing "turn it off and on again" for when a node's live
+        routing has gone wrong.  The current graph is captured first (so
+        the rebuild is identical, layout/anchors/groups included), then
+        every public node is removed (backings destroyed in parallel,
+        outside the lock) and the captured config is staged back in.
+        Staged on a background thread for the same reason load_session is
+        (see _cmd_load_session): a multi-effect rebuild can take seconds,
+        and the socket protocol is one-in-flight.  The GUI's get_nodes
+        poll observes the nodes land, so the reply just says the rebuild
+        started."""
+        config = self._build_export_config()
+        self._teardown_public_graph()
+        with self._lock:
+            self._dirty = True
+
+        def _run():
+            try:
+                self._load_session(config)
+            except Exception:
+                logger.exception("Background rebuild failed")
+
+        threading.Thread(target=_run, daemon=True).start()
+        return {"status": "ok", "started": True}
 
     # ------------------------------------------------------------------
     # serialization
@@ -2687,6 +2748,8 @@ class PatchBayDaemon:
                 response = self._cmd_disconnect_ports(cmd)
             elif command == "reset":
                 response = self._cmd_reset(cmd)
+            elif command == "rebuild":
+                response = self._cmd_rebuild(cmd)
             elif command == "ping":
                 response = {"status": "ok", "message": "pong"}
             else:

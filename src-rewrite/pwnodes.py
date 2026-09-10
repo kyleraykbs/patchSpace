@@ -2575,6 +2575,36 @@ class PatchSpace:
             for key in ((node_id, "structural"), (node_id, "module")):
                 self._repair_gate.forget(key)
 
+    def detach_nodes(self, node_ids) -> List[OwnedPwNode]:
+        """Remove several nodes from the model in one pass and return
+        every backing they owned, WITHOUT destroying anything.
+
+        The caller destroys the returned backings - and must do so
+        *outside* the daemon lock and in parallel.  `remove_node` tears a
+        node's backings down (concurrently within the node) but nodes are
+        removed one at a time, so deleting a graph full of effects costs
+        the *sum* of each node's slowest process exit; batching them (and
+        destroying all at once) costs only the single slowest.  Splitting
+        the model mutation from the destruction also lets the slow part
+        run without holding the daemon lock."""
+        doomed: List[OwnedPwNode] = []
+        with self._lock:
+            for node_id in list(node_ids):
+                node = self.nodes.pop(node_id, None)
+                if node is None:
+                    continue
+                self.public_nodes.discard(node_id)
+                for edge in list(self._edges_into.get(node_id, [])) + list(
+                    self._edges_out_of.get(node_id, [])
+                ):
+                    self._remove_edge_locked(edge.id)
+                if isinstance(node, BackedNode):
+                    doomed.extend(node.backings)
+                    node.backings = []
+                for key in ((node_id, "structural"), (node_id, "module")):
+                    self._repair_gate.forget(key)
+        return doomed
+
     def add_edge(
         self,
         from_node: NodeId,

@@ -650,6 +650,34 @@ def test_removing_node_tears_down_and_unlinks():
     assert not g.linked_pairs()
 
 
+def test_detach_nodes_collects_backings_without_destroying():
+    """Batch teardown: detach_nodes must remove the nodes from the model
+    and hand back their backings for the caller to destroy in parallel,
+    so a graph full of effects costs the slowest process instead of the
+    sum of every node's teardown."""
+    g = FakeGraph()
+    space = make_space(g)
+    space.mark_graph_loaded()
+    space.add_node(EchoBacked("n"))
+    space.add_node(EchoBacked("m"))
+
+    class Backing:
+        def __init__(self):
+            self.destroyed = False
+
+        def destroy(self):
+            self.destroyed = True
+
+    a, b = Backing(), Backing()
+    space.nodes["n"].backings.append(a)
+    space.nodes["m"].backings.append(b)
+
+    doomed = space.detach_nodes(["n", "m"])
+    assert set(doomed) == {a, b}
+    assert not a.destroyed and not b.destroyed  # destruction is the caller's job
+    assert "n" not in space.nodes and "m" not in space.nodes
+
+
 # ---------------------------------------------------------------------------
 # supervision
 # ---------------------------------------------------------------------------

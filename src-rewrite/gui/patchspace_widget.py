@@ -50,6 +50,7 @@ from render_utils import (
     theme_color,
     draw_rounded_rect,
     draw_text_ellipsized,
+    draw_text_unbounded,
     draw_text_wrapped,
     wrapped_text_height,
     draw_bezier_link,
@@ -155,6 +156,19 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self.nodes = {}
         self.edges = {}
         self.nodes_pending_wiring = set()
+        # Cached node pixel dimensions, keyed by node id.  A single redraw
+        # asks for them thousands of times (edge endpoints, socket
+        # positions, group bounds, hit tests); they only change when the
+        # daemon poll updates a node's label/spec/state, so they are
+        # cleared at the start of update_from_daemon rather than
+        # recomputed per call.  See node_height/node_width.
+        self._node_h_cache = {}
+        self._node_w_cache = {}
+        # Per-frame geometry cache for group nesting (the enclosed-group
+        # walk is O(groups^2) and was recomputed many times inside one
+        # redraw).  Cleared at the start of each on_draw - see
+        # _raw_group_bounds / _enclosed_group_ids / _group_bounds.
+        self._group_geo_cache = {}
 
         self.pan_x = 0.0
         self.pan_y = 0.0
@@ -228,6 +242,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # GLib source for the deferred post-load zoom_to_fit (see
         # _set_loading/_fit_after_load).
         self._fit_source = 0
+        # One-shot: frame the whole graph the first time it's drawn with
+        # nodes and a real allocation, so a GUI launched against an
+        # already-running daemon opens centred on the session instead of
+        # at the (0,0) world origin.  Cleared once the initial fit runs.
+        self._needs_initial_fit = True
         # GLib source id for the debounced "push layout to daemon" timer.
         self._layout_save_source = 0
 
@@ -354,13 +373,21 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             # A completed load just dropped the new graph on the canvas at
             # whatever scattered positions it had - frame all of it so the
             # user sees the whole session at once instead of a corner.
+            # This supersedes the startup auto-fit.
+            self._needs_initial_fit = False
             # Deferred: the console collapse above changes the canvas
             # height, and fitting before GTK re-lays-out would centre
             # against the old (shorter) canvas and leave the graph sitting
             # high once the console actually disappears.
-            if self._fit_source:
-                GLib.source_remove(self._fit_source)
-            self._fit_source = GLib.timeout_add(80, self._fit_after_load)
+            self._schedule_fit(80)
+
+    def _schedule_fit(self, delay_ms: int) -> None:
+        """(Re)arm the one-shot deferred zoom_to_fit.  Deferring matters:
+        the canvas height changes as the page/toolbar/console lay out, and
+        fitting against a transient size leaves the graph vertically off."""
+        if self._fit_source:
+            GLib.source_remove(self._fit_source)
+        self._fit_source = GLib.timeout_add(delay_ms, self._fit_after_load)
 
     def _fit_after_load(self):
         self._fit_source = 0
@@ -391,6 +418,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         if now >= self._load_timeout_at:
             self._set_loading(False)
             return
+        if not daemon_nodes:
+            # A rebuild/import has torn the old graph down (or a rebuild's
+            # deletion phase has emptied it) but hasn't staged the new
+            # nodes yet.  An empty space is NOT "finished" - keep the
+            # overlay until nodes actually land; the timeout above bounds
+            # a load that never produces any.
+            return
         pending = any(
             ndata.get("health") == "starting"
             or (not ndata.get("ready", True) and ndata.get("health") != "dead")
@@ -409,6 +443,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             return
         view_w = self.get_width()
         view_h = self.get_height()
+        if view_w <= 1 or view_h <= 1:
+            # Called from inside on_draw, before GTK exposes the
+            # allocation via get_width()/get_height() - use the size we
+            # were just handed.
+            view_w, view_h = getattr(self, "_last_view_size", (0, 0))
         if view_w <= 1 or view_h <= 1:
             return
 
@@ -561,6 +600,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         daemon_edges = data.get("edges", {})
         selection_before = set(self.selected_nodes)
         anchored_before = set(self.anchored_nodes)
+        # A poll can change a node's label/description/control state (and
+        # therefore its height/width), so drop the dimension cache and let
+        # the next redraw repopulate it.
+        self._node_h_cache.clear()
+        self._node_w_cache.clear()
 
         for nid in list(self.nodes.keys()):
             if nid not in daemon_nodes:
@@ -1012,9 +1056,20 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         return self.NODE_WIDTH
 
     def node_width(self, node_id):
-        return self._node_width_for(self.nodes[node_id])
+        cached = self._node_w_cache.get(node_id)
+        if cached is None:
+            cached = self._node_width_for(self.nodes[node_id])
+            self._node_w_cache[node_id] = cached
+        return cached
 
     def node_height(self, node_id):
+        cached = self._node_h_cache.get(node_id)
+        if cached is None:
+            cached = self._compute_node_height(node_id)
+            self._node_h_cache[node_id] = cached
+        return cached
+
+    def _compute_node_height(self, node_id):
         node = self.nodes[node_id]
         if self._is_splitter_node(node):
             # A bare splitter is a square.  With a label, grow just enough
@@ -1570,6 +1625,23 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     # ---------- drawing ----------
 
     def on_draw(self, area, cr, w, h):
+        # Frame the graph once, the first time there are nodes and a real
+        # allocation, so startup opens on the session rather than empty
+        # space.  Done here (not on the first poll) because zoom_to_fit
+        # needs the widget's real size.  A bulk import already fits via
+        # _fit_after_load; this covers a GUI attached to a running daemon.
+        self._last_view_size = (w, h)
+        if self._needs_initial_fit and not self.loading and self.nodes and w > 1 and h > 1:
+            self._needs_initial_fit = False
+            # Deferred, exactly like the post-load fit: at first draw the
+            # notebook page / toolbar / console haven't finished laying
+            # out, so fitting now centres against a transient canvas
+            # height and the graph ends up vertically off.  Let layout
+            # settle, then frame.
+            self._schedule_fit(150)
+        # Group nesting geometry is stable for the duration of one frame;
+        # clear the per-frame cache here (see _group_geo_cache).
+        self._group_geo_cache.clear()
         pal = theme_palette(self)
         cr.set_source_rgb(*pal["bg"])
         cr.paint()
@@ -2729,6 +2801,18 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._begin_load()
         GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
 
+    def rebuild_graph(self):
+        """Tear the daemon's PatchSpace down and rebuild it exactly as it
+        is now - a user-facing "turn it off and on again" for when a
+        node's live routing has gone wrong.  The daemon snapshots the
+        current graph first (main.py's _cmd_rebuild), so nothing is lost;
+        it stages the rebuild in the background and the periodic poll
+        picks the nodes back up as they land.  The loading overlay reuses
+        the bulk-load path so it's obvious work is happening."""
+        self.client.send({"command": "rebuild"})
+        self._begin_load()
+        GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
+
     # ---------- export/import helpers (clipboard, file chooser) ----------
 
     def _copy_text_to_clipboard(self, text):
@@ -3777,15 +3861,22 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     def _raw_group_bounds(self, group):
         """Union of a group's member node rectangles, no padding, or None
-        if it has no live members."""
+        if it has no live members.  Memoised for the current frame (the
+        group dicts are rebuilt on every daemon poll, so key on identity)."""
+        key = ("raw", id(group))
+        if key in self._group_geo_cache:
+            return self._group_geo_cache[key]
         ids = [nid for nid in group.get("nodes", ()) if nid in self.nodes]
         if not ids:
+            self._group_geo_cache[key] = None
             return None
         x1 = min(self.nodes[n]["x"] for n in ids)
         y1 = min(self.nodes[n]["y"] for n in ids)
         x2 = max(self.nodes[n]["x"] + self.node_width(n) for n in ids)
         y2 = max(self.nodes[n]["y"] + self.node_height(n) for n in ids)
-        return (x1, y1, x2, y2)
+        result = (x1, y1, x2, y2)
+        self._group_geo_cache[key] = result
+        return result
 
     def _group_header_height(self, gid, group):
         """Vertical space a group's name block occupies *above* its
@@ -3808,16 +3899,22 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     def _enclosed_group_ids(self, gid):
         """Ids of the other groups whose member bounds this group fully
-        encloses (its children for layout purposes)."""
+        encloses (its children for layout purposes).  Memoised per frame."""
+        key = ("enc", gid)
+        if key in self._group_geo_cache:
+            return self._group_geo_cache[key]
         own = self._raw_group_bounds(self.groups[gid])
         if own is None:
+            self._group_geo_cache[key] = []
             return []
-        return [
+        result = [
             other_id
             for other_id, other in self.groups.items()
             if other_id != gid
             and self._encloses(own, self._raw_group_bounds(other))
         ]
+        self._group_geo_cache[key] = result
+        return result
 
     def _group_bounds(self, gid, group, _seen=None):
         """A group's dotted-box rectangle, or None if it has no live
@@ -3830,8 +3927,15 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         inside its container instead of poking out over its top edge.
         Children are resolved recursively, so the clearance compounds
         through any depth of nesting."""
+        top = _seen is None
+        if top:
+            key = ("bounds", gid)
+            if key in self._group_geo_cache:
+                return self._group_geo_cache[key]
         raw = self._raw_group_bounds(group)
         if raw is None:
+            if top:
+                self._group_geo_cache[("bounds", gid)] = None
             return None
         # Guard against identical/mutually-containing member bounds, which
         # would otherwise recurse forever.
@@ -3857,7 +3961,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             y1 = min(y1, cy1 - head - self.GROUP_SPACING)
             x2 = max(x2, cx2 + self.GROUP_SPACING)
             y2 = max(y2, cy2 + self.GROUP_SPACING)
-        return (x1, y1, x2, y2)
+        result = (x1, y1, x2, y2)
+        if top:
+            self._group_geo_cache[("bounds", gid)] = result
+        return result
 
     def _group_header_layout(self, gid, group):
         """Geometry of a group's label / id / colour chip block, which sits
@@ -3954,13 +4061,15 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             if info is None:
                 continue
             r, g, b = self._hex_to_rgb(group.get("color"))
-            draw_text_ellipsized(
-                cr, info["x"], info["top"], info["label"],
-                info["lw"] + 4, 12, (r, g, b),
+            # Unbounded: a group title must always read in full and never
+            # clip to an ellipsis as the view zooms (see
+            # draw_text_unbounded).
+            draw_text_unbounded(
+                cr, info["x"], info["top"], info["label"], 12, (r, g, b)
             )
             id_y = info["top"] + info["lh"] + info["gap"]
-            draw_text_ellipsized(
-                cr, info["x"], id_y, gid, info["iw"] + 4, 9, pal["subtext"]
+            draw_text_unbounded(
+                cr, info["x"], id_y, gid, 9, pal["subtext"]
             )
             draw_rounded_rect(
                 cr, info["chip_x"], info["chip_y"], info["chip"], info["chip"], 3
