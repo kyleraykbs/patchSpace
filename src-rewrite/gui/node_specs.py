@@ -180,7 +180,7 @@ NODE_TYPE_SPECS.update(
             ],
         ),
         "noise_cancel": NodeSpec(
-            "Noise Cancel",
+            "AI Noise Cancel",
             ["in"],
             ["out"],
             settings=[
@@ -192,6 +192,21 @@ NODE_TYPE_SPECS.update(
                 ),
                 ("ladspa_plugin", "Override plugin path (blank = auto):", "text"),
                 ("ladspa_label", "Override plugin label (blank = auto):", "text"),
+            ],
+        ),
+        # Same backing module as Echo Cancel (libpipewire-module-echo-
+        # cancel, its dummies, keepalives and interior streams), but the
+        # "probe" input is deliberately not surfaced: it reads as a plain
+        # one-in/one-out noise suppressor. The probe stream still exists
+        # privately inside the module - see LightNoiseCancelNode.
+        "light_noise_cancel": NodeSpec(
+            "Light Noise Cancel",
+            ["mic"],
+            ["out"],
+            settings=[
+                ("library_name", "AEC library:", "text"),
+                ("aec_args", "AEC args:", "text"),
+                ("monitor_mode", "Monitor mode (auto-capture default sink)", "bool"),
             ],
         ),
         # control="sensitivity" is the Sensitivity Gate's 0..1 inline
@@ -292,7 +307,8 @@ ADD_NODE_CATEGORIES = [
         "Effects",
         [
             ("Echo Cancel", "echo_cancel"),
-            ("Noise Cancel", "noise_cancel"),
+            ("AI Noise Cancel", "noise_cancel"),
+            ("Light Noise Cancel", "light_noise_cancel"),
             ("Sensitivity Gate", "sensitivity_gate"),
             ("Reverb", "reverb"),
         ],
@@ -377,6 +393,7 @@ NODE_TYPE_ICONS: Dict[str, str] = {
     "mute": "audio-volume-muted-symbolic",
     "echo_cancel": "audio-input-microphone-symbolic",
     "noise_cancel": "microphone-sensitivity-muted-symbolic",
+    "light_noise_cancel": "microphone-sensitivity-low-symbolic",
     "sensitivity_gate": "microphone-sensitivity-high-symbolic",
     "reverb": "media-playlist-repeat-symbolic",
     "device_input": "audio-input-microphone-symbolic",
@@ -430,6 +447,7 @@ CLASS_NAME_TO_TYPE = {
     "SensitivityGateNode": "sensitivity_gate",
     "ReverbNode": "reverb",
     "EchoCancelNode": "echo_cancel",
+    "LightNoiseCancelNode": "light_noise_cancel",
 }
 
 CLASS_NAME_TO_TYPE.update(

@@ -432,3 +432,142 @@ def test_downstream_edges_walks_signal_order_through_switches():
     # Everything reachable from fx via from->to, closest first, then by
     # config order; upstream/unrelated edges are not included.
     assert result == [edges[0], edges[1], edges[2], edges[3]]
+
+
+def test_light_noise_cancel_shares_echo_backing_but_hides_probe():
+    from pwnodes import EchoCancelNode, LightNoiseCancelNode
+    from gui import node_specs
+
+    assert main_mod.NODE_TYPE_REGISTRY["light_noise_cancel"] is LightNoiseCancelNode
+    # Same backing/machinery as echo cancel, so the careful-node
+    # treatment (isinstance against _CAREFUL_NODE_TYPES) picks it up too.
+    assert issubclass(LightNoiseCancelNode, EchoCancelNode)
+    assert isinstance(LightNoiseCancelNode("x", "x"), EchoCancelNode)
+
+    spec = node_specs.spec_for("light_noise_cancel")
+    assert spec.label == "Light Noise Cancel"
+    assert spec.inputs == ["mic"]  # probe deliberately not exposed
+
+    # The existing denoiser is now presented as AI Noise Cancel.
+    assert node_specs.spec_for("noise_cancel").label == "AI Noise Cancel"
+    assert (
+        node_specs.normalize_node_type("LightNoiseCancelNode")
+        == "light_noise_cancel"
+    )
+    assert ("Light Noise Cancel", "light_noise_cancel") in node_specs.ADD_NODE_MENU_ITEMS
+
+
+def test_add_node_stages_and_waits_on_finicky_nodes(monkeypatch):
+    """A finicky node created at runtime gets the same staged, careful
+    bring-up a session load gives it - so the edges the GUI wires next
+    can't attach before its module streams are live."""
+    monkeypatch.setitem(main_mod.NODE_TYPE_REGISTRY, "leaf_stub", _LeafStub)
+    monkeypatch.setitem(main_mod.NODE_TYPE_REGISTRY, "finicky_stub", _FinickyStub)
+    monkeypatch.setattr(main_mod, "_CAREFUL_NODE_TYPES", (_FinickyStub,))
+
+    d = fresh_daemon()
+    monkeypatch.setattr(
+        d,
+        "_create_node",
+        lambda node_type, node_id, config: main_mod.NODE_TYPE_REGISTRY[node_type](
+            node_id, config.get("backing_node_name") or f"patchbay_{node_id}"
+        ),
+    )
+    bringups = []
+    staged_during_bringup = []
+
+    def fake_bring_up(node):
+        bringups.append(node.id)
+        staged_during_bringup.append(node.id in d.space._staging)
+        return True
+
+    monkeypatch.setattr(d, "_bring_node_up", fake_bring_up)
+    internals = []
+    monkeypatch.setattr(
+        d,
+        "_wait_node_internals_wired",
+        lambda nid: (internals.append(nid), True)[1],
+    )
+    relinked = []
+    monkeypatch.setattr(
+        d,
+        "_relink_edge_carefully",
+        lambda edge: (relinked.append(f"{edge['from']}->{edge['to']}"), ("", None, False, None))[1],
+    )
+
+    # A plain leaf node is created normally, no careful pass.
+    assert d.handle_command(
+        {"command": "add_node", "node_type": "leaf_stub", "node_id": "src"}
+    )["status"] == "ok"
+    assert d.handle_command(
+        {"command": "add_node", "node_type": "finicky_stub", "node_id": "fx"}
+    )["status"] == "ok"
+    # It was staged for the whole bring-up, brought up, and its interior
+    # waited on - and left unstaged afterward.
+    assert bringups == ["fx"]
+    assert staged_during_bringup == [True]
+    assert internals == ["fx"]
+    assert "fx" not in d.space._staging
+
+    # An edge touching the finicky node is wired the careful way; one
+    # that doesn't is left to the normal sync.
+    assert d.handle_command(
+        {"command": "add_edge", "from_node": "src", "to_node": "fx"}
+    )["status"] == "ok"
+    assert relinked == ["src->fx"]
+    assert d.handle_command(
+        {"command": "add_node", "node_type": "leaf_stub", "node_id": "dst"}
+    )["status"] == "ok"
+    assert d.handle_command(
+        {"command": "add_edge", "from_node": "src", "to_node": "dst"}
+    )["status"] == "ok"
+    assert relinked == ["src->fx"]
+
+
+def test_load_session_only_reaps_backings_of_new_nodes(monkeypatch):
+    """Re-importing the current session must not reap the live objects
+    of nodes that already exist - doing so kills their owning processes
+    and leaves them structurally present but silent (the re-import
+    thrash). Only backings for nodes this load will create are swept."""
+    monkeypatch.setitem(main_mod.NODE_TYPE_REGISTRY, "regular_stub", _RegularStub)
+
+    d = fresh_daemon()
+    monkeypatch.setattr(
+        d,
+        "_create_node",
+        lambda node_type, node_id, config: main_mod.NODE_TYPE_REGISTRY[node_type](
+            node_id, config.get("backing_node_name") or f"patchbay_{node_id}"
+        ),
+    )
+    monkeypatch.setattr(d, "_bring_node_up", lambda node: True)
+    monkeypatch.setattr(d, "_wait_node_internals_wired", lambda nid: True)
+    monkeypatch.setattr(d, "_wire_edge_carefully", lambda edge: d._store_session_edge(edge))
+    monkeypatch.setattr(d, "_relink_edge_carefully", lambda edge: ("", None, False, None))
+
+    # An already-present, healthy node whose backing must be left alone.
+    d.space.nodes["keep"] = _RegularStub("keep", "keep_backing")
+    d.space.public_nodes.add("keep")
+
+    reaped = []
+    monkeypatch.setattr(
+        d.graph,
+        "reap_stale_for_names",
+        lambda markers: reaped.append(list(markers)) or 0,
+    )
+
+    d._load_session(
+        {
+            "nodes": {
+                "keep": {
+                    "type": "regular_stub",
+                    "params": {"backing_node_name": "keep_backing"},
+                },
+                "fresh": {
+                    "type": "regular_stub",
+                    "params": {"backing_node_name": "fresh_backing"},
+                },
+            },
+            "edges": [],
+        }
+    )
+    assert reaped == [["fresh_backing"]]

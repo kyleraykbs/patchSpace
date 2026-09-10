@@ -3775,7 +3775,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         elif node_type in ("volume", "mute"):
             config["backing_node_name"] = f"volume_{node_id}"
             config["initial_volume"] = 1.0
-        elif node_type in ("echo_cancel", "noise_cancel", "reverb"):
+        elif node_type in ("echo_cancel", "light_noise_cancel", "noise_cancel", "reverb"):
             # No inline field/control for these (see NODE_TYPE_SPECS) -
             # just a real backing name, like volume/virtual_speaker/
             # virtual_mic above. Everything else (which LADSPA plugin

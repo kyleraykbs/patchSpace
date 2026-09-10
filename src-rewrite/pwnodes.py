@@ -1834,6 +1834,25 @@ class EchoCancelNode(BackedNode):
     # - see the note on _ChainEffect.ensure_module above.
 
 
+class LightNoiseCancelNode(EchoCancelNode):
+    """A mic-only take on EchoCancelNode: identical
+    libpipewire-module-echo-cancel backing and identical plumbing (mic/
+    probe/out dummies, their keepalives, the module's own capture/
+    playback streams), but the GUI exposes only the ``mic`` input - no
+    user-visible ``probe`` socket - so it reads as a plain one-in/one-out
+    noise suppressor rather than an echo canceller.
+
+    The module still creates its probe stream internally (and the probe
+    dummy is still fed), since libpipewire-module-echo-cancel always
+    does; it simply isn't surfaced as a connectable port. Biasing the
+    WebRTC plugin toward noise suppression over echo cancellation is a
+    matter of the ``aec_args`` Settings value."""
+
+    # The module is still the echo-cancel one, so the probe dummy must
+    # keep existing and being fed - see ensure_structural on the base.
+    pass
+
+
 # ---------------------------------------------------------------------------
 # The graph
 # ---------------------------------------------------------------------------

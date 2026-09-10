@@ -48,6 +48,7 @@ from pwnodes import (
     SensitivityGateNode,
     ReverbNode,
     EchoCancelNode,
+    LightNoiseCancelNode,
     VirtualSpeakerNode,
     VirtualMicNode,
     DeviceInputNode,
@@ -125,6 +126,7 @@ NODE_TYPE_REGISTRY: Dict[str, type] = {
     "sensitivity_gate": SensitivityGateNode,
     "reverb": ReverbNode,
     "echo_cancel": EchoCancelNode,
+    "light_noise_cancel": LightNoiseCancelNode,
     "device_input": DeviceInputNode,
     "device_output": DeviceOutputNode,
     "app_input": AppInputNode,
@@ -258,6 +260,7 @@ class PatchBayDaemon:
     _OWNED_PREFIXES = (
         "patchbay_",
         "echo_cancel_node_",
+        "light_noise_cancel_node_",
         "noise_cancel_node_",
         "reverb_node_",
         "volume_node_",
@@ -724,6 +727,40 @@ class PatchBayDaemon:
                 return False
             time.sleep(SESSION_LOAD_POLL_S)
 
+    def _careful_bring_up(self, node) -> bool:
+        """Bring one finicky effect node (see _CAREFUL_NODE_TYPES) up on
+        its own, staged so the periodic supervision tick leaves it alone,
+        and wait for its module interior to actually connect. This is the
+        single-node form of the dedicated careful pass _load_session runs
+        over every finicky node; _cmd_add_node uses it so a node created
+        at runtime can't have its edges wired before its capture/playback
+        streams exist (the "new echo-cancel node breaks the chain" bug).
+        Returns whether the node became ready; a timeout is not fatal -
+        the normal supervision tick keeps repairing it."""
+        self.space.stage([node.id])
+        try:
+            logger.info(
+                "Careful bring-up of %r before wiring its inputs\u2026", node.id
+            )
+            ready = self._bring_node_up(node)
+        finally:
+            self.space.unstage(node.id)
+        if not ready:
+            logger.warning(
+                "%r did not become ready within %.1fs - wiring it anyway; "
+                "the normal supervision tick will keep repairing it",
+                node.id,
+                SESSION_LOAD_NODE_TIMEOUT_S,
+            )
+        if not self._wait_node_internals_wired(node.id):
+            logger.warning(
+                "%r's interior did not finish wiring within %.1fs - wiring "
+                "its edges anyway",
+                node.id,
+                SESSION_LOAD_NODE_TIMEOUT_S,
+            )
+        return ready
+
     def _wait_node_internals_wired(self, node_id: str) -> bool:
         """Poll until `node_id`'s own module interior (capture/playback
         sandwich) is fully linked, the same short-poll discipline
@@ -879,9 +916,19 @@ class PatchBayDaemon:
             # does - cheaper, and it can't mistake a node created
             # earlier in *this same* load for a stale leftover of one
             # created later in it just because they share a prefix.
+            #
+            # Only nodes this load will actually *create* are swept.
+            # A node already in the space keeps its live objects: the
+            # loop below re-adopts the existing node object unchanged,
+            # so reaping its backing would kill the owning process of a
+            # perfectly healthy running node and leave it structurally
+            # present but silent - which then thrashes as the daemon
+            # tries to rebuild it. (Re-importing the current session is
+            # the common case: every node is "existing".)
             backing_names = [
                 (node_cfg.get("params") or {}).get("backing_node_name")
-                for node_cfg in nodes_cfg.values()
+                for node_id, node_cfg in nodes_cfg.items()
+                if node_id not in self.space.nodes
             ]
             backing_names = [b for b in backing_names if b]
             if backing_names:
@@ -1065,31 +1112,8 @@ class PatchBayDaemon:
                     # than being silently dropped.
                     processed_finicky.add(node_id)
                     continue
-                self.space.stage([node_id])
-                try:
-                    logger.info(
-                        "Careful bring-up of %r before wiring its inputs\u2026",
-                        node_id,
-                    )
-                    if not self._bring_node_up(node):
-                        if node_id not in not_ready:
-                            not_ready.append(node_id)
-                        logger.warning(
-                            "%r did not become ready within %.1fs during the "
-                            "careful pass - wiring it anyway; the normal "
-                            "supervision tick will keep repairing it",
-                            node_id,
-                            SESSION_LOAD_NODE_TIMEOUT_S,
-                        )
-                finally:
-                    self.space.unstage(node_id)
-                if not self._wait_node_internals_wired(node_id):
-                    logger.warning(
-                        "%r's interior did not finish wiring within %.1fs - "
-                        "wiring its edges anyway",
-                        node_id,
-                        SESSION_LOAD_NODE_TIMEOUT_S,
-                    )
+                if not self._careful_bring_up(node) and node_id not in not_ready:
+                    not_ready.append(node_id)
                 # Inputs (edges landing on this node) first, then outputs;
                 # one at a time, each confirmed live before the next.
                 inputs = [
@@ -1337,7 +1361,7 @@ class PatchBayDaemon:
                 g("ladspa_label", ""),
                 g("wet_dry", 0.3),
             )
-        if cls is EchoCancelNode:
+        if cls in (EchoCancelNode, LightNoiseCancelNode):
             return cls(
                 node_id,
                 backing,
@@ -1378,6 +1402,7 @@ class PatchBayDaemon:
         if cls is None:
             return {"status": "error", "message": f"Unknown node type: {node_type}"}
 
+        careful_node = None
         with self._lock:
             if node_id in self.space.nodes:
                 existing = self.space.nodes[node_id]
@@ -1426,14 +1451,34 @@ class PatchBayDaemon:
                 # Clean any leftover objects from an earlier (crashed) run
                 # before creating ours - see PipewireGraph.reap_stale_for_names.
                 self.graph.reap_stale_for_names([node.backing_node_name])
+            careful = isinstance(node, _CAREFUL_NODE_TYPES)
+            if careful:
+                # Stage before add_node so the periodic supervision tick
+                # can't touch this node while we bring it up below (same
+                # contract as _load_session's careful pass).
+                self.space.stage([node_id])
             self.space.add_node(node)
             if isinstance(node, SensitivityGateNode):
                 self._ensure_sensitivity_internals(node)
             if isinstance(node, LiveResolvableNode):
                 self._try_immediate_resolve(node)
-            self.space.supervise()
+            if careful:
+                careful_node = node
+            else:
+                self.space.supervise()
             self._dirty = True
-            return {"status": "ok", "node_id": node_id, "already_existed": False}
+
+        if careful_node is not None:
+            # Finicky effect modules (echo/noise cancel) publish their
+            # capture/playback streams asynchronously. Bring this one up
+            # on its own and let its interior connect before returning,
+            # so the edges the GUI wires next can't attach to a stream
+            # that isn't live yet - the "new echo-cancel node breaks the
+            # chain" failure mode.
+            self._careful_bring_up(careful_node)
+            with self._lock:
+                self.space.supervise()
+        return {"status": "ok", "node_id": node_id, "already_existed": False}
 
     def _cmd_remove_node(self, cmd: dict) -> dict:
         node_id = cmd.get("node_id")
@@ -1621,6 +1666,7 @@ class PatchBayDaemon:
         from_port = cmd.get("from_port", "out")
         if not from_node or not to_node:
             return {"status": "error", "message": "from_node and to_node required"}
+        careful = False
         with self._lock:
             logical_id = PatchSpace._edge_id(from_node, to_node, to_port, from_port)
             stored_from, stored_to = self._stored_endpoints(from_node, to_node)
@@ -1633,9 +1679,29 @@ class PatchBayDaemon:
                 self._store_edge(from_node, to_node, to_port, from_port)
             except (KeyError, ValueError) as exc:
                 return {"status": "error", "message": str(exc)}
-            self.space.sync()
+            careful = isinstance(
+                self.space.nodes.get(from_node), _CAREFUL_NODE_TYPES
+            ) or isinstance(self.space.nodes.get(to_node), _CAREFUL_NODE_TYPES)
+            if not careful:
+                self.space.sync()
             self._dirty = True
-            return {"status": "ok", "edge_id": logical_id, "already_existed": False}
+
+        if careful:
+            # An echo/noise-cancel endpoint publishes its capture/
+            # playback streams asynchronously. Wire this edge the
+            # careful way - drop/re-make, waiting for the live link - so
+            # an edge to a node created this session doesn't end up
+            # present-but-silent. Edge-side mirror of _cmd_add_node's
+            # careful bring-up.
+            self._relink_edge_carefully(
+                {
+                    "from": from_node,
+                    "to": to_node,
+                    "to_port": to_port,
+                    "from_port": from_port,
+                }
+            )
+        return {"status": "ok", "edge_id": logical_id, "already_existed": False}
 
     def _cmd_remove_edge(self, cmd: dict) -> dict:
         edge_id = cmd.get("edge_id")
