@@ -115,12 +115,14 @@ class NodeSpec:
         self.label = label
         self.inputs = inputs
         self.outputs = outputs
-        # None | "gate" | "volume" | "wetdry" | "threshold" - which
+        # None | "gate" | "volume" | "wetdry" | "sensitivity" - which
         # inline control (if any) is drawn on the node body and wired
         # to a daemon command. "gate" is the on/off toggle, "volume"
         # the gain slider, "wetdry" the 0..1 dry/wet mix slider
-        # (Reverb), "threshold" the 0-100 sensitivity slider
-        # (Sensitivity Gate).
+        # (Reverb), "sensitivity" the Sensitivity Gate's 0..1
+        # gain-staging slider (handed to the daemon, which drives the
+        # hidden pre/post Volume nodes it owns - see that node's
+        # comment below).
         self.control = control
         # None | "pattern" | "media_class" | "description" - which
         # single string property (if any) is edited via an inline
@@ -188,8 +190,40 @@ NODE_TYPE_SPECS.update(
                 ("ladspa_label", "Override plugin label (blank = auto):", "text"),
             ],
         ),
+        # control="sensitivity" is the Sensitivity Gate's 0..1 inline
+        # slider. It is deliberately *not* wired to this node's own live
+        # LADSPA threshold (that set-param path isn't reliable on every
+        # build - see SensitivityGateNode's docstring). Instead the
+        # daemon invisibly brackets every Sensitivity gate with two
+        # hidden VolumeProcessNodes - a pre-gain and an equal-and-
+        # opposite post-gain (main.py's _ensure_sensitivity_internals) -
+        # and routes the user's edges through them. The pre gain swings
+        # below unity (more aggressive gating) and above it (opens more
+        # easily), with the post node's reciprocal keeping output
+        # loudness constant. The slider just sends
+        # set_node_property("sensitivity", <0..1>) and the daemon drives
+        # both hidden nodes (main.py's _apply_sensitivity), so there is
+        # nothing for the user to create or wire and the control works
+        # the moment the node exists. `level` (this node's static
+        # threshold, in dB terms via THRESHOLD_DB_AT_LEVEL_0/100) remains
+        # a Settings-dialog-only value, same as Noise Cancel's
+        # vad_threshold - the fixed point the gain staging pushes signal
+        # across.
         "sensitivity_gate": NodeSpec(
-            "Sensitivity", ["in"], ["out"], control="threshold"
+            "Sensitivity",
+            ["in"],
+            ["out"],
+            control="sensitivity",
+            settings=[
+                (
+                    "level",
+                    "Fixed gate threshold (0-100, not live-adjustable):",
+                    "number",
+                    {"min": 0, "max": 100, "step": 1},
+                ),
+                ("ladspa_plugin", "Override plugin path (blank = auto):", "text"),
+                ("ladspa_label", "Override plugin label (blank = auto):", "text"),
+            ],
         ),
         # Reverb's only real dial - the dry/wet mix - is drawn as an
         # inline slider on the node body (control="wetdry") rather than

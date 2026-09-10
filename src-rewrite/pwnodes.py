@@ -790,7 +790,17 @@ class VolumeProcessNode(_SingleSinkNode):
         actual = self.volume_min + (self.volume_max - self.volume_min) * self.volume
         logger.info("Volume for %s set to %.2f (fraction %.2f)",
                     self.backing_node_name, actual, self.volume)
-        _run_wpctl("set-volume", b.node_id, actual)
+        # wpctl silently clamps to 1.0 (100%) unless told otherwise -
+        # without an explicit -l/--limit, any `actual` above 1.0 (a
+        # boosted volume_max, e.g. the hidden pre-gain node the daemon
+        # brackets a Sensitivity gate with - see main.py's
+        # _ensure_sensitivity_internals) would just get capped back
+        # down to 100% and the boost would never actually apply. The
+        # limit tracks volume_max so a node configured for boost can
+        # reach it, while an ordinary 0..1 node (limit 1.0) behaves
+        # exactly as before.
+        limit = max(1.0, self.volume_max)
+        _run_wpctl("set-volume", b.node_id, actual, "-l", f"{limit:.3f}")
         self._volume_applied_to = b.node_id
 
     def set_volume(self, fraction: float) -> None:
@@ -1090,6 +1100,24 @@ class _ChainEffect(BackedNode):
     # implementation to keep in sync with.
 
 
+def _ladspa_search_paths():
+    """Non-/usr locations to probe for a LADSPA plugin, beyond
+    LADSPA_PATH and a hardcoded /usr candidate list: a user nix
+    profile, the system profile, and the current user's per-user
+    profile.  Shared by every LADSPA-backed node (NoiseCancelNode,
+    SensitivityGateNode, ...) so a distro that keeps plugins out of
+    /usr (NixOS) is handled once, not per-node."""
+    bases = [
+        os.path.expanduser("~/.nix-profile/lib/ladspa"),
+        os.path.expanduser("~/.nix-profile/lib64/ladspa"),
+        "/run/current-system/sw/lib/ladspa",
+    ]
+    user = os.environ.get("USER", "")
+    if user:
+        bases.append(f"/etc/profiles/per-user/{user}/lib/ladspa")
+    return bases
+
+
 class NoiseCancelNode(_ChainEffect):
     """RNNoise LADSPA denoiser (librnnoise_ladspa.so,
     "noise_suppressor_mono").  ``vad_threshold`` is a live LADSPA
@@ -1126,7 +1154,7 @@ class NoiseCancelNode(_ChainEffect):
     def _plugin_candidates(cls):
         rel = "librnnoise_ladspa.so"
         candidates = list(cls._CANDIDATES)
-        for base in cls._ladspa_search_paths():
+        for base in _ladspa_search_paths():
             candidates.append(os.path.join(base, rel))
         for entry in os.environ.get("LADSPA_PATH", "").split(":"):
             entry = entry.strip()
@@ -1136,18 +1164,6 @@ class NoiseCancelNode(_ChainEffect):
         if store:
             candidates.append(store)
         return candidates
-
-    @staticmethod
-    def _ladspa_search_paths():
-        bases = [
-            os.path.expanduser("~/.nix-profile/lib/ladspa"),
-            os.path.expanduser("~/.nix-profile/lib64/ladspa"),
-            "/run/current-system/sw/lib/ladspa",
-        ]
-        user = os.environ.get("USER", "")
-        if user:
-            bases.append(f"/etc/profiles/per-user/{user}/lib/ladspa")
-        return bases
 
     def _resolve_plugin(self):
         """(plugin path, label) for the filter graph: the explicit config
@@ -1243,69 +1259,178 @@ class ReverbNode(_ChainEffect):
 
 
 class SensitivityGateNode(_ChainEffect):
-    """A Discord-style voice-activity gate backed by Calf's plain "Gate"
-    LV2 plugin (a real downward expander with a live-settable
-    threshold), instead of a hard-knee LADSPA gate whose threshold could
-    only change by reloading (glitchy) or by gain-staging workarounds.
+    """A Discord-style voice-activity gate backed by ``gate_1410.so``
+    (label ``gate``) from Steve Harris's swh-plugins - a real, mono
+    LADSPA gate modelled on the Drawmer DS-201, ships at
+    ``/usr/lib/ladspa/gate_1410.so`` on most distros.  Mono in/out, same
+    as NoiseCancelNode's rnnoise plugin - filter-chain auto-duplicates
+    it per channel the same proven way, using the same plugin-lookup
+    machinery (_ladspa_search_paths / LADSPA_PATH / nix store probing).
 
-    ``level`` (0-100, higher = needs a louder signal) maps to Calf's
-    linear "threshold" control port and is pushed live via set-param -
-    no module reload, safe to call on every slider tick."""
+    This replaces an earlier attempt built on PipeWire filter-chain's
+    own ``builtin`` "noisegate" label, which produced no audio at any
+    sensitivity setting - a real, if under-documented, builtin filter
+    (its ports and control names checked out against the module's own
+    manpage), but not one that could be made to pass signal here. A
+    real, independently-shipped LADSPA plugin - already the pattern
+    NoiseCancelNode uses successfully - is the more debuggable
+    backend: it's a plugin with an install path we can verify exists,
+    not a builtin filter this daemon can only load and hope loaded
+    correctly.
 
-    LV2_URI = "http://calf.sourceforge.net/plugins/Gate"
-    RATIO = 4.0
+    ``level`` (0-100) is exactly what NoiseCancelNode's vad_threshold
+    is: a live LADSPA control pushed straight to the module's own
+    pw-cli session via set_param, never a module reload. It maps
+    linearly onto [THRESHOLD_DB_AT_LEVEL_0, THRESHOLD_DB_AT_LEVEL_100]
+    - level 100 is most sensitive (a low, easy-to-cross threshold),
+    level 0 is least sensitive (a threshold only a loud, close voice
+    reaches). That range is deliberately narrower than the plugin's
+    full -70..+20 dB span: the full span includes thresholds that are
+    either always crossed or nearly never crossed by a normal mic
+    signal, which is exactly the "every slider position does nothing"
+    failure mode this node is replacing.
+
+    RANGE_DB is the plugin's own "Range (dB)" control - how far it
+    attenuates when closed, not necessarily to absolute silence.
+    Deliberately not the plugin's max attenuation (-90 dB, effectively
+    dead silence): a threshold that's slightly mistuned degrades
+    instead of going fully silent, which is the more diagnosable
+    failure mode if this needs tuning further.
+
+    Known issue - set_level()'s live update doesn't reach the running
+    gate: unlike NoiseCancelNode's vad_threshold (which this mirrors
+    exactly - same mod.set_param("Props", ...) pattern against the
+    same module_backing()), changing `level` after creation doesn't
+    audibly change the gate. The node gates correctly at whatever
+    level it was *created* with; only the live set-param path is
+    suspect. Two live candidates, neither confirmed here (no running
+    PipeWire to test against): (a) filter-chain's Props interface
+    may not expose per-LADSPA-control set-param support the same way
+    for every plugin/build, or (b) "Threshold (dB)" may not be the
+    exact control name this build's gate_1410.so registers. Until
+    that's confirmed, node_specs.py's sensitivity_gate spec no longer
+    offers a live inline slider for `level` - it's a Settings-dialog,
+    create-time-only value instead.
+
+    The inline sensitivity slider instead drives the hidden pre/post
+    VolumeProcessNodes the daemon brackets this gate with (`sensitivity`,
+    the 0..1 slider value here) - gain-staging around a fixed-level gate
+    rather than trying to move its threshold live. The pre gain swings
+    below and above unity (see PRE_GAIN_MIN/PRE_GAIN_MAX below) so the
+    slider can both make the gate harder to open and easier to open,
+    with the post node's reciprocal keeping the output level constant.
+    See main.py's _ensure_sensitivity_internals / _apply_sensitivity."""
+
+    LABEL = "gate"
+    _CANDIDATES = (
+        "/usr/lib/ladspa/gate_1410.so",
+        "/usr/lib/x86_64-linux-gnu/ladspa/gate_1410.so",
+        "/usr/lib64/ladspa/gate_1410.so",
+    )
+
+    # Real LADSPA control-port names from gate_1410's own port spec -
+    # these are what filter-chain's control={} keys must match exactly.
+    _THRESHOLD_CONTROL = "Threshold (dB)"
+    _RANGE_CONTROL = "Range (dB)"
+    _ATTACK_CONTROL = "Attack (ms)"
+    _HOLD_CONTROL = "Hold (ms)"
+    _DECAY_CONTROL = "Decay (ms)"
+    _SELECT_CONTROL = "Output select (-1 = key listen, 0 = gate, 1 = bypass)"
+
+    THRESHOLD_DB_AT_LEVEL_0 = -10.0    # least sensitive
+    THRESHOLD_DB_AT_LEVEL_100 = -60.0  # most sensitive
+    RANGE_DB = -60.0
     ATTACK_MS = 5.0
-    RELEASE_MS = 200.0
-    KNEE = 6.0
-    MAKEUP = 1.0
-    # How far the gate ducks when the signal is below threshold.  Calf's
-    # default is only ~ -24 dB ("Max Gain Reduction"), which leaves a
-    # closed gate audibly open - a real gate has to go to the floor.
-    # 1e-4 is ~ -80 dB (Calf's own floor is ~ -96 dB), i.e. effectively
-    # silent when closed.
-    RANGE = 1.0e-4
-    # level 0..100 -> threshold in dB, most- to least-sensitive.  The
-    # top end reaches -3 dBFS (not -15 dBFS): mic signals in a typical
-    # chain sit around -15..-6 dBFS, and if the loudest threshold a user
-    # can set is below their signal the gate never closes no matter how
-    # far they drag the slider - which is what made the gate feel like it
-    # "didn't gate anything".
-    THRESHOLD_MIN_DB = -60.0
-    THRESHOLD_MAX_DB = -3.0
+    HOLD_MS = 50.0
+    DECAY_MS = 200.0
+    SELECT_GATE = 0  # normal gated output (not key-listen, not bypass)
+
+    # The sensitivity slider (0..1) is realised by gain-staging the
+    # hidden VolumeProcessNodes the daemon brackets this gate with (see
+    # main.py's _ensure_sensitivity_internals) rather than by moving the
+    # gate's own `level` live - that live LADSPA set-param path is not
+    # reliable on every build. `sensitivity` is the 0..1 slider value:
+    # the pre node's gain swings across PRE_GAIN_MIN..PRE_GAIN_MAX and
+    # the post node applies the exact reciprocal so output loudness stays
+    # constant.
+    #
+    # PRE_GAIN_MIN is deliberately *below* unity (not 1.0): the fixed
+    # gate threshold can only be made more aggressive - gate harder,
+    # close on quieter room tone - by feeding the gate a quieter signal.
+    # A boost-only range (min 1.0) leaves the slider unable to do
+    # anything at its low end, which is the "gate isn't aggressive enough
+    # to be audible" failure. The top end still boosts well above unity
+    # so the slider can also make the gate open on near-whispers.
+    PRE_GAIN_MIN = 0.1
+    PRE_GAIN_MAX = 4.0
+
+    # The post/output stage has to apply the reciprocal of *whichever*
+    # pre gain is set, including the up-to-1/PRE_GAIN_MIN makeup needed
+    # when the pre node is attenuating. That is far above wpctl's normal
+    # 100% ceiling, so it gets its own max (and, in VolumeProcessNode,
+    # a matching wpctl --limit); capping it at 1.0 - as the daemon used
+    # to - silently clamps the makeup gain and the output level sags
+    # whenever the gate is made more aggressive.
+    POST_GAIN_MAX = 1.0 / PRE_GAIN_MIN
 
     def __init__(self, node_id, backing_node_name: str,
-                 level: float = 25.0, lv2_uri: str = "",
+                 level: float = 25.0, sensitivity: float = 0.0,
+                 ladspa_plugin: str = "", ladspa_label: str = "",
                  pw_cli_command=("pw-cli",), settle: float = 0.3, **_ignored):
         super().__init__(node_id, backing_node_name, pw_cli_command, settle)
         self.level = max(0.0, min(100.0, level))
-        self.lv2_uri = lv2_uri
-        self._control_applied_to: Optional[int] = None
-
-    def _resolve_uri(self) -> str:
-        return self.lv2_uri or self.LV2_URI
+        self.sensitivity = max(0.0, min(1.0, sensitivity))
+        self.ladspa_plugin = ladspa_plugin
+        self.ladspa_label = ladspa_label
+        self._control_applied_to: Optional[Tuple[int, float]] = None
 
     @classmethod
-    def _level_to_threshold(cls, level: float) -> float:
-        level = max(0.0, min(100.0, level))
-        db = cls.THRESHOLD_MIN_DB + (cls.THRESHOLD_MAX_DB - cls.THRESHOLD_MIN_DB) * (level / 100.0)
-        return _db_to_linear(db)
+    def _plugin_candidates(cls):
+        rel = "gate_1410.so"
+        candidates = list(cls._CANDIDATES)
+        for base in _ladspa_search_paths():
+            candidates.append(os.path.join(base, rel))
+        for entry in os.environ.get("LADSPA_PATH", "").split(":"):
+            entry = entry.strip()
+            if entry:
+                candidates.append(os.path.join(entry, rel))
+        store = _store_ladspa_candidate("swh-plugins", f"lib/ladspa/{rel}")
+        if store:
+            candidates.append(store)
+        return candidates
+
+    def _resolve_plugin(self):
+        if self.ladspa_plugin and self.ladspa_label:
+            return self.ladspa_plugin, self.ladspa_label
+        for path in self._plugin_candidates():
+            if path and os.path.isfile(path):
+                return path, self.LABEL
+        return self._CANDIDATES[0], self.LABEL
+
+    def _threshold_db(self) -> float:
+        # level 0 -> THRESHOLD_DB_AT_LEVEL_0 (least sensitive), level
+        # 100 -> THRESHOLD_DB_AT_LEVEL_100 (most sensitive).
+        frac = self.level / 100.0
+        return self.THRESHOLD_DB_AT_LEVEL_0 + frac * (
+            self.THRESHOLD_DB_AT_LEVEL_100 - self.THRESHOLD_DB_AT_LEVEL_0
+        )
 
     def _module_command_args(self) -> str:
-        threshold = self._level_to_threshold(self.level)
+        plugin, label = self._resolve_plugin()
         return (
             f'node.description = "{self.id}" '
             "filter.graph = { nodes = [ { "
-            "type = lv2 "
+            "type = ladspa "
             f"name = {self.backing_node_name}_plugin "
-            f'plugin = "{self._resolve_uri()}" '
+            f"plugin = {plugin} "
+            f"label = {label} "
             "control = { "
-            f'"threshold" = {threshold:.6f} '
-            f'"ratio" = {self.RATIO:.2f} '
-            f'"attack" = {self.ATTACK_MS:.2f} '
-            f'"release" = {self.RELEASE_MS:.2f} '
-            f'"knee" = {self.KNEE:.4f} '
-            f'"makeup" = {self.MAKEUP:.2f} '
-            f'"range" = {self.RANGE:.6g} '
+            f'"{self._THRESHOLD_CONTROL}" = {self._threshold_db():.2f} '
+            f'"{self._RANGE_CONTROL}" = {self.RANGE_DB:.2f} '
+            f'"{self._ATTACK_CONTROL}" = {self.ATTACK_MS:.2f} '
+            f'"{self._HOLD_CONTROL}" = {self.HOLD_MS:.2f} '
+            f'"{self._DECAY_CONTROL}" = {self.DECAY_MS:.2f} '
+            f'"{self._SELECT_CONTROL}" = {self.SELECT_GATE} '
             "} } ] } "
             "capture.props = { "
             f'node.name = "{self._capture_name}" '
@@ -1323,11 +1448,14 @@ class SensitivityGateNode(_ChainEffect):
         mod = self.module_backing()
         if mod is None or mod.node_id is None:
             return
-        if mod.node_id == self._control_applied_to:
+        threshold = round(self._threshold_db(), 2)
+        key = (mod.node_id, threshold)
+        if self._control_applied_to == key:
             return
-        threshold = self._level_to_threshold(self.level)
-        mod.set_param("Props", f'{{ params = [ "threshold" {threshold:.6f} ] }}')
-        self._control_applied_to = mod.node_id
+        mod.set_param(
+            "Props", f'{{ params = [ "{self._THRESHOLD_CONTROL}" {threshold:.2f} ] }}'
+        )
+        self._control_applied_to = key
 
     def set_level(self, value: float) -> None:
         self.level = max(0.0, min(100.0, value))

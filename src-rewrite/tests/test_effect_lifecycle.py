@@ -76,8 +76,9 @@ def names():
 def test_effect_gets_stable_sockets_first_module_later():
     """add_node must create the stable dummy sockets immediately and
     leave the (fallible) DSP module to the supervision pass."""
-    space = make_space(FakeGraph(), repair_gate=pwnodes.Backoff(
-        initial_s=0, jitter_fraction=0))
+    space = make_space(
+        FakeGraph(), repair_gate=pwnodes.Backoff(initial_s=0, jitter_fraction=0)
+    )
     space.mark_graph_loaded()
 
     node = NoiseCancelNode("n", "fx")
@@ -87,13 +88,14 @@ def test_effect_gets_stable_sockets_first_module_later():
     assert "fx" not in names()  # module not spawned yet
 
     space.supervise()
-    assert "fx" in names()          # module now materialised
-    assert "fx_fx_out" in names()   # plus its playback sibling
+    assert "fx" in names()  # module now materialised
+    assert "fx_fx_out" in names()  # plus its playback sibling
 
 
 def test_missing_module_is_retried_not_duplicated():
-    space = make_space(FakeGraph(), repair_gate=pwnodes.Backoff(
-        initial_s=0, jitter_fraction=0))
+    space = make_space(
+        FakeGraph(), repair_gate=pwnodes.Backoff(initial_s=0, jitter_fraction=0)
+    )
     space.mark_graph_loaded()
     node = NoiseCancelNode("n", "fx")
     space.add_node(node)
@@ -110,8 +112,9 @@ def test_missing_module_is_retried_not_duplicated():
 
 
 def test_crashed_module_interior_is_reloaded():
-    space = make_space(FakeGraph(), repair_gate=pwnodes.Backoff(
-        initial_s=0, jitter_fraction=0))
+    space = make_space(
+        FakeGraph(), repair_gate=pwnodes.Backoff(initial_s=0, jitter_fraction=0)
+    )
     space.mark_graph_loaded()
     node = NoiseCancelNode("n", "fx")
     space.add_node(node)
@@ -130,14 +133,17 @@ def test_crashed_module_interior_is_reloaded():
 
 
 def test_reload_module_swaps_interior_keeps_sockets():
-    space = make_space(FakeGraph(), repair_gate=pwnodes.Backoff(
-        initial_s=0, jitter_fraction=0))
+    space = make_space(
+        FakeGraph(), repair_gate=pwnodes.Backoff(initial_s=0, jitter_fraction=0)
+    )
     space.mark_graph_loaded()
     node = SensitivityGateNode("n", "gate", level=30.0)
     space.add_node(node)
     space.supervise()
 
-    fx_out_names_before = {i.name for i in FakeCli.instances if i.name.startswith("gate_fx_out")}
+    fx_out_names_before = {
+        i.name for i in FakeCli.instances if i.name.startswith("gate_fx_out")
+    }
     assert fx_out_names_before
 
     node.reload_module()
@@ -146,21 +152,56 @@ def test_reload_module_swaps_interior_keeps_sockets():
     assert "gate_out" in names()
 
 
-def test_control_param_reapplied_after_module_recreation():
-    space = make_space(FakeGraph(), repair_gate=pwnodes.Backoff(
-        initial_s=0, jitter_fraction=0))
+def test_sensitivity_drives_ladspa_gate_threshold_live():
+    """Sensitivity drives swh-plugins gate_1410's own LADSPA threshold
+    live, via set_param into the running module - no reload on a slider
+    tick, and no gain-staging trick around it."""
+    space = make_space(
+        FakeGraph(), repair_gate=pwnodes.Backoff(initial_s=0, jitter_fraction=0)
+    )
     space.mark_graph_loaded()
-    node = SensitivityGateNode("n", "gate", level=25.0)
+    node = SensitivityGateNode(
+        "n",
+        "gate",
+        level=100.0,
+        ladspa_plugin="/plugins/gate_1410.so",
+        ladspa_label="gate",
+    )
     space.add_node(node)
     space.supervise()
-    node._resolve_backings = None  # no-op guard below not needed
+
+    # Module graph is the real gate_1410 LADSPA plugin, not the
+    # filter-chain builtin noisegate that never passed signal.
+    args = node._module_command_args()
+    assert "type = ladspa" in args
+    assert "plugin = /plugins/gate_1410.so" in args
+    assert "label = gate" in args
+    assert '"Threshold (dB)" = -60.00' in args  # level=100: most sensitive
+    assert '"Range (dB)" = -60.00' in args
+    assert '"Output select (-1 = key listen, 0 = gate, 1 = bypass)" = 0' in args
+    assert "type = builtin" not in args
+    assert "label = noisegate" not in args
 
     module = node.module_backing()
+    assert module is not None and module.name == "gate"
+    assert module.set_params == []  # nothing pushed until node_id resolves
+
     module.node_id = 101
     node.refresh_live()
-    assert module.set_params  # threshold pushed once
+    assert len(module.set_params) == 1
+    iface, body = module.set_params[0]
+    assert iface == "Props"
+    assert '"Threshold (dB)" -60.00' in body
 
-    module.set_params.clear()
-    node.set_level(60.0)
-    assert node.level == 60.0
-    assert module.set_params  # pushed again live, no reload needed
+    # A second refresh at the same level is a no-op (cached).
+    node.refresh_live()
+    assert len(module.set_params) == 1
+
+    # level=0 is least sensitive - the threshold climbs back toward the
+    # louder end. Changing the level re-pushes live - no reload.
+    node.set_level(0.0)
+    assert node.level == 0.0
+    assert len(module.set_params) == 2
+    iface, body = module.set_params[-1]
+    assert iface == "Props"
+    assert '"Threshold (dB)" -10.00' in body

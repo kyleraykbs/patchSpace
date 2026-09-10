@@ -109,6 +109,36 @@ NODE_TYPE_REGISTRY: Dict[str, type] = {
 }
 CLASS_TO_TYPE = {cls: key for key, cls in NODE_TYPE_REGISTRY.items()}
 
+# Hidden per-Sensitivity-gate gain-staging nodes. A SensitivityGateNode
+# is always bracketed by two daemon-owned VolumeProcessNodes - a pre
+# booster and a reciprocal post cut - so the GUI's sensitivity slider
+# has a working, always-present control without the user ever creating
+# or wiring a Volume node by hand. Both are added with public=False (so
+# get_nodes/export never show them) and the daemon routes the user's
+# edges through them transparently; see _ensure_sensitivity_internals
+# and _stored_endpoints below.
+_SENS_PRE_PREFIX = "__sens_pre__"
+_SENS_POST_PREFIX = "__sens_post__"
+
+
+def _sens_pre_id(gate_id: str) -> str:
+    return f"{_SENS_PRE_PREFIX}{gate_id}"
+
+
+def _sens_post_id(gate_id: str) -> str:
+    return f"{_SENS_POST_PREFIX}{gate_id}"
+
+
+def _hidden_sensitivity_gate_for(node_id: str) -> Optional[str]:
+    """The Sensitivity gate a hidden pre/post volume node belongs to,
+    or None if `node_id` is an ordinary node. Used to translate the
+    daemon's internal edges into the logical edges the GUI sees."""
+    if node_id.startswith(_SENS_PRE_PREFIX):
+        return node_id[len(_SENS_PRE_PREFIX):]
+    if node_id.startswith(_SENS_POST_PREFIX):
+        return node_id[len(_SENS_POST_PREFIX):]
+    return None
+
 
 # Attributes a node may expose; included in serialization whenever
 # present.  Kept in one place so get_nodes / export can't drift.
@@ -133,9 +163,9 @@ _SERIAL_ATTRS = (
     "ladspa_plugin",
     "ladspa_label",
     "vad_threshold",
-    "lv2_uri",
     "wet_dry",
     "level",
+    "sensitivity",
 )
 
 
@@ -507,14 +537,18 @@ class PatchBayDaemon:
                 if label:
                     params["label"] = label
                 nodes[node_id] = {"type": node_type, "params": params}
-            edges = [
-                (
-                    {"from": e.from_node, "to": e.to_node}
-                    if e.to_port == "in"
-                    else {"from": e.from_node, "to": e.to_node, "to_port": e.to_port}
-                )
-                for e in self.space.edges.values()
-            ]
+            edges = []
+            for e in self.space.edges.values():
+                logical = self._logical_edge(e)
+                if logical is None:
+                    continue
+                from_node, to_node, to_port = logical
+                if to_port == "in":
+                    edges.append({"from": from_node, "to": to_node})
+                else:
+                    edges.append(
+                        {"from": from_node, "to": to_node, "to_port": to_port}
+                    )
         return {"nodes": nodes, "edges": edges}
 
     def _auto_export_session(self) -> None:
@@ -681,6 +715,8 @@ class PatchBayDaemon:
                             setattr(existing, key, value)
                     if hasattr(existing, "apply_device_settings"):
                         existing.apply_device_settings()
+                    if isinstance(existing, SensitivityGateNode):
+                        self._ensure_sensitivity_internals(existing)
                     updated.append(node_id)
                     if isinstance(existing, BackedNode):
                         backed_ids.append(node_id)
@@ -693,6 +729,8 @@ class PatchBayDaemon:
                 if "label" in params:
                     node.label = params["label"]
                 self.space.add_node(node)
+                if isinstance(node, SensitivityGateNode):
+                    backed_ids.extend(self._ensure_sensitivity_internals(node))
                 if isinstance(node, LiveResolvableNode):
                     self._try_immediate_resolve(node)
                 created.append(node_id)
@@ -740,14 +778,16 @@ class PatchBayDaemon:
                 if not from_node or not to_node:
                     edge_failures.append((edge, "missing from/to"))
                     continue
-                edge_id = PatchSpace._edge_id(from_node, to_node, to_port)
-                if edge_id in self.space.edges:
+                logical_id = PatchSpace._edge_id(from_node, to_node, to_port)
+                stored_from, stored_to = self._stored_endpoints(from_node, to_node)
+                stored_id = PatchSpace._edge_id(stored_from, stored_to, to_port)
+                if stored_id in self.space.edges:
                     continue
                 try:
-                    self.space.add_edge(from_node, to_node, to_port)
-                    edges_created.append(edge_id)
+                    self._store_edge(from_node, to_node, to_port)
+                    edges_created.append(logical_id)
                 except (KeyError, ValueError) as exc:
-                    edge_failures.append((edge_id, str(exc)))
+                    edge_failures.append((logical_id, str(exc)))
             self.space.supervise()
 
         self._dirty = True
@@ -864,7 +904,12 @@ class PatchBayDaemon:
             )
         if cls is SensitivityGateNode:
             return cls(
-                node_id, backing, level=g("level", 25.0), lv2_uri=g("lv2_uri", "")
+                node_id,
+                backing,
+                level=g("level", 25.0),
+                sensitivity=g("sensitivity", 0.0),
+                ladspa_plugin=g("ladspa_plugin", ""),
+                ladspa_label=g("ladspa_label", ""),
             )
         if cls is ReverbNode:
             return cls(
@@ -923,8 +968,15 @@ class PatchBayDaemon:
                         "status": "error",
                         "message": f"Node {node_id} exists but with a different type",
                     }
-                # Idempotent re-apply: update config fields.
+                # Idempotent re-apply: update config fields. "level" on a
+                # SensitivityGateNode is excluded here and handled below via
+                # set_level() - a raw setattr skips both the 0..100 clamp
+                # and the _control_applied_to cache reset, so a replayed
+                # config wouldn't re-push the live LADSPA threshold a level
+                # change needs (see SensitivityGateNode's docstring).
                 for key, value in config.items():
+                    if key == "level" and isinstance(existing, SensitivityGateNode):
+                        continue
                     if hasattr(existing, key):
                         setattr(existing, key, value)
                 if isinstance(existing, VolumeProcessNode):
@@ -938,7 +990,11 @@ class PatchBayDaemon:
                 if hasattr(existing, "apply_device_settings"):
                     existing.apply_device_settings()
                 if isinstance(existing, SensitivityGateNode):
-                    existing.refresh_live()
+                    if "level" in config:
+                        existing.set_level(config["level"])
+                    else:
+                        existing.refresh_live()
+                    self._ensure_sensitivity_internals(existing)
                 self.space.sync()
                 return {"status": "ok", "node_id": node_id, "already_existed": True}
 
@@ -952,6 +1008,8 @@ class PatchBayDaemon:
                 # before creating ours - see PipewireGraph.reap_stale_for_names.
                 self.graph.reap_stale_for_names([node.backing_node_name])
             self.space.add_node(node)
+            if isinstance(node, SensitivityGateNode):
+                self._ensure_sensitivity_internals(node)
             if isinstance(node, LiveResolvableNode):
                 self._try_immediate_resolve(node)
             self.space.supervise()
@@ -966,6 +1024,12 @@ class PatchBayDaemon:
                 or node_id not in self.space.public_nodes
             ):
                 return {"status": "error", "message": f"Node {node_id} not found"}
+            if isinstance(self.space.nodes.get(node_id), SensitivityGateNode):
+                # Drop the hidden gain-staging children this gate owns -
+                # removing the gate alone would orphan them.
+                for child in (_sens_pre_id(node_id), _sens_post_id(node_id)):
+                    if child in self.space.nodes:
+                        self.space.remove_node(child)
             self.space.remove_node(node_id)
             self.space.sync()
             self._dirty = True
@@ -979,13 +1043,144 @@ class PatchBayDaemon:
                 "message": "old_node_id and new_node_id required",
             }
         with self._lock:
+            is_sensitivity = isinstance(
+                self.space.nodes.get(old_id), SensitivityGateNode
+            )
             try:
                 self.space.rename_node(old_id, new_id)
             except (KeyError, ValueError) as exc:
                 return {"status": "error", "message": str(exc)}
+            if is_sensitivity:
+                # Hidden children are keyed off the gate id; carry them
+                # along so the pre/post mapping keeps resolving.
+                for old_child, new_child in (
+                    (_sens_pre_id(old_id), _sens_pre_id(new_id)),
+                    (_sens_post_id(old_id), _sens_post_id(new_id)),
+                ):
+                    if old_child in self.space.nodes:
+                        try:
+                            self.space.rename_node(old_child, new_child)
+                        except (KeyError, ValueError):
+                            pass
             self.space.sync()
             self._dirty = True
             return {"status": "ok", "node_id": new_id}
+
+    # ------------------------------------------------------------------
+    # hidden Sensitivity-gate gain staging
+    # ------------------------------------------------------------------
+
+    def _ensure_sensitivity_internals(self, gate) -> list:
+        """Create the hidden pre/post VolumeProcessNodes bracketing a
+        Sensitivity gate (if absent) and wire the two internal edges
+        that put them in the signal path: pre -> gate -> post. Called
+        under self._lock whenever a Sensitivity node is added or a
+        session carrying one is loaded. Returns the ids it created so a
+        session load can also bring their modules up."""
+        gate_id = gate.id
+        pre_id = _sens_pre_id(gate_id)
+        post_id = _sens_post_id(gate_id)
+        created = []
+        if pre_id not in self.space.nodes:
+            pre = VolumeProcessNode(
+                pre_id,
+                f"patchbay_{pre_id}",
+                initial_volume=gate.sensitivity,
+                volume_min=SensitivityGateNode.PRE_GAIN_MIN,
+                volume_max=SensitivityGateNode.PRE_GAIN_MAX,
+            )
+            self.space.add_node(pre, public=False)
+            created.append(pre_id)
+        if post_id not in self.space.nodes:
+            post = VolumeProcessNode(
+                post_id,
+                f"patchbay_{post_id}",
+                initial_volume=1.0,
+                volume_min=0.0,
+                volume_max=SensitivityGateNode.POST_GAIN_MAX,
+            )
+            self.space.add_node(post, public=False)
+            created.append(post_id)
+        for a, b in ((pre_id, gate_id), (gate_id, post_id)):
+            eid = PatchSpace._edge_id(a, b, "in")
+            if eid not in self.space.edges:
+                try:
+                    self.space.add_edge(a, b, "in")
+                except (KeyError, ValueError):
+                    pass
+        self._apply_sensitivity(gate)
+        return created
+
+    def _apply_sensitivity(self, gate) -> None:
+        """Push a Sensitivity gate's 0..1 slider value onto its hidden
+        pre/post volume nodes: the pre node's gain swings across
+        PRE_GAIN_MIN..PRE_GAIN_MAX, the post node applies the exact
+        reciprocal so output loudness is unchanged. No-op (and never
+        raises) until both hidden nodes exist."""
+        pre = self.space.nodes.get(_sens_pre_id(gate.id))
+        post = self.space.nodes.get(_sens_post_id(gate.id))
+        if not isinstance(pre, VolumeProcessNode) or not isinstance(
+            post, VolumeProcessNode
+        ):
+            return
+        fraction = max(0.0, min(1.0, getattr(gate, "sensitivity", 0.0)))
+        pre.set_volume(fraction)
+        pre_actual = pre.volume_min + (pre.volume_max - pre.volume_min) * fraction
+        if pre_actual <= 1e-6:
+            return
+        # The post node's own volume is a fraction of its range, not the
+        # gain itself - convert the desired reciprocal gain into that
+        # range so a post max above unity actually reaches the makeup
+        # level instead of being clamped at 1.0.
+        post_gain = 1.0 / pre_actual
+        span = post.volume_max - post.volume_min
+        if span <= 1e-9:
+            return
+        post_fraction = (post_gain - post.volume_min) / span
+        post.set_volume(post_fraction)
+
+    def _stored_endpoints(self, from_node: str, to_node: str):
+        """Map a logical (GUI-visible) edge onto the daemon's stored
+        endpoints, routing through a Sensitivity gate's hidden pre/post
+        nodes: anything feeding a gate lands on its pre node, and
+        anything a gate feeds starts at its post node."""
+        node = self.space.nodes.get(from_node)
+        if isinstance(node, SensitivityGateNode):
+            from_node = _sens_post_id(from_node)
+        node = self.space.nodes.get(to_node)
+        if isinstance(node, SensitivityGateNode):
+            to_node = _sens_pre_id(to_node)
+        return from_node, to_node
+
+    def _store_edge(self, from_node: str, to_node: str, to_port: str = "in") -> str:
+        stored_from, stored_to = self._stored_endpoints(from_node, to_node)
+        return self.space.add_edge(stored_from, stored_to, to_port)
+
+    def _logical_edge(self, edge):
+        """(from_node, to_node, to_port) as the GUI should see `edge`,
+        or None if `edge` is one of the hidden internal links
+        (pre->gate / gate->post) that must never surface."""
+        from_node, to_node = edge.from_node, edge.to_node
+        if from_node.startswith(_SENS_PRE_PREFIX):
+            return None
+        if to_node.startswith(_SENS_POST_PREFIX):
+            return None
+        from_node = _hidden_sensitivity_gate_for(from_node) or from_node
+        to_node = _hidden_sensitivity_gate_for(to_node) or to_node
+        return from_node, to_node, edge.to_port
+
+    def _stored_edge_id_for(self, logical_id: str):
+        """The daemon's stored edge id whose GUI-visible form is
+        `logical_id`, or None. Needed because a hidden-node-backed edge
+        (X -> gate) is stored under a different id (X -> pre)."""
+        for stored_id, edge in self.space.edges.items():
+            logical = self._logical_edge(edge)
+            if logical is None:
+                continue
+            lf, lt, port = logical
+            if PatchSpace._edge_id(lf, lt, port) == logical_id:
+                return stored_id
+        return None
 
     def _cmd_add_edge(self, cmd: dict) -> dict:
         from_node, to_node = cmd.get("from_node"), cmd.get("to_node")
@@ -993,23 +1188,30 @@ class PatchBayDaemon:
         if not from_node or not to_node:
             return {"status": "error", "message": "from_node and to_node required"}
         with self._lock:
-            edge_id = PatchSpace._edge_id(from_node, to_node, to_port)
-            if edge_id in self.space.edges:
-                return {"status": "ok", "edge_id": edge_id, "already_existed": True}
+            logical_id = PatchSpace._edge_id(from_node, to_node, to_port)
+            stored_from, stored_to = self._stored_endpoints(from_node, to_node)
+            stored_id = PatchSpace._edge_id(stored_from, stored_to, to_port)
+            if stored_id in self.space.edges:
+                return {"status": "ok", "edge_id": logical_id, "already_existed": True}
             try:
-                edge_id = self.space.add_edge(from_node, to_node, to_port)
+                self._store_edge(from_node, to_node, to_port)
             except (KeyError, ValueError) as exc:
                 return {"status": "error", "message": str(exc)}
             self.space.sync()
             self._dirty = True
-            return {"status": "ok", "edge_id": edge_id, "already_existed": False}
+            return {"status": "ok", "edge_id": logical_id, "already_existed": False}
 
     def _cmd_remove_edge(self, cmd: dict) -> dict:
         edge_id = cmd.get("edge_id")
         with self._lock:
-            if edge_id not in self.space.edges:
+            stored_id = (
+                edge_id
+                if edge_id in self.space.edges
+                else self._stored_edge_id_for(edge_id)
+            )
+            if stored_id is None:
                 return {"status": "error", "message": f"Edge {edge_id} not found"}
-            self.space.remove_edge(edge_id)
+            self.space.remove_edge(stored_id)
             self.space.sync()
             self._dirty = True
             return {"status": "ok"}
@@ -1105,6 +1307,13 @@ class PatchBayDaemon:
                 except (TypeError, ValueError):
                     return {"status": "error", "message": "level must be 0..100"}
                 node.set_level(new_val)
+            elif prop == "sensitivity" and isinstance(node, SensitivityGateNode):
+                try:
+                    new_val = max(0.0, min(1.0, float(value)))
+                except (TypeError, ValueError):
+                    return {"status": "error", "message": "sensitivity must be 0..1"}
+                node.sensitivity = new_val
+                self._apply_sensitivity(node)
             elif prop == "wet_dry" and isinstance(node, ReverbNode):
                 try:
                     new_val = max(0.0, min(1.0, float(value)))
@@ -1114,14 +1323,15 @@ class PatchBayDaemon:
                     return {"status": "ok"}
                 node.wet_dry = new_val
                 self._coalesce_reload(node)
-            elif prop == "ladspa_plugin" and isinstance(node, NoiseCancelNode):
+            elif prop == "ladspa_plugin" and isinstance(
+                node, (NoiseCancelNode, SensitivityGateNode)
+            ):
                 node.ladspa_plugin = value
                 self._coalesce_reload(node)
-            elif prop == "ladspa_label" and isinstance(node, NoiseCancelNode):
+            elif prop == "ladspa_label" and isinstance(
+                node, (NoiseCancelNode, SensitivityGateNode)
+            ):
                 node.ladspa_label = value
-                self._coalesce_reload(node)
-            elif prop == "lv2_uri" and isinstance(node, SensitivityGateNode):
-                node.lv2_uri = value
                 self._coalesce_reload(node)
             elif prop in ("library_name", "aec_args", "monitor_mode") and isinstance(
                 node, EchoCancelNode
@@ -1315,6 +1525,9 @@ class PatchBayDaemon:
             for node_id in list(self.space.nodes.keys()):
                 if node_id in self.space.public_nodes:
                     self.space.remove_node(node_id)
+            for node_id in list(self.space.nodes.keys()):
+                if _hidden_sensitivity_gate_for(node_id) is not None:
+                    self.space.remove_node(node_id)
             self.space.sync()
             self._dirty = True
             return {"status": "ok", "message": "Graph reset"}
@@ -1359,15 +1572,20 @@ class PatchBayDaemon:
         return result
 
     def _serialize_edges(self) -> dict:
-        return {
-            e.id: {
-                "id": e.id,
-                "from_node": e.from_node,
-                "to_node": e.to_node,
-                "to_port": e.to_port,
+        result = {}
+        for e in self.space.edges.values():
+            logical = self._logical_edge(e)
+            if logical is None:
+                continue
+            from_node, to_node, to_port = logical
+            eid = PatchSpace._edge_id(from_node, to_node, to_port)
+            result[eid] = {
+                "id": eid,
+                "from_node": from_node,
+                "to_node": to_node,
+                "to_port": to_port,
             }
-            for e in self.space.edges.values()
-        }
+        return result
 
     def _serialize_graph(self) -> dict:
         nodes = {}

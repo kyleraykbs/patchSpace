@@ -233,6 +233,34 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             {"command": "set_gate", "node_id": node_id, "enabled": enabled}
         )
 
+    # ---------- Sensitivity Gate slider ----------
+    # The Sensitivity Gate's own live LADSPA threshold isn't reliable on
+    # every build (see node_specs.py's sensitivity_gate spec comment), so
+    # the slider does NOT touch the gate's threshold directly. Instead the
+    # daemon invisibly brackets every Sensitivity node with two hidden
+    # VolumeProcessNodes - a pre-boost and a reciprocal post-cut (see
+    # main.py's _ensure_sensitivity_internals) - and this slider is just a
+    # single 0..1 value handed to the daemon, which drives both. Nothing
+    # here knows about those Volume nodes, so there is nothing for the user
+    # to create or wire, and the control works the instant the node exists.
+    def _apply_sensitivity_slider(self, gate_id, fraction):
+        """Update the local slider position and push the 0..1 value to
+        the daemon, which fans it out to the hidden gain-staging volume
+        nodes bracketing this gate (main.py's _apply_sensitivity)."""
+        node = self.nodes.get(gate_id)
+        if node is None:
+            return
+        fraction = max(0.0, min(1.0, fraction))
+        node["sensitivity"] = fraction
+        self.client.send(
+            {
+                "command": "set_node_property",
+                "node_id": gate_id,
+                "property": "sensitivity",
+                "value": fraction,
+            }
+        )
+
     def _send_property(self, node_id, prop, value):
         self.client.send(
             {
@@ -309,6 +337,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     "volume": ndata.get("volume", 1.0),
                     "wet_dry": ndata.get("wet_dry", 0.3),
                     "level": ndata.get("level", 25.0),
+                    # Sensitivity Gate's 0..1 slider value. Persisted
+                    # daemon-side (the daemon fans it out to the hidden
+                    # pre/post volume nodes it owns - see main.py's
+                    # _apply_sensitivity), so it survives reloads and is
+                    # refreshed here like any other daemon field.
+                    "sensitivity": ndata.get("sensitivity", 0.0),
                     "device_volume": 1.0,
                     "device_name": ndata.get("device_name", ""),
                     "app_name": ndata.get("app_name", ""),
@@ -354,14 +388,25 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     )
                     if value is not None:
                         node["wet_dry"] = value
-                # ...and for the Sensitivity Gate threshold slider.
-                if self.slider_dragging != ("threshold", nid):
-                    reported = ndata.get("level", node.get("level", 25.0))
-                    value = self._accept_effect_slider_echo(
-                        nid, "threshold", reported, 0.5
+                # Sensitivity Gate's `level` is now a Settings-dialog-
+                # only static value (see node_specs.py) - no longer
+                # touched by dragging the node's inline slider (that
+                # slider drives _apply_sensitivity_slider instead), so
+                # there's no "pending" value of our own to guard
+                # against here; just take whatever the daemon reports.
+                reported = ndata.get("level", node.get("level", 25.0))
+                value = self._accept_effect_slider_echo(
+                    nid, "threshold", reported, 0.5
+                )
+                if value is not None:
+                    node["level"] = value
+                # Sensitivity Gate's 0..1 inline slider - just mirror the
+                # daemon's value, except mid-drag where our own handle is
+                # authoritative until release.
+                if self.slider_dragging != ("sensitivity", nid):
+                    node["sensitivity"] = ndata.get(
+                        "sensitivity", node.get("sensitivity", 0.0)
                     )
-                    if value is not None:
-                        node["level"] = value
                 # Always update min/max (they don't change during drag)
                 node["volume_min"] = ndata.get("volume_min", 0.0)
                 node["volume_max"] = ndata.get("volume_max", 1.0)
@@ -752,11 +797,15 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 return nid
         return None
 
-    def find_threshold_slider_at(self, x, y):
-        """Sensitivity Gate's threshold bar - same bottom-of-node-body
-        geometry as the volume/wetdry sliders, control == "threshold"."""
+    def find_sensitivity_slider_at(self, x, y):
+        """Sensitivity Gate's 0..1 gain-staging slider - same bottom-of-
+        node-body geometry as the volume/wetdry sliders, control ==
+        "sensitivity". It sends the value to the daemon (which drives the
+        hidden pre/post Volume nodes it owns) rather than to this node's
+        own threshold - see _apply_sensitivity_slider and
+        node_specs.py's sensitivity_gate spec comment for why."""
         for nid, node in self.nodes.items():
-            if spec_for(node["type"]).control != "threshold":
+            if spec_for(node["type"]).control != "sensitivity":
                 continue
             nx, ny = node["x"], node["y"]
             node_h = self.node_height(nid)
@@ -969,9 +1018,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self._draw_gate_toggle(cr, nid, node["enabled"])
         elif spec.control == "wetdry":
             self._draw_wetdry_slider(cr, x, y, node_h, node.get("wet_dry", 0.3))
-        elif spec.control == "threshold":
+        elif spec.control == "sensitivity":
             self._draw_threshold_slider(
-                cr, x, y, node_h, node.get("level", 25.0) / 100.0
+                cr, x, y, node_h, node.get("sensitivity", 0.0)
             )
         elif spec.field:
             self._draw_text_field(cr, x, y, node_h, self._field_value(node))
@@ -1109,11 +1158,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         cr.show_text(f"{int(round(mix * 100))}% wet")
 
     def _draw_threshold_slider(self, cr, x, y, node_h, frac):
-        """Sensitivity Gate's threshold bar (Discord-style voice
-        activity): `frac` is the 0..1 threshold position on the node's
-        inline slider. Only the gating threshold lives here today; a
-        live incoming-level indicator layered onto the same bar is a
-        later, cosmetic addition (see SensitivityGateNode's docstring)."""
+        """Sensitivity Gate's sensitivity bar (Discord-style voice
+        activity): `frac` is the 0..1 slider position. The value drives
+        the hidden pre/post gain-staging nodes daemon-side - see
+        _apply_sensitivity_slider. A live incoming-level indicator
+        layered onto the same bar is a later, cosmetic addition (see
+        SensitivityGateNode's docstring)."""
         slider_y = y + node_h - self.SLIDER_HEIGHT - 5
         slider_width = self.NODE_WIDTH - 2 * self.SLIDER_MARGIN
         slider_x = x + self.SLIDER_MARGIN
@@ -1302,7 +1352,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         if (
             self.find_slider_at(wx, wy) is not None
             or self.find_wetdry_slider_at(wx, wy) is not None
-            or self.find_threshold_slider_at(wx, wy) is not None
+            or self.find_sensitivity_slider_at(wx, wy) is not None
         ):
             self.set_cursor(Gdk.Cursor.new_from_name("ew-resize", None))
         elif (
@@ -1819,20 +1869,19 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self.pinned_nodes.add(wet_hit)
             return
 
-        threshold_hit = self.find_threshold_slider_at(wx, wy)
-        if threshold_hit is not None:
-            node = self.nodes[threshold_hit]
+        sensitivity_hit = self.find_sensitivity_slider_at(wx, wy)
+        if sensitivity_hit is not None:
+            node = self.nodes[sensitivity_hit]
             slider_left = node["x"] + self.SLIDER_MARGIN
             slider_width = self.NODE_WIDTH - 2 * self.SLIDER_MARGIN
-            new_level = max(0.0, min(100.0, (wx - slider_left) / slider_width * 100))
-            node["level"] = new_level
-            self._send_effect_slider(threshold_hit, "threshold", "level", new_level)
-            self.slider_dragging = ("threshold", threshold_hit)
+            new_frac = max(0.0, min(1.0, (wx - slider_left) / slider_width))
+            self._apply_sensitivity_slider(sensitivity_hit, new_frac)
+            self.slider_dragging = ("sensitivity", sensitivity_hit)
             self.slider_drag_start_x = wx
-            self.slider_initial_volume = new_level
-            self._slider_last_sent = new_level
+            self.slider_initial_volume = new_frac
+            self._slider_last_sent = new_frac
             self.queue_draw()
-            self.pinned_nodes.add(threshold_hit)
+            self.pinned_nodes.add(sensitivity_hit)
             return
 
         device_row_hit = self.find_device_row_at(wx, wy)
@@ -1904,14 +1953,15 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     self._send_effect_slider(nid, "wetdry", "wet_dry", new_mix)
                 self.queue_draw()
                 return
-            if kind == "threshold":
+            if kind == "sensitivity":
                 slider_width = self.NODE_WIDTH - 2 * self.SLIDER_MARGIN
-                delta_level = (offset_x / self.zoom) / slider_width * 100
-                new_level = max(0.0, min(100.0, self.slider_initial_volume + delta_level))
-                node["level"] = new_level
-                if abs(new_level - self._slider_last_sent) >= 1.0:
-                    self._slider_last_sent = new_level
-                    self._send_effect_slider(nid, "threshold", "level", new_level)
+                delta_frac = (offset_x / self.zoom) / slider_width
+                new_frac = max(0.0, min(1.0, self.slider_initial_volume + delta_frac))
+                if abs(new_frac - self._slider_last_sent) >= VOLUME_SEND_EPSILON:
+                    self._slider_last_sent = new_frac
+                    self._apply_sensitivity_slider(nid, new_frac)
+                else:
+                    node["sensitivity"] = new_frac
                 self.queue_draw()
                 return
             if kind == "process":
@@ -1983,8 +2033,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     self._send_set_volume(nid, node["volume"])
                 elif kind == "wetdry":
                     self._send_effect_slider(nid, "wetdry", "wet_dry", node["wet_dry"])
-                elif kind == "threshold":
-                    self._send_effect_slider(nid, "threshold", "level", node["level"])
+                elif kind == "sensitivity":
+                    self._apply_sensitivity_slider(nid, node["sensitivity"])
                 else:
                     self.client.send(
                         {
