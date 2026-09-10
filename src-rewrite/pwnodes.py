@@ -979,6 +979,56 @@ class BooleanInvertNode(Node):
         return "boolean"
 
 
+class WarpInNode(TransparentNode):
+    """Publishes the audio feeding its single "in" under ``warp_name``.
+
+    A pure logical alias - no backing and no PipeWire object.  Every
+    WarpOutNode with the same name resolves to this node's upstream
+    source(s); because it is a TransparentNode it reuses the ordinary
+    single-upstream rule and passthrough resolution.  Several WarpInNodes
+    sharing a name are summed by the resolver (see _resolve_warp_audio)."""
+
+    def __init__(self, node_id, warp_name: str = ""):
+        super().__init__(node_id)
+        self.warp_name = warp_name or ""
+
+
+class WarpOutNode(Node):
+    """Reads whatever WarpInNode(s) publish under ``warp_name``: its
+    "out" resolves to their upstream audio.  Pure alias, no backing."""
+
+    def __init__(self, node_id, warp_name: str = ""):
+        super().__init__(node_id)
+        self.warp_name = warp_name or ""
+
+
+class BooleanWarpInNode(Node):
+    """Boolean counterpart of WarpInNode: publishes the boolean signal
+    on its "in" under ``warp_name`` in the separate boolean namespace."""
+
+    BOOLEAN_INPUT = "in"
+
+    def __init__(self, node_id, warp_name: str = ""):
+        super().__init__(node_id)
+        self.warp_name = warp_name or ""
+
+    def port_kind(self, port: str, direction: str) -> str:
+        return "boolean"
+
+
+class BooleanWarpOutNode(Node):
+    """Boolean counterpart of WarpOutNode: its "out" is the boolean
+    value published under ``warp_name`` (first matching publisher wins;
+    see PatchSpace._resolve_boolean)."""
+
+    def __init__(self, node_id, warp_name: str = ""):
+        super().__init__(node_id)
+        self.warp_name = warp_name or ""
+
+    def port_kind(self, port: str, direction: str) -> str:
+        return "boolean"
+
+
 class ExcludeFilterNode(TransparentNode):
     """Pass-through that narrows whatever is upstream by excluding a
     nameRegex.  Annotates upstream source filters with "exclude" entries
@@ -1579,32 +1629,70 @@ class NoiseCancelNode(_ChainEffect):
 
 
 class ReverbNode(_ChainEffect):
-    """CAPS "Plate" reverb.  wet_dry is a load-time filter-graph control,
-    so changing it schedules an interior-only module reload (the dummies
-    keep every user edge attached)."""
+    """Stereo reverb built on Calf Studio Gear's LV2 "Calf Reverb".
 
-    DEFAULT_LADSPA_PLUGIN = "/usr/lib/ladspa/caps.so"
-    DEFAULT_LADSPA_LABEL = "Plate"
+    This is the one effect here that is LV2 rather than LADSPA.  LV2
+    plugins are located *by URI* through ``LV2_PATH`` (which the dev
+    shell exports - see flake.nix), not by an absolute ``.so`` path, so
+    there is no plugin-path probing like the LADSPA effects need.  The
+    previous implementation pointed at ``/usr/lib/ladspa/caps.so``
+    (absent on NixOS), used a control name CAPS never had (``dry/wet``
+    instead of ``blend``), and picked the mono-in CAPS Plate which has
+    no wet/dry at all.
+
+    ``wet_dry`` (0..1) crossfades the plugin's wet ``amount`` against
+    its ``dry`` level - a real wet/dry for a normal insert effect.  The
+    reverb character (decay, room size, damping, ...) lives in the
+    Settings dialog; every control is a load-time filter-graph value, so
+    a change schedules an interior-only module reload (the dummies keep
+    every user edge attached)."""
+
+    DEFAULT_URI = "http://calf.sourceforge.net/plugins/Reverb"
+
+    DECAY_MIN_S, DECAY_MAX_S = 0.4, 15.0
+    ROOM_MIN, ROOM_MAX = 0.0, 5.0
+    DIFFUSION_MIN, DIFFUSION_MAX = 0.0, 1.0
+    DAMP_MIN_HZ, DAMP_MAX_HZ = 2000.0, 20000.0
+    PREDELAY_MIN_MS, PREDELAY_MAX_MS = 0.0, 500.0
 
     def __init__(self, node_id, backing_node_name: str,
-                 ladspa_plugin: str = "", ladspa_label: str = "",
                  wet_dry: float = 0.3,
-                 pw_cli_command=("pw-cli",), settle: float = 0.3):
+                 decay_time: float = 1.5, room_size: float = 2.0,
+                 diffusion: float = 0.5, hf_damp: float = 5000.0,
+                 predelay: float = 0.0, plugin_uri: str = "",
+                 pw_cli_command=("pw-cli",), settle: float = 0.3, **_ignored):
         super().__init__(node_id, backing_node_name, pw_cli_command, settle)
-        self.ladspa_plugin = ladspa_plugin or self.DEFAULT_LADSPA_PLUGIN
-        self.ladspa_label = ladspa_label or self.DEFAULT_LADSPA_LABEL
-        self.wet_dry = max(0.0, min(1.0, wet_dry))
+        self.plugin_uri = plugin_uri or self.DEFAULT_URI
+        self.wet_dry = _clamp(wet_dry, 0.0, 1.0)
+        self.decay_time = _clamp(decay_time, self.DECAY_MIN_S, self.DECAY_MAX_S)
+        self.room_size = _clamp(room_size, self.ROOM_MIN, self.ROOM_MAX)
+        self.diffusion = _clamp(
+            diffusion, self.DIFFUSION_MIN, self.DIFFUSION_MAX
+        )
+        self.hf_damp = _clamp(hf_damp, self.DAMP_MIN_HZ, self.DAMP_MAX_HZ)
+        self.predelay = _clamp(
+            predelay, self.PREDELAY_MIN_MS, self.PREDELAY_MAX_MS
+        )
 
     def _module_command_args(self) -> str:
+        # true wet/dry crossfade: wet amount up as the dry level drops.
+        wet = self.wet_dry
+        dry = 1.0 - self.wet_dry
         return (
             f'node.description = "{self.id}" '
             "filter.graph = { nodes = [ { "
-            "type = ladspa "
+            "type = lv2 "
             f"name = {self.backing_node_name}_plugin "
-            f"plugin = {self.ladspa_plugin} "
-            f"label = {self.ladspa_label} "
-            f'control = {{ "dry/wet" = {self.wet_dry} }} '
-            "} ] } "
+            f'plugin = "{self.plugin_uri}" '
+            "control = { "
+            f'"amount" = {wet:.4f} '
+            f'"dry" = {dry:.4f} '
+            f'"decay_time" = {self.decay_time:.4f} '
+            f'"room_size" = {self.room_size:.4f} '
+            f'"diffusion" = {self.diffusion:.4f} '
+            f'"hf_damp" = {self.hf_damp:.2f} '
+            f'"predelay" = {self.predelay:.2f} '
+            "} } ] } "
             "capture.props = { "
             f'node.name = "{self._capture_name}" '
             f'node.description = "{self._capture_name}" '
@@ -2333,6 +2421,11 @@ class PatchSpace:
         # this is additive, not a replacement for the regular health pass.
         self._staging: Set[NodeId] = set()
 
+        # Boolean warp names we've already warned about having more than
+        # one publisher (see _boolean_warp_publisher) - without this the
+        # warning would repeat every supervision tick.
+        self._warned_bool_warps: Set[str] = set()
+
     # ------------------------------------------------------------------
     # staged bring-up (see _load_session in main.py)
     # ------------------------------------------------------------------
@@ -2585,18 +2678,60 @@ class PatchSpace:
         if isinstance(node, BooleanInvertNode):
             value = self._resolve_boolean_input(node_id, seen)
             return None if value is None else (not value)
+        if isinstance(node, BooleanWarpOutNode):
+            name = getattr(node, "warp_name", "")
+            if not name:
+                return None
+            key = f"warp:{name}"
+            if key in seen:
+                return None
+            seen = seen | {key}
+            publisher = self._boolean_warp_publisher(name)
+            if publisher is None:
+                return None
+            return self._resolve_boolean_input(publisher.id, seen)
         return None
 
+    def _boolean_warp_publisher(self, name: str) -> Optional["BooleanWarpInNode"]:
+        """The BooleanWarpInNode that publishes `name`.  Boolean warps
+        are a separate namespace from audio warps and can't be summed,
+        so if several share a name the first one (stable node order)
+        wins and the rest are reported once."""
+        matches = [
+            node
+            for node in self.nodes.values()
+            if isinstance(node, BooleanWarpInNode) and node.warp_name == name
+        ]
+        if not matches:
+            return None
+        if len(matches) > 1 and name not in self._warned_bool_warps:
+            self._warned_bool_warps.add(name)
+            logger.warning(
+                "Boolean warp %r has %d publishers; using %r",
+                name, len(matches), matches[0].id,
+            )
+        return matches[0]
+
     def _resolve_sources(
-        self, node_id: NodeId, from_port: str = "out"
+        self, node_id: NodeId, from_port: str = "out",
+        seen: Optional[Set[Any]] = None,
     ) -> List[dict]:
         node = self.nodes.get(node_id)
         if node is None:
             return []
+        # Path-local cycle guard: a warp loop (or any transparent loop)
+        # resolves to no signal instead of recursing forever.
+        if seen is None:
+            seen = set()
+        if node_id in seen:
+            return []
+        seen = seen | {node_id}
         if isinstance(node, InputNode):
             return node.source_filters()
         if isinstance(node, BackedNode):
             return [node.output_identity()]
+        if isinstance(node, WarpOutNode):
+            return self._resolve_warp_audio(node, seen)
         if isinstance(node, TransparentNode):
             if not node.gate_open():
                 return []
@@ -2618,7 +2753,9 @@ class PatchSpace:
             chosen = node.select_upstream(upstream)
             if chosen is None:
                 return []
-            sources = self._resolve_sources(chosen.from_node, chosen.from_port)
+            sources = self._resolve_sources(
+                chosen.from_node, chosen.from_port, seen
+            )
             if isinstance(node, ExcludeFilterNode):
                 exclude = node.exclude_filter()
                 if exclude is not None:
@@ -2628,6 +2765,26 @@ class PatchSpace:
                     ]
             return sources
         return []
+
+    def _resolve_warp_audio(self, warp_out: "WarpOutNode",
+                            seen: Set[Any]) -> List[dict]:
+        """Everything published under ``warp_out.warp_name``.  Audio
+        warps are a *mix*: every matching WarpInNode contributes its
+        upstream source filters, and sync_locked links all of them into
+        the downstream input ports (PipeWire sums multiple links into
+        one port)."""
+        name = getattr(warp_out, "warp_name", "")
+        if not name:
+            return []
+        key = f"warp:{name}"
+        if key in seen:
+            return []
+        seen = seen | {key}
+        sources: List[dict] = []
+        for node in self.nodes.values():
+            if isinstance(node, WarpInNode) and node.warp_name == name:
+                sources.extend(self._resolve_sources(node.id, "in", seen))
+        return sources
 
     # ------------------------------------------------------------------
     # supervision
@@ -2813,11 +2970,23 @@ class PatchSpace:
         elif isinstance(node, (NoiseCancelNode, SensitivityGateNode)):
             node.refresh_live()
 
-    def handle_node_removed(self, removed_id: int) -> None:
+    def handle_node_removed(self, removed_id: int,
+                            removed_props: Optional[dict] = None) -> None:
         """A live object disappeared.  If it is one of our backings whose
         owning process is *still alive*, the object was destroyed out
         from under us (or a reload raced) - drop the owner so the next
-        supervise() respawns it."""
+        supervise() respawns it.
+
+        ``removed_props`` (the removed node's last-known snapshot) guards
+        against PipeWire node-id reuse: when provided, the removed
+        object's ``node.name`` must match the backing's name, so a stale
+        id that has since been handed to an unrelated node can't tear
+        down the wrong backing."""
+        removed_name = None
+        if removed_props:
+            removed_name = (
+                removed_props.get("info", {}).get("props", {}).get("node.name")
+            )
         with self._lock:
             for node in list(self.nodes.values()):
                 if not isinstance(node, BackedNode):
@@ -2825,7 +2994,27 @@ class PatchSpace:
                 for owned in list(node.backings):
                     if owned.node_id != removed_id:
                         continue
+                    if removed_name is not None and removed_name != owned.name:
+                        # The id was reused by another object; this is
+                        # not our backing dying. Forget the stale id so
+                        # the backing re-resolves instead of being torn
+                        # down.
+                        owned.node_id = None
+                        continue
                     if owned.owns_process and owned.is_alive:
+                        resolved_at = getattr(owned, "_resolved_at", None)
+                        if (
+                            resolved_at is not None
+                            and (_time.monotonic() - resolved_at) < 3.0
+                        ):
+                            # Resolved moments ago: this is almost always
+                            # a lagging removal event for a recycled id
+                            # (the load-time reap frees an id, PipeWire
+                            # hands it to our fresh node, then the old
+                            # removal lands). Clear the id and let it
+                            # re-resolve rather than destroy the backing.
+                            owned.node_id = None
+                            continue
                         logger.warning(
                             "Live object for %r (%s) disappeared while its "
                             "process was alive - restarting backing",

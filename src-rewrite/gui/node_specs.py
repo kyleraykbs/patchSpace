@@ -29,6 +29,7 @@ FIELD_LABELS = {
     "media_class": "Media Class:",
     "description": "Description:",
     "device_label": "Name:",
+    "warp_name": "Warp name:",
 }
 
 # Human-readable labels for the raw PipeWire media.class strings that
@@ -227,6 +228,27 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
         boolean_inputs=["in"],
         boolean_outputs=["out"],
     ),
+    # Warps: named logical aliases. A Warp In publishes whatever is
+    # plugged into it under `warp_name`; a Warp Out resolves to the
+    # matching publisher(s). Audio warps mix multiple publishers;
+    # boolean warps are a separate namespace (first match wins). The
+    # inline `warp_name` text box is the pairing key.
+    "warp_in": NodeSpec("Warp In", ["in"], [], field="warp_name"),
+    "warp_out": NodeSpec("Warp Out", [], ["out"], field="warp_name"),
+    "bool_warp_in": NodeSpec(
+        "Bool Warp In",
+        ["in"],
+        [],
+        field="warp_name",
+        boolean_inputs=["in"],
+    ),
+    "bool_warp_out": NodeSpec(
+        "Bool Warp Out",
+        [],
+        ["out"],
+        field="warp_name",
+        boolean_outputs=["out"],
+    ),
 }
 
 NODE_TYPE_SPECS.update(
@@ -310,7 +332,51 @@ NODE_TYPE_SPECS.update(
         # inline slider on the node body (control="wetdry") rather than
         # buried in its Settings menu; see the Reverb wet_dry handler in
         # main.py's set_node_property.
-        "reverb": NodeSpec("Reverb", ["in"], ["out"], control="wetdry"),
+        "reverb": NodeSpec(
+            "Reverb",
+            ["in"],
+            ["out"],
+            control="wetdry",
+            # Calf Reverb (LV2). The inline slider is wet/dry; the rest
+            # is reverb character, all load-time filter-graph values.
+            settings=[
+                (
+                    "decay_time",
+                    "Decay time (s):",
+                    "number",
+                    {"min": 0.4, "max": 15, "step": 0.1},
+                ),
+                (
+                    "room_size",
+                    "Room size (0-5):",
+                    "number",
+                    {"min": 0, "max": 5, "step": 0.1},
+                ),
+                (
+                    "diffusion",
+                    "Diffusion (0-1):",
+                    "number",
+                    {"min": 0, "max": 1, "step": 0.05},
+                ),
+                (
+                    "hf_damp",
+                    "High-freq damping (Hz):",
+                    "number",
+                    {"min": 2000, "max": 20000, "step": 100},
+                ),
+                (
+                    "predelay",
+                    "Pre-delay (ms):",
+                    "number",
+                    {"min": 0, "max": 500, "step": 1},
+                ),
+                (
+                    "plugin_uri",
+                    "LV2 plugin URI (blank = Calf Reverb):",
+                    "text",
+                ),
+            ],
+        ),
         # Loudness normalization: a lookahead-limiter sandwich that can
         # lift quiet/far-from-mic speech without blasting on resume (see
         # NormalizeNode). The inline slider is `boost_db`; the caps and
@@ -444,6 +510,15 @@ ADD_NODE_CATEGORIES = [
         ],
     ),
     (
+        "Warp",
+        [
+            ("Warp In", "warp_in"),
+            ("Warp Out", "warp_out"),
+            ("Bool Warp In", "bool_warp_in"),
+            ("Bool Warp Out", "bool_warp_out"),
+        ],
+    ),
+    (
         "Effects",
         [
             ("Echo Cancel", "echo_cancel"),
@@ -490,6 +565,7 @@ CATEGORY_COLOR_NAMES = {
     "Filters": "accent_color",
     "Processing": "success_color",
     "Boolean": "dim_label_color",
+    "Warp": "accent_color",
     "Effects": "warning_color",
     "Hardware & Apps": "error_color",
     "Virtual Devices": "destructive_color",
@@ -534,6 +610,10 @@ NODE_TYPE_ICONS: Dict[str, str] = {
     "boolean_switch": "object-select-symbolic",
     "boolean_splitter": "network-transmit-receive-symbolic",
     "boolean_invert": "action-unavailable-symbolic",
+    "warp_in": "insert-link-symbolic",
+    "warp_out": "insert-link-symbolic",
+    "bool_warp_in": "insert-link-symbolic",
+    "bool_warp_out": "insert-link-symbolic",
     "volume": "audio-volume-high-symbolic",
     "mute": "audio-volume-muted-symbolic",
     "echo_cancel": "audio-input-microphone-symbolic",
@@ -591,6 +671,10 @@ CLASS_NAME_TO_TYPE = {
     "BooleanSourceNode": "boolean_switch",
     "BooleanSplitterNode": "boolean_splitter",
     "BooleanInvertNode": "boolean_invert",
+    "WarpInNode": "warp_in",
+    "WarpOutNode": "warp_out",
+    "BooleanWarpInNode": "bool_warp_in",
+    "BooleanWarpOutNode": "bool_warp_out",
     "VolumeProcessNode": "volume",
     "NoiseCancelNode": "noise_cancel",
     "SensitivityGateNode": "sensitivity_gate",

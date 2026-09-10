@@ -46,6 +46,10 @@ from pwnodes import (
     BooleanSourceNode,
     BooleanSplitterNode,
     BooleanInvertNode,
+    WarpInNode,
+    WarpOutNode,
+    BooleanWarpInNode,
+    BooleanWarpOutNode,
     VolumeProcessNode,
     NoiseCancelNode,
     SensitivityGateNode,
@@ -74,6 +78,47 @@ from pwnodes import (
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
+
+# Recent log output, kept in memory so the GUI's log console (get_logs)
+# can display it without the daemon having to write a file.  Bounded so
+# a chatty daemon can't grow it without limit.
+_LOG_RING_MAX = 1000
+_log_buffer: "deque[tuple[int, str]]" = deque(maxlen=_LOG_RING_MAX)
+_log_seq = 0
+
+
+class _LogRingHandler(logging.Handler):
+    """Appends every record (from any logger that propagates to root) to
+    the bounded in-memory ring the get_logs command serves."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        global _log_seq
+        try:
+            text = self.format(record)
+        except Exception:
+            return
+        # logging calls emit under the handler's own lock, so this
+        # counter can't interleave between records.
+        _log_seq += 1
+        _log_buffer.append((_log_seq, text))
+
+
+_log_ring_installed = False
+
+
+def _install_log_ring() -> None:
+    """Attach the in-memory ring handler to the root logger exactly once,
+    so every daemon entrypoint (main() or a direct start()) captures its
+    log output for the GUI's get_logs console."""
+    global _log_ring_installed
+    if _log_ring_installed:
+        return
+    handler = _LogRingHandler()
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(message)s", "%H:%M:%S")
+    )
+    logging.getLogger().addHandler(handler)
+    _log_ring_installed = True
 
 SOCKET_PATH = "/tmp/patchbay.sock"
 SESSION_CACHE_PATH = os.path.expanduser("~/.cache/patchbay/last_session.json")
@@ -115,6 +160,7 @@ _CAREFUL_NODE_TYPES = (
     NoiseCancelNode,
     SensitivityGateNode,
     NormalizeNode,
+    ReverbNode,
 )
 
 
@@ -133,6 +179,10 @@ NODE_TYPE_REGISTRY: Dict[str, type] = {
     "boolean_switch": BooleanSourceNode,
     "boolean_splitter": BooleanSplitterNode,
     "boolean_invert": BooleanInvertNode,
+    "warp_in": WarpInNode,
+    "warp_out": WarpOutNode,
+    "bool_warp_in": BooleanWarpInNode,
+    "bool_warp_out": BooleanWarpOutNode,
     "volume": VolumeProcessNode,
     "noise_cancel": NoiseCancelNode,
     "sensitivity_gate": SensitivityGateNode,
@@ -221,6 +271,13 @@ _SERIAL_ATTRS = (
     "knee_db",
     "limiter_release_s",
     "ladspa_dir",
+    "warp_name",
+    "plugin_uri",
+    "decay_time",
+    "room_size",
+    "diffusion",
+    "hf_damp",
+    "predelay",
 )
 
 # GUI layout state a node may carry.  Serialized separately (only when
@@ -331,6 +388,10 @@ class PatchBayDaemon:
 
     def start(self) -> None:
         self._running = True
+
+        # Capture our own log output for the GUI's get_logs console
+        # regardless of how the daemon was launched.
+        _install_log_ring()
 
         # Clear anything a previous (uncleanly-killed) run left behind
         # before we request fresh objects.
@@ -657,7 +718,7 @@ class PatchBayDaemon:
         if changed:
             self.space.sync()
 
-    def _on_node_removed(self, node_id: int) -> None:
+    def _on_node_removed(self, node_id: int, node_data: Optional[dict] = None) -> None:
         with self._lock:
             changed = False
             for node in self.space.nodes.values():
@@ -667,7 +728,7 @@ class PatchBayDaemon:
                 ):
                     node.resolve_live(None, None)
                     changed = True
-            self.space.handle_node_removed(node_id)
+            self.space.handle_node_removed(node_id, node_data)
         if changed:
             self.space.sync()
 
@@ -845,6 +906,11 @@ class PatchBayDaemon:
         streams exist (the "new echo-cancel node breaks the chain" bug).
         Returns whether the node became ready; a timeout is not fatal -
         the normal supervision tick keeps repairing it."""
+        if not self.space._graph_loaded:
+            # Nothing is wired yet (tests, or a daemon before its first
+            # graph snapshot); polling readiness here would just burn the
+            # full timeout and block the caller.
+            return True
         self.space.stage([node.id])
         try:
             logger.info(
@@ -1018,30 +1084,32 @@ class PatchBayDaemon:
         # (see _CAREFUL_NODE_TYPES), in creation order.
         finicky_ids: List[str] = []
 
-        with self._lock:
-            # One batched sweep for everything this config could
-            # collide with, rather than the per-node reap _cmd_add_node
-            # does - cheaper, and it can't mistake a node created
-            # earlier in *this same* load for a stale leftover of one
-            # created later in it just because they share a prefix.
-            #
-            # Only nodes this load will actually *create* are swept.
-            # A node already in the space keeps its live objects: the
-            # loop below re-adopts the existing node object unchanged,
-            # so reaping its backing would kill the owning process of a
-            # perfectly healthy running node and leave it structurally
-            # present but silent - which then thrashes as the daemon
-            # tries to rebuild it. (Re-importing the current session is
-            # the common case: every node is "existing".)
-            backing_names = [
-                (node_cfg.get("params") or {}).get("backing_node_name")
-                for node_id, node_cfg in nodes_cfg.items()
-                if node_id not in self.space.nodes
-            ]
-            backing_names = [b for b in backing_names if b]
-            if backing_names:
-                self.graph.reap_stale_for_names(backing_names)
+        # One batched reap for everything this config could collide with,
+        # done *outside* the lock (and with reap_stale_for_names waiting
+        # for the graph to drop the objects) so the daemon's node-removed
+        # callbacks can drain before we create same-named replacements.
+        # Creating before the removals are processed lets PipeWire reuse
+        # the freed node id and a lagging removal then tears down the new
+        # backing - the "live object disappeared while alive" thrash that
+        # took out the hidden sensitivity pre/post nodes.
+        #
+        # Only nodes this load will actually *create* are swept.  A node
+        # already in the space keeps its live objects: the loop below
+        # re-adopts the existing node object unchanged, so reaping its
+        # backing would kill the owning process of a perfectly healthy
+        # running node and leave it structurally present but silent.
+        # (Re-importing the current session is the common case: every
+        # node is "existing".)
+        backing_names = [
+            (node_cfg.get("params") or {}).get("backing_node_name")
+            for node_id, node_cfg in nodes_cfg.items()
+            if node_id not in self.space.nodes
+        ]
+        backing_names = [b for b in backing_names if b]
+        if backing_names:
+            self.graph.reap_stale_for_names(backing_names)
 
+        with self._lock:
             # Stage every id that will turn out to be a BackedNode
             # *before* creating any of them - add_node() wakes the
             # ticker the moment the first one lands, and the ticker
@@ -1441,6 +1509,8 @@ class PatchBayDaemon:
             return cls(node_id)
         if cls is BooleanInvertNode:
             return cls(node_id)
+        if cls in (WarpInNode, WarpOutNode, BooleanWarpInNode, BooleanWarpOutNode):
+            return cls(node_id, g("warp_name", ""))
         if cls is ExcludeFilterNode:
             return cls(node_id, g("pattern", ""))
         if cls is VolumeProcessNode:
@@ -1473,9 +1543,13 @@ class PatchBayDaemon:
             return cls(
                 node_id,
                 backing,
-                g("ladspa_plugin", ""),
-                g("ladspa_label", ""),
-                g("wet_dry", 0.3),
+                wet_dry=g("wet_dry", 0.3),
+                decay_time=g("decay_time", 1.5),
+                room_size=g("room_size", 2.0),
+                diffusion=g("diffusion", 0.5),
+                hf_damp=g("hf_damp", 5000.0),
+                predelay=g("predelay", 0.0),
+                plugin_uri=g("plugin_uri", ""),
             )
         if cls is NormalizeNode:
             return cls(
@@ -1915,7 +1989,13 @@ class PatchBayDaemon:
                 node, (ABSwitchNode, BooleanSourceNode)
             ):
                 node.output = 1 if value else 0
-            elif prop in ("pattern", "media_class", "description", "port_type"):
+            elif prop in (
+                "pattern",
+                "media_class",
+                "description",
+                "port_type",
+                "warp_name",
+            ):
                 if hasattr(node, prop):
                     setattr(node, prop, value)
                 else:
@@ -1969,6 +2049,37 @@ class PatchBayDaemon:
                 if abs(new_val - node.wet_dry) < 1e-9 and node.module_ok():
                     return {"status": "ok"}
                 node.wet_dry = new_val
+                self._coalesce_reload(node)
+            elif isinstance(node, ReverbNode) and prop in (
+                "plugin_uri",
+                "decay_time",
+                "room_size",
+                "diffusion",
+                "hf_damp",
+                "predelay",
+            ):
+                if prop == "plugin_uri":
+                    node.plugin_uri = value or ReverbNode.DEFAULT_URI
+                else:
+                    try:
+                        new_val = float(value)
+                    except (TypeError, ValueError):
+                        return {
+                            "status": "error",
+                            "message": f"{prop} must be a number",
+                        }
+                    bounds = {
+                        "decay_time": (node.DECAY_MIN_S, node.DECAY_MAX_S),
+                        "room_size": (node.ROOM_MIN, node.ROOM_MAX),
+                        "diffusion": (node.DIFFUSION_MIN, node.DIFFUSION_MAX),
+                        "hf_damp": (node.DAMP_MIN_HZ, node.DAMP_MAX_HZ),
+                        "predelay": (
+                            node.PREDELAY_MIN_MS,
+                            node.PREDELAY_MAX_MS,
+                        ),
+                    }
+                    lo, hi = bounds[prop]
+                    setattr(node, prop, max(lo, min(hi, new_val)))
                 self._coalesce_reload(node)
             elif prop == "ladspa_plugin" and isinstance(
                 node, (NoiseCancelNode, SensitivityGateNode)
@@ -2311,6 +2422,20 @@ class PatchBayDaemon:
     def _cmd_get_graph(self, cmd: dict) -> dict:
         return {"status": "ok", "graph": self._serialize_graph()}
 
+    def _cmd_get_logs(self, cmd: dict) -> dict:
+        """Recent daemon log lines for the GUI console.  `since` is the
+        last sequence number the caller has seen; lines with a higher
+        seq are returned.  A `last_seq` lower than `since` means the
+        daemon restarted, so the caller should reset."""
+        try:
+            since = int(cmd.get("since", 0) or 0)
+        except (TypeError, ValueError):
+            since = 0
+        snapshot = list(_log_buffer)
+        lines = [{"seq": seq, "text": text} for seq, text in snapshot if seq > since]
+        last_seq = snapshot[-1][0] if snapshot else 0
+        return {"status": "ok", "lines": lines, "last_seq": last_seq}
+
     def _cmd_export_config(self, cmd: dict) -> dict:
         return {"status": "ok", "config": self._build_export_config()}
 
@@ -2488,6 +2613,8 @@ class PatchBayDaemon:
                 response = self._cmd_get_nodes(cmd)
             elif command == "get_graph":
                 response = self._cmd_get_graph(cmd)
+            elif command == "get_logs":
+                response = self._cmd_get_logs(cmd)
             elif command == "export_config":
                 response = self._cmd_export_config(cmd)
             elif command == "load_session":
@@ -2573,6 +2700,7 @@ class PatchBayDaemon:
 
 
 def main():
+    _install_log_ring()
     daemon = PatchBayDaemon()
     try:
         daemon.start()

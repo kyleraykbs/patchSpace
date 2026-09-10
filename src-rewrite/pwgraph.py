@@ -52,7 +52,7 @@ CLIENT_TYPE = "PipeWire:Interface:Client"
 OnChange = Callable[["PipewireGraph"], None]
 OnError = Callable[[Exception], None]
 NodeCreatedCallback = Callable[[int, dict], None]
-NodeRemovedCallback = Callable[[int], None]
+NodeRemovedCallback = Callable[[int, dict], None]
 
 
 class GraphMonitorError(Exception):
@@ -341,7 +341,39 @@ class PipewireGraph:
         # a client whose application.process.id wasn't reported, or a
         # node whose owning client already exited on its own).
         swept += self._destroy_nodes(stale)
+        # Wait for the graph snapshot to actually drop the reaped
+        # objects before returning.  If the caller immediately creates a
+        # replacement with the same name, PipeWire can hand the new node
+        # the just-freed id, and a lagging node-removed event for the old
+        # object then matches (by id) the new backing and tears it down -
+        # the "live object disappeared while alive" reaping thrash.
+        self._wait_markers_gone(markers, timeout=3.0)
         return swept
+
+    def _wait_markers_gone(self, markers: Sequence[str],
+                           timeout: float = 3.0) -> bool:
+        """Poll until no live node name starts with any marker (or the
+        timeout elapses).  Best-effort; used by reap_stale_for_names to
+        let the removal events drain before a same-named replacement is
+        created."""
+        deadline = _time.monotonic() + timeout
+        while _time.monotonic() < deadline:
+            if not self._live_names_matching(markers):
+                return True
+            _time.sleep(0.05)
+        return False
+
+    def _live_names_matching(self, markers: Sequence[str]) -> list:
+        try:
+            nodes = self.nodes()
+        except Exception:
+            return []
+        hits = []
+        for data in nodes.values():
+            name = data.get("info", {}).get("props", {}).get("node.name", "")
+            if name and any(name.startswith(m) for m in markers):
+                hits.append(name)
+        return hits
 
     def _terminate_orphan_helpers(self, markers: Set[str]) -> int:
         """SIGTERM every pw-loopback / pw-cat helper whose command line
@@ -654,9 +686,13 @@ class PipewireGraph:
             self._stage_pending_node(node_id, new_nodes[node_id])
         for node_id in old_ids - new_ids:
             self._cancel_pending_node(node_id)
+            # Pass the node's last-known data too: PipeWire reuses node
+            # ids after a node is destroyed, so a consumer matching a
+            # removal by id alone can tear down an unrelated object that
+            # has since taken the id. The name lets it verify identity.
             for cb in self._node_removed_callbacks:
                 try:
-                    cb(node_id)
+                    cb(node_id, old_nodes.get(node_id, {}))
                 except Exception as exc:
                     logger.error("Error in node_removed callback: %s", exc)
         for node_id in old_ids & new_ids:
@@ -722,7 +758,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
     def on_initial(g):
-        print(f"Initial dump: {len(g.nodes())} nodes, {len(g.ports())} ports")
+        logger.info("Initial dump: %d nodes, %d ports", len(g.nodes()), len(g.ports()))
 
     graph = PipewireGraph()
     graph.on_initial_sync(on_initial)

@@ -22,6 +22,11 @@ REFRESH_INTERVAL_MS = 400
 POLL_RESPONSES_MS = 50
 POST_MUTATION_REFRESH_MS = 150
 
+# How often the log console (main_window.LogConsole) asks the daemon for
+# new log lines while it is open. Slower than REFRESH_INTERVAL_MS - log
+# output is bursty and there's no point polling it as hard as the graph.
+LOG_POLL_MS = 800
+
 LAYOUT_TICK_MS = 33
 LAYOUT_SETTLE_TICKS = 20
 LAYOUT_SETTLE_EPSILON = 0.05

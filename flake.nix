@@ -62,21 +62,28 @@
           #     pwnodes.py, so they work regardless; LADSPA_PATH is
           #     still exported for any LADSPA plugin that relies on it.
           #
-          # swh-plugins provides gate_1410.so (SensitivityGateNode's
-          # LADSPA gate); caps provides caps.so (ReverbNode's "Plate").
-          # Both are also in pkgs.ladspaPlugins, but listing them
-          # explicitly keeps the two plugins the daemon actually needs
-          # from silently vanishing if that aggregate's contents change.
+          # pkgs.ladspaPlugins is the swh-plugins set: it provides
+          # gate_1410.so (SensitivityGateNode), sc4_1882.so /
+          # fast_lookahead_limiter_1913.so (NormalizeNode) and
+          # gverb_1216.so.  caps provides caps.so, kept for the reverb's
+          # LADSPA fallback/experiments.
+          #
+          # ReverbNode itself uses Calf Reverb, an LV2 plugin: LV2 is
+          # found by URI via LV2_PATH (there is no absolute path to
+          # probe), so calf must be on the path too - see lv2Dirs below.
           #
           # Each entry is a directory that CONTAINS the shared objects,
           # not the .so files themselves.
           ladspaPluginPackages = [
             pkgs.rnnoise-plugin # librnnoise_ladspa.so (NoiseCancelNode)
-            pkgs.swh-plugins # gate_1410.so (SensitivityGateNode)
-            pkgs.caps # caps.so (ReverbNode)
-            pkgs.ladspaPlugins
+            pkgs.ladspaPlugins # swh: gate_1410, sc4, fastLookaheadLimiter
+            pkgs.caps # caps.so (LADSPA fallback plugin set)
           ];
           ladspaDirs = map (p: "${p}/lib/ladspa") ladspaPluginPackages;
+          lv2PluginPackages = [
+            pkgs.calf # Calf Reverb (ReverbNode)
+          ];
+          lv2Dirs = map (p: "${p}/lib/lv2") lv2PluginPackages;
           pluginPath = dirs: pkgs.lib.concatStringsSep ":" dirs;
 
         in
@@ -90,20 +97,21 @@
               pkgs.cairo # provides Cairo-1.0.typelib
               pkgs.pipewire
               pkgs.wireplumber
-            ] ++ ladspaPluginPackages;
+            ] ++ ladspaPluginPackages ++ lv2PluginPackages;
 
             shellHook = ''
-              # Prepend the DSP plugin dirs to the daemon's LADSPA search
-              # path (preserving whatever the user already had, so other
-              # LADSPA hosts in this shell still work).  The patchbay
-              # daemon spawns its pw-cli sessions from this environment,
-              # and it is THAT process's LADSPA_PATH that the filter-chain
-              # module's plugin host reads - see the
-              # ladspaPluginPackages comment above.
+              # Prepend the DSP plugin dirs to the daemon's search paths
+              # (preserving whatever the user already had, so other hosts
+              # in this shell still work).  The patchbay daemon spawns its
+              # pw-cli sessions from this environment, and it is THAT
+              # process's LADSPA_PATH / LV2_PATH that the filter-chain
+              # module's plugin host reads - see the comments above.
               export LADSPA_PATH="${pluginPath ladspaDirs}''${LADSPA_PATH:+:$LADSPA_PATH}"
+              export LV2_PATH="${pluginPath lv2Dirs}''${LV2_PATH:+:$LV2_PATH}"
               echo "Python dev shell ready ($(python --version))"
               echo "GTK4, Adwaita, PipeWire, WirePlumber available"
               echo "LADSPA_PATH=$LADSPA_PATH"
+              echo "LV2_PATH=$LV2_PATH"
             '';
           };
         };

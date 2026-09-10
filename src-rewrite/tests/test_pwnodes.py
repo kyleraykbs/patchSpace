@@ -18,6 +18,10 @@ from pwnodes import (
     BooleanSourceNode,
     BooleanSplitterNode,
     BooleanInvertNode,
+    WarpInNode,
+    WarpOutNode,
+    BooleanWarpInNode,
+    BooleanWarpOutNode,
     NoiseCancelNode,
     SplitterNode,
     VolumeProcessNode,
@@ -982,3 +986,129 @@ def test_boolean_invert_negates_its_input():
     space.remove_edge(space._edge_id("n", "g", "ctrl"))
     space._refresh_boolean_states()
     assert space.nodes["g"].gate_open() is True  # stored enabled=True
+
+
+# ---------------------------------------------------------------------------
+# warps
+# ---------------------------------------------------------------------------
+
+
+def test_audio_warp_mixes_multiple_publishers():
+    g = FakeGraph()
+    src_a = g.add_source(10, "appA")
+    src_b = g.add_source(11, "appB")
+    sink = g.add_sink(20, "sink")
+    space = make_space(g)
+    space.mark_graph_loaded()
+    space.add_node(NamedSource("sa", "appA"))
+    space.add_node(NamedSource("sb", "appB"))
+    space.add_node(WarpInNode("wi1", "foo"))
+    space.add_node(WarpInNode("wi2", "foo"))
+    space.add_node(WarpOutNode("wo", "foo"))
+    space.add_node(NamedSink("snk", "sink"))
+    space.add_edge("sa", "wi1", to_port="in")
+    space.add_edge("sb", "wi2", to_port="in")
+    space.add_edge("wo", "snk", from_port="out")
+    space.sync()
+
+    # Both publishers are linked into the same sink ports -> summed.
+    pairs = g.linked_pairs()
+    assert (src_a["FL"], sink["FL"]) in pairs
+    assert (src_b["FL"], sink["FL"]) in pairs
+
+
+def test_warp_name_mismatch_yields_no_link():
+    g = FakeGraph()
+    g.add_source(10, "appA")
+    g.add_sink(20, "sink")
+    space = make_space(g)
+    space.mark_graph_loaded()
+    space.add_node(NamedSource("sa", "appA"))
+    space.add_node(WarpInNode("wi", "foo"))
+    space.add_node(WarpOutNode("wo", "bar"))  # different name
+    space.add_node(NamedSink("snk", "sink"))
+    space.add_edge("sa", "wi", to_port="in")
+    space.add_edge("wo", "snk", from_port="out")
+    space.sync()
+    assert g.linked_pairs() == set()
+
+
+def test_boolean_warp_uses_first_publisher_and_separate_namespace():
+    g = FakeGraph()
+    space = make_space(g)
+    space.mark_graph_loaded()
+    space.add_node(BooleanSourceNode("b1", output=1))
+    space.add_node(BooleanSourceNode("b2", output=0))
+    space.add_node(BooleanWarpInNode("wi1", "m"))
+    space.add_node(BooleanWarpInNode("wi2", "m"))  # duplicate name
+    space.add_node(BooleanWarpOutNode("wo", "m"))
+    space.add_node(GateNode("gate", enabled=False))
+    space.add_edge("b1", "wi1", "in")
+    space.add_edge("b2", "wi2", "in")
+    space.add_edge("wo", "gate", "ctrl")
+    space._refresh_boolean_states()
+    # First publisher (b1 = true) wins; the gate opens.
+    assert space.nodes["gate"].gate_open() is True
+
+    # A boolean warp must not be reachable from an audio warp of the
+    # same name (separate namespaces).
+    space.add_node(WarpOutNode("awo", "m"))
+    assert space._resolve_warp_audio(space.nodes["awo"], set()) == []
+
+
+def test_audio_warp_cycle_resolves_safely():
+    g = FakeGraph()
+    space = make_space(g)
+    space.mark_graph_loaded()
+    # warp "x" is fed by warp "y", and warp "y" by warp "x": a loop.
+    space.add_node(WarpInNode("wi_x", "x"))
+    space.add_node(WarpOutNode("wo_y", "y"))
+    space.add_node(WarpInNode("wi_y", "y"))
+    space.add_node(WarpOutNode("wo_x", "x"))
+    space.add_edge("wo_y", "wi_x", "in")
+    space.add_edge("wo_x", "wi_y", "in")
+    # A downstream consumer forces resolution of the loop.
+    space.add_node(WarpOutNode("wo_x2", "x"))
+    space.add_node(SinkNode("snk"))
+    space.add_edge("wo_x2", "snk")
+    space.sync()  # must not hang
+    assert g.linked_pairs() == set()
+
+
+def test_handle_node_removed_ignores_reused_node_id():
+    """PipeWire reuses node ids: a removal event whose object name is not
+    ours must not tear down our backing (it only clears the stale id)."""
+    g = FakeGraph()
+    space = make_space(g)
+    space.mark_graph_loaded()
+
+    node = EchoBacked("n")
+
+    class FakeOwned:
+        owns_process = True
+        is_alive = True
+        node_id = 55
+        name = "our_node"
+        destroyed = False
+
+        def destroy(self):
+            self.destroyed = True
+
+    owned = FakeOwned()
+    node.backings.append(owned)
+    space.add_node(node)
+
+    space.handle_node_removed(
+        55, {"info": {"props": {"node.name": "some_other_node"}}}
+    )
+    assert owned.destroyed is False
+    assert owned in node.backings
+    assert owned.node_id is None  # stale id forgotten so it re-resolves
+
+    # A genuine removal (name matches) still restarts the backing.
+    owned.node_id = 55
+    space.handle_node_removed(
+        55, {"info": {"props": {"node.name": "our_node"}}}
+    )
+    assert owned.destroyed is True
+    assert owned not in node.backings

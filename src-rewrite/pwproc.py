@@ -94,6 +94,10 @@ class OwnedPwNode:
         # successful create()) - used by stuck() below, NOT by is_alive/
         # owns_process, which only ever look at the process itself.
         self._created_at: Optional[float] = None
+        # Set when the graph id is resolved, so handle_node_removed can
+        # tell a genuinely-destroyed object from a lagging removal event
+        # for a recycled id (see PatchSpace.handle_node_removed).
+        self._resolved_at: Optional[float] = None
 
     # -- health -------------------------------------------------------------
 
@@ -141,6 +145,7 @@ class OwnedPwNode:
     def resolve(self, node_id: int) -> None:
         """Record the real graph id once the graph confirms the object."""
         self.node_id = node_id
+        self._resolved_at = _time.monotonic()
 
     # -- lifecycle ----------------------------------------------------------
 

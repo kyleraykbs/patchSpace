@@ -354,6 +354,9 @@ def test_load_session_wires_finicky_node_inputs_one_at_a_time(monkeypatch):
     monkeypatch.setattr(main_mod, "_CAREFUL_NODE_TYPES", (_FinickyStub,))
 
     d = fresh_daemon()
+    # The careful path only runs against a live graph; mark it loaded so
+    # these assertions still exercise the staged bring-up.
+    d.space.mark_graph_loaded()
     monkeypatch.setattr(
         d,
         "_create_node",
@@ -466,6 +469,9 @@ def test_add_node_stages_and_waits_on_finicky_nodes(monkeypatch):
     monkeypatch.setattr(main_mod, "_CAREFUL_NODE_TYPES", (_FinickyStub,))
 
     d = fresh_daemon()
+    # The careful path only runs against a live graph; mark it loaded so
+    # these assertions still exercise the staged bring-up.
+    d.space.mark_graph_loaded()
     monkeypatch.setattr(
         d,
         "_create_node",
@@ -786,3 +792,128 @@ def test_boolean_nodes_registry_specs_and_output_control():
         {"command": "add_edge", "from_node": "bo", "to_node": "g",
          "to_port": "in"}
     )["status"] == "error"
+
+
+def test_warp_nodes_registry_specs_and_name_roundtrip():
+    from pwnodes import (
+        WarpInNode,
+        WarpOutNode,
+        BooleanWarpInNode,
+        BooleanWarpOutNode,
+    )
+    from gui import node_specs as ns
+
+    assert main_mod.NODE_TYPE_REGISTRY["warp_in"] is WarpInNode
+    assert main_mod.NODE_TYPE_REGISTRY["warp_out"] is WarpOutNode
+    assert main_mod.NODE_TYPE_REGISTRY["bool_warp_in"] is BooleanWarpInNode
+    assert main_mod.NODE_TYPE_REGISTRY["bool_warp_out"] is BooleanWarpOutNode
+    assert ns.spec_for("warp_in").field == "warp_name"
+    assert ns.spec_for("warp_out").field == "warp_name"
+    assert ns.port_kind("warp_in", "in", "in") == "audio"
+    assert ns.port_kind("warp_out", "out", "out") == "audio"
+    assert ns.port_kind("bool_warp_in", "in", "in") == "boolean"
+    assert ns.port_kind("bool_warp_out", "out", "out") == "boolean"
+    for label, key in (
+        ("Warp In", "warp_in"),
+        ("Warp Out", "warp_out"),
+        ("Bool Warp In", "bool_warp_in"),
+        ("Bool Warp Out", "bool_warp_out"),
+    ):
+        assert (label, key) in ns.ADD_NODE_MENU_ITEMS
+
+    d = fresh_daemon()
+    assert d.handle_command(
+        {"command": "add_node", "node_type": "warp_in", "node_id": "wi",
+         "config": {"warp_name": "foo"}}
+    )["status"] == "ok"
+    assert d.handle_command(
+        {"command": "add_node", "node_type": "warp_out", "node_id": "wo",
+         "config": {"warp_name": "foo"}}
+    )["status"] == "ok"
+
+    # The name is serialized (so it round-trips through export/import)...
+    nodes = d.handle_command({"command": "get_nodes"})["nodes"]
+    assert nodes["wi"]["warp_name"] == "foo"
+    assert nodes["wo"]["warp_name"] == "foo"
+    # ...and editable at runtime.
+    assert d.handle_command(
+        {"command": "set_node_property", "node_id": "wi",
+         "property": "warp_name", "value": "bar"}
+    )["status"] == "ok"
+    assert d.space.nodes["wi"].warp_name == "bar"
+
+
+def test_get_logs_serves_recent_output():
+    import logging
+    from main import _LogRingHandler
+
+    main_mod._log_buffer.clear()
+    root = logging.getLogger()
+    handler = _LogRingHandler()
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    root.addHandler(handler)
+    try:
+        root.warning("console hello")
+        d = fresh_daemon()
+        resp = d.handle_command({"command": "get_logs", "since": 0})
+        assert resp["status"] == "ok"
+        assert any("console hello" in line["text"] for line in resp["lines"])
+        # Polling again from the returned high-water mark yields nothing.
+        resp2 = d.handle_command(
+            {"command": "get_logs", "since": resp["last_seq"]}
+        )
+        assert resp2["lines"] == []
+    finally:
+        root.removeHandler(handler)
+
+
+def test_reverb_spec_and_control_clamp():
+    from pwnodes import ReverbNode
+    from gui import node_specs as ns
+
+    spec = ns.spec_for("reverb")
+    assert spec.control == "wetdry"
+    settings_attrs = {row[0] for row in spec.settings}
+    assert {"decay_time", "room_size", "diffusion", "hf_damp",
+            "predelay", "plugin_uri"} <= settings_attrs
+
+    d = fresh_daemon()
+    node = ReverbNode("rev", "reverb_node_rev")
+    d.space.nodes["rev"] = node
+    d.space.public_nodes.add("rev")
+    assert d.handle_command(
+        {"command": "set_node_property", "node_id": "rev",
+         "property": "decay_time", "value": 999}
+    )["status"] == "ok"
+    assert node.decay_time == ReverbNode.DECAY_MAX_S
+    assert node._reload_due is not None
+    assert d.handle_command(
+        {"command": "set_node_property", "node_id": "rev",
+         "property": "room_size", "value": -5}
+    )["status"] == "ok"
+    assert node.room_size == ReverbNode.ROOM_MIN
+
+    data = d.handle_command({"command": "get_nodes"})["nodes"]["rev"]
+    assert data["type"] == "reverb"
+    assert data["decay_time"] == ReverbNode.DECAY_MAX_S
+
+
+def test_install_log_ring_is_idempotent():
+    import logging
+    from main import _LogRingHandler
+
+    root = logging.getLogger()
+    for h in list(root.handlers):
+        if isinstance(h, _LogRingHandler):
+            root.removeHandler(h)
+    main_mod._log_ring_installed = False
+    try:
+        main_mod._install_log_ring()
+        main_mod._install_log_ring()
+        ring = [h for h in root.handlers if isinstance(h, _LogRingHandler)]
+        assert len(ring) == 1
+    finally:
+        for h in list(root.handlers):
+            if isinstance(h, _LogRingHandler):
+                root.removeHandler(h)
+        main_mod._log_ring_installed = False

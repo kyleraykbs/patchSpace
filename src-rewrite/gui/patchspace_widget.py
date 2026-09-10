@@ -23,6 +23,7 @@ if/elif chains here.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import random
 import time
@@ -68,6 +69,8 @@ from node_specs import (
 )
 from portal_file_dialog import open_file, save_file
 from color_picker import ColorPicker
+
+logger = logging.getLogger(__name__)
 
 
 class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
@@ -558,7 +561,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 if self.slider_dragging != ("process", nid):
                     node["volume"] = ndata.get("volume", 1.0)
                 else:
-                    print(f"Skipping volume update for dragged node {nid}")
+                    logger.debug("Skipping volume update for dragged node %s", nid)
                 # Same drag guard for the Reverb dry/wet mix slider -
                 # a poll landing mid-drag would otherwise yank it back.
                 if self.slider_dragging != ("wetdry", nid):
@@ -2677,7 +2680,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self.slider_initial_volume = new_vol
             self._slider_last_sent = new_vol
             self.queue_draw()
-            print(f"Started dragging slider for node {slider_hit}")
+            logger.debug("Started dragging slider for node %s", slider_hit)
             self.pinned_nodes.add(slider_hit)
             return
 
