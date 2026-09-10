@@ -329,6 +329,25 @@ class MainWindow(Gtk.ApplicationWindow):
         )
         box.append(import_last_btn)
 
+        box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+
+        # "Rebuild" lives in this menu - it's a rarely-needed recovery
+        # action, not an everyday view control.  Tears the live PatchSpace
+        # down and rebuilds it from a snapshot of itself (main.py's
+        # rebuild command): the user's "turn it off and on again" when a
+        # node's routing has wedged.  Nothing is lost; it's the same
+        # graph, recreated.
+        rebuild_btn = Gtk.Button(label="Rebuild Graph")
+        rebuild_btn.get_child().set_wrap(False)
+        rebuild_btn.set_tooltip_text(
+            "Tear down and rebuild the graph in place (restart the live nodes)"
+        )
+        rebuild_btn.connect(
+            "clicked",
+            lambda _b: (popover.popdown(), self.ps_widget.rebuild_graph()),
+        )
+        box.append(rebuild_btn)
+
         popover.set_child(box)
         menu_button.set_popover(popover)
 
@@ -462,9 +481,10 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _build_patchspace_toolbar(self):
         """Strip under the PatchSpace canvas: the log-console toggle, the
-        view controls (Recenter / Rebuild), the selection readout, and the
-        selection actions (Group / Anchor).  Every button carries a hover
-        tooltip explaining what it does."""
+        Recenter view control, the selection readout, and the selection
+        actions (Group / Anchor).  Every button carries a hover tooltip
+        explaining what it does.  (Rebuild lives in the top-right
+        hamburger menu now - see _build_patchspace_page.)"""
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         bar.set_margin_top(4)
         bar.set_margin_bottom(4)
@@ -502,26 +522,6 @@ class MainWindow(Gtk.ApplicationWindow):
         )
         bar.append(self._recenter_button)
 
-        # "Rebuild" sits immediately right of Recenter: tears the live
-        # PatchSpace graph down and rebuilds it from a snapshot of itself
-        # (main.py's rebuild command) - the user's "turn it off and on
-        # again" when a node's routing has wedged.  Nothing is lost; it is
-        # the same graph, recreated.
-        self._rebuild_button = Gtk.Button()
-        self._rebuild_button.set_tooltip_text(
-            "Tear down and rebuild the graph in place (restart the live nodes)"
-        )
-        rebuild_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        rebuild_box.append(
-            Gtk.Image.new_from_icon_name("view-refresh-symbolic")
-        )
-        rebuild_box.append(Gtk.Label(label="Rebuild"))
-        self._rebuild_button.set_child(rebuild_box)
-        self._rebuild_button.connect(
-            "clicked", lambda _b: self.ps_widget.rebuild_graph()
-        )
-        bar.append(self._rebuild_button)
-
         self._ps_selection_label = Gtk.Label(label="No selection")
         self._ps_selection_label.set_halign(Gtk.Align.START)
         self._ps_selection_label.set_hexpand(True)
@@ -553,7 +553,6 @@ class MainWindow(Gtk.ApplicationWindow):
         for widget in (
             self._console_button,
             self._recenter_button,
-            self._rebuild_button,
             self._ps_selection_label,
             self._ps_group_button,
             self._ps_anchor_button,
