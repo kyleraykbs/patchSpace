@@ -730,3 +730,59 @@ def test_normalize_registry_spec_and_control_clamp():
     assert data["type"] == "normalize"
     assert data["boost_db"] == NormalizeNode.BOOST_MAX_DB
     assert data["leveling"] is False
+
+
+def test_boolean_nodes_registry_specs_and_output_control():
+    from pwnodes import (
+        BooleanSourceNode,
+        BooleanSplitterNode,
+        BooleanInvertNode,
+    )
+    from gui import node_specs as ns
+
+    assert main_mod.NODE_TYPE_REGISTRY["boolean_switch"] is BooleanSourceNode
+    assert main_mod.NODE_TYPE_REGISTRY["boolean_splitter"] is BooleanSplitterNode
+    assert main_mod.NODE_TYPE_REGISTRY["boolean_invert"] is BooleanInvertNode
+    assert ns.spec_for("boolean_switch").inputs == []
+    assert ns.spec_for("boolean_switch").boolean_outputs == {"out"}
+    assert ns.spec_for("gate").boolean_inputs == {"ctrl"}
+    assert ns.spec_for("gate").control == "fallback_onoff"
+    assert ns.spec_for("switcher").inputs == ["in", "ctrl"]
+    assert ns.spec_for("switcher").outputs == ["on", "off"]
+    assert ns.port_kind("gate", "ctrl", "in") == "boolean"
+    assert ns.port_kind("gate", "in", "in") == "audio"
+    assert ns.port_kind("switcher", "on", "out") == "audio"
+    assert ns.port_kind("boolean_splitter", "out1", "out") == "boolean"
+    assert ns.port_kind("boolean_splitter", "in", "in") == "boolean"
+    assert ns.port_kind("boolean_invert", "out", "out") == "boolean"
+    assert ("On/Off", "boolean_switch") in ns.ADD_NODE_MENU_ITEMS
+    assert ("Bool Splitter", "boolean_splitter") in ns.ADD_NODE_MENU_ITEMS
+    assert ("Bool Invert", "boolean_invert") in ns.ADD_NODE_MENU_ITEMS
+
+    d = fresh_daemon()
+    d.space.mark_graph_loaded()
+    assert d.handle_command(
+        {"command": "add_node", "node_type": "boolean_switch", "node_id": "bo",
+         "config": {}}
+    )["status"] == "ok"
+    assert d.handle_command(
+        {"command": "add_node", "node_type": "gate", "node_id": "g", "config": {}}
+    )["status"] == "ok"
+    assert d.handle_command(
+        {"command": "add_edge", "from_node": "bo", "to_node": "g",
+         "to_port": "ctrl"}
+    )["status"] == "ok"
+
+    # Flipping the On/Off source drives the wired gate's pass state.
+    assert d.space.nodes["g"].gate_open() is False  # output default 0
+    d.handle_command(
+        {"command": "set_node_property", "node_id": "bo",
+         "property": "output", "value": 1}
+    )
+    assert d.space.nodes["g"].gate_open() is True
+
+    # A boolean output can't be wired into an audio input.
+    assert d.handle_command(
+        {"command": "add_edge", "from_node": "bo", "to_node": "g",
+         "to_port": "in"}
+    )["status"] == "error"

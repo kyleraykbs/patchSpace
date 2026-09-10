@@ -20,6 +20,7 @@ _FALLBACK_TEXT = (0.93, 0.93, 0.94)
 _FALLBACK_SUBTEXT = (0.63, 0.63, 0.66)
 _FALLBACK_INPUT_PORT = (0.35, 0.78, 0.51)
 _FALLBACK_OUTPUT_PORT = (0.94, 0.47, 0.42)
+_FALLBACK_BOOLEAN_PORT = (0.55, 0.55, 0.58)
 _FALLBACK_LINK = (0.42, 0.65, 0.98)
 _FALLBACK_SELECT = (0.98, 0.76, 0.24)
 _FALLBACK_PENDING_LINK = (0.98, 0.76, 0.24)
@@ -68,6 +69,7 @@ def theme_palette(widget) -> dict:
         "subtext": _lookup(widget, "dim_label_color", _FALLBACK_SUBTEXT),
         "input_port": _FALLBACK_INPUT_PORT,
         "output_port": _FALLBACK_OUTPUT_PORT,
+        "boolean_port": _FALLBACK_BOOLEAN_PORT,
         "link": _lookup(widget, "accent_color", _FALLBACK_LINK),
         "select": _FALLBACK_SELECT,
         "pending_link": _FALLBACK_PENDING_LINK,

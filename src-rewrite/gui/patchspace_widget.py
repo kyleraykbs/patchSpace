@@ -60,6 +60,7 @@ from node_specs import (
     media_class_label,
     normalize_node_type,
     spec_for,
+    port_kind,
     is_mute_node,
     type_label,
     icon_for_add_node_type,
@@ -635,6 +636,17 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             for nid in (e["from_node"], e["to_node"])
         }
 
+        # Which bool-controlled nodes currently have a boolean control
+        # edge wired into their "ctrl" input.  Drives the fallback
+        # on/off button, which is hidden the moment ctrl is connected.
+        ctrl_connected = {
+            e["to_node"]
+            for e in self.edges.values()
+            if e.get("to_port") == "ctrl"
+        }
+        for nid, node in self.nodes.items():
+            node["ctrl_connected"] = nid in ctrl_connected
+
         # Groups: daemon is authoritative, but keep locally-created ones
         # that haven't been echoed yet so they don't flicker away.
         seen_groups = set()
@@ -943,7 +955,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         if rows:
             return len(rows) * (self.FIELD_HEIGHT + 4) + 5
         spec = spec_for(node["type"])
-        if spec.control in ("gate", "switcher"):
+        if spec.control == "fallback_onoff":
+            # The fallback on/off button only claims space while nothing
+            # is wired into the node's boolean "ctrl" input.
+            return 0 if node.get("ctrl_connected") else self.GATE_AREA_HEIGHT
+        if spec.control in ("gate", "switcher", "boolean"):
             return self.GATE_AREA_HEIGHT
         if spec.has_extra_row:
             return 25
@@ -1323,6 +1339,31 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 return nid
         return None
 
+    def find_boolean_toggle_at(self, x, y):
+        """The On/Off button on a boolean source node - same geometry as
+        the old gate/switcher toggles (see _gate_rect)."""
+        for nid, node in self.nodes.items():
+            if spec_for(node["type"]).control != "boolean":
+                continue
+            gx, gy, gw, gh = self._gate_rect(nid)
+            if gx <= x <= gx + gw and gy <= y <= gy + gh:
+                return nid
+        return None
+
+    def find_fallback_toggle_at(self, x, y):
+        """The on/off fallback button on a gate/switcher whose boolean
+        ctrl input is unwired (it disappears once something is plugged
+        into ctrl - see _bottom_control_height)."""
+        for nid, node in self.nodes.items():
+            if spec_for(node["type"]).control != "fallback_onoff":
+                continue
+            if node.get("ctrl_connected"):
+                continue
+            gx, gy, gw, gh = self._gate_rect(nid)
+            if gx <= x <= gx + gw and gy <= y <= gy + gh:
+                return nid
+        return None
+
     def find_mute_checkbox_at(self, x, y):
         return self._find_bottom_checkbox_at(
             x,
@@ -1398,7 +1439,16 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             if edge["from_node"] not in self.nodes or edge["to_node"] not in self.nodes:
                 continue
             out_x, out_y, in_x, in_y = self._edge_endpoints(edge)
-            cr.set_source_rgb(*pal["link"])
+            src_node = self.nodes[edge["from_node"]]
+            is_bool = (
+                port_kind(
+                    src_node["type"], edge.get("from_port", "out"), "out"
+                )
+                == "boolean"
+            )
+            cr.set_source_rgb(
+                *(pal["boolean_port"] if is_bool else pal["link"])
+            )
             draw_bezier_link(cr, out_x, out_y, in_x, in_y)
 
         for nid, node in self.nodes.items():
@@ -1511,6 +1561,19 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self._draw_gate_toggle(cr, nid, node["enabled"])
         elif spec.control == "switcher":
             self._draw_switcher_toggle(cr, nid, node.get("output", 0))
+        elif spec.control == "boolean":
+            self._draw_boolean_toggle(cr, nid, node.get("output", 0))
+        elif spec.control == "fallback_onoff":
+            # Gate/switch fallback button: shown only while nothing is
+            # wired into the boolean ctrl input.  For a gate it reflects
+            # `enabled`, for a switch its stored `output` channel.
+            if not node.get("ctrl_connected"):
+                if node["type"] == "gate":
+                    self._draw_boolean_toggle(
+                        cr, nid, 1 if node.get("enabled", True) else 0
+                    )
+                else:
+                    self._draw_boolean_toggle(cr, nid, node.get("output", 0))
         elif spec.control == "wetdry":
             self._draw_wetdry_slider(cr, x, y, node_h, node.get("wet_dry", 0.3))
         elif spec.control == "gain":
@@ -1541,7 +1604,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         multi_input = len(node["inputs"]) > 1
         for i in range(len(node["inputs"])):
             sx, sy = self._socket_position(nid, "in", i)
-            cr.set_source_rgb(*pal["input_port"])
+            is_bool = port_kind(node["type"], node["inputs"][i], "in") == "boolean"
+            cr.set_source_rgb(
+                *(pal["boolean_port"] if is_bool else pal["input_port"])
+            )
             cr.arc(sx, sy, self.SOCKET_RADIUS, 0, 2 * math.pi)
             cr.fill()
             # A single "in" socket is self-explanatory and every node
@@ -1562,7 +1628,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         for i in range(len(node["outputs"])):
             sx, sy = self._socket_position(nid, "out", i)
             is_source = self.connecting_from == (nid, i)
-            cr.set_source_rgb(*(pal["select"] if is_source else pal["output_port"]))
+            is_bool = port_kind(node["type"], node["outputs"][i], "out") == "boolean"
+            cr.set_source_rgb(
+                *(
+                    pal["select"]
+                    if is_source
+                    else (pal["boolean_port"] if is_bool else pal["output_port"])
+                )
+            )
             cr.arc(sx, sy, self.SOCKET_RADIUS, 0, 2 * math.pi)
             cr.fill()
             # Multi-output nodes (today only the Switcher's "a"/"b") get
@@ -1882,6 +1955,42 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             cr.move_to(text_x, text_y)
             cr.show_text(label)
 
+    def _draw_boolean_toggle(self, cr, nid, output):
+        """On/Off button for the boolean source node - the A/B button's
+        shape with On/Off labels.  The active segment is filled green so
+        a glance shows the value being broadcast to any gate/switcher
+        wired to this node."""
+        x, y, w, h = self._gate_rect(nid)
+        radius = 10
+        half = w / 2
+
+        draw_rounded_rect(cr, x, y, w, h, radius)
+        cr.set_source_rgb(0.20, 0.20, 0.22)
+        cr.fill_preserve()
+        cr.set_source_rgb(0.46, 0.46, 0.49)
+        cr.set_line_width(1.5)
+        cr.stroke()
+
+        # On = left/true, Off = right/false.
+        active = 0 if output else 1
+        cr.select_font_face("sans")
+        cr.set_font_size(11)
+        for i, label in enumerate(("On", "Off")):
+            seg_x = x + i * half
+            if i == active:
+                draw_rounded_rect(cr, seg_x + 2, y + 2, half - 4, h - 4, radius - 2)
+                cr.set_source_rgb(0.30, 0.72, 0.42)
+                cr.fill()
+            extents = cr.text_extents(label)
+            text_x = seg_x + (half - extents.width) / 2 - extents.x_bearing
+            text_y = y + (h - extents.height) / 2 - extents.y_bearing
+            if i == active:
+                cr.set_source_rgb(0.06, 0.16, 0.09)
+            else:
+                cr.set_source_rgb(0.78, 0.78, 0.80)
+            cr.move_to(text_x, text_y)
+            cr.show_text(label)
+
     def _draw_mute_checkbox(self, cr, x, y, node_h, volume):
         self._draw_check_row(cr, x, y, node_h, volume > 0.5, "Pass audio")
 
@@ -1987,6 +2096,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             or self.find_mute_checkbox_at(wx, wy) is not None
             or self.find_gate_toggle_at(wx, wy) is not None
             or self.find_switcher_toggle_at(wx, wy) is not None
+            or self.find_boolean_toggle_at(wx, wy) is not None
+            or self.find_fallback_toggle_at(wx, wy) is not None
             or self.find_three_dots_at(wx, wy) is not None
             or self.find_anchor_icon_at(wx, wy) is not None
             or self.find_settings_gear_at(wx, wy) is not None
@@ -2081,6 +2192,26 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             node = self.nodes[nid]
             node["output"] = 0 if node.get("output") else 1
             self._send_switcher_output(nid, node["output"])
+            self.queue_draw()
+            return
+
+        nid = self.find_boolean_toggle_at(wx, wy)
+        if nid is not None:
+            node = self.nodes[nid]
+            node["output"] = 0 if node.get("output") else 1
+            self._send_switcher_output(nid, node["output"])
+            self.queue_draw()
+            return
+
+        nid = self.find_fallback_toggle_at(wx, wy)
+        if nid is not None:
+            node = self.nodes[nid]
+            if node["type"] == "gate":
+                node["enabled"] = not node.get("enabled", True)
+                self._send_set_gate(nid, node["enabled"])
+            else:
+                node["output"] = 0 if node.get("output") else 1
+                self._send_switcher_output(nid, node["output"])
             self.queue_draw()
             return
 
@@ -2618,6 +2749,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self.find_mute_checkbox_at(wx, wy) is not None
             or self.find_gate_toggle_at(wx, wy) is not None
             or self.find_switcher_toggle_at(wx, wy) is not None
+            or self.find_boolean_toggle_at(wx, wy) is not None
+            or self.find_fallback_toggle_at(wx, wy) is not None
             or self.find_three_dots_at(wx, wy) is not None
             or self.find_anchor_icon_at(wx, wy) is not None
             or self.find_settings_gear_at(wx, wy) is not None
@@ -2786,6 +2919,19 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             base += f"@{from_port}"
         return base
 
+    def _ports_compatible(self, from_nid, from_port, to_nid, to_port):
+        """Whether an edge from (from_nid, from_port) to (to_nid,
+        to_port) is legal: both ports must be the same kind (audio with
+        audio, boolean with boolean).  Mirrors the daemon's add_edge
+        check so the GUI never sends a connection it knows will fail."""
+        src = self.nodes.get(from_nid)
+        dst = self.nodes.get(to_nid)
+        if src is None or dst is None:
+            return False
+        return port_kind(src["type"], from_port, "out") == port_kind(
+            dst["type"], to_port, "in"
+        )
+
     def on_drag_end(self, gesture, offset_x, offset_y):
         # Always clear the transient drag/connection state, even if a
         # branch below raised (a stale detaching-edge lookup, a node
@@ -2866,15 +3012,18 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                         target_nid != old_to_nid or target_port != old_to_port
                     ) and target_nid != from_nid:
                         self.client.send({"command": "remove_edge", "edge_id": eid})
-                        self.client.send(
-                            {
-                                "command": "add_edge",
-                                "from_node": from_nid,
-                                "to_node": target_nid,
-                                "to_port": target_port,
-                                "from_port": source_port,
-                            }
-                        )
+                        if self._ports_compatible(
+                            from_nid, source_port, target_nid, target_port
+                        ):
+                            self.client.send(
+                                {
+                                    "command": "add_edge",
+                                    "from_node": from_nid,
+                                    "to_node": target_nid,
+                                    "to_port": target_port,
+                                    "from_port": source_port,
+                                }
+                            )
                         GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
                 else:
                     self.client.send({"command": "remove_edge", "edge_id": eid})
@@ -2888,7 +3037,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                         self.client.send(
                             {"command": "remove_edge", "edge_id": existing_eid}
                         )
-                    else:
+                    elif self._ports_compatible(
+                        out_nid, source_port, target_nid, target_port
+                    ):
                         self.client.send(
                             {
                                 "command": "add_edge",

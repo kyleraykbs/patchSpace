@@ -15,6 +15,9 @@ from pwnodes import (
     GateNode,
     SwitcherNode,
     InverseSwitcherNode,
+    BooleanSourceNode,
+    BooleanSplitterNode,
+    BooleanInvertNode,
     NoiseCancelNode,
     SplitterNode,
     VolumeProcessNode,
@@ -329,53 +332,54 @@ class NamedSink(OutputNode):
 def test_switcher_only_routes_the_selected_output():
     g = FakeGraph()
     src_ports = g.add_source(10, "app1")
-    a_ports = g.add_sink(20, "sinkA")
-    b_ports = g.add_sink(30, "sinkB")
+    on_ports = g.add_sink(20, "sinkA")
+    off_ports = g.add_sink(30, "sinkB")
     space = make_space(g)
     space.mark_graph_loaded()
     space.add_node(SrcNode("src"))
-    space.add_node(SwitcherNode("sw"))
-    space.add_node(NamedSink("a", "sinkA"))
-    space.add_node(NamedSink("b", "sinkB"))
+    space.add_node(SwitcherNode("sw", output=1))  # output 1 = "on"
+    space.add_node(NamedSink("on", "sinkA"))
+    space.add_node(NamedSink("off", "sinkB"))
     space.add_edge("src", "sw")
-    space.add_edge("sw", "a", from_port="a")
-    space.add_edge("sw", "b", from_port="b")
+    space.add_edge("sw", "on", from_port="on")
+    space.add_edge("sw", "off", from_port="off")
     space.sync()
 
-    # Output A selected: only the A branch carries audio.
-    assert (src_ports["FL"], a_ports["FL"]) in g.linked_pairs()
-    assert (src_ports["FL"], b_ports["FL"]) not in g.linked_pairs()
+    # "on" selected: only the on branch carries audio.
+    assert (src_ports["FL"], on_ports["FL"]) in g.linked_pairs()
+    assert (src_ports["FL"], off_ports["FL"]) not in g.linked_pairs()
 
-    # Flip to B: A is torn down, B comes up.
-    space.nodes["sw"].output = 1
+    # Flip to "off": on is torn down, off comes up.
+    space.nodes["sw"].output = 0
     space.sync()
-    assert (src_ports["FL"], b_ports["FL"]) in g.linked_pairs()
-    assert (src_ports["FL"], a_ports["FL"]) not in g.linked_pairs()
+    assert (src_ports["FL"], off_ports["FL"]) in g.linked_pairs()
+    assert (src_ports["FL"], on_ports["FL"]) not in g.linked_pairs()
 
 
 def test_switcher_state_propagates_through_downstream_transparent_nodes():
     g = FakeGraph()
     src_ports = g.add_source(10, "app1")
-    a_ports = g.add_sink(20, "sinkA")
-    b_ports = g.add_sink(30, "sinkB")
+    on_ports = g.add_sink(20, "sinkA")
+    off_ports = g.add_sink(30, "sinkB")
     space = make_space(g)
     space.mark_graph_loaded()
-    for node in (SrcNode("src"), SwitcherNode("sw"), GateNode("ga"), GateNode("gb"),
-                 NamedSink("a", "sinkA"), NamedSink("b", "sinkB")):
+    for node in (SrcNode("src"), SwitcherNode("sw", output=1), GateNode("ga"),
+                 GateNode("gb"), NamedSink("on", "sinkA"),
+                 NamedSink("off", "sinkB")):
         space.add_node(node)
     space.add_edge("src", "sw")
-    space.add_edge("sw", "ga", from_port="a")
-    space.add_edge("ga", "a")
-    space.add_edge("sw", "gb", from_port="b")
-    space.add_edge("gb", "b")
+    space.add_edge("sw", "ga", from_port="on")
+    space.add_edge("ga", "on")
+    space.add_edge("sw", "gb", from_port="off")
+    space.add_edge("gb", "off")
     space.sync()
-    assert (src_ports["FL"], a_ports["FL"]) in g.linked_pairs()
-    assert (src_ports["FL"], b_ports["FL"]) not in g.linked_pairs()
+    assert (src_ports["FL"], on_ports["FL"]) in g.linked_pairs()
+    assert (src_ports["FL"], off_ports["FL"]) not in g.linked_pairs()
 
-    space.nodes["sw"].output = 1
+    space.nodes["sw"].output = 0
     space.sync()
-    assert (src_ports["FL"], b_ports["FL"]) in g.linked_pairs()
-    assert (src_ports["FL"], a_ports["FL"]) not in g.linked_pairs()
+    assert (src_ports["FL"], off_ports["FL"]) in g.linked_pairs()
+    assert (src_ports["FL"], on_ports["FL"]) not in g.linked_pairs()
 
 
 class NamedSource(InputNode):
@@ -396,18 +400,18 @@ def test_inverse_switcher_only_passes_the_selected_input():
     space.mark_graph_loaded()
     space.add_node(NamedSource("sa", "srcA"))
     space.add_node(NamedSource("sb", "srcB"))
-    space.add_node(InverseSwitcherNode("inv"))
+    space.add_node(InverseSwitcherNode("inv", output=1))  # "on"
     space.add_node(NamedSink("snk", "sink"))
-    space.add_edge("sa", "inv", to_port="a")
-    space.add_edge("sb", "inv", to_port="b")
+    space.add_edge("sa", "inv", to_port="on")
+    space.add_edge("sb", "inv", to_port="off")
     space.add_edge("inv", "snk")
     space.sync()
 
-    # Input A selected: only srcA reaches the sink.
+    # "on" input selected: only srcA reaches the sink.
     assert (a_ports["FL"], sink_ports["FL"]) in g.linked_pairs()
     assert (b_ports["FL"], sink_ports["FL"]) not in g.linked_pairs()
 
-    space.nodes["inv"].output = 1
+    space.nodes["inv"].output = 0
     space.sync()
     assert (b_ports["FL"], sink_ports["FL"]) in g.linked_pairs()
     assert (a_ports["FL"], sink_ports["FL"]) not in g.linked_pairs()
@@ -420,8 +424,8 @@ def test_inverse_switcher_accepts_two_inputs_but_gate_does_not():
     space.add_node(NamedSource("sb", "srcB"))
     space.add_node(InverseSwitcherNode("inv"))
     space.add_node(GateNode("gate"))
-    space.add_edge("sa", "inv", to_port="a")
-    space.add_edge("sb", "inv", to_port="b")  # allowed: selectable inputs
+    space.add_edge("sa", "inv", to_port="on")
+    space.add_edge("sb", "inv", to_port="off")  # allowed: selectable inputs
     space.add_edge("sa", "gate")
     with pytest.raises(ValueError):
         space.add_edge("sb", "gate")
@@ -433,8 +437,8 @@ def test_edges_with_same_nodes_but_different_source_ports_are_distinct():
     space.add_node(SrcNode("src"))
     space.add_node(SwitcherNode("sw"))
     space.add_node(SinkNode("snk"))
-    id_a = space.add_edge("sw", "snk", from_port="a")
-    id_b = space.add_edge("sw", "snk", from_port="b")
+    id_a = space.add_edge("sw", "snk", from_port="on")
+    id_b = space.add_edge("sw", "snk", from_port="off")
     assert id_a != id_b
     assert len(space.edges) == 2
 
@@ -854,3 +858,127 @@ def test_one_broken_node_does_not_stop_others():
 
     space.supervise()  # must not raise, and must still repair `good`
     assert good.module_spawns == 1
+
+
+# ---------------------------------------------------------------------------
+# boolean control signals
+# ---------------------------------------------------------------------------
+
+
+def test_boolean_source_drives_gate_state():
+    g = FakeGraph()
+    space = make_space(g)
+    space.mark_graph_loaded()
+
+    # Gate's stored default says "closed", but a wired boolean source
+    # overrides it.
+    src = BooleanSourceNode("b", output=1)
+    gate = GateNode("g", enabled=False)
+    space.add_node(src)
+    space.add_node(gate)
+    space.add_edge("b", "g", "ctrl")
+
+    space._refresh_boolean_states()
+    assert gate.gate_open() is True
+
+    # Flip the source off; the gate follows.
+    src.output = 0
+    space._refresh_boolean_states()
+    assert gate.gate_open() is False
+
+    # Removing the control edge falls back to the gate's own default.
+    space.remove_edge(space._edge_id("b", "g", "ctrl"))
+    space._refresh_boolean_states()
+    assert gate.gate_open() is False  # stored enabled=False
+
+
+def test_boolean_splitter_forwards_to_both_outputs():
+    g = FakeGraph()
+    space = make_space(g)
+    space.mark_graph_loaded()
+
+    space.add_node(BooleanSourceNode("b", output=1))
+    space.add_node(BooleanSplitterNode("s"))
+    space.add_node(GateNode("g1", enabled=False))
+    space.add_node(SwitcherNode("g2", output=0))
+    space.add_edge("b", "s", "in")
+    space.add_edge("s", "g1", "ctrl", from_port="out1")
+    space.add_edge("s", "g2", "ctrl", from_port="out2")
+
+    space._refresh_boolean_states()
+    assert space.nodes["g1"].gate_open() is True
+    # true -> switcher channel "on".
+    assert space.nodes["g2"].active_output() == "on"
+
+
+def test_mixed_kind_edge_is_rejected():
+    g = FakeGraph()
+    space = make_space(g)
+    space.mark_graph_loaded()
+    space.add_node(BooleanSourceNode("b"))
+    space.add_node(GateNode("g"))
+    space.add_node(SrcNode("src"))
+
+    # boolean output -> audio input
+    with pytest.raises(ValueError):
+        space.add_edge("b", "g", "in")
+    # audio output -> boolean input
+    with pytest.raises(ValueError):
+        space.add_edge("src", "g", "ctrl")
+
+
+def test_boolean_input_accepts_only_one_driver():
+    g = FakeGraph()
+    space = make_space(g)
+    space.mark_graph_loaded()
+    space.add_node(BooleanSourceNode("b1"))
+    space.add_node(BooleanSourceNode("b2"))
+    space.add_node(GateNode("g"))
+    space.add_edge("b1", "g", "ctrl")
+    with pytest.raises(ValueError):
+        space.add_edge("b2", "g", "ctrl")
+
+
+def test_boolean_edge_never_becomes_a_pipewire_link():
+    g = FakeGraph()
+    g.add_source(10, "app1")
+    g.add_sink(20, "sink1")
+    space = make_space(g)
+    space.mark_graph_loaded()
+
+    space.add_node(SrcNode("src"))
+    space.add_node(GateNode("gate"))
+    space.add_node(SinkNode("out"))
+    space.add_node(BooleanSourceNode("b", output=1))
+    space.add_edge("src", "gate", "in")
+    audio_eid = space.add_edge("gate", "out", "in")
+    bool_eid = space.add_edge("b", "gate", "ctrl")
+
+    space.sync()
+    # The audio edge out of the (open) gate got a real pair; the boolean
+    # control edge never gets one.
+    assert space._edge_links[audio_eid].pairs
+    assert bool_eid not in space._edge_links
+
+
+def test_boolean_invert_negates_its_input():
+    g = FakeGraph()
+    space = make_space(g)
+    space.mark_graph_loaded()
+    space.add_node(BooleanSourceNode("b", output=1))
+    space.add_node(BooleanInvertNode("n"))
+    space.add_node(GateNode("g", enabled=True))
+    space.add_edge("b", "n", "in")
+    space.add_edge("n", "g", "ctrl")
+
+    space._refresh_boolean_states()
+    assert space.nodes["g"].gate_open() is False  # inverted true -> false
+
+    space.nodes["b"].output = 0
+    space._refresh_boolean_states()
+    assert space.nodes["g"].gate_open() is True  # inverted false -> true
+
+    # An unwired inverter emits no value, so downstream keeps its default.
+    space.remove_edge(space._edge_id("n", "g", "ctrl"))
+    space._refresh_boolean_states()
+    assert space.nodes["g"].gate_open() is True  # stored enabled=True

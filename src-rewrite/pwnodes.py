@@ -227,6 +227,15 @@ class Node:
     def is_transparent(self) -> bool:
         return False
 
+    def port_kind(self, port: str, direction: str) -> str:
+        """The kind of signal one of this node's ports carries:
+        ``"audio"`` (the default for every ordinary node) or
+        ``"boolean"`` (a control signal - see BooleanSourceNode /
+        BooleanSplitterNode / BoolControlledMixin).  Only same-kind
+        ports may be wired together; boolean edges never become
+        PipeWire links, they just drive a node's pass/select state."""
+        return "audio"
+
     # -- serialization support: the config fields this node exposes ----
     def config_fields(self) -> Dict[str, Any]:
         """Canonical dict of this node's user-facing config, used for
@@ -250,6 +259,30 @@ class InputNode(Node):
 class OutputNode(Node):
     def sink_filters(self) -> List[dict]:
         raise NotImplementedError
+
+
+class BoolControlledMixin:
+    """A transparent node whose pass/select state is driven by a boolean
+    signal on its ``BOOLEAN_INPUT`` port instead of an inline button.
+
+    ``_bool_effective`` is filled in by the owning PatchSpace on every
+    sync: the resolved boolean value of whatever source is wired into
+    the input, or ``None`` when nothing is wired (fall back to the
+    node's own stored default - so an unwired gate still passes, an
+    unwired switcher still picks "a")."""
+
+    BOOLEAN_INPUT = "ctrl"
+
+    def _init_bool_control(self) -> None:
+        self._bool_effective: Optional[bool] = None
+
+    def port_kind(self, port: str, direction: str) -> str:
+        if direction == "in" and port == self.BOOLEAN_INPUT:
+            return "boolean"
+        return "audio"
+
+    def effective_bool(self, default: bool) -> bool:
+        return self._bool_effective if self._bool_effective is not None else default
 
 
 class TransparentNode(Node):
@@ -822,58 +855,75 @@ class AppOutputNode(OutputNode, LiveResolvableNode):
 # ---------------------------------------------------------------------------
 
 
-class GateNode(TransparentNode):
-    """The "should this pass" checkbox.  When disabled, sync() treats the
-    node as having no source, so every edge downstream is disconnected on
-    the very next pass."""
+class GateNode(BoolControlledMixin, TransparentNode):
+    """The "should this pass" gate.  Its state is no longer set by an
+    inline button: a boolean signal on the ``ctrl`` input opens/closes
+    it.  With nothing wired there, it falls back to its stored
+    ``enabled`` default.  When closed, sync() treats the node as having
+    no source, so every edge downstream is disconnected on the next
+    pass."""
 
     def __init__(self, node_id, enabled: bool = True):
         super().__init__(node_id)
         self.enabled = enabled
+        self._init_bool_control()
 
     def gate_open(self):
-        return self.enabled
+        return self.effective_bool(bool(self.enabled))
 
 
-class ABSwitchNode(TransparentNode):
-    """Shared state for the two A/B switches.  Both carry an ``output``
-    flag (0 = channel "a", 1 = channel "b") flipped by the inline button
-    and persisted/round-tripped like any other node property - see
-    main.py's set_node_property("output") handler.  SwitcherNode sends
-    the chosen channel out of one of two outputs; InverseSwitcherNode
-    takes the chosen channel in through one of two inputs."""
+class ABSwitchNode(BoolControlledMixin, TransparentNode):
+    """Shared state for the two switches.  Their two channels are "on"
+    and "off": a wired boolean signal selects on (true) / off (false),
+    and with nothing wired the stored ``output`` flag is the default
+    (1 = "on", 0 = "off").  SwitcherNode sends the chosen channel out of
+    one of two outputs; InverseSwitcherNode takes the chosen channel in
+    through one of two inputs."""
 
-    OUTPUT_A = "a"
-    OUTPUT_B = "b"
-    OUTPUTS = (OUTPUT_A, OUTPUT_B)
+    OUTPUT_ON = "on"
+    OUTPUT_OFF = "off"
+    OUTPUTS = (OUTPUT_ON, OUTPUT_OFF)
+    # Pre-rename port names, tolerated so an older saved session keeps
+    # routing after the A/B -> On/Off rename.
+    _LEGACY_PORTS = {"a": OUTPUT_ON, "b": OUTPUT_OFF}
 
     def __init__(self, node_id, output: int = 0):
         super().__init__(node_id)
         self.output = 1 if output else 0
+        self._init_bool_control()
+
+    @classmethod
+    def _normalize_port(cls, port: str) -> str:
+        return cls._LEGACY_PORTS.get(port, port)
 
     def active_output(self) -> str:
-        return self.OUTPUT_B if self.output else self.OUTPUT_A
+        # A wired boolean signal drives it (true = "on", false = "off");
+        # with nothing wired, the stored ``output`` flag is the default
+        # (1 = "on", 0 = "off").
+        if self._bool_effective is not None:
+            return self.OUTPUT_ON if self._bool_effective else self.OUTPUT_OFF
+        return self.OUTPUT_ON if self.output else self.OUTPUT_OFF
 
 
 class SwitcherNode(ABSwitchNode):
-    """A one-in, two-out A/B switch.  Exactly one output - "a" or "b" -
-    is live at a time; the other resolves to no source, so sync()
-    disconnects everything downstream of it."""
+    """A one-in, two-out on/off switch.  Exactly one output - "on" or
+    "off" - is live at a time; the other resolves to no source, so
+    sync() disconnects everything downstream of it."""
 
     def passes_output(self, from_port: str) -> bool:
         """Whether audio arriving from the selected output port should
-        continue.  "out" (the single-output default) is treated as the
-        first output so a stray legacy edge keeps passing."""
+        continue.  A portless legacy edge follows the selected channel
+        (with "on" as the first output)."""
         if from_port in ("", None, "out"):
-            return self.output == 0
-        return from_port == self.active_output()
+            return self.active_output() == self.OUTPUT_ON
+        return self._normalize_port(from_port) == self.active_output()
 
 
 class InverseSwitcherNode(ABSwitchNode):
-    """A two-in, one-out A/B switch - the mirror of SwitcherNode.
-    Edges arrive on inputs "a" and "b"; only the one matching the
-    button's selection feeds the single output, the other input is
-    ignored (so anything wired to it is left alone but silent)."""
+    """A two-in, one-out on/off switch - the mirror of SwitcherNode.
+    Edges arrive on inputs "on"/"off"; only the one matching the
+    selection feeds the single output, the other input is ignored (so
+    anything wired to it is left alone but silent)."""
 
     def allows_multiple_inputs(self) -> bool:
         return True
@@ -881,9 +931,52 @@ class InverseSwitcherNode(ABSwitchNode):
     def select_upstream(self, upstream: List["Edge"]) -> Optional["Edge"]:
         wanted = self.active_output()
         for edge in upstream:
-            if edge.to_port == wanted:
+            if self._normalize_port(edge.to_port) == wanted:
                 return edge
         return None
+
+
+class BooleanSourceNode(Node):
+    """On/Off boolean signal source.  Carries a single boolean output
+    ("out"); its inline On/Off button flips ``output``.  Wiring it into
+    a gate/switcher's boolean input drives that node - nothing on the
+    audio graph moves by itself."""
+
+    def __init__(self, node_id, output: int = 0):
+        super().__init__(node_id)
+        self.output = 1 if output else 0
+
+    def port_kind(self, port: str, direction: str) -> str:
+        return "boolean" if direction == "out" else "audio"
+
+    def boolean_value(self) -> bool:
+        return bool(self.output)
+
+
+class BooleanSplitterNode(Node):
+    """Fans one boolean signal out to two boolean outputs ("out1", "out2").
+    Pure control-plane plumbing: it carries no audio and never becomes a
+    PipeWire object, it just forwards the value of whatever source is
+    wired into its "in" to everything wired downstream."""
+
+    # Its boolean input port, so PatchSpace._resolve_boolean_input knows
+    # which inbound edge to follow (it shares the lookup with the
+    # BoolControlledMixin nodes, whose input is "ctrl").
+    BOOLEAN_INPUT = "in"
+
+    def port_kind(self, port: str, direction: str) -> str:
+        return "boolean"
+
+
+class BooleanInvertNode(Node):
+    """Boolean NOT.  Its "out" is the negation of whatever boolean
+    signal is wired into "in"; with nothing wired it emits no value, so
+    anything downstream falls back to its own default."""
+
+    BOOLEAN_INPUT = "in"
+
+    def port_kind(self, port: str, direction: str) -> str:
+        return "boolean"
 
 
 class ExcludeFilterNode(TransparentNode):
@@ -2310,14 +2403,38 @@ class PatchSpace:
             if from_node not in self.nodes or to_node not in self.nodes:
                 raise KeyError("both endpoints must already be added")
             target = self.nodes[to_node]
-            if (
+            source = self.nodes[from_node]
+            from_kind = source.port_kind(from_port, "out")
+            to_kind = target.port_kind(to_port, "in")
+            if from_kind != to_kind:
+                raise ValueError(
+                    f"cannot connect a {from_kind} output to a {to_kind} input"
+                )
+            if to_kind == "boolean":
+                # A boolean input is a single control signal, not a
+                # mixable audio bus: exactly one source may drive it.
+                for existing in self._edges_into.get(to_node, []):
+                    if existing.to_port == to_port:
+                        raise ValueError(
+                            f"{to_node}.{to_port} is already driven"
+                        )
+            elif (
                 target.is_transparent()
                 and not target.allows_multiple_inputs()
                 and self._edges_into.get(to_node)
             ):
-                raise ValueError(
-                    f"{to_node} is a transparent node and already has an upstream edge"
-                )
+                # Only count *audio* upstream edges - a gate's boolean
+                # "ctrl" edge must not look like a second audio input.
+                audio_into = [
+                    e
+                    for e in self._edges_into.get(to_node, [])
+                    if not self._edge_is_boolean(e)
+                ]
+                if audio_into:
+                    raise ValueError(
+                        f"{to_node} is a transparent node and already has "
+                        "an upstream edge"
+                    )
             edge_id = self._edge_id(from_node, to_node, to_port, from_port)
             self.edges[edge_id] = Edge(
                 edge_id, from_node, to_node, to_port, from_port
@@ -2422,6 +2539,54 @@ class PatchSpace:
     # resolving what feeds an edge
     # ------------------------------------------------------------------
 
+    def _edge_is_boolean(self, edge: "Edge") -> bool:
+        """Whether `edge` carries a boolean control signal rather than
+        audio.  Either endpoint being a boolean port is enough; add_edge
+        refuses mixed-kind edges, so the two always agree."""
+        src = self.nodes.get(edge.from_node)
+        if src is not None and src.port_kind(edge.from_port, "out") == "boolean":
+            return True
+        dst = self.nodes.get(edge.to_node)
+        return dst is not None and dst.port_kind(edge.to_port, "in") == "boolean"
+
+    def _refresh_boolean_states(self) -> None:
+        """Resolve every bool-controlled node's effective state from the
+        boolean signal wired into it (or None when nothing is wired, so
+        the node keeps its own stored default).  Called at the top of
+        every sync, before audio sources are resolved."""
+        for node in self.nodes.values():
+            if isinstance(node, BoolControlledMixin):
+                node._bool_effective = self._resolve_boolean_input(node.id, set())
+
+    def _resolve_boolean_input(self, node_id: NodeId,
+                               seen: Set[NodeId]) -> Optional[bool]:
+        node = self.nodes.get(node_id)
+        port = getattr(node, "BOOLEAN_INPUT", None)
+        if port is None:
+            return None
+        for edge in self._edges_into.get(node_id, []):
+            if edge.to_port != port:
+                continue
+            return self._resolve_boolean(edge.from_node, edge.from_port, seen)
+        return None
+
+    def _resolve_boolean(self, node_id: NodeId, from_port: str,
+                         seen: Set[NodeId]) -> Optional[bool]:
+        if node_id in seen:
+            # A boolean feedback loop has no stable value; treat it as
+            # unwired rather than recursing forever.
+            return None
+        seen = seen | {node_id}
+        node = self.nodes.get(node_id)
+        if isinstance(node, BooleanSourceNode):
+            return node.boolean_value()
+        if isinstance(node, BooleanSplitterNode):
+            return self._resolve_boolean_input(node_id, seen)
+        if isinstance(node, BooleanInvertNode):
+            value = self._resolve_boolean_input(node_id, seen)
+            return None if value is None else (not value)
+        return None
+
     def _resolve_sources(
         self, node_id: NodeId, from_port: str = "out"
     ) -> List[dict]:
@@ -2441,6 +2606,10 @@ class PatchSpace:
             if not node.passes_output(from_port):
                 return []
             upstream = self._edges_into.get(node_id, [])
+            # Boolean control edges also land here (a gate's "ctrl", a
+            # switcher's "ctrl") but must never be mistaken for the
+            # node's audio upstream.
+            upstream = [e for e in upstream if not self._edge_is_boolean(e)]
             if not upstream:
                 return []
             # A single-input transparent node has exactly one inbound
@@ -2677,6 +2846,10 @@ class PatchSpace:
     def sync_locked(self) -> None:
         if not self._graph_loaded:
             return
+        # Resolve boolean control signals first: a gate/switcher's state
+        # (and therefore which audio edges resolve to a source) depends
+        # on them.
+        self._refresh_boolean_states()
         graph = self.graph
         desired: Dict[EdgeId, Set[Tuple[int, int]]] = {}
         unresolved: Set[EdgeId] = set()

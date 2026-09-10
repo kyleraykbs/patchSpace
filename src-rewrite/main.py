@@ -43,6 +43,9 @@ from pwnodes import (
     SwitcherNode,
     InverseSwitcherNode,
     ExcludeFilterNode,
+    BooleanSourceNode,
+    BooleanSplitterNode,
+    BooleanInvertNode,
     VolumeProcessNode,
     NoiseCancelNode,
     SensitivityGateNode,
@@ -127,6 +130,9 @@ NODE_TYPE_REGISTRY: Dict[str, type] = {
     "switcher": SwitcherNode,
     "inverse_switcher": InverseSwitcherNode,
     "exclude_filter": ExcludeFilterNode,
+    "boolean_switch": BooleanSourceNode,
+    "boolean_splitter": BooleanSplitterNode,
+    "boolean_invert": BooleanInvertNode,
     "volume": VolumeProcessNode,
     "noise_cancel": NoiseCancelNode,
     "sensitivity_gate": SensitivityGateNode,
@@ -1429,6 +1435,12 @@ class PatchBayDaemon:
             return cls(node_id, g("enabled", True))
         if cls in (SwitcherNode, InverseSwitcherNode):
             return cls(node_id, g("output", 0))
+        if cls is BooleanSourceNode:
+            return cls(node_id, g("output", 0))
+        if cls is BooleanSplitterNode:
+            return cls(node_id)
+        if cls is BooleanInvertNode:
+            return cls(node_id)
         if cls is ExcludeFilterNode:
             return cls(node_id, g("pattern", ""))
         if cls is VolumeProcessNode:
@@ -1899,7 +1911,9 @@ class PatchBayDaemon:
 
             if prop == "label":
                 node.label = value
-            elif prop == "output" and isinstance(node, ABSwitchNode):
+            elif prop == "output" and isinstance(
+                node, (ABSwitchNode, BooleanSourceNode)
+            ):
                 node.output = 1 if value else 0
             elif prop in ("pattern", "media_class", "description", "port_type"):
                 if hasattr(node, prop):

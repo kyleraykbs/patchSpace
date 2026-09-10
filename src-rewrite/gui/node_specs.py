@@ -101,7 +101,16 @@ def media_class_label(value: Optional[str]) -> str:
 
 
 class NodeSpec:
-    __slots__ = ("label", "inputs", "outputs", "control", "field", "settings")
+    __slots__ = (
+        "label",
+        "inputs",
+        "outputs",
+        "control",
+        "field",
+        "settings",
+        "boolean_inputs",
+        "boolean_outputs",
+    )
 
     def __init__(
         self,
@@ -111,10 +120,17 @@ class NodeSpec:
         control: Optional[str] = None,
         field: Optional[str] = None,
         settings: Optional[List[tuple]] = None,
+        boolean_inputs: Optional[List[str]] = None,
+        boolean_outputs: Optional[List[str]] = None,
     ):
         self.label = label
         self.inputs = inputs
         self.outputs = outputs
+        # Which of inputs/outputs carry a *boolean control signal*
+        # rather than audio (gray sockets, gray edges, never a PipeWire
+        # link).  Every port not listed here is audio.
+        self.boolean_inputs = set(boolean_inputs or ())
+        self.boolean_outputs = set(boolean_outputs or ())
         # None | "gate" | "volume" | "wetdry" | "sensitivity" - which
         # inline control (if any) is drawn on the node body and wired
         # to a daemon command. "gate" is the on/off toggle, "volume"
@@ -158,13 +174,59 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
     "description_input": NodeSpec("Description In", [], ["out"], field="description"),
     "description_output": NodeSpec("Description Out", ["in"], [], field="description"),
     "splitter": NodeSpec("Splitter", ["in"], ["out"]),
-    "gate": NodeSpec("Gate", ["in"], ["out"], control="gate"),
-    "switcher": NodeSpec("Switcher", ["in"], ["a", "b"], control="switcher"),
+    # Gate and the two switches are bool-controlled: a boolean signal on
+    # the gray "ctrl" input drives them.  When nothing is wired there
+    # they show an on/off fallback button instead (control
+    # "fallback_onoff"), which the widget hides as soon as ctrl is
+    # connected.  Their two channels are "on"/"off".
+    "gate": NodeSpec(
+        "Gate",
+        ["in", "ctrl"],
+        ["out"],
+        control="fallback_onoff",
+        boolean_inputs=["ctrl"],
+    ),
+    "switcher": NodeSpec(
+        "Switcher",
+        ["in", "ctrl"],
+        ["on", "off"],
+        control="fallback_onoff",
+        boolean_inputs=["ctrl"],
+    ),
     "inverse_switcher": NodeSpec(
-        "Inv. Switcher", ["a", "b"], ["out"], control="switcher"
+        "Inv. Switcher",
+        ["on", "off", "ctrl"],
+        ["out"],
+        control="fallback_onoff",
+        boolean_inputs=["ctrl"],
     ),
     "exclude_filter": NodeSpec("Exclude (Regex)", ["in"], ["out"], field="pattern"),
     "volume": NodeSpec("Volume", ["in"], ["out"], control="volume"),
+    # Boolean control-signal nodes (gray ports/edges; never a PipeWire
+    # link). The On/Off source's button flips a boolean output; the
+    # splitter fans one boolean out to two; the inverter emits its
+    # negation.
+    "boolean_switch": NodeSpec(
+        "On/Off",
+        [],
+        ["out"],
+        control="boolean",
+        boolean_outputs=["out"],
+    ),
+    "boolean_splitter": NodeSpec(
+        "Bool Splitter",
+        ["in"],
+        ["out1", "out2"],
+        boolean_inputs=["in"],
+        boolean_outputs=["out1", "out2"],
+    ),
+    "boolean_invert": NodeSpec(
+        "Bool Invert",
+        ["in"],
+        ["out"],
+        boolean_inputs=["in"],
+        boolean_outputs=["out"],
+    ),
 }
 
 NODE_TYPE_SPECS.update(
@@ -366,11 +428,19 @@ ADD_NODE_CATEGORIES = [
         "Processing",
         [
             ("Splitter", "splitter"),
-            ("Gate (checkbox)", "gate"),
-            ("Switcher (A/B out)", "switcher"),
-            ("Inverse Switcher (A/B in)", "inverse_switcher"),
+            ("Gate (bool)", "gate"),
+            ("Switcher (On/Off out)", "switcher"),
+            ("Inverse Switcher (On/Off in)", "inverse_switcher"),
             ("Exclude Filter (regex)", "exclude_filter"),
             ("Volume (slider)", "volume"),
+        ],
+    ),
+    (
+        "Boolean",
+        [
+            ("On/Off", "boolean_switch"),
+            ("Bool Invert", "boolean_invert"),
+            ("Bool Splitter", "boolean_splitter"),
         ],
     ),
     (
@@ -419,6 +489,7 @@ ADD_NODE_MENU_ITEMS = [
 CATEGORY_COLOR_NAMES = {
     "Filters": "accent_color",
     "Processing": "success_color",
+    "Boolean": "dim_label_color",
     "Effects": "warning_color",
     "Hardware & Apps": "error_color",
     "Virtual Devices": "destructive_color",
@@ -460,6 +531,9 @@ NODE_TYPE_ICONS: Dict[str, str] = {
     "inverse_switcher": "object-flip-horizontal-symbolic",
     "sensitivity_gate": "microphone-sensitivity-high-symbolic",
     "exclude_filter": "action-unavailable-symbolic",
+    "boolean_switch": "object-select-symbolic",
+    "boolean_splitter": "network-transmit-receive-symbolic",
+    "boolean_invert": "action-unavailable-symbolic",
     "volume": "audio-volume-high-symbolic",
     "mute": "audio-volume-muted-symbolic",
     "echo_cancel": "audio-input-microphone-symbolic",
@@ -514,6 +588,9 @@ CLASS_NAME_TO_TYPE = {
     "SwitcherNode": "switcher",
     "InverseSwitcherNode": "inverse_switcher",
     "ExcludeFilterNode": "exclude_filter",
+    "BooleanSourceNode": "boolean_switch",
+    "BooleanSplitterNode": "boolean_splitter",
+    "BooleanInvertNode": "boolean_invert",
     "VolumeProcessNode": "volume",
     "NoiseCancelNode": "noise_cancel",
     "SensitivityGateNode": "sensitivity_gate",
@@ -552,6 +629,15 @@ def spec_for(node_type: str) -> NodeSpec:
     with no control so an unrecognized type still renders instead of
     raising."""
     return NODE_TYPE_SPECS.get(node_type, _FALLBACK_SPEC)
+
+
+def port_kind(node_type: str, port: str, direction: str) -> str:
+    """"audio" or "boolean" for one of `node_type`'s ports.  Shared by
+    socket/edge coloring and by edge-drop validation so the GUI can't
+    create a boolean-to-audio connection the daemon would reject."""
+    spec = spec_for(node_type)
+    kinds = spec.boolean_inputs if direction == "in" else spec.boolean_outputs
+    return "boolean" if port in kinds else "audio"
 
 
 def is_mute_node(node_id) -> bool:
