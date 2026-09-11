@@ -57,7 +57,7 @@ class FakeCli:
 
 
 class FakeProc(FakeCli):
-    def create(self, command):
+    def create(self, command, quiet=False):
         if isinstance(command, (list, tuple)):
             FakeCli.created_lines.append(" ".join(command))
         else:
@@ -440,3 +440,74 @@ def test_out_drain_captures_its_target_sink():
     assert "--record" in command
     assert "--target nc_out" in command
     assert "stream.capture.sink = true" in command
+def test_keepalive_start_is_retried_after_transient_failure(monkeypatch):
+    """A keepalive pw-cat can lose PipeWire's buffer-allocation race
+    against a sink whose ports are still coming up (the link errors with
+    "Buffer allocation failed" and pw-cat exits).  That is transient, so
+    _ensure_feed/_ensure_drain must retry rather than give up on the
+    first immediate exit."""
+    monkeypatch.setattr(pwnodes.BackedNode, "_KEEPALIVE_RETRY_DELAY_S", 0.0)
+    attempts = []
+
+    class FlakyProc:
+        def __init__(self, name, command=("pw-cli",), settle=0.3, **kw):
+            self.name = name
+
+        def create(self, command, quiet=False):
+            attempts.append(quiet)
+            return len(attempts) >= 2  # fail once, then succeed
+
+    monkeypatch.setattr(pwnodes, "OwnedPwProcess", FlakyProc)
+
+    class Probe(pwnodes.BackedNode):
+        def structural_ok(self):
+            return True
+
+        def ensure_structural(self):
+            pass
+
+    node = Probe("probe", "probe_backing")
+    proc = node._ensure_feed("probe_backing_keepalive", "probe_backing")
+
+    assert proc is not None
+    assert len(attempts) == 2
+    # The first (retry-worthy) failure is quiet; only the final attempt
+    # may log if it too fails.
+    assert attempts[0] is True
+    assert proc in node.backings
+
+
+def test_keepalive_gives_up_after_bounded_attempts(monkeypatch):
+    """A keepalive that can never start is retried a bounded number of
+    times, not forever, and leaves no half-registered backing behind."""
+    monkeypatch.setattr(pwnodes.BackedNode, "_KEEPALIVE_RETRY_DELAY_S", 0.0)
+    attempts = []
+
+    class DeadProc:
+        def __init__(self, name, command=("pw-cli",), settle=0.3, **kw):
+            self.name = name
+
+        def create(self, command, quiet=False):
+            attempts.append(quiet)
+            return False
+
+    monkeypatch.setattr(pwnodes, "OwnedPwProcess", DeadProc)
+
+    class Probe(pwnodes.BackedNode):
+        def structural_ok(self):
+            return True
+
+        def ensure_structural(self):
+            pass
+
+    node = Probe("probe", "probe_backing")
+    proc = node._ensure_drain("probe_backing_keepalive", "probe_backing")
+
+    assert proc is None
+    assert len(attempts) == node._KEEPALIVE_ATTEMPTS
+    # Only the last attempt is allowed to log a warning.
+    assert attempts[-1] is False
+    assert all(a is True for a in attempts[:-1])
+    assert node.backings == []
+
+

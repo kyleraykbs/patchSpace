@@ -330,7 +330,10 @@ class OwnedPwProcess(OwnedPwNode):
     ``pw-loopback`` republishing a monitor.  There is no destroy <id>
     protocol; the process is simply terminated."""
 
-    def create(self, command: Sequence[str]) -> bool:
+    def create(self, command: Sequence[str], quiet: bool = False) -> bool:
+        """Start the helper.  ``quiet`` suppresses the warning for an
+        immediate exit, for a caller that is about to retry (a transient
+        start-up race should not be logged as a failure on every attempt)."""
         if self._proc is not None:
             return True
         try:
@@ -349,12 +352,14 @@ class OwnedPwProcess(OwnedPwNode):
 
         if proc.poll() is not None:
             stderr = proc.stderr.read() if proc.stderr else ""
-            logger.warning(
-                "%r exited immediately (exit code %s): %s",
-                self.name,
-                proc.returncode,
-                stderr.strip(),
-            )
+            self._close_pipes(proc)
+            if not quiet:
+                logger.warning(
+                    "%r exited immediately (exit code %s): %s",
+                    self.name,
+                    proc.returncode,
+                    stderr.strip(),
+                )
             return False
 
         self._start_drain(proc)
@@ -363,6 +368,15 @@ class OwnedPwProcess(OwnedPwNode):
         self._created_at = _time.monotonic()
         logger.info("Started helper process %r.", self.name)
         return True
+
+    @staticmethod
+    def _close_pipes(proc: subprocess.Popen) -> None:
+        for pipe in (proc.stdin, proc.stdout, proc.stderr):
+            try:
+                if pipe is not None:
+                    pipe.close()
+            except OSError:
+                pass
 
     def destroy(self) -> None:
         proc, self._proc = self._proc, None

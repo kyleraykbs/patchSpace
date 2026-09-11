@@ -240,9 +240,24 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # Nodes currently marquee-selected (right-drag). Drives the
         # bottom tool panel's Anchor button.
         self.selected_nodes = set()
-        # Right-drag marquee state.
+        # Marquee state.  select_rect is shared by the right-drag marquee
+        # and the modifier (shift/ctrl) left-drag marquee.
         self.select_rect = None
+        # "add" (shift-drag) / "remove" (ctrl-drag) while a modifier
+        # marquee is in progress, else None.  _marquee_base is the
+        # selection it started from, so each update re-derives from a
+        # stable base instead of accumulating drift.
+        self._marquee_mode = None
+        self._marquee_base = set()
+        self._marquee_start_world = (0.0, 0.0)
         self._right_drag_moved = False
+        # Declarative-files dialogs: last listing, the open dialog, and
+        # the "open the Declare dialog once the list arrives" handshake.
+        self._pending_declarative_list = False
+        self._declarative_files = []
+        self._declarative_dialog = None
+        self._pending_declare_nodes = None
+        self._pending_declare_open = False
         self._right_drag_start_widget = (0.0, 0.0)
         self._right_drag_start_world = (0.0, 0.0)
         # Callbacks fired whenever the selection or anchor set changes,
@@ -258,6 +273,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._load_started_at = 0.0
         self._load_min_visible_until = 0.0
         self._load_timeout_at = 0.0
+        # The daemon reports via get_nodes whether it is running its own
+        # start-up session load (which the GUI never issued, so it has no
+        # command-side signal for).  Tracked so a False->True transition
+        # raises the overlay exactly once.
+        self._daemon_loading = False
         # GLib source for the deferred post-load zoom_to_fit (see
         # _set_loading/_fit_after_load).
         self._fit_source = 0
@@ -440,6 +460,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             return
         if now >= self._load_timeout_at:
             self._set_loading(False)
+            return
+        if self._daemon_loading:
+            # The daemon is still working (its own startup load, or a
+            # second cross-reference pass).  Node readiness alone would
+            # clear the overlay between passes; wait for its "loading"
+            # flag to drop (bounded by the timeout above).
             return
         if not daemon_nodes:
             # A rebuild/import has torn the old graph down (or a rebuild's
@@ -654,6 +680,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     def update_from_daemon(self, data):
         daemon_nodes = data.get("nodes", {})
         daemon_edges = data.get("edges", {})
+        # The daemon auto-loads the saved session on start-up; show the
+        # same loading overlay the GUI would for an import it triggered,
+        # raising it only on the False->True edge.
+        loading_now = bool(data.get("loading"))
+        if loading_now and not self._daemon_loading:
+            self._begin_load()
+        self._daemon_loading = loading_now
         selection_before = set(self.selected_nodes)
         anchored_before = set(self.anchored_nodes)
         # A poll can change a node's label/description/control state (and
@@ -737,10 +770,20 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     # _node_health. Only backed nodes carry it; anything
                     # else is treated as healthy.
                     "health": ndata.get("health", "ok"),
+                    # File-backed node (see main.py's declarative support):
+                    # drawn with a small blue corner dot so the user can
+                    # tell at a glance which nodes a declarative file owns
+                    # and will re-derive on reload.
+                    "declarative": bool(ndata.get("declarative", False)),
+                    "declarative_label": ndata.get("declarative_label", ""),
+                    "declarative_color": ndata.get(
+                        "declarative_color", "#3584e4"
+                    ),
                     "device_volume": ndata.get("device_volume", 1.0),
                     "profile_index": ndata.get("profile_index"),
                     "codec_label": ndata.get("profile_description", ""),
                     "volume_locked": ndata.get("volume_locked", True),
+                    "force_default": ndata.get("force_default", True),
                 }
                 # A node the GUI itself asked the daemon to create is a
                 # user-spawned node -> anchor it by default.  Anything
@@ -788,6 +831,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 node["selection_label"] = ndata.get("selection_label", "")
                 node["ready"] = ndata.get("ready", True)
                 node["health"] = ndata.get("health", "ok")
+                node["declarative"] = bool(ndata.get("declarative", False))
+                node["declarative_label"] = ndata.get("declarative_label", "")
+                node["declarative_color"] = ndata.get(
+                    "declarative_color", "#3584e4"
+                )
                 # Only update volume if not dragging this node
                 # Only update volume if not dragging this node
                 if self.slider_dragging != ("process", nid):
@@ -842,6 +890,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 if self.slider_dragging != ("device", nid):
                     node["device_volume"] = ndata.get("device_volume", 1.0)
                     node["volume_locked"] = ndata.get("volume_locked", True)
+                node["force_default"] = ndata.get("force_default", True)
                 node["profile_index"] = ndata.get("profile_index")
                 node["codec_label"] = ndata.get("profile_description", "")
 
@@ -1612,20 +1661,37 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     # Width of the lock button reserved at the right of a volume row.
     VOLUME_LOCK_SIZE = 18
 
+    @staticmethod
+    def _has_force_default(node):
+        """Only the built-in sink/mic line nodes carry the force-default
+        toggle (hardware devices don't)."""
+        return node.get("type") in ("patchbay_device", "patchbay_mic_device")
+
     def _volume_row_rects(self, nid):
-        """(slider_rect, lock_rect) for `nid`'s volume row.  The slider
-        stops short of the lock button so a press on the lock can't also
-        start a volume drag.  Shared by drawing, hit-testing and the
-        drag handlers so they can't drift."""
+        """(slider_rect, force_rect_or_None, lock_rect) for `nid`'s volume
+        row.  The slider stops short of the buttons so a press on one
+        can't also start a volume drag; the lock sits at the right edge
+        and the force-default button just left of it.  Shared by drawing,
+        hit-testing and the drag handlers so they can't drift."""
         node = self.nodes[nid]
         rows = self._device_rows(node)
         rx, ry, rw, rh = self._device_row_rect(nid, rows.index("volume"))
         size = self.VOLUME_LOCK_SIZE
         gap = 6
-        slider_w = max(10, rw - size - gap)
-        slider = (rx, ry, slider_w, rh)
         lock = (rx + rw - size, ry + (rh - size) / 2.0, size, size)
-        return slider, lock
+        force = None
+        if self._has_force_default(node):
+            force = (
+                rx + rw - 2 * size - gap,
+                ry + (rh - size) / 2.0,
+                size,
+                size,
+            )
+            slider_w = max(10, rw - 2 * size - 2 * gap)
+        else:
+            slider_w = max(10, rw - size - gap)
+        slider = (rx, ry, slider_w, rh)
+        return slider, force, lock
 
     def find_device_row_at(self, x, y):
         for nid, node in self._hit_nodes(x, y):
@@ -1651,8 +1717,22 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         for nid, node in self._hit_nodes(x, y):
             if "volume" not in self._device_rows(node):
                 continue
-            lx, ly, lw, lh = self._volume_row_rects(nid)[1]
+            lx, ly, lw, lh = self._volume_row_rects(nid)[2]
             if lx <= x <= lx + lw and ly <= y <= ly + lh:
+                return nid
+        return None
+
+    def find_force_default_at(self, x, y):
+        """The force-default button, just left of the lock on a
+        Speaker/Mic Line node - returns the line node clicked."""
+        for nid, node in self._hit_nodes(x, y):
+            if "volume" not in self._device_rows(node):
+                continue
+            rect = self._volume_row_rects(nid)[1]
+            if rect is None:
+                continue
+            fx, fy, fw, fh = rect
+            if fx <= x <= fx + fw and fy <= y <= fy + fh:
                 return nid
         return None
 
@@ -1755,6 +1835,36 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         """GTK "query-tooltip" handler: after the normal hover delay over
         a node body, show its type name and description."""
         wx, wy = self.to_world(x, y)
+
+        nid = self.find_force_default_at(wx, wy)
+        if nid is not None:
+            if bool(self.nodes[nid].get("force_default", True)):
+                tooltip.set_text(
+                    "Forcing system default: the daemon keeps this virtual "
+                    "device as the default, re-checking every couple of "
+                    "seconds. Click to stop."
+                )
+            else:
+                tooltip.set_text(
+                    "Not forcing the system default. Click to keep this "
+                    "virtual device as the default output/input."
+                )
+            return True
+
+        nid = self.find_volume_lock_at(wx, wy)
+        if nid is not None:
+            if bool(self.nodes[nid].get("volume_locked", True)):
+                tooltip.set_text(
+                    "Volume locked: the daemon re-asserts this device's "
+                    "volume every tick. Click to let external changes through."
+                )
+            else:
+                tooltip.set_text(
+                    "Volume unlocked: external volume changes are adopted. "
+                    "Click to lock it again."
+                )
+            return True
+
         nid = self.find_node_at(wx, wy)
         if nid is None:
             return False
@@ -1821,6 +1931,16 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
         for nid, node in self.nodes.items():
             self._draw_node(cr, pal, nid, node)
+
+        # Declarative name bubbles hang just below their node.  Drawn in
+        # their own pass after every node body, so a node sitting under
+        # another can't paint over the bubble.
+        for nid, node in self.nodes.items():
+            if node.get("declarative"):
+                self._draw_declarative_chip(
+                    cr, pal, nid, node, node["x"], node["y"],
+                    self.node_height(nid),
+                )
 
         # Highlight the current marquee selection, then the rubber-band
         # rectangle itself, above the nodes so both stay visible.
@@ -2115,6 +2235,47 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             cr.set_source_rgb(0.7, 0.7, 0.7)
             cr.fill()
 
+    def _draw_declarative_chip(self, cr, pal, nid, node, x, y, node_h):
+        """A small coloured tag hanging just below the node, centred,
+        naming the declarative file that owns it, filled with the file's
+        colour.  Replaces the old plain blue dot: one canvas can hold
+        several declared groups, and the label+colour keeps them
+        distinguishable at a glance.  Below the node so it never covers a
+        socket/control/row; painting only, with no hit-tester, so clicks
+        fall through to the canvas."""
+        label = (node.get("declarative_label") or "").strip() or "declared"
+        color = node.get("declarative_color") or "#3584e4"
+        font_size = 9
+        text_w, text_h = self._text_size(label, font_size)
+        chip_h = max(14.0, text_h + 5)
+        chip_w = min(text_w + 14, max(24.0, self.node_width(nid) - 16))
+        cx = x + (self.node_width(nid) - chip_w) / 2.0
+        cy = y + node_h + 3
+        r, g, b = self._hex_to_rgb(color)
+        cr.save()
+        draw_rounded_rect(cr, cx, cy, chip_w, chip_h, chip_h / 2.0)
+        # Semi-transparent so whatever sits under the tag (a socket label,
+        # a control) still reads through it.  The tag is painting only -
+        # there is deliberately no find_declarative_chip_at() hit-tester,
+        # so clicks pass straight through to the node/control beneath.
+        cr.set_source_rgba(r, g, b, 0.5)
+        cr.fill_preserve()
+        cr.set_source_rgba(*pal["node_bg"], 0.6)
+        cr.set_line_width(1.0)
+        cr.stroke()
+        lum = 0.299 * r + 0.587 * g + 0.114 * b
+        text_rgb = (0.08, 0.08, 0.08) if lum > 0.6 else (1.0, 1.0, 1.0)
+        draw_text_ellipsized(
+            cr,
+            cx + 7,
+            cy + (chip_h - text_h) / 2.0,
+            label,
+            chip_w - 14,
+            font_size,
+            text_rgb,
+        )
+        cr.restore()
+
     def _draw_settings_gear(self, cr, pal, x, y, node_h):
         """Small cog in the node's bottom-right corner marking "this
         node's Settings menu has important extra controls" - and the
@@ -2164,6 +2325,26 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         if locked:
             cr.fill()
         else:
+            cr.stroke()
+        cr.restore()
+
+    def _draw_force_default_button(self, cr, x, y, w, h, active):
+        """Small "cage/bars" glyph to the left of the lock on a Speaker/Mic
+        Line: the built-in device is *locked in* as the system default.
+        Amber while the daemon keeps forcing it; dim once turned off."""
+        color = (0.88, 0.70, 0.30) if active else (0.5, 0.5, 0.53)
+        cr.save()
+        cr.set_line_width(1.5)
+        cr.set_source_rgb(*color)
+        left, right = x + w * 0.20, x + w * 0.80
+        top, bottom = y + h * 0.18, y + h * 0.82
+        # Cage frame.
+        cr.rectangle(left, top, right - left, bottom - top)
+        cr.stroke()
+        # Bars, poking slightly past the frame like a jail cell.
+        for fx in (0.35, 0.5, 0.65):
+            cr.move_to(x + w * fx, y + h * 0.10)
+            cr.line_to(x + w * fx, y + h * 0.90)
             cr.stroke()
         cr.restore()
 
@@ -2428,7 +2609,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         row_x, row_y, row_w, row_h = self._device_row_rect(nid, row_index)
 
         if row_kind == "volume":
-            (sx, sy, sw, sh), (lx, ly, lw, lh) = self._volume_row_rects(nid)
+            (sx, sy, sw, sh), force_rect, (lx, ly, lw, lh) = (
+                self._volume_row_rects(nid)
+            )
+            if force_rect is not None:
+                fx, fy, fw, fh = force_rect
+                self._draw_force_default_button(
+                    cr, fx, fy, fw, fh, bool(node.get("force_default", True))
+                )
             volume = node.get("device_volume", 1.0)
             cr.set_source_rgb(0.3, 0.3, 0.3)
             cr.rectangle(sx, sy + sh / 2 - 2, sw, 4)
@@ -2558,6 +2746,15 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         nid = self.find_anchor_icon_at(wx, wy)
         if nid is not None:
             self.toggle_node_anchor(nid)
+            return
+
+        nid = self.find_force_default_at(wx, wy)
+        if nid is not None:
+            enabled = not bool(self.nodes[nid].get("force_default", True))
+            self.nodes[nid]["force_default"] = enabled
+            self._send_property(nid, "force_default", enabled)
+            self.queue_draw()
+            GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
             return
 
         nid = self.find_volume_lock_at(wx, wy)
@@ -2932,24 +3129,554 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._begin_load()
         GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
 
-    def show_import_last_session(self):
-        """Import from the daemon's auto-saved session cache (see
-        main.py's _auto_export_session, which writes this file after
-        every structural/config change). This is the ONLY thing that
-        ever triggers loading that cache - the daemon never loads it on
-        its own startup - so restarting the daemon or the GUI never
-        silently replaces whatever's currently open; the previous
-        session only comes back if this button is clicked.
+    # ------------------------------------------------------------------
+    # declarative node files
+    # ------------------------------------------------------------------
+    #
+    # Declarative files are loaded by the daemon automatically at
+    # start-up and whenever one changes (main.py's _load_startup_sessions
+    # / reload_declarative), so there is no "import" step here.  The GUI
+    # only lists/renames/deletes the writable ones and can export the
+    # current selection into one - declaring a group of nodes so a Nix
+    # config (or any other file owner) can re-derive them.
 
-        The daemon reads its own cache file and stages it (see
-        _apply_config's note on why staging matters) - this used to
-        read the file directly off disk from here and replay it as
-        individual commands, which both bypassed the staging and kept
-        the cache path duplicated between constants.py and main.py for
-        no reason beyond "the GUI needs it too"."""
-        self.client.send({"command": "load_session"})
+    def reload_declarative(self):
+        # A declarative reload is a full rebuild of the declarative half;
+        # raise the overlay optimistically.  The daemon's own `loading`
+        # flag can't be seen here because the synchronous command blocks
+        # this connection's get_nodes polls until it finishes.
         self._begin_load()
-        GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
+        self.client.send({"command": "reload_declarative"})
+
+    def show_declarative_dialog(self):
+        self._pending_declarative_list = True
+        self.client.send({"command": "list_declarative"})
+
+    def on_declarative_files(self, resp):
+        # Cache the listing so the Declare dialog can offer a target
+        # dropdown without another round trip.
+        self._declarative_files = resp.get("files", [])
+        if getattr(self, "_pending_declare_open", False):
+            self._pending_declare_open = False
+            nodes = self._pending_declare_nodes or []
+            self._pending_declare_nodes = None
+            self._show_export_declarative_dialog(nodes)
+            return
+        if not self._pending_declarative_list:
+            return
+        self._pending_declarative_list = False
+        self._show_declarative_dialog(resp)
+
+    def on_declarative_action(self, resp):
+        """A reload/export/rename/delete finished.  Surface failures;
+        rebuild the list dialog if it is still open so it reflects the
+        change."""
+        if resp.get("status") == "error":
+            self._show_error_dialog(resp.get("message", "Declarative action failed"))
+        dialog = getattr(self, "_declarative_dialog", None)
+        if dialog is not None:
+            # Rebuild the list in place: drop the stale dialog, then ask
+            # the daemon for the new state (on_declarative_files reopens).
+            dialog.destroy()
+            self._pending_declarative_list = True
+            self.client.send({"command": "list_declarative"})
+
+    def _select_declarative_nodes(self, node_ids):
+        """Select the given full-id nodes on the canvas so the user can
+        immediately re-run Declare against the same file."""
+        ids = {n for n in node_ids if n in self.nodes}
+        if not ids:
+            self._show_error_dialog("Those nodes are not on the canvas.")
+            return
+        self._set_selection(ids)
+        self.zoom_to_fit()
+
+    def _declarative_swatch(self, color):
+        area = Gtk.DrawingArea()
+        area.set_content_width(16)
+        area.set_content_height(16)
+        area.set_valign(Gtk.Align.CENTER)
+
+        def draw(_area, cr, w, h):
+            r, g, b = self._hex_to_rgb(color)
+            cr.set_source_rgb(r, g, b)
+            cr.arc(w / 2.0, h / 2.0, min(w, h) / 2.0 - 1, 0, 2 * math.pi)
+            cr.fill()
+            cr.set_source_rgb(0.1, 0.1, 0.1)
+            cr.set_line_width(1.0)
+            cr.arc(w / 2.0, h / 2.0, min(w, h) / 2.0 - 1, 0, 2 * math.pi)
+            cr.stroke()
+
+        area.set_draw_func(draw)
+        return area
+
+    def _show_declarative_dialog(self, resp):
+        dialog = Gtk.Dialog(
+            title="Declarative Nodes",
+            transient_for=self.get_root(),
+            modal=False,
+        )
+        self._declarative_dialog = dialog
+        dialog.set_default_size(560, 460)
+
+        content = dialog.get_content_area()
+        content.set_spacing(6)
+        content.set_margin_top(10)
+        content.set_margin_bottom(10)
+        content.set_margin_start(10)
+        content.set_margin_end(10)
+
+        dirs = resp.get("directories", {})
+        info = Gtk.Label()
+        info.set_xalign(0)
+        info.set_wrap(True)
+        ro = dirs.get("readonly") or "(none)"
+        rw = dirs.get("readwrite") or "(none)"
+        info.set_markup(
+            "Read-only: <tt>{}</tt>\nRead-write: <tt>{}</tt>".format(
+                GLib.markup_escape_text(str(ro)),
+                GLib.markup_escape_text(str(rw)),
+            )
+        )
+        content.append(info)
+
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.set_vexpand(True)
+        scrolled.set_hexpand(True)
+        listbox = Gtk.ListBox()
+        listbox.set_selection_mode(Gtk.SelectionMode.NONE)
+        scrolled.set_child(listbox)
+
+        files = resp.get("files", [])
+        if not files:
+            placeholder = Gtk.Label(label="No declarative files found.")
+            placeholder.set_margin_top(12)
+            listbox.append(placeholder)
+        for entry in files:
+            listbox.append(self._declarative_file_row(entry, dialog))
+        content.append(scrolled)
+
+        select_group_btn = Gtk.Button(label="Select Group\u2026")
+        select_group_btn.set_tooltip_text(
+            "Select the nodes of one of the canvas groups (declared or not)"
+        )
+        select_group_btn.connect(
+            "clicked", lambda _b, d=dialog: self._prompt_select_group(d)
+        )
+        content.append(select_group_btn)
+
+        dialog.add_button("Reload", Gtk.ResponseType.APPLY)
+        dialog.add_button("Close", Gtk.ResponseType.CLOSE)
+        dialog.connect("response", self._on_declarative_dialog_response)
+        dialog.connect("destroy", self._on_declarative_dialog_destroy)
+        dialog.show()
+
+    def _prompt_select_group(self, parent):
+        groups = list(self.groups.items())
+        if not groups:
+            self._show_error_dialog("There are no groups on the canvas.")
+            return
+        dialog = Gtk.Dialog(
+            title="Select Group", transient_for=parent, modal=True
+        )
+        content = dialog.get_content_area()
+        content.set_spacing(6)
+        content.set_margin_top(10)
+        content.set_margin_bottom(10)
+        content.set_margin_start(10)
+        content.set_margin_end(10)
+        dropdown = Gtk.DropDown.new_from_strings(
+            [g.get("label", gid) for gid, g in groups]
+        )
+        content.append(self._labeled_row("Group:", dropdown))
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Select", Gtk.ResponseType.APPLY)
+        dialog.set_default_response(Gtk.ResponseType.APPLY)
+
+        def on_response(dlg, response):
+            if response == Gtk.ResponseType.APPLY:
+                idx = dropdown.get_selected()
+                if 0 <= idx < len(groups):
+                    self._select_declarative_nodes(groups[idx][1].get("nodes", []))
+            dlg.destroy()
+
+        dialog.connect("response", on_response)
+        dialog.show()
+
+    def _declarative_file_row(self, entry, dialog):
+        row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        row.set_margin_top(6)
+        row.set_margin_bottom(6)
+        row.set_margin_start(6)
+        row.set_margin_end(6)
+
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        header.append(self._declarative_swatch(entry.get("color", "#3584e4")))
+        name = Gtk.Label()
+        name.set_xalign(0)
+        name.set_hexpand(True)
+        name.set_ellipsize(Pango.EllipsizeMode.END)
+        name.set_markup(
+            "<b>{}</b>  <span size='small' alpha='60%'>{}</span>".format(
+                GLib.markup_escape_text(str(entry.get("label", "?"))),
+                GLib.markup_escape_text(str(entry.get("name", ""))),
+            )
+        )
+        header.append(name)
+
+        select_btn = Gtk.Button(label="Select")
+        select_btn.set_tooltip_text("Select this file's nodes on the canvas")
+        select_btn.connect(
+            "clicked",
+            lambda _b, e=entry: self._select_declarative_nodes(
+                [n["id"] for n in e.get("nodes", [])]
+            ),
+        )
+        header.append(select_btn)
+
+        if entry.get("writable"):
+            edit_btn = Gtk.Button(label="Edit\u2026")
+            edit_btn.set_tooltip_text("Change this group's name, label and colour")
+            edit_btn.connect(
+                "clicked",
+                lambda _b, e=entry, d=dialog: self._prompt_edit_declarative(e, d),
+            )
+            header.append(edit_btn)
+
+            delete_btn = Gtk.Button(label="Delete")
+            delete_btn.connect(
+                "clicked",
+                lambda _b, e=entry, d=dialog: self._confirm_delete_declarative(e, d),
+            )
+            header.append(delete_btn)
+        else:
+            ro_tag = Gtk.Label(label="read-only")
+            ro_tag.add_css_class("dim-label")
+            header.append(ro_tag)
+
+        row.append(header)
+
+        if entry.get("error"):
+            detail = Gtk.Label(label=f"Could not read: {entry['error']}")
+            detail.set_xalign(0)
+            detail.add_css_class("dim-label")
+            row.append(detail)
+        else:
+            nodes = entry.get("nodes", [])
+            names = ", ".join(str(n.get("local_id")) for n in nodes[:8])
+            if len(nodes) > 8:
+                names += ", \u2026"
+            detail = Gtk.Label(
+                label=f"{len(nodes)} node(s), {entry.get('edge_count', 0)} "
+                f"edge(s), {entry.get('group_count', 0)} group(s): {names}"
+            )
+            detail.set_xalign(0)
+            detail.set_wrap(True)
+            detail.add_css_class("dim-label")
+            row.append(detail)
+        return row
+
+    def _on_declarative_dialog_response(self, dialog, response):
+        if response == Gtk.ResponseType.APPLY:
+            self._pending_declarative_list = True
+            self.client.send({"command": "list_declarative"})
+        dialog.destroy()
+
+    def _on_declarative_dialog_destroy(self, dialog):
+        if getattr(self, "_declarative_dialog", None) is dialog:
+            self._declarative_dialog = None
+
+    def _prompt_edit_declarative(self, entry, parent):
+        dialog = Gtk.Dialog(
+            title="Edit Declarative Group",
+            transient_for=parent,
+            modal=True,
+        )
+        content = dialog.get_content_area()
+        content.set_spacing(6)
+        content.set_margin_top(10)
+        content.set_margin_bottom(10)
+        content.set_margin_start(10)
+        content.set_margin_end(10)
+        dialog.set_default_size(380, -1)
+
+        name_entry = Gtk.Entry()
+        name_entry.set_text(str(entry.get("stem", "")))
+        name_entry.set_tooltip_text(
+            "The file name (its nodes are prefixed with it).  Changing it "
+            "re-prefixes every node in the file."
+        )
+        content.append(self._labeled_row("Name:", name_entry))
+
+        label_entry = Gtk.Entry()
+        label_entry.set_text(str(entry.get("label", "")))
+        label_entry.set_tooltip_text("The label shown on each node's tag.")
+        content.append(self._labeled_row("Label:", label_entry))
+
+        color_picker = ColorPicker(
+            entry.get("color", self.GROUP_COLORS[0]), presets=self.GROUP_COLORS
+        )
+        color_picker.set_tooltip_text("The tag colour for this group's nodes.")
+        content.append(self._labeled_row("Color:", color_picker))
+
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Apply", Gtk.ResponseType.APPLY)
+        dialog.set_default_response(Gtk.ResponseType.APPLY)
+        dialog.connect(
+            "response",
+            self._on_edit_declarative_response,
+            entry,
+            name_entry,
+            label_entry,
+            color_picker,
+        )
+        dialog.show()
+
+    def _on_edit_declarative_response(
+        self, dialog, response, entry, name_entry, label_entry, color_picker
+    ):
+        if response == Gtk.ResponseType.APPLY:
+            new_name = name_entry.get_text().strip()
+            label = label_entry.get_text().strip()
+            if new_name and label:
+                self._begin_load()
+                self.client.send(
+                    {
+                        "command": "edit_declarative",
+                        "path": entry.get("path"),
+                        "new_name": new_name,
+                        "label": label,
+                        "color": color_picker.get_hex(),
+                    }
+                )
+        dialog.destroy()
+
+    def _confirm_delete_declarative(self, entry, parent):
+        confirm = Gtk.AlertDialog()
+        confirm.set_modal(True)
+        confirm.set_message(f"Delete {entry.get('name', 'this file')}?")
+        confirm.set_detail(
+            "Every node and edge defined by this file will be removed."
+        )
+        confirm.set_buttons(["Cancel", "Delete"])
+        confirm.set_cancel_button(0)
+        confirm.set_default_button(1)
+        confirm.choose(
+            parent,
+            None,
+            lambda d, result, e=entry: self._on_delete_declarative_chosen(
+                d, result, e
+            ),
+        )
+
+    def _on_delete_declarative_chosen(self, dialog, result, entry):
+        try:
+            index = dialog.choose_finish(result)
+        except GLib.Error:
+            return
+        if index == 1:
+            self._begin_load()
+            self.client.send(
+                {"command": "delete_declarative", "path": entry.get("path")}
+            )
+
+    @staticmethod
+    def _slugify(text):
+        slug = "".join(
+            c.lower() if c.isalnum() else "-" for c in (text or "").strip()
+        )
+        slug = "-".join(part for part in slug.split("-") if part)
+        return slug or "declared-group"
+
+    def show_export_declarative_dialog(self):
+        """Declare the current selection: create a new declarative group
+        or add/remove the selection from an existing writable one.  The
+        file list is fetched first so the target dropdown is current."""
+        node_ids = [nid for nid in self.selected_nodes if nid in self.nodes]
+        if not node_ids:
+            self._show_error_dialog("Select one or more nodes to declare first.")
+            return
+        self._pending_declare_nodes = node_ids
+        self._pending_declare_open = True
+        self.client.send({"command": "list_declarative"})
+
+    def _group_for_selection(self, node_ids):
+        """A canvas group whose members are exactly `node_ids`, or None.
+        Used so declaring a selection defaults to that group's label and
+        colour."""
+        wanted = set(node_ids)
+        if not wanted:
+            return None
+        for group in self.groups.values():
+            if set(group.get("nodes", [])) == wanted:
+                return group
+        return None
+
+    def _show_export_declarative_dialog(self, node_ids):
+        tappable = [f for f in self._declarative_files if f.get("writable")]
+        dialog = Gtk.Dialog(
+            title="Declare Selection",
+            transient_for=self.get_root(),
+            modal=True,
+        )
+        dialog.set_default_size(420, -1)
+        content = dialog.get_content_area()
+        content.set_spacing(6)
+        content.set_margin_top(10)
+        content.set_margin_bottom(10)
+        content.set_margin_start(10)
+        content.set_margin_end(10)
+
+        # If the selection is exactly a canvas group, inherit its
+        # label/colour for a new declarative group - "select the nodes and
+        # click Update" should carry their group properties across.
+        preset = self._group_for_selection(node_ids)
+        preset_label = preset.get("label", "") if preset else ""
+        preset_color = (
+            preset.get("color", "#3584e4") if preset else "#3584e4"
+        )
+
+        summary = Gtk.Label(
+            label=(
+                f"{len(node_ids)} node(s) selected.  The groups they belong "
+                "to (label, colour, membership) are saved with them."
+            )
+        )
+        summary.set_xalign(0)
+        summary.set_wrap(True)
+        summary.add_css_class("dim-label")
+        content.append(summary)
+
+        labels = [f.get("label") or f.get("stem") for f in tappable]
+        labels.append("New group\u2026")
+        dropdown = Gtk.DropDown.new_from_strings(labels)
+        content.append(self._labeled_row("Target:", dropdown))
+
+        select_btn = Gtk.Button(label="Select target's nodes")
+        select_btn.set_tooltip_text(
+            "Select the nodes currently in the chosen group on the canvas"
+        )
+        content.append(select_btn)
+
+        label_entry = Gtk.Entry()
+        label_entry.set_placeholder_text("Group label")
+        label_entry.set_text(preset_label)
+        content.append(self._labeled_row("Label:", label_entry))
+
+        color_picker = ColorPicker(preset_color, presets=self.GROUP_COLORS)
+        content.append(self._labeled_row("Color:", color_picker))
+
+        checkbox = Gtk.CheckButton(
+            label="Also capture edges that connect to non-declarative nodes"
+        )
+        checkbox.set_tooltip_text(
+            "Off (default): only edges wholly inside the selection or "
+            "touching another declarative node are written."
+        )
+        content.append(checkbox)
+
+        def current_target():
+            idx = dropdown.get_selected()
+            return tappable[idx] if idx < len(tappable) else None
+
+        def sync_fields(*_a):
+            target = current_target()
+            select_btn.set_sensitive(target is not None)
+            if target is not None:
+                label_entry.set_text(target.get("label", ""))
+                color_picker.set_hex(target.get("color", "#3584e4"))
+            else:
+                label_entry.set_text(preset_label)
+                color_picker.set_hex(preset_color)
+
+        dropdown.connect("notify::selected", sync_fields)
+
+        def on_select(*_a):
+            target = current_target()
+            if target is not None:
+                self._select_declarative_nodes(
+                    [n["id"] for n in target.get("nodes", [])]
+                )
+
+        select_btn.connect("clicked", on_select)
+
+        # Response ids: 1 add/update, 2 remove, 3 replace/create.
+        update_btn = dialog.add_button("Update", 1)
+        update_btn.set_tooltip_text(
+            "Merge the selection into the target group and (re)write its "
+            "group properties - label, colour and membership."
+        )
+        remove_btn = dialog.add_button("Remove", 2)
+        remove_btn.set_tooltip_text(
+            "Take the selection out of the target group (back to ordinary "
+            "imperative nodes)."
+        )
+        replace_btn = dialog.add_button("Replace file", 3)
+        replace_btn.set_tooltip_text(
+            "Overwrite the target so it contains exactly the selection "
+            "(and its groups)."
+        )
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.connect(
+            "response",
+            self._on_export_declarative_response,
+            dropdown,
+            tappable,
+            label_entry,
+            color_picker,
+            checkbox,
+            node_ids,
+        )
+        sync_fields()
+        dialog.show()
+
+    def _on_export_declarative_response(
+        self,
+        dialog,
+        response,
+        dropdown,
+        tappable,
+        label_entry,
+        color_picker,
+        checkbox,
+        node_ids,
+    ):
+        if response == Gtk.ResponseType.CANCEL:
+            dialog.destroy()
+            return
+        idx = dropdown.get_selected()
+        target = tappable[idx] if idx < len(tappable) else None
+        cmd = {
+            "command": "export_declarative",
+            "node_ids": list(node_ids),
+            "include_imperative_edges": checkbox.get_active(),
+        }
+        if target is not None:
+            cmd["path"] = target.get("path")
+            if response == 1:
+                cmd["mode"] = "add"
+            elif response == 2:
+                cmd["mode"] = "remove"
+            else:
+                cmd["mode"] = "replace"
+                cmd["overwrite"] = True
+                cmd["label"] = label_entry.get_text().strip() or target.get("label")
+                cmd["color"] = color_picker.get_hex()
+        else:
+            if response != 3:
+                return  # add/remove need an existing target; leave open
+            label = label_entry.get_text().strip()
+            if not label:
+                return  # need a label for a new group; leave open
+            cmd["mode"] = "create"
+            cmd["name"] = self._slugify(label)
+            cmd["label"] = label
+            cmd["color"] = color_picker.get_hex()
+        # Declaring/add/removing triggers a full declarative reload on the
+        # daemon; show the loading overlay while it runs.
+        self._begin_load()
+        self.client.send(cmd)
+        dialog.destroy()
 
     def rebuild_graph(self):
         """Tear the daemon's PatchSpace down and rebuild it exactly as it
@@ -3030,6 +3757,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self.drag_node_starts = {}
         self.hover_target_node = None
         self.panning = False
+        self._marquee_mode = None
+        self.select_rect = None
         if self.slider_dragging is not None:
             _kind, nid = self.slider_dragging
             self.slider_dragging = None
@@ -3172,6 +3901,19 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             # drag gesture also grab the node or start a pan under them.
             return
 
+        # Shift / Ctrl + left-drag is a modifier marquee: shift adds the
+        # nodes it sweeps to the selection, ctrl removes them.  Handled
+        # before nodes/sockets so a modifier-drag never moves a node or
+        # starts a connection.
+        mods = gesture.get_current_event_state()
+        add_sel = bool(mods & Gdk.ModifierType.SHIFT_MASK)
+        rem_sel = bool(mods & Gdk.ModifierType.CONTROL_MASK)
+        if add_sel or rem_sel:
+            self._marquee_mode = "add" if add_sel else "remove"
+            self._marquee_base = set(self.selected_nodes)
+            self._marquee_start_world = (wx, wy)
+            return
+
         socket_hit = self.find_socket_at(wx, wy)
         if socket_hit and socket_hit[1] == "out":
             nid, _, idx = socket_hit
@@ -3192,6 +3934,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
         nid = self.find_node_at(wx, wy)
         if nid is not None:
+            # A plain press selects the node (a click with no movement is
+            # therefore "select"), while pressing one already in a
+            # multi-selection keeps the selection so the whole thing
+            # moves together.
+            if nid not in self.selected_nodes:
+                self._set_selection({nid})
             self.dragging_node = nid
             # Dragging a node that's part of a multi-node selection moves
             # the whole selection together; otherwise just that node.
@@ -3213,6 +3961,18 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._set_selection(())
 
     def on_drag_update(self, gesture, offset_x, offset_y):
+        if self._marquee_mode is not None:
+            sx, sy = self._marquee_start_world
+            ex = sx + offset_x / self.zoom
+            ey = sy + offset_y / self.zoom
+            self.select_rect = (min(sx, ex), min(sy, ey), max(sx, ex), max(sy, ey))
+            inside = self._nodes_in_rect(self.select_rect)
+            if self._marquee_mode == "add":
+                self._set_selection(self._marquee_base | inside)
+            else:
+                self._set_selection(self._marquee_base - inside)
+            self.queue_draw()
+            return
         if self.connecting_from:
             cur_x = self.drag_start_xy[0] + offset_x / self.zoom
             cur_y = self.drag_start_xy[1] + offset_y / self.zoom
@@ -3352,6 +4112,23 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self.queue_draw()
 
     def _handle_drag_end(self, gesture, offset_x, offset_y):
+        if self._marquee_mode is not None:
+            # A modifier *click* (no sweep) toggles just the node under
+            # the pointer; a modifier drag already updated the selection
+            # live in on_drag_update.
+            if offset_x * offset_x + offset_y * offset_y < 25.0:
+                wx, wy = self._marquee_start_world
+                nid = self.find_node_at(wx, wy)
+                if nid is not None:
+                    if nid in self.selected_nodes:
+                        self._set_selection(self.selected_nodes - {nid})
+                    else:
+                        self._set_selection(self.selected_nodes | {nid})
+            self.select_rect = None
+            self._marquee_mode = None
+            self.queue_draw()
+            return
+
         if self.slider_dragging is not None:
             kind, nid = self.slider_dragging
             node = self.nodes.get(nid)
@@ -4031,6 +4808,52 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         )
         return layout.get_pixel_size()
 
+    @staticmethod
+    def _group_merge_key(gid):
+        """Groups that share a local id merge across namespace boundaries
+        (an imperative ``grp`` and a declarative ``file::grp``, or the
+        same id in two files): one outline, every contributing group's
+        title stacked.  The namespace separator is ``::``."""
+        return gid.split("::", 1)[1] if "::" in gid else gid
+
+    def _merged_groups(self):
+        """{merge_key: merged_group} for the current frame.
+
+        A merged group unions the members of every same-local-id group and
+        keeps their individual titles/colours (``titles``) plus the list of
+        real group ids (``gids``).  ``id`` is the primary full id used for
+        settings/actions.  Cached per frame alongside the other group
+        geometry (cleared at the top of on_draw)."""
+        cached = self._group_geo_cache.get("merged")
+        if cached is not None:
+            return cached
+        merged: dict = {}
+        for gid, group in self.groups.items():
+            key = self._group_merge_key(gid)
+            entry = merged.get(key)
+            if entry is None:
+                entry = {
+                    "id": gid,
+                    "key": key,
+                    "label": group.get("label") or gid,
+                    "color": group.get("color"),
+                    "nodes": set(),
+                    "gids": [],
+                    "titles": [],
+                }
+                merged[key] = entry
+            entry["gids"].append(gid)
+            entry["titles"].append(
+                {
+                    "gid": gid,
+                    "label": group.get("label") or gid,
+                    "color": group.get("color") or self.GROUP_COLORS[0],
+                }
+            )
+            entry["nodes"] |= set(group.get("nodes", ()))
+        self._group_geo_cache["merged"] = merged
+        return merged
+
     def _raw_group_bounds(self, group):
         """Union of a group's member node rectangles, no padding, or None
         if it has no live members.  Memoised for the current frame (the
@@ -4050,16 +4873,23 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._group_geo_cache[key] = result
         return result
 
+    def _group_title_block_height(self, group):
+        """Height of a (possibly merged) group's stacked title block: every
+        title's label line, the gaps between them, and one id line."""
+        titles = group.get("titles") or [
+            {"label": group.get("label") or group.get("id", "")}
+        ]
+        gap = 2
+        label_h = sum(self._text_size(t["label"], 12)[1] for t in titles)
+        _iw, ih = self._text_size(group.get("key", group.get("id", "")), 9)
+        return label_h + gap * (len(titles) - 1) + gap + ih
+
     def _group_header_height(self, gid, group):
         """Vertical space a group's name block occupies *above* its
-        dotted-box top: the 6px gap the header is drawn with, the wrapped
-        label + id heights, and GROUP_NAME_BUMP of breathing room so a
-        container's own edge can't touch the enclosed name."""
-        label = group.get("label") or gid
-        _lw, lh = self._text_size(label, 12)
-        _iw, ih = self._text_size(gid, 9)
-        block_h = lh + 2 + ih  # 2 == _group_header_layout's label/id gap
-        return 6 + block_h + self.GROUP_NAME_BUMP
+        dotted-box top: the 6px gap the header is drawn with, the stacked
+        title block, and GROUP_NAME_BUMP of breathing room so a container's
+        own edge can't touch the enclosed name."""
+        return 6 + self._group_title_block_height(group) + self.GROUP_NAME_BUMP
 
     def _encloses(self, outer_raw, inner_raw):
         """Whether `outer_raw` (member bounds) contains `inner_raw`, within
@@ -4083,13 +4913,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         key = ("enc", gid)
         if key in self._group_geo_cache:
             return self._group_geo_cache[key]
-        own = self._raw_group_bounds(self.groups[gid])
+        merged = self._merged_groups()
+        own = self._raw_group_bounds(merged[gid])
         if own is None:
             self._group_geo_cache[key] = []
             return []
         result = [
             other_id
-            for other_id, other in self.groups.items()
+            for other_id, other in merged.items()
             if other_id != gid
             and self._encloses(own, self._raw_group_bounds(other))
         ]
@@ -4131,7 +4962,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         x2 += p
         y2 += p
         for child_id in self._enclosed_group_ids(gid):
-            child = self.groups[child_id]
+            child = self._merged_groups()[child_id]
             cb = self._group_bounds(child_id, child, seen)
             if cb is None:
                 continue
@@ -4147,23 +4978,33 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         return result
 
     def _build_group_header(self, gid, group, top):
-        """Geometry of one group's label / id / colour chip / +/- block for
-        a given `top` (or the naive top above its box when None).  Pure;
-        the collision-resolved top comes from _all_group_header_layouts."""
+        """Geometry of one (possibly merged) group's stacked titles / id /
+        colour chip / +/- block for a given `top` (or the naive top above
+        its box when None).  Pure; the collision-resolved top comes from
+        _all_group_header_layouts.
+
+        A merged group draws every contributing group's title on its own
+        line (each in that group's colour), then a single id line."""
         bounds = self._group_bounds(gid, group)
         if bounds is None:
             return None
         x1, y1, _x2, _y2 = bounds
-        label = group.get("label") or gid
-        lw, lh = self._text_size(label, 12)
-        iw, ih = self._text_size(gid, 9)
-        chip = 12
+        titles = group.get("titles") or [
+            {"label": group.get("label") or gid, "color": group.get("color")}
+        ]
         gap = 2
-        block_h = lh + gap + ih
+        line_sizes = [self._text_size(t["label"], 12) for t in titles]
+        id_text = group.get("key", gid)
+        iw, ih = self._text_size(id_text, 9)
+        label_w = max([iw] + [w for w, _h in line_sizes])
+        block_h = (
+            sum(h for _w, h in line_sizes) + gap * (len(titles) - 1) + gap + ih
+        )
         if top is None:
             top = y1 - 6 - block_h
         mid_y = top + block_h / 2
-        chip_x = x1 + max(lw, iw) + 8
+        chip = 12
+        chip_x = x1 + label_w + 8
         chip_y = mid_y - chip / 2
         # Two small +/- buttons past the colour chip to add/remove
         # members by clicking nodes.
@@ -4175,13 +5016,17 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         rem_rect = (rem_x, btn_y, rem_x + btn, btn_y + btn)
         return {
             "gid": gid,
+            "primary_gid": group.get("id", gid),
             "x": x1,
             "top": top,
             "block_h": block_h,
-            "label": label,
+            "titles": titles,
+            "line_sizes": line_sizes,
+            "id_text": id_text,
+            "label": group.get("label") or gid,
             "color": group.get("color"),
-            "lw": lw,
-            "lh": lh,
+            "lw": label_w,
+            "lh": line_sizes[0][1] if line_sizes else 0,
             "iw": iw,
             "ih": ih,
             "gap": gap,
@@ -4212,7 +5057,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         if cached is not None:
             return cached
         naive = []
-        for gid, group in self.groups.items():
+        for gid, group in self._merged_groups().items():
             info = self._build_group_header(gid, group, None)
             if info is not None:
                 naive.append(info)
@@ -4236,7 +5081,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                         bottom = top + block_h
                         moved = True
             placed.append(
-                self._build_group_header(info["gid"], self.groups[info["gid"]], top)
+                self._build_group_header(
+                    info["gid"], self._merged_groups()[info["gid"]], top
+                )
             )
         result = {info["gid"]: info for info in placed}
         self._group_geo_cache["headers"] = result
@@ -4248,8 +5095,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         return self._all_group_header_layouts().get(gid)
 
     def find_group_action_at(self, x, y):
-        """(group_id, "add"|"remove") for the +/- header buttons."""
-        for gid, group in self.groups.items():
+        """(primary_group_id, "add"|"remove") for the +/- header buttons."""
+        for gid, group in self._merged_groups().items():
             info = self._group_header_layout(gid, group)
             if info is None:
                 continue
@@ -4258,24 +5105,24 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 ("remove", info["rem_rect"]),
             ):
                 if rect[0] <= x <= rect[2] and rect[1] <= y <= rect[3]:
-                    return (gid, action)
+                    return (info["primary_gid"], action)
         return None
 
     def find_group_label_at(self, x, y):
-        for gid, group in self.groups.items():
+        for gid, group in self._merged_groups().items():
             info = self._group_header_layout(gid, group)
             if info is None:
                 continue
             rx1, ry1, rx2, ry2 = info["rect"]
             if rx1 <= x <= rx2 and ry1 <= y <= ry2:
-                return gid
+                return info["primary_gid"]
         return None
 
     def _draw_group_boxes(self, cr, pal):
         # Draw enclosing groups first (most nested children first), so a
         # nested group's box ends up on top of its container's.
         ordered = sorted(
-            self.groups.items(),
+            self._merged_groups().items(),
             key=lambda kv: len(self._enclosed_group_ids(kv[0])),
             reverse=True,
         )
@@ -4293,21 +5140,25 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         cr.set_dash([])
 
     def _draw_group_headers(self, cr, pal):
-        for gid, group in self.groups.items():
+        for gid, group in self._merged_groups().items():
             info = self._group_header_layout(gid, group)
             if info is None:
                 continue
+            # Stacked titles: each contributing group's label on its own
+            # line, in that group's colour (unbounded, so a title always
+            # reads in full - see draw_text_unbounded).
+            y = info["top"]
+            for title, (_tw, th) in zip(info["titles"], info["line_sizes"]):
+                r, g, b = self._hex_to_rgb(title.get("color"))
+                draw_text_unbounded(
+                    cr, info["x"], y, title["label"], 12, (r, g, b)
+                )
+                y += th + info["gap"]
+            draw_text_unbounded(
+                cr, info["x"], y, info["id_text"], 9, pal["subtext"]
+            )
+
             r, g, b = self._hex_to_rgb(group.get("color"))
-            # Unbounded: a group title must always read in full and never
-            # clip to an ellipsis as the view zooms (see
-            # draw_text_unbounded).
-            draw_text_unbounded(
-                cr, info["x"], info["top"], info["label"], 12, (r, g, b)
-            )
-            id_y = info["top"] + info["lh"] + info["gap"]
-            draw_text_unbounded(
-                cr, info["x"], id_y, gid, 9, pal["subtext"]
-            )
             draw_rounded_rect(
                 cr, info["chip_x"], info["chip_y"], info["chip"], info["chip"], 3
             )
@@ -4316,11 +5167,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
             self._draw_group_button(
                 cr, pal, info["add_rect"], "+",
-                (gid, "add"), (r, g, b),
+                (info["primary_gid"], "add"), (r, g, b),
             )
             self._draw_group_button(
                 cr, pal, info["rem_rect"], "\u2212",
-                (gid, "remove"), (r, g, b),
+                (info["primary_gid"], "remove"), (r, g, b),
             )
 
     def _draw_group_button(self, cr, pal, rect, symbol, mode, color):
@@ -4392,43 +5243,57 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._set_selection(())
         self.queue_draw()
 
+    def _merged_member_gids(self, gid):
+        """Every real group id that renders as one merged group with `gid`
+        (same local id).  A +/- click applies to all of them so the merge
+        stays coherent."""
+        key = self._group_merge_key(gid)
+        return [g for g in self.groups if self._group_merge_key(g) == key]
+
     def _add_node_to_group(self, gid, nid):
-        group = self.groups.get(gid)
-        if group is None or nid not in self.nodes or nid in group["nodes"]:
+        if nid not in self.nodes:
             return
-        # Adding this node must not turn this group into a copy of another.
-        if self._exact_duplicate_group(
-            group["nodes"] | {nid}, exclude_gid=gid
-        ) is not None:
-            return
-        # Additive: a node can be in several groups at once.
-        group["nodes"].add(nid)
-        # Keep this group locally authoritative until the daemon echoes the
-        # change, so a racing poll can't flicker the membership back.
-        self._pending_groups.add(gid)
-        self.client.send(
-            {"command": "set_group", "group_id": gid,
-             "nodes": sorted(group["nodes"])}
-        )
+        for real_gid in self._merged_member_gids(gid):
+            group = self.groups.get(real_gid)
+            if group is None or nid in group["nodes"]:
+                continue
+            # Adding this node must not turn this group into a copy of
+            # another (unless it is a merged sibling, whose duplicate is
+            # fine).
+            dup = self._exact_duplicate_group(
+                group["nodes"] | {nid}, exclude_gid=real_gid
+            )
+            if dup is not None and self._group_merge_key(dup) != self._group_merge_key(real_gid):
+                continue
+            # Additive: a node can be in several groups at once.
+            group["nodes"].add(nid)
+            # Keep this group locally authoritative until the daemon echoes
+            # the change, so a racing poll can't flicker membership back.
+            self._pending_groups.add(real_gid)
+            self.client.send(
+                {"command": "set_group", "group_id": real_gid,
+                 "nodes": sorted(group["nodes"])}
+            )
         self.queue_draw()
 
     def _remove_node_from_group(self, gid, nid):
-        group = self.groups.get(gid)
-        if group is None or nid not in group["nodes"]:
-            return
-        # Removing this node must not leave this group identical to another.
-        if self._exact_duplicate_group(
-            group["nodes"] - {nid}, exclude_gid=gid
-        ) is not None:
-            return
-        group["nodes"].discard(nid)
-        # Keep this group locally authoritative until the daemon echoes the
-        # change (see update_from_daemon's pending-group handling).
-        self._pending_groups.add(gid)
-        self.client.send(
-            {"command": "set_group", "group_id": gid,
-             "nodes": sorted(group["nodes"])}
-        )
+        for real_gid in self._merged_member_gids(gid):
+            group = self.groups.get(real_gid)
+            if group is None or nid not in group["nodes"]:
+                continue
+            # Removing this node must not leave this group identical to
+            # another (merged siblings excepted).
+            dup = self._exact_duplicate_group(
+                group["nodes"] - {nid}, exclude_gid=real_gid
+            )
+            if dup is not None and self._group_merge_key(dup) != self._group_merge_key(real_gid):
+                continue
+            group["nodes"].discard(nid)
+            self._pending_groups.add(real_gid)
+            self.client.send(
+                {"command": "set_group", "group_id": real_gid,
+                 "nodes": sorted(group["nodes"])}
+            )
         self.queue_draw()
 
     def show_group_settings_dialog(self, gid):

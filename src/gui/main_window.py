@@ -247,6 +247,7 @@ class MainWindow(Gtk.ApplicationWindow):
         # close / via the menu) - see daemon_control.DaemonManager.
         self.daemon = DaemonManager()
         self.daemon.ensure_started()
+        self._daemon_busy = False
         self.client = PatchBayClient()
 
         self.notebook = Gtk.Notebook()
@@ -295,8 +296,8 @@ class MainWindow(Gtk.ApplicationWindow):
         """The PatchSpace tab is a side panel (drag-and-drop "add
         node" source, see PatchSpaceGraphWidget.build_add_node_panel)
         next to the ps_widget canvas, which itself carries a hamburger
-        menu (Export/Import) pinned to its top-right corner. ps_widget
-        itself is a plain Gtk.DrawingArea with no room for child
+        menu (Export/Import/declarative/daemon actions) pinned to its
+        top-right corner. ps_widget itself is a plain Gtk.DrawingArea with no room for child
         widgets, so the menu button lives in a Gtk.Overlay wrapped
         around it instead of inside it."""
         # Filled in below; the loading overlay is created after the
@@ -331,9 +332,7 @@ class MainWindow(Gtk.ApplicationWindow):
         # to force a wrap ("Export…" wrapping mid-word). Forcing a
         # minimum width on the box - and turning off label wrapping as
         # a belt-and-suspenders fix - keeps both entries on one line.
-        # 180 rather than 140 now that "Import Last Session" is the
-        # longest label in here.
-        box.set_size_request(180, -1)
+        box.set_size_request(200, -1)
 
         export_btn = Gtk.Button(label="Export\u2026")
         export_btn.get_child().set_wrap(False)
@@ -355,20 +354,38 @@ class MainWindow(Gtk.ApplicationWindow):
         )
         box.append(import_btn)
 
-        # Pulls from the daemon's auto-saved cache (see main.py's
-        # _auto_export_session) rather than a user-chosen file - never
-        # loaded automatically, only on this explicit click. See
-        # PatchSpaceGraphWidget.show_import_last_session.
-        import_last_btn = Gtk.Button(label="Import Last Session")
-        import_last_btn.get_child().set_wrap(False)
-        import_last_btn.set_tooltip_text(
-            "Reload the daemon's auto-saved last session."
+        # Declarative node files are loaded automatically at daemon
+        # start-up now (main.py's _load_startup_sessions), so the old
+        # "Import Last Session" button is gone.  This dialog is the
+        # management surface: list files, rename/delete the writable ones,
+        # and see which nodes each one defines.
+        declarative_btn = Gtk.Button(label="Declarative Nodes\u2026")
+        declarative_btn.get_child().set_wrap(False)
+        declarative_btn.set_tooltip_text(
+            "Manage file-backed nodes loaded from the declarative directories"
         )
-        import_last_btn.connect(
+        declarative_btn.connect(
             "clicked",
-            lambda _b: (popover.popdown(), self.ps_widget.show_import_last_session()),
+            lambda _b: (
+                popover.popdown(),
+                self.ps_widget.show_declarative_dialog(),
+            ),
         )
-        box.append(import_last_btn)
+        box.append(declarative_btn)
+
+        reload_declarative_btn = Gtk.Button(label="Reload Declarative Files")
+        reload_declarative_btn.get_child().set_wrap(False)
+        reload_declarative_btn.set_tooltip_text(
+            "Re-read every declarative file now (daemon-side edits will be lost)"
+        )
+        reload_declarative_btn.connect(
+            "clicked",
+            lambda _b: (
+                popover.popdown(),
+                self.ps_widget.reload_declarative(),
+            ),
+        )
+        box.append(reload_declarative_btn)
 
         box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
 
@@ -659,6 +676,20 @@ class MainWindow(Gtk.ApplicationWindow):
         )
         bar.append(self._ps_anchor_button)
 
+        # Write the selection into a declarative file, so a Nix config
+        # (or anything else) can own and re-derive it.
+        self._ps_declare_button = Gtk.Button(label="Declare\u2026")
+        self._ps_declare_button.set_sensitive(False)
+        self._ps_declare_button.set_tooltip_text(
+            "Export the selected nodes to a declarative file in the "
+            "read-write declarative directory"
+        )
+        self._ps_declare_button.connect(
+            "clicked",
+            lambda _b: self.ps_widget.show_export_declarative_dialog(),
+        )
+        bar.append(self._ps_declare_button)
+
         # Vertically centre every strip control; a horizontal Gtk.Box
         # otherwise FILLs each child to the bar's full height, which left
         # the short icon+label buttons sitting taller than they needed to.
@@ -668,6 +699,7 @@ class MainWindow(Gtk.ApplicationWindow):
             self._ps_selection_label,
             self._ps_group_button,
             self._ps_anchor_button,
+            self._ps_declare_button,
         ):
             widget.set_valign(Gtk.Align.CENTER)
 
@@ -682,6 +714,7 @@ class MainWindow(Gtk.ApplicationWindow):
             self._ps_selection_label.set_label("No selection")
             self._ps_group_button.set_sensitive(False)
             self._ps_anchor_button.set_sensitive(False)
+            self._ps_declare_button.set_sensitive(False)
             self._ps_anchor_button.set_label("Anchor")
             return
         all_anchored = all(
@@ -690,6 +723,7 @@ class MainWindow(Gtk.ApplicationWindow):
         plural = "s" if count != 1 else ""
         self._ps_selection_label.set_label(f"{count} node{plural} selected")
         self._ps_group_button.set_sensitive(True)
+        self._ps_declare_button.set_sensitive(True)
         self._ps_anchor_button.set_sensitive(True)
         self._ps_anchor_button.set_label("Unanchor" if all_anchored else "Anchor")
 
@@ -714,6 +748,10 @@ class MainWindow(Gtk.ApplicationWindow):
                     self.ps_widget.on_device_profiles(resp)
                 elif "config" in resp:
                     self.ps_widget.on_export_config(resp["config"])
+                elif "files" in resp and "directories" in resp:
+                    self.ps_widget.on_declarative_files(resp)
+                elif resp.get("declarative_action"):
+                    self.ps_widget.on_declarative_action(resp)
                 elif "nodes" in resp:
                     self.ps_widget.update_from_daemon(resp)
             except Exception:

@@ -45,7 +45,7 @@ class FakeCli:
 
 
 class FakeProc(FakeCli):
-    def create(self, command):
+    def create(self, command, quiet=False):
         self.alive = True
         return True
 
@@ -102,12 +102,18 @@ def test_user_edges_route_through_hidden_nodes_and_stay_logical():
     _add(d, "regex_input", "src", {"pattern": ".*"})
     _add(d, "sensitivity_gate", "sens")
     _add(d, "description_output", "out", {"description": "speakers"})
-    assert d.handle_command(
-        {"command": "add_edge", "from_node": "src", "to_node": "sens"}
-    )["status"] == "ok"
-    assert d.handle_command(
-        {"command": "add_edge", "from_node": "sens", "to_node": "out"}
-    )["status"] == "ok"
+    assert (
+        d.handle_command(
+            {"command": "add_edge", "from_node": "src", "to_node": "sens"}
+        )["status"]
+        == "ok"
+    )
+    assert (
+        d.handle_command(
+            {"command": "add_edge", "from_node": "sens", "to_node": "out"}
+        )["status"]
+        == "ok"
+    )
 
     # Physically, the audio goes src -> pre -> sens -> post -> out ...
     assert "src->__sens_pre__sens" in d.space.edges
@@ -123,9 +129,7 @@ def test_removing_logical_edge_removes_routed_edge():
     d = fresh_daemon()
     _add(d, "regex_input", "src", {"pattern": ".*"})
     _add(d, "sensitivity_gate", "sens")
-    d.handle_command(
-        {"command": "add_edge", "from_node": "src", "to_node": "sens"}
-    )
+    d.handle_command({"command": "add_edge", "from_node": "src", "to_node": "sens"})
 
     resp = d.handle_command({"command": "remove_edge", "edge_id": "src->sens"})
     assert resp["status"] == "ok", resp
@@ -143,28 +147,34 @@ def test_sensitivity_property_moves_gate_threshold_live():
     """Sliding sensitivity moves the gate's load-time threshold and
     schedules a debounced interior reload (the live set-param path is not
     reliable through the daemon's pw-cli session)."""
-    assert d.handle_command(
-        {
-            "command": "set_node_property",
-            "node_id": "sens",
-            "property": "sensitivity",
-            "value": 1.0,
-        }
-    )["status"] == "ok"
+    assert (
+        d.handle_command(
+            {
+                "command": "set_node_property",
+                "node_id": "sens",
+                "property": "sensitivity",
+                "value": 1.0,
+            }
+        )["status"]
+        == "ok"
+    )
     assert node.sensitivity == 1.0
     assert node.level == 0.0
     assert node._reload_due is not None
     assert '"threshold" = 0.005623' in node._module_command_args()
 
     # Slider 0.0 = least sensitive -> level 100.
-    assert d.handle_command(
-        {
-            "command": "set_node_property",
-            "node_id": "sens",
-            "property": "sensitivity",
-            "value": 0.0,
-        }
-    )["status"] == "ok"
+    assert (
+        d.handle_command(
+            {
+                "command": "set_node_property",
+                "node_id": "sens",
+                "property": "sensitivity",
+                "value": 0.0,
+            }
+        )["status"]
+        == "ok"
+    )
     assert node.level == 100.0
 
     # The hidden nodes stay unity pass-throughs regardless of the slider.
@@ -172,23 +182,27 @@ def test_sensitivity_property_moves_gate_threshold_live():
         assert n.volume_min == 1.0 and n.volume_max == 1.0
 
     # Out-of-range values clamp rather than error.
-    assert d.handle_command(
-        {
-            "command": "set_node_property",
-            "node_id": "sens",
-            "property": "sensitivity",
-            "value": 5.0,
-        }
-    )["status"] == "ok"
+    assert (
+        d.handle_command(
+            {
+                "command": "set_node_property",
+                "node_id": "sens",
+                "property": "sensitivity",
+                "value": 5.0,
+            }
+        )["status"]
+        == "ok"
+    )
     assert d.space.nodes["sens"].sensitivity == 1.0
 
 
 def test_removing_sensitivity_node_removes_hidden_children():
     d = fresh_daemon()
     _add(d, "sensitivity_gate", "sens")
-    assert d.handle_command({"command": "remove_node", "node_id": "sens"})[
-        "status"
-    ] == "ok"
+    assert (
+        d.handle_command({"command": "remove_node", "node_id": "sens"})["status"]
+        == "ok"
+    )
     assert "__sens_pre__sens" not in d.space.nodes
     assert "__sens_post__sens" not in d.space.nodes
 
@@ -197,9 +211,7 @@ def test_renaming_sensitivity_gate_carries_hidden_children_and_edges():
     d = fresh_daemon()
     _add(d, "regex_input", "src", {"pattern": ".*"})
     _add(d, "sensitivity_gate", "sens")
-    d.handle_command(
-        {"command": "add_edge", "from_node": "src", "to_node": "sens"}
-    )
+    d.handle_command({"command": "add_edge", "from_node": "src", "to_node": "sens"})
 
     resp = d.handle_command(
         {
@@ -228,9 +240,7 @@ def test_export_hides_hidden_nodes_and_round_trips_sensitivity():
     d1 = fresh_daemon()
     _add(d1, "regex_input", "src", {"pattern": ".*"})
     _add(d1, "sensitivity_gate", "sens", {"sensitivity": 0.5})
-    d1.handle_command(
-        {"command": "add_edge", "from_node": "src", "to_node": "sens"}
-    )
+    d1.handle_command({"command": "add_edge", "from_node": "src", "to_node": "sens"})
     d1.handle_command(
         {
             "command": "set_node_property",
@@ -428,3 +438,60 @@ def test_sensitivity_gate_closes_to_silence_by_default():
     d2 = fresh_daemon()
     _add(d2, "sensitivity_gate", "sens", {"range_db": -24.0})
     assert d2.space.nodes["sens"].range_db == -24.0
+
+
+def test_declaring_sensitivity_gate_moves_hidden_children_live(tmp_path):
+    """A live declarative move must rename a Sensitivity gate's hidden
+    pre/post companions with it, or the gate's signal path breaks."""
+    (tmp_path / "rw").mkdir()
+    d = PatchBayDaemon(
+        declarative_ro=str(tmp_path / "ro"),
+        declarative_rw=str(tmp_path / "rw"),
+    )
+    _add(d, "sensitivity_gate", "sens")
+
+    # Seed an interior-link entry under the old id; the move must re-key
+    # it with the node rather than dropping it (dropping forces the next
+    # sync to tear the interior down and re-make it, which can stall the
+    # module).
+    from pwnodes import _DesiredLinks
+
+    d.space._edge_links["__internal__:sens:0"] = _DesiredLinks(pairs=set())
+
+    export = d.handle_command(
+        {"command": "export_declarative", "name": "kit", "node_ids": ["sens"]}
+    )
+    assert export["status"] == "ok", export
+    assert "__internal__:sens:0" not in d.space._edge_links
+    assert "__internal__:kit::sens:0" in d.space._edge_links
+    assert "kit::sens" in d.space.nodes
+    assert "sens" not in d.space.nodes
+    assert "__sens_pre__kit::sens" in d.space.nodes
+    assert "__sens_post__kit::sens" in d.space.nodes
+    assert "__sens_pre__sens" not in d.space.nodes
+    assert "__sens_post__sens" not in d.space.nodes
+    assert "__sens_pre__kit::sens->kit::sens" in d.space.edges
+    assert "kit::sens->__sens_post__kit::sens" in d.space.edges
+
+
+def test_declare_runs_standard_careful_setup_for_moved_nodes(tmp_path):
+    """A declarative move must go through the same per-node setup +
+    careful bring-up as a normal add/load (not just supervise()), so a
+    moved finicky effect can't be left half-configured or half-wired."""
+    (tmp_path / "rw").mkdir()
+    d = PatchBayDaemon(
+        declarative_ro=str(tmp_path / "ro"),
+        declarative_rw=str(tmp_path / "rw"),
+    )
+    _add(d, "sensitivity_gate", "sens")
+
+    careful = []
+    d._careful_bring_up = lambda n: careful.append(n.id)
+
+    export = d.handle_command(
+        {"command": "export_declarative", "name": "kit", "node_ids": ["sens"]}
+    )
+    assert export["status"] == "ok", export
+    assert "kit::sens" in d.space.nodes
+    # The standard careful bring-up ran for the renamed node.
+    assert "kit::sens" in careful

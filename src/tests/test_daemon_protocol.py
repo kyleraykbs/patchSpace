@@ -19,14 +19,30 @@ def fresh_daemon():
 def test_add_node_and_serialize_leaf_types():
     d = fresh_daemon()
     for cmd in [
-        {"command": "add_node", "node_type": "regex_input", "node_id": "in1",
-         "config": {"pattern": ".*", "label": "Everything"}},
-        {"command": "add_node", "node_type": "gate", "node_id": "g1",
-         "config": {"enabled": True}},
-        {"command": "add_node", "node_type": "exclude_filter", "node_id": "x1",
-         "config": {"pattern": "Discord"}},
-        {"command": "add_node", "node_type": "description_output", "node_id": "out1",
-         "config": {"description": "speakers"}},
+        {
+            "command": "add_node",
+            "node_type": "regex_input",
+            "node_id": "in1",
+            "config": {"pattern": ".*", "label": "Everything"},
+        },
+        {
+            "command": "add_node",
+            "node_type": "gate",
+            "node_id": "g1",
+            "config": {"enabled": True},
+        },
+        {
+            "command": "add_node",
+            "node_type": "exclude_filter",
+            "node_id": "x1",
+            "config": {"pattern": "Discord"},
+        },
+        {
+            "command": "add_node",
+            "node_type": "description_output",
+            "node_id": "out1",
+            "config": {"description": "speakers"},
+        },
         {"command": "add_edge", "from_node": "in1", "to_node": "g1"},
         {"command": "add_edge", "from_node": "g1", "to_node": "out1"},
     ]:
@@ -52,12 +68,24 @@ def test_add_node_and_serialize_leaf_types():
 def test_export_import_round_trip():
     d1 = fresh_daemon()
     for cmd in [
-        {"command": "add_node", "node_type": "regex_input", "node_id": "in1",
-         "config": {"pattern": "Firefox", "label": "Web"}},
-        {"command": "add_node", "node_type": "gate", "node_id": "g1",
-         "config": {"enabled": False}},
-        {"command": "add_node", "node_type": "media_class_output", "node_id": "out1",
-         "config": {"media_class": "Audio/Sink"}},
+        {
+            "command": "add_node",
+            "node_type": "regex_input",
+            "node_id": "in1",
+            "config": {"pattern": "Firefox", "label": "Web"},
+        },
+        {
+            "command": "add_node",
+            "node_type": "gate",
+            "node_id": "g1",
+            "config": {"enabled": False},
+        },
+        {
+            "command": "add_node",
+            "node_type": "media_class_output",
+            "node_id": "out1",
+            "config": {"media_class": "Audio/Sink"},
+        },
         {"command": "add_edge", "from_node": "in1", "to_node": "g1"},
         {"command": "add_edge", "from_node": "g1", "to_node": "out1"},
     ]:
@@ -73,16 +101,24 @@ def test_export_import_round_trip():
     # Replay into a fresh daemon - import must reproduce the graph.
     d2 = fresh_daemon()
     for node_id, node_cfg in config["nodes"].items():
-        resp = d2.handle_command({
-            "command": "add_node", "node_type": node_cfg["type"],
-            "node_id": node_id, "config": node_cfg["params"],
-        })
+        resp = d2.handle_command(
+            {
+                "command": "add_node",
+                "node_type": node_cfg["type"],
+                "node_id": node_id,
+                "config": node_cfg["params"],
+            }
+        )
         assert resp["status"] == "ok"
     for edge in config["edges"]:
-        resp = d2.handle_command({
-            "command": "add_edge", "from_node": edge["from"],
-            "to_node": edge["to"], "to_port": edge.get("to_port", "in"),
-        })
+        resp = d2.handle_command(
+            {
+                "command": "add_edge",
+                "from_node": edge["from"],
+                "to_node": edge["to"],
+                "to_port": edge.get("to_port", "in"),
+            }
+        )
         assert resp["status"] == "ok"
 
     state2 = d2.handle_command({"command": "get_nodes"})
@@ -97,16 +133,21 @@ def test_export_import_round_trip():
 def test_switcher_toggles_output_and_ports_round_trip():
     d = fresh_daemon()
     for cmd in [
-        {"command": "add_node", "node_type": "switcher", "node_id": "sw",
-         "config": {}},
-        {"command": "add_node", "node_type": "description_output", "node_id": "a",
-         "config": {"description": "A"}},
-        {"command": "add_node", "node_type": "description_output", "node_id": "b",
-         "config": {"description": "B"}},
-        {"command": "add_edge", "from_node": "sw", "to_node": "a",
-         "from_port": "a"},
-        {"command": "add_edge", "from_node": "sw", "to_node": "b",
-         "from_port": "b"},
+        {"command": "add_node", "node_type": "switcher", "node_id": "sw", "config": {}},
+        {
+            "command": "add_node",
+            "node_type": "description_output",
+            "node_id": "a",
+            "config": {"description": "A"},
+        },
+        {
+            "command": "add_node",
+            "node_type": "description_output",
+            "node_id": "b",
+            "config": {"description": "B"},
+        },
+        {"command": "add_edge", "from_node": "sw", "to_node": "a", "from_port": "a"},
+        {"command": "add_edge", "from_node": "sw", "to_node": "b", "from_port": "b"},
     ]:
         assert d.handle_command(cmd)["status"] == "ok", cmd
 
@@ -118,8 +159,14 @@ def test_switcher_toggles_output_and_ports_round_trip():
     assert edges["sw->a@a"]["from_port"] == "a"
     assert edges["sw->b@b"]["from_port"] == "b"
 
-    resp = d.handle_command({"command": "set_node_property", "node_id": "sw",
-                             "property": "output", "value": 1})
+    resp = d.handle_command(
+        {
+            "command": "set_node_property",
+            "node_id": "sw",
+            "property": "output",
+            "value": 1,
+        }
+    )
     assert resp["status"] == "ok"
     assert d.handle_command({"command": "get_nodes"})["nodes"]["sw"]["output"] == 1
 
@@ -131,26 +178,49 @@ def test_switcher_toggles_output_and_ports_round_trip():
 
 def test_inverse_switcher_registered_and_toggles():
     d = fresh_daemon()
-    resp = d.handle_command({"command": "add_node", "node_type": "inverse_switcher",
-                             "node_id": "inv", "config": {}})
+    resp = d.handle_command(
+        {
+            "command": "add_node",
+            "node_type": "inverse_switcher",
+            "node_id": "inv",
+            "config": {},
+        }
+    )
     assert resp["status"] == "ok"
     nodes = d.handle_command({"command": "get_nodes"})["nodes"]
     assert nodes["inv"]["type"] == "inverse_switcher"
     assert nodes["inv"]["output"] == 0
 
-    resp = d.handle_command({"command": "set_node_property", "node_id": "inv",
-                             "property": "output", "value": 1})
+    resp = d.handle_command(
+        {
+            "command": "set_node_property",
+            "node_id": "inv",
+            "property": "output",
+            "value": 1,
+        }
+    )
     assert resp["status"] == "ok"
     assert d.handle_command({"command": "get_nodes"})["nodes"]["inv"]["output"] == 1
 
 
 def test_node_layout_persists_through_export_and_reimport():
     d1 = fresh_daemon()
-    d1.handle_command({"command": "add_node", "node_type": "gate", "node_id": "g1",
-                       "config": {"label": "G"}})
-    resp = d1.handle_command({"command": "set_node_layout", "layout": {
-        "g1": {"x": 123.5, "y": -40.0, "anchored": True},
-    }})
+    d1.handle_command(
+        {
+            "command": "add_node",
+            "node_type": "gate",
+            "node_id": "g1",
+            "config": {"label": "G"},
+        }
+    )
+    resp = d1.handle_command(
+        {
+            "command": "set_node_layout",
+            "layout": {
+                "g1": {"x": 123.5, "y": -40.0, "anchored": True},
+            },
+        }
+    )
     assert resp["status"] == "ok"
 
     nodes = d1.handle_command({"command": "get_nodes"})["nodes"]
@@ -167,10 +237,14 @@ def test_node_layout_persists_through_export_and_reimport():
     # Replay the export into a fresh daemon, as apply_config.py does.
     d2 = fresh_daemon()
     for node_id, cfg in export["nodes"].items():
-        resp = d2.handle_command({
-            "command": "add_node", "node_type": cfg["type"],
-            "node_id": node_id, "config": cfg["params"],
-        })
+        resp = d2.handle_command(
+            {
+                "command": "add_node",
+                "node_type": cfg["type"],
+                "node_id": node_id,
+                "config": cfg["params"],
+            }
+        )
         assert resp["status"] == "ok"
     restored = d2.handle_command({"command": "get_nodes"})["nodes"]["g1"]
     assert restored["x"] == 123.5
@@ -181,21 +255,39 @@ def test_node_layout_persists_through_export_and_reimport():
 def test_groups_add_update_export_and_prune():
     d = fresh_daemon()
     for nid in ("a", "b"):
-        d.handle_command({"command": "add_node", "node_type": "gate",
-                          "node_id": nid, "config": {}})
-    resp = d.handle_command({"command": "add_group", "group_id": "g1",
-                             "label": "Drums", "color": "#33d17a",
-                             "nodes": ["a", "b"]})
+        d.handle_command(
+            {"command": "add_node", "node_type": "gate", "node_id": nid, "config": {}}
+        )
+    resp = d.handle_command(
+        {
+            "command": "add_group",
+            "group_id": "g1",
+            "label": "Drums",
+            "color": "#33d17a",
+            "nodes": ["a", "b"],
+        }
+    )
     assert resp["status"] == "ok"
 
     groups = d.handle_command({"command": "get_nodes"})["groups"]
-    assert groups == [{"id": "g1", "label": "Drums", "color": "#33d17a",
-                       "nodes": ["a", "b"]}]
+    assert groups == [
+        {"id": "g1", "label": "Drums", "color": "#33d17a", "nodes": ["a", "b"]}
+    ]
 
     # Rename, recolor, and drop a member.
-    assert d.handle_command({"command": "set_group", "group_id": "g1",
-                             "new_group_id": "g2", "label": "Perc",
-                             "color": "#e01b24", "nodes": ["a"]})["status"] == "ok"
+    assert (
+        d.handle_command(
+            {
+                "command": "set_group",
+                "group_id": "g1",
+                "new_group_id": "g2",
+                "label": "Perc",
+                "color": "#e01b24",
+                "nodes": ["a"],
+            }
+        )["status"]
+        == "ok"
+    )
     groups = d.handle_command({"command": "get_nodes"})["groups"]
     assert groups[0]["id"] == "g2"
     assert groups[0]["label"] == "Perc"
@@ -216,47 +308,90 @@ def test_no_two_groups_with_identical_members():
     GUI's own guard."""
     d = fresh_daemon()
     for nid in ("a", "b", "c"):
-        d.handle_command({"command": "add_node", "node_type": "gate",
-                          "node_id": nid, "config": {}})
+        d.handle_command(
+            {"command": "add_node", "node_type": "gate", "node_id": nid, "config": {}}
+        )
 
-    assert d.handle_command({"command": "add_group", "group_id": "g1",
-                             "nodes": ["a", "b"]})["status"] == "ok"
+    assert (
+        d.handle_command(
+            {"command": "add_group", "group_id": "g1", "nodes": ["a", "b"]}
+        )["status"]
+        == "ok"
+    )
     # Same members, different order -> still an exact duplicate.
-    assert d.handle_command({"command": "add_group", "group_id": "g2",
-                             "nodes": ["b", "a"]})["status"] == "error"
+    assert (
+        d.handle_command(
+            {"command": "add_group", "group_id": "g2", "nodes": ["b", "a"]}
+        )["status"]
+        == "error"
+    )
     # Overlapping groups are fine.
-    assert d.handle_command({"command": "add_group", "group_id": "g2",
-                             "nodes": ["a", "b", "c"]})["status"] == "ok"
-    assert d.handle_command({"command": "add_group", "group_id": "g3",
-                             "nodes": ["a"]})["status"] == "ok"
+    assert (
+        d.handle_command(
+            {"command": "add_group", "group_id": "g2", "nodes": ["a", "b", "c"]}
+        )["status"]
+        == "ok"
+    )
+    assert (
+        d.handle_command({"command": "add_group", "group_id": "g3", "nodes": ["a"]})[
+            "status"
+        ]
+        == "ok"
+    )
 
     # Editing a group so it matches another is rejected...
-    assert d.handle_command({"command": "set_group", "group_id": "g3",
-                             "nodes": ["a", "b"]})["status"] == "error"
+    assert (
+        d.handle_command(
+            {"command": "set_group", "group_id": "g3", "nodes": ["a", "b"]}
+        )["status"]
+        == "error"
+    )
     # ...an overlapping edit is fine...
-    assert d.handle_command({"command": "set_group", "group_id": "g3",
-                             "nodes": ["c"]})["status"] == "ok"
+    assert (
+        d.handle_command({"command": "set_group", "group_id": "g3", "nodes": ["c"]})[
+            "status"
+        ]
+        == "ok"
+    )
     # ...and it can't be made identical to another later either.
-    assert d.handle_command({"command": "set_group", "group_id": "g1",
-                             "nodes": ["a", "b", "c"]})["status"] == "error"
+    assert (
+        d.handle_command(
+            {"command": "set_group", "group_id": "g1", "nodes": ["a", "b", "c"]}
+        )["status"]
+        == "error"
+    )
 
-    groups = {g["id"]: set(g["nodes"])
-              for g in d.handle_command({"command": "get_nodes"})["groups"]}
+    groups = {
+        g["id"]: set(g["nodes"])
+        for g in d.handle_command({"command": "get_nodes"})["groups"]
+    }
     assert groups == {"g1": {"a", "b"}, "g2": {"a", "b", "c"}, "g3": {"c"}}
 
 
 def test_set_property_and_rename():
     d = fresh_daemon()
-    d.handle_command({"command": "add_node", "node_type": "regex_input",
-                      "node_id": "n1", "config": {"pattern": ".*"}})
-    resp = d.handle_command({"command": "set_node_property",
-                             "node_id": "n1", "property": "pattern",
-                             "value": "OBS"})
+    d.handle_command(
+        {
+            "command": "add_node",
+            "node_type": "regex_input",
+            "node_id": "n1",
+            "config": {"pattern": ".*"},
+        }
+    )
+    resp = d.handle_command(
+        {
+            "command": "set_node_property",
+            "node_id": "n1",
+            "property": "pattern",
+            "value": "OBS",
+        }
+    )
     assert resp["status"] == "ok"
     assert d.handle_command({"command": "get_nodes"})["nodes"]["n1"]["pattern"] == "OBS"
 
-    resp = d.handle_command({"command": "rename_node",
-                             "old_node_id": "n1", "new_node_id": "n2"})
+    resp = d.handle_command(
+        {"command": "rename_node", "old_node_id": "n1", "new_node_id": "n2"}
+    )
     assert resp["status"] == "ok"
     nodes = d.handle_command({"command": "get_nodes"})["nodes"]
     assert "n2" in nodes and "n1" not in nodes
@@ -265,11 +400,15 @@ def test_set_property_and_rename():
 
 def test_remove_node_and_reset():
     d = fresh_daemon()
-    d.handle_command({"command": "add_node", "node_type": "gate",
-                      "node_id": "g1", "config": {}})
-    d.handle_command({"command": "add_node", "node_type": "gate",
-                      "node_id": "g2", "config": {}})
-    assert d.handle_command({"command": "remove_node", "node_id": "g1"})["status"] == "ok"
+    d.handle_command(
+        {"command": "add_node", "node_type": "gate", "node_id": "g1", "config": {}}
+    )
+    d.handle_command(
+        {"command": "add_node", "node_type": "gate", "node_id": "g2", "config": {}}
+    )
+    assert (
+        d.handle_command({"command": "remove_node", "node_id": "g1"})["status"] == "ok"
+    )
     assert "g1" not in d.handle_command({"command": "get_nodes"})["nodes"]
 
     d.handle_command({"command": "reset"})
@@ -284,10 +423,18 @@ def test_rebuild_captures_then_tears_down_and_reloads(monkeypatch):
     load_session).  Nothing may be lost in the round trip."""
     d = fresh_daemon()
     for cmd in [
-        {"command": "add_node", "node_type": "regex_input", "node_id": "in1",
-         "config": {"pattern": ".*", "label": "In"}},
-        {"command": "add_node", "node_type": "gate", "node_id": "g1",
-         "config": {"enabled": False}},
+        {
+            "command": "add_node",
+            "node_type": "regex_input",
+            "node_id": "in1",
+            "config": {"pattern": ".*", "label": "In"},
+        },
+        {
+            "command": "add_node",
+            "node_type": "gate",
+            "node_id": "g1",
+            "config": {"enabled": False},
+        },
         {"command": "add_edge", "from_node": "in1", "to_node": "g1"},
     ]:
         assert d.handle_command(cmd)["status"] == "ok", cmd
@@ -333,9 +480,7 @@ def test_every_node_type_has_a_description_and_setting_tooltips():
     tooltip for every Settings row (falling back to the label)."""
     from gui import node_specs as ns
 
-    missing_desc = [
-        t for t, spec in ns.NODE_TYPE_SPECS.items() if not spec.description
-    ]
+    missing_desc = [t for t, spec in ns.NODE_TYPE_SPECS.items() if not spec.description]
     assert missing_desc == []
     for node_type, spec in ns.NODE_TYPE_SPECS.items():
         for row in spec.settings or []:
@@ -345,8 +490,9 @@ def test_every_node_type_has_a_description_and_setting_tooltips():
 
 def test_unknown_type_and_bad_command_error():
     d = fresh_daemon()
-    resp = d.handle_command({"command": "add_node", "node_type": "nope",
-                             "node_id": "x", "config": {}})
+    resp = d.handle_command(
+        {"command": "add_node", "node_type": "nope", "node_id": "x", "config": {}}
+    )
     assert resp["status"] == "error"
     assert d.handle_command({"command": "frobnicate"})["status"] == "error"
 
@@ -528,10 +674,10 @@ def test_load_session_wires_finicky_node_inputs_one_at_a_time(monkeypatch):
 def test_downstream_edges_walks_signal_order_through_switches():
     d = fresh_daemon()
     edges = [
-        {"from": "fx", "to": "sw"},        # index 0 - directly downstream
-        {"from": "sw", "to": "a"},         # index 1
-        {"from": "sw", "to": "bypass"},    # index 2
-        {"from": "a", "to": "device"},     # index 3 - furthest downstream
+        {"from": "fx", "to": "sw"},  # index 0 - directly downstream
+        {"from": "sw", "to": "a"},  # index 1
+        {"from": "sw", "to": "bypass"},  # index 2
+        {"from": "a", "to": "device"},  # index 3 - furthest downstream
         {"from": "upstream", "to": "fx"},  # index 4 - upstream, excluded
         {"from": "elsewhere", "to": "x"},  # index 5 - unrelated, excluded
     ]
@@ -558,10 +704,12 @@ def test_light_noise_cancel_shares_echo_backing_but_hides_probe():
     # The existing denoiser is now presented as AI Noise Cancel.
     assert node_specs.spec_for("noise_cancel").label == "AI Noise Cancel"
     assert (
-        node_specs.normalize_node_type("LightNoiseCancelNode")
-        == "light_noise_cancel"
+        node_specs.normalize_node_type("LightNoiseCancelNode") == "light_noise_cancel"
     )
-    assert ("Light Noise Cancel", "light_noise_cancel") in node_specs.ADD_NODE_MENU_ITEMS
+    assert (
+        "Light Noise Cancel",
+        "light_noise_cancel",
+    ) in node_specs.ADD_NODE_MENU_ITEMS
 
 
 def test_add_node_stages_and_waits_on_finicky_nodes(monkeypatch):
@@ -602,16 +750,25 @@ def test_add_node_stages_and_waits_on_finicky_nodes(monkeypatch):
     monkeypatch.setattr(
         d,
         "_relink_edge_carefully",
-        lambda edge: (relinked.append(f"{edge['from']}->{edge['to']}"), ("", None, False, None))[1],
+        lambda edge: (
+            relinked.append(f"{edge['from']}->{edge['to']}"),
+            ("", None, False, None),
+        )[1],
     )
 
     # A plain leaf node is created normally, no careful pass.
-    assert d.handle_command(
-        {"command": "add_node", "node_type": "leaf_stub", "node_id": "src"}
-    )["status"] == "ok"
-    assert d.handle_command(
-        {"command": "add_node", "node_type": "finicky_stub", "node_id": "fx"}
-    )["status"] == "ok"
+    assert (
+        d.handle_command(
+            {"command": "add_node", "node_type": "leaf_stub", "node_id": "src"}
+        )["status"]
+        == "ok"
+    )
+    assert (
+        d.handle_command(
+            {"command": "add_node", "node_type": "finicky_stub", "node_id": "fx"}
+        )["status"]
+        == "ok"
+    )
     # It was staged for the whole bring-up, brought up, and its interior
     # waited on - and left unstaged afterward.
     assert bringups == ["fx"]
@@ -621,16 +778,25 @@ def test_add_node_stages_and_waits_on_finicky_nodes(monkeypatch):
 
     # An edge touching the finicky node is wired the careful way; one
     # that doesn't is left to the normal sync.
-    assert d.handle_command(
-        {"command": "add_edge", "from_node": "src", "to_node": "fx"}
-    )["status"] == "ok"
+    assert (
+        d.handle_command({"command": "add_edge", "from_node": "src", "to_node": "fx"})[
+            "status"
+        ]
+        == "ok"
+    )
     assert relinked == ["src->fx"]
-    assert d.handle_command(
-        {"command": "add_node", "node_type": "leaf_stub", "node_id": "dst"}
-    )["status"] == "ok"
-    assert d.handle_command(
-        {"command": "add_edge", "from_node": "src", "to_node": "dst"}
-    )["status"] == "ok"
+    assert (
+        d.handle_command(
+            {"command": "add_node", "node_type": "leaf_stub", "node_id": "dst"}
+        )["status"]
+        == "ok"
+    )
+    assert (
+        d.handle_command({"command": "add_edge", "from_node": "src", "to_node": "dst"})[
+            "status"
+        ]
+        == "ok"
+    )
     assert relinked == ["src->fx"]
 
 
@@ -651,8 +817,12 @@ def test_load_session_only_reaps_backings_of_new_nodes(monkeypatch):
     )
     monkeypatch.setattr(d, "_bring_node_up", lambda node: True)
     monkeypatch.setattr(d, "_wait_node_internals_wired", lambda nid: True)
-    monkeypatch.setattr(d, "_wire_edge_carefully", lambda edge: d._store_session_edge(edge))
-    monkeypatch.setattr(d, "_relink_edge_carefully", lambda edge: ("", None, False, None))
+    monkeypatch.setattr(
+        d, "_wire_edge_carefully", lambda edge: d._store_session_edge(edge)
+    )
+    monkeypatch.setattr(
+        d, "_relink_edge_carefully", lambda edge: ("", None, False, None)
+    )
 
     # An already-present, healthy node whose backing must be left alone.
     d.space.nodes["keep"] = _RegularStub("keep", "keep_backing")
@@ -705,14 +875,17 @@ def test_speaker_mic_lines_share_builtin_volume_and_lock():
             }
         )
         assert resp["status"] == "ok", resp
-    assert d.handle_command(
-        {
-            "command": "add_node",
-            "node_type": "patchbay_mic_device",
-            "node_id": "mic1",
-            "config": {"label": "Mic Line"},
-        }
-    )["status"] == "ok"
+    assert (
+        d.handle_command(
+            {
+                "command": "add_node",
+                "node_type": "patchbay_mic_device",
+                "node_id": "mic1",
+                "config": {"label": "Mic Line"},
+            }
+        )["status"]
+        == "ok"
+    )
 
     # Several Speaker Lines coexist and all point at the one built-in
     # sink (same source/sink identities), not separate devices.
@@ -720,9 +893,9 @@ def test_speaker_mic_lines_share_builtin_volume_and_lock():
     assert d._line_volume_target(d.space.nodes["spk1"]) is d.builtin_sink
     assert d._line_volume_target(d.space.nodes["spk2"]) is d.builtin_sink
     assert d._line_volume_target(d.space.nodes["mic1"]) is d.builtin_mic
-    assert d.space.nodes["spk1"].source_filters() == d.space.nodes[
-        "spk2"
-    ].source_filters()
+    assert (
+        d.space.nodes["spk1"].source_filters() == d.space.nodes["spk2"].source_filters()
+    )
 
     # One line's slider drives the shared device and mirrors to siblings.
     resp = d.handle_command(
@@ -736,14 +909,17 @@ def test_speaker_mic_lines_share_builtin_volume_and_lock():
     assert abs(d.builtin_mic.device_volume - 1.0) < 1e-9
 
     # Lock is shared per device and mirrors to every line.
-    assert d.handle_command(
-        {
-            "command": "set_node_property",
-            "node_id": "spk2",
-            "property": "volume_locked",
-            "value": False,
-        }
-    )["status"] == "ok"
+    assert (
+        d.handle_command(
+            {
+                "command": "set_node_property",
+                "node_id": "spk2",
+                "property": "volume_locked",
+                "value": False,
+            }
+        )["status"]
+        == "ok"
+    )
     assert d.builtin_sink.volume_locked is False
     assert d.space.nodes["spk1"].volume_locked is False
     assert d.space.nodes["spk2"].volume_locked is False
@@ -760,9 +936,7 @@ def test_device_volume_lock_gates_constant_override(monkeypatch):
     from pwnodes import DeviceOutputNode
 
     calls = []
-    monkeypatch.setattr(
-        pwnodes, "_run_wpctl", lambda *a, **k: calls.append(a) or True
-    )
+    monkeypatch.setattr(pwnodes, "_run_wpctl", lambda *a, **k: calls.append(a) or True)
 
     node = DeviceOutputNode("out", "dev", device_volume=0.5)
     node.live_node_id = 123
@@ -804,35 +978,44 @@ def test_normalize_registry_spec_and_control_clamp():
 
     # Out-of-range values are clamped to the plugin's safe bounds and a
     # (debounced) interior reload is scheduled for the load-time change.
-    assert d.handle_command(
-        {
-            "command": "set_node_property",
-            "node_id": "nz",
-            "property": "boost_db",
-            "value": 999,
-        }
-    )["status"] == "ok"
+    assert (
+        d.handle_command(
+            {
+                "command": "set_node_property",
+                "node_id": "nz",
+                "property": "boost_db",
+                "value": 999,
+            }
+        )["status"]
+        == "ok"
+    )
     assert node.boost_db == NormalizeNode.BOOST_MAX_DB
     assert node._reload_due is not None
 
-    assert d.handle_command(
-        {
-            "command": "set_node_property",
-            "node_id": "nz",
-            "property": "ceiling_db",
-            "value": -999,
-        }
-    )["status"] == "ok"
+    assert (
+        d.handle_command(
+            {
+                "command": "set_node_property",
+                "node_id": "nz",
+                "property": "ceiling_db",
+                "value": -999,
+            }
+        )["status"]
+        == "ok"
+    )
     assert node.ceiling_db == NormalizeNode.CEILING_MIN_DB
 
-    assert d.handle_command(
-        {
-            "command": "set_node_property",
-            "node_id": "nz",
-            "property": "leveling",
-            "value": False,
-        }
-    )["status"] == "ok"
+    assert (
+        d.handle_command(
+            {
+                "command": "set_node_property",
+                "node_id": "nz",
+                "property": "leveling",
+                "value": False,
+            }
+        )["status"]
+        == "ok"
+    )
     assert node.leveling is False
 
     # Serialized for the GUI (and the inline boost slider reads boost_db).
@@ -880,23 +1063,44 @@ def test_boolean_nodes_registry_specs_and_output_control():
 
     d = fresh_daemon()
     d.space.mark_graph_loaded()
-    assert d.handle_command(
-        {"command": "add_node", "node_type": "boolean_switch", "node_id": "bo",
-         "config": {}}
-    )["status"] == "ok"
-    assert d.handle_command(
-        {"command": "add_node", "node_type": "gate", "node_id": "g", "config": {}}
-    )["status"] == "ok"
-    assert d.handle_command(
-        {"command": "add_edge", "from_node": "bo", "to_node": "g",
-         "to_port": "ctrl"}
-    )["status"] == "ok"
+    assert (
+        d.handle_command(
+            {
+                "command": "add_node",
+                "node_type": "boolean_switch",
+                "node_id": "bo",
+                "config": {},
+            }
+        )["status"]
+        == "ok"
+    )
+    assert (
+        d.handle_command(
+            {"command": "add_node", "node_type": "gate", "node_id": "g", "config": {}}
+        )["status"]
+        == "ok"
+    )
+    assert (
+        d.handle_command(
+            {
+                "command": "add_edge",
+                "from_node": "bo",
+                "to_node": "g",
+                "to_port": "ctrl",
+            }
+        )["status"]
+        == "ok"
+    )
 
     # Flipping the On/Off source drives the wired gate's pass state.
     assert d.space.nodes["g"].gate_open() is False  # output default 0
     d.handle_command(
-        {"command": "set_node_property", "node_id": "bo",
-         "property": "output", "value": 1}
+        {
+            "command": "set_node_property",
+            "node_id": "bo",
+            "property": "output",
+            "value": 1,
+        }
     )
     assert d.space.nodes["g"].gate_open() is True
 
@@ -908,8 +1112,12 @@ def test_boolean_nodes_registry_specs_and_output_control():
     assert g["bool_driven"] is True
     assert g["bool_state"] is True
     d.handle_command(
-        {"command": "set_node_property", "node_id": "bo",
-         "property": "output", "value": 0}
+        {
+            "command": "set_node_property",
+            "node_id": "bo",
+            "property": "output",
+            "value": 0,
+        }
     )
     g = d.handle_command({"command": "get_nodes"})["nodes"]["g"]
     assert g["bool_state"] is False
@@ -917,18 +1125,19 @@ def test_boolean_nodes_registry_specs_and_output_control():
     # An unwired gate falls back to its own default: nothing is driving
     # it, so it reports no effective value.
     d.handle_command(
-        {"command": "add_node", "node_type": "gate", "node_id": "g2",
-         "config": {}}
+        {"command": "add_node", "node_type": "gate", "node_id": "g2", "config": {}}
     )
     g2 = d.handle_command({"command": "get_nodes"})["nodes"]["g2"]
     assert g2["bool_driven"] is False
     assert g2["bool_state"] is None
 
     # A boolean output can't be wired into an audio input.
-    assert d.handle_command(
-        {"command": "add_edge", "from_node": "bo", "to_node": "g",
-         "to_port": "in"}
-    )["status"] == "error"
+    assert (
+        d.handle_command(
+            {"command": "add_edge", "from_node": "bo", "to_node": "g", "to_port": "in"}
+        )["status"]
+        == "error"
+    )
 
 
 def test_warp_nodes_registry_specs_and_name_roundtrip():
@@ -959,24 +1168,45 @@ def test_warp_nodes_registry_specs_and_name_roundtrip():
         assert (label, key) in ns.ADD_NODE_MENU_ITEMS
 
     d = fresh_daemon()
-    assert d.handle_command(
-        {"command": "add_node", "node_type": "warp_in", "node_id": "wi",
-         "config": {"warp_name": "foo"}}
-    )["status"] == "ok"
-    assert d.handle_command(
-        {"command": "add_node", "node_type": "warp_out", "node_id": "wo",
-         "config": {"warp_name": "foo"}}
-    )["status"] == "ok"
+    assert (
+        d.handle_command(
+            {
+                "command": "add_node",
+                "node_type": "warp_in",
+                "node_id": "wi",
+                "config": {"warp_name": "foo"},
+            }
+        )["status"]
+        == "ok"
+    )
+    assert (
+        d.handle_command(
+            {
+                "command": "add_node",
+                "node_type": "warp_out",
+                "node_id": "wo",
+                "config": {"warp_name": "foo"},
+            }
+        )["status"]
+        == "ok"
+    )
 
     # The name is serialized (so it round-trips through export/import)...
     nodes = d.handle_command({"command": "get_nodes"})["nodes"]
     assert nodes["wi"]["warp_name"] == "foo"
     assert nodes["wo"]["warp_name"] == "foo"
     # ...and editable at runtime.
-    assert d.handle_command(
-        {"command": "set_node_property", "node_id": "wi",
-         "property": "warp_name", "value": "bar"}
-    )["status"] == "ok"
+    assert (
+        d.handle_command(
+            {
+                "command": "set_node_property",
+                "node_id": "wi",
+                "property": "warp_name",
+                "value": "bar",
+            }
+        )["status"]
+        == "ok"
+    )
     assert d.space.nodes["wi"].warp_name == "bar"
 
 
@@ -996,9 +1226,7 @@ def test_get_logs_serves_recent_output():
         assert resp["status"] == "ok"
         assert any("console hello" in line["text"] for line in resp["lines"])
         # Polling again from the returned high-water mark yields nothing.
-        resp2 = d.handle_command(
-            {"command": "get_logs", "since": resp["last_seq"]}
-        )
+        resp2 = d.handle_command({"command": "get_logs", "since": resp["last_seq"]})
         assert resp2["lines"] == []
     finally:
         root.removeHandler(handler)
@@ -1011,23 +1239,43 @@ def test_reverb_spec_and_control_clamp():
     spec = ns.spec_for("reverb")
     assert spec.control == "wetdry"
     settings_attrs = {row[0] for row in spec.settings}
-    assert {"decay_time", "room_size", "diffusion", "hf_damp",
-            "predelay", "plugin_uri"} <= settings_attrs
+    assert {
+        "decay_time",
+        "room_size",
+        "diffusion",
+        "hf_damp",
+        "predelay",
+        "plugin_uri",
+    } <= settings_attrs
 
     d = fresh_daemon()
     node = ReverbNode("rev", "reverb_node_rev")
     d.space.nodes["rev"] = node
     d.space.public_nodes.add("rev")
-    assert d.handle_command(
-        {"command": "set_node_property", "node_id": "rev",
-         "property": "decay_time", "value": 999}
-    )["status"] == "ok"
+    assert (
+        d.handle_command(
+            {
+                "command": "set_node_property",
+                "node_id": "rev",
+                "property": "decay_time",
+                "value": 999,
+            }
+        )["status"]
+        == "ok"
+    )
     assert node.decay_time == ReverbNode.DECAY_MAX_S
     assert node._reload_due is not None
-    assert d.handle_command(
-        {"command": "set_node_property", "node_id": "rev",
-         "property": "room_size", "value": -5}
-    )["status"] == "ok"
+    assert (
+        d.handle_command(
+            {
+                "command": "set_node_property",
+                "node_id": "rev",
+                "property": "room_size",
+                "value": -5,
+            }
+        )["status"]
+        == "ok"
+    )
     assert node.room_size == ReverbNode.ROOM_MIN
 
     data = d.handle_command({"command": "get_nodes"})["nodes"]["rev"]

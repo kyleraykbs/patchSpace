@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import socket
 import threading
 import time
@@ -83,6 +84,7 @@ from pwnodes import (
 )
 
 import session_repair
+import declarative
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
@@ -130,6 +132,25 @@ def _install_log_ring() -> None:
 
 SOCKET_PATH = "/tmp/patchbay.sock"
 SESSION_CACHE_PATH = os.path.expanduser("~/.cache/patchbay/last_session.json")
+
+# Declarative node files (see declarative.py).  The read-only directory
+# usually points at a Nix store path and is never written; the read-write
+# one is where the GUI exports groups.  Both are overridable on the
+# command line (--declarative-ro / --declarative-rw) and via the
+# environment for the flake's wrapper.
+DEFAULT_DECLARATIVE_RW = os.environ.get(
+    "PATCHBAY_DECLARATIVE_RW",
+    os.path.expanduser("~/.local/share/patchbay/declarative"),
+)
+DEFAULT_DECLARATIVE_RO = os.environ.get("PATCHBAY_DECLARATIVE_RO")
+# How often the tick rescans the declarative directories for changes.
+DECLARATIVE_POLL_S = 1.5
+
+# How often the default-device "force" check runs (each check shells out
+# to wpctl to read the live default, so it's throttled well below the
+# tick rate).
+DEFAULT_CHECK_INTERVAL_S = 2.0
+
 
 SUPERVISE_INTERVAL_S = 0.5
 RELOAD_DEBOUNCE_S = 0.35
@@ -300,6 +321,8 @@ _SERIAL_ATTRS = (
     "diffusion",
     "hf_damp",
     "predelay",
+    "force_default",
+    "declarative",
 )
 
 # GUI layout state a node may carry.  Serialized separately (only when
@@ -317,7 +340,11 @@ def _apply_layout_attrs(node, config: dict) -> None:
 
 
 class PatchBayDaemon:
-    def __init__(self):
+    def __init__(
+        self,
+        declarative_ro: Optional[str] = None,
+        declarative_rw: Optional[str] = None,
+    ):
         self.graph = PipewireGraph(pw_cli_command=("pw-cli",))
         self.space = PatchSpace(self.graph)
         self._lock = self.space._lock
@@ -328,6 +355,33 @@ class PatchBayDaemon:
         self._ticker: Optional[Ticker] = None
         self._reload_wake_timer: Optional[threading.Timer] = None
         self._dirty = False
+
+        # Declarative node files: two watched directories, plus the
+        # mtime snapshot used to notice adds/edits/removes.  See
+        # declarative.py for the file format and why this exists.
+        self.declarative_ro = declarative_ro or DEFAULT_DECLARATIVE_RO
+        self.declarative_rw = declarative_rw or DEFAULT_DECLARATIVE_RW
+        self._declarative_mtimes: Dict[str, float] = {}
+        self._declarative_poll_at = 0.0
+        # stem -> {"label","color","readonly","writable","path",...} for
+        # the currently-loaded declarative files, used to label nodes in
+        # get_nodes and to drive the GUI's group list.
+        self._declarative_meta: Dict[str, dict] = {}
+        # True while any heavy (re)build runs: the startup session load, a
+        # declarative reload (declare/add/remove/rename/delete or a watched
+        # file change), a rebuild, or a GUI-issued session load.  Surfaced
+        # to the GUI via get_nodes so it can show its loading overlay - the
+        # GUI has no command-side signal for loads it didn't issue.
+        # A counter so overlapping loads (a rebuild that calls
+        # reload_declarative, say) don't clear the flag early.
+        self._startup_loading = False
+        self._loading_count = 0
+        self._loading_lock = threading.Lock()
+        # Set while _reload_declarative is mid-flight so the tick doesn't
+        # launch a second reload on top of a slow one; the lock serialises
+        # a tick-driven reload against a command-driven one.
+        self._declarative_reloading = False
+        self._declarative_lock = threading.Lock()
 
         # GUI-only node groups: id -> {id, label, color, nodes:[node_id]}.
         # Pure canvas annotations (like x/y/anchored) - they never touch
@@ -345,6 +399,7 @@ class PatchBayDaemon:
         self._prev_default_source_id: Optional[int] = None
         self._set_default_sink_id: Optional[int] = None
         self._set_default_source_id: Optional[int] = None
+        # Throttle for the force-default re-check (see _assert_defaults).
         self._default_check_at: float = 0.0
 
         self.graph.on_node_created(self._on_node_created)
@@ -460,8 +515,22 @@ class PatchBayDaemon:
         # regardless of how the daemon was launched.
         _install_log_ring()
 
+        # Mark the whole start-up sequence as a heavy load *before* binding
+        # the socket, so the GUI can raise its loading overlay while the
+        # crash-recovery sweep destroys orphaned helper processes and the
+        # saved session comes back up.  The socket is bound first (below)
+        # precisely so get_nodes can report this to the GUI.
+        self._begin_heavy_load()
+
+        # Bind the socket immediately so the GUI connects (and sees
+        # loading=true) while the slow work below runs.  The overlay blocks
+        # canvas interaction until the load finishes.
+        socket_thread = threading.Thread(target=self._socket_server, daemon=True)
+        socket_thread.start()
+
         # Clear anything a previous (uncleanly-killed) run left behind
-        # before we request fresh objects.
+        # before we request fresh objects.  This is the slow part when a
+        # crashed run left a pile of orphaned pw-cli/pw-cat helpers.
         self._cleanup_stale_objects()
 
         # Capture the pre-existing defaults before creating our own
@@ -482,8 +551,17 @@ class PatchBayDaemon:
         self._ticker = Ticker(SUPERVISE_INTERVAL_S, self._tick)
         self._ticker.start()
 
-        socket_thread = threading.Thread(target=self._socket_server, daemon=True)
-        socket_thread.start()
+        # Snapshot the declarative files up front so the tick's change
+        # watcher doesn't fire a reload on top of the startup load (which
+        # refreshes this snapshot again when it finishes).
+        self._declarative_mtimes = declarative.snapshot(self._declarative_dirs())
+
+        # Load the saved session on a background thread.  Bringing up a
+        # session's backed effect nodes is slow (up to
+        # SESSION_LOAD_NODE_TIMEOUT_S each, sequentially); the GUI's
+        # periodic get_nodes poll picks them up as they land.  This thread
+        # owns the end of the start-up heavy-load counter opened above.
+        threading.Thread(target=self._startup_load_thread, daemon=True).start()
 
         logger.info("Patch Space daemon running. Press Ctrl+C to exit.")
         logger.info(f"Connect via: socat - UNIX-CONNECT:{SOCKET_PATH}")
@@ -497,6 +575,11 @@ class PatchBayDaemon:
 
     def stop(self) -> None:
         self._running = False
+        # Make sure a start-up that aborted part-way can't leave the
+        # loading flag stuck on for any lingering get_nodes poll.
+        with self._loading_lock:
+            self._loading_count = 0
+            self._startup_loading = False
         if self._ticker is not None:
             self._ticker.stop()
         self._teardown_all()
@@ -559,6 +642,8 @@ class PatchBayDaemon:
                 PATCHBAY_VIRTUAL_MIC_NAME,
                 device_label="PatchBay Mic",
             )
+            sink.force_default = True
+            mic.force_default = True
             self.builtin_sink = sink
             self.builtin_mic = mic
             self.space.add_node(sink, public=False)
@@ -613,6 +698,7 @@ class PatchBayDaemon:
         for line in self._line_nodes_for(target):
             line.device_volume = target.device_volume
             line.volume_locked = target.volume_locked
+            line.force_default = getattr(target, "force_default", True)
 
     def _adopt_line_volume(self, node, config: dict) -> None:
         """A line node created/loaded with an explicit device_volume /
@@ -624,6 +710,8 @@ class PatchBayDaemon:
             return
         if "volume_locked" in config:
             target.volume_locked = bool(config["volume_locked"])
+        if "force_default" in config:
+            target.force_default = bool(config["force_default"])
         if "device_volume" in config:
             try:
                 target.device_volume = max(
@@ -632,6 +720,38 @@ class PatchBayDaemon:
             except (TypeError, ValueError):
                 pass
         self._mirror_line_volume(target)
+
+    def _apply_node_config(self, node, config: dict) -> None:
+        """Standard "re-adopt an existing node from a config" fixups.
+
+        Shared by ``_cmd_add_node`` and ``_load_session`` so a replayed
+        config behaves identically however it arrives.  Applies params
+        (guarding the per-type needs: ``level`` must go through
+        ``set_level`` so the clamp + live re-push happen, volumes through
+        their setters), seeds the shared line volume, and re-applies
+        device settings."""
+        for key, value in config.items():
+            if key == "level" and isinstance(node, SensitivityGateNode):
+                continue
+            if hasattr(node, key):
+                setattr(node, key, value)
+        self._adopt_line_volume(node, config)
+        if isinstance(node, VolumeProcessNode):
+            if "initial_volume" in config:
+                node.set_volume(config["initial_volume"])
+            if "volume_min" in config or "volume_max" in config:
+                node.set_volume_range(
+                    getattr(node, "volume_min", 0.0),
+                    getattr(node, "volume_max", 1.0),
+                )
+        if isinstance(node, SensitivityGateNode):
+            new_level = config.get("level")
+            if new_level is not None and new_level != getattr(node, "level", None):
+                node.set_level(new_level)
+            else:
+                node.refresh_live()
+        if hasattr(node, "apply_device_settings"):
+            node.apply_device_settings()
 
     def _enforce_volume_locks(self) -> None:
         """Per-tick volume policy.  Hardware device nodes re-apply their
@@ -738,34 +858,54 @@ class PatchBayDaemon:
                 )
 
     def _assert_defaults(self) -> None:
-        """Keep the builtins as the default output/input.
+        """Promote the builtins to system default output/input.
 
-        A freshly-resolved device is promoted immediately; after that a
-        throttled check re-reads the live default and puts the builtin
-        back if something else stole it.  Promotion used to happen only
-        once per resolved id, so a newly-plugged device or another app
-        could take the default source and apps would silently record a
-        hardware source instead of the processed Mic Line."""
-        sink_id, mic_id = self._builtin_resolved_ids()
+        Two modes, per builtin (the Speaker/Mic Line node's "force"
+        button):
+
+        * **force on** (default): *constantly* re-check the live default
+          and put it back on PatchBay if something moved it - throttled by
+          ``DEFAULT_CHECK_INTERVAL_S`` so we're not spawning ``wpctl`` on
+          every tick.
+        * **force off**: the old once-per-resolved-id behaviour - promote
+          a newly-created builtin, then leave the user's choice alone.
+
+        The id is only remembered after ``wpctl set-default`` actually
+        *succeeds*: at start-up the built-in sink can be resolved a tick
+        or two before WirePlumber will accept it as default (or before
+        ``wpctl`` can see it), and recording the id up front on a failed
+        attempt meant the promotion was never retried."""
         now = time.monotonic()
         if now < self._default_check_at:
             return
         self._default_check_at = now + DEFAULT_CHECK_INTERVAL_S
-        if sink_id is not None and (
-            sink_id != self._set_default_sink_id
-            or self._read_default_id("@DEFAULT_AUDIO_SINK@") != sink_id
-        ):
-            self._set_default("@DEFAULT_AUDIO_SINK@", sink_id)
-            self._set_default_sink_id = sink_id
-        if mic_id is not None and (
-            mic_id != self._set_default_source_id
-            or self._read_default_id("@DEFAULT_AUDIO_SOURCE@") != mic_id
-        ):
-            self._set_default("@DEFAULT_AUDIO_SOURCE@", mic_id)
-            self._set_default_source_id = mic_id
+
+        sink_id, mic_id = self._builtin_resolved_ids()
+        if sink_id is not None:
+            force = getattr(self.builtin_sink, "force_default", True)
+            if force:
+                if self._read_default_id("@DEFAULT_AUDIO_SINK@") != sink_id:
+                    if self._set_default("@DEFAULT_AUDIO_SINK@", sink_id):
+                        self._set_default_sink_id = sink_id
+            elif sink_id != self._set_default_sink_id:
+                if self._set_default("@DEFAULT_AUDIO_SINK@", sink_id):
+                    self._set_default_sink_id = sink_id
+                else:
+                    self._set_default_sink_id = None
+        if mic_id is not None:
+            force = getattr(self.builtin_mic, "force_default", True)
+            if force:
+                if self._read_default_id("@DEFAULT_AUDIO_SOURCE@") != mic_id:
+                    if self._set_default("@DEFAULT_AUDIO_SOURCE@", mic_id):
+                        self._set_default_source_id = mic_id
+            elif mic_id != self._set_default_source_id:
+                if self._set_default("@DEFAULT_AUDIO_SOURCE@", mic_id):
+                    self._set_default_source_id = mic_id
+                else:
+                    self._set_default_source_id = None
 
     @staticmethod
-    def _set_default(token: str, node_id: int) -> None:
+    def _set_default(token: str, node_id: int) -> bool:
         import subprocess
 
         try:
@@ -777,14 +917,15 @@ class PatchBayDaemon:
             )
             if result.returncode == 0:
                 logger.info("Set default to node id %s", node_id)
-            else:
-                logger.warning(
-                    "wpctl set-default %s failed: %s",
-                    node_id,
-                    (result.stderr or result.stdout).strip(),
-                )
+                return True
+            logger.warning(
+                "wpctl set-default %s failed: %s",
+                node_id,
+                (result.stderr or result.stdout).strip(),
+            )
         except (OSError, subprocess.TimeoutExpired) as exc:
             logger.warning("wpctl set-default %s failed: %s", node_id, exc)
+        return False
 
     def _restore_defaults(
         self, skip_sink: Optional[int] = None, skip_mic: Optional[int] = None
@@ -814,9 +955,249 @@ class PatchBayDaemon:
             self._ensure_device_profiles()
         except Exception:
             logger.exception("supervision tick failed")
-        if self._dirty:
+        # Never autosave while a declarative reload is mid-flight: it
+        # briefly removes all declarative nodes, so an imperative export
+        # taken then would drop every edge that crosses into a declarative
+        # node (declarative -> hardware output, say) and, if the daemon is
+        # killed before the next save, that loss is permanent.  Keep
+        # `_dirty` set and save once the reload has finished.
+        if self._dirty and not self._declarative_reloading:
             self._dirty = False
             self._auto_export_session()
+        self._poll_declarative()
+
+    # ------------------------------------------------------------------
+    # declarative node files
+    # ------------------------------------------------------------------
+
+    def _declarative_dirs(self) -> tuple:
+        return (self.declarative_ro, self.declarative_rw)
+
+    def _begin_heavy_load(self) -> None:
+        with self._loading_lock:
+            self._loading_count += 1
+            self._startup_loading = True
+        self._wake_ticker()
+
+    def _end_heavy_load(self) -> None:
+        with self._loading_lock:
+            self._loading_count = max(0, self._loading_count - 1)
+            self._startup_loading = self._loading_count > 0
+
+    def _startup_load_thread(self) -> None:
+        """Run the start-up session load off the socket thread.  Never
+        lets a bad session take the daemon down: the socket is already
+        serving, so failures are logged and the GUI stays connected.
+
+        `start()` opens the heavy-load counter (covering the orphan sweep)
+        before this thread exists; this thread closes it when the session
+        load finishes."""
+        try:
+            self._load_startup_sessions()
+        except Exception:
+            logger.exception("Start-up session load failed")
+        finally:
+            self._end_heavy_load()
+
+    def _load_startup_sessions(self) -> None:
+        """Boot the graph from the imperative cache plus every
+        declarative file, replacing the old "Import Last Session"
+        button.  When both halves are present, two passes are run so an
+        edge that names a node living in the other half (an imperative
+        edge into a declarative filter, say) is wired once both node sets
+        exist; _load_session is idempotent, so the second pass only
+        re-wires what the first couldn't and re-adopts the rest.  With
+        only one half present there is nothing to cross-reference, so a
+        single pass keeps start-up as fast as the old import."""
+        imperative_cfg: dict = {"nodes": {}, "edges": [], "groups": []}
+        try:
+            with open(SESSION_CACHE_PATH) as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                imperative_cfg = loaded
+        except (OSError, ValueError):
+            pass
+        decl_cfg = declarative.load_all(self.declarative_ro, self.declarative_rw)
+        self._declarative_meta = decl_cfg.get("meta", {}) or {}
+        if not imperative_cfg.get("nodes") and not decl_cfg.get("nodes"):
+            return
+        logger.info(
+            "Auto-loading session: %d imperative node(s), %d declarative node(s)",
+            len(imperative_cfg.get("nodes") or {}),
+            len(decl_cfg.get("nodes") or {}),
+        )
+        rounds = 2 if (imperative_cfg.get("nodes") and decl_cfg.get("nodes")) else 1
+        for _ in range(rounds):
+            self._load_session(imperative_cfg, declarative=False)
+            self._load_session(decl_cfg, declarative=True)
+        # A cache written before "Declare" became a move can contain the
+        # imperative originals of nodes a file now owns; drop those.
+        self._reconcile_declarative_duplicates()
+        self._declarative_mtimes = declarative.snapshot(self._declarative_dirs())
+
+    def _poll_declarative(self) -> None:
+        """Cheap mtime scan on the tick; reload only when a declarative
+        file was added, removed or touched."""
+        if self._declarative_reloading:
+            return
+        now = time.monotonic()
+        if now < self._declarative_poll_at:
+            return
+        self._declarative_poll_at = now + DECLARATIVE_POLL_S
+        state = declarative.snapshot(self._declarative_dirs())
+        if state != self._declarative_mtimes:
+            self._declarative_mtimes = state
+            self.reload_declarative()
+
+    def _remove_declarative_from_space(self) -> None:
+        """Drop every declarative node/edge/group so the files can be
+        re-applied cleanly.  Imperative edges that touched declarative
+        nodes are captured first (by the caller) and re-added after."""
+        with self._lock:
+            for edge_id in [
+                eid
+                for eid, e in self.space.edges.items()
+                if getattr(e, "declarative", False)
+            ]:
+                self.space.remove_edge(edge_id)
+            for node_id in [
+                nid
+                for nid, n in self.space.nodes.items()
+                if getattr(n, "declarative", False)
+            ]:
+                self.space.remove_node(node_id)
+            for group_id in [
+                gid for gid, g in self.groups.items() if g.get("declarative")
+            ]:
+                self.groups.pop(group_id, None)
+
+    def _store_imperative_edges(self, edges) -> None:
+        with self._lock:
+            for edge in edges:
+                if edge.get("from") not in self.space.nodes:
+                    continue
+                if edge.get("to") not in self.space.nodes:
+                    continue
+                try:
+                    self._store_session_edge(edge)
+                except (KeyError, ValueError) as exc:
+                    logger.warning("Could not restore imperative edge %r: %s", edge, exc)
+            self.space.supervise()
+
+    def _declarative_duplicate_map(self) -> Dict[str, str]:
+        """Map each imperative node id that a declarative file has taken
+        over to the declarative node that now owns it.
+
+        A file's node ``foo`` is loaded as ``<stem>::foo``.  If an
+        imperative node is *also* literally named ``foo`` (which is
+        exactly the case when "Declare" exported imperative nodes and
+        left the originals behind), the two are the same node: the file
+        has taken it over.  The local part is what makes this
+        unambiguous - two files can't collide, and the exported local id
+        is the original imperative id."""
+        mapping: Dict[str, str] = {}
+        for node_id, node in self.space.nodes.items():
+            if not getattr(node, "declarative", False):
+                continue
+            stem, local = declarative.split_namespaced(node_id)
+            if stem is None:
+                continue
+            if local not in self.space.public_nodes:
+                continue
+            other = self.space.nodes.get(local)
+            if other is not None and not getattr(other, "declarative", False):
+                mapping[local] = node_id
+        return mapping
+
+    def _reconcile_declarative_duplicates(self) -> int:
+        """Delete imperative nodes a declarative file has taken over, and
+        re-point the edges that connected them to the rest of the graph
+        at the declarative copy.  This is what makes "Declare" a *move*
+        rather than a copy, and it also cleans up graphs saved before
+        that behaviour existed (which is how a declared node and its
+        imperative original could both be present)."""
+        with self._lock:
+            dupes = self._declarative_duplicate_map()
+            if not dupes:
+                return 0
+            # Snapshot the imperative edges *before* the originals vanish,
+            # so the ones that also touched non-declared nodes survive.
+            imperative_edges = self._build_export_config(imperative_only=True)["edges"]
+            for local in dupes:
+                node = self.space.nodes.get(local)
+                if node is not None and not getattr(node, "declarative", False):
+                    self.space.remove_node(local)
+            # Groups a file took over move with their nodes: re-point the
+            # members, then drop any imperative group whose member set is
+            # *exactly* the same as a declarative group's - the file is the
+            # source of truth for that grouping, so the imperative twin is
+            # a duplicate (regardless of id/label).
+            declarative_group_sets = [
+                frozenset(g.get("nodes", []))
+                for g in self.groups.values()
+                if g.get("declarative")
+            ]
+            for gid in list(self.groups):
+                group = self.groups[gid]
+                if group.get("declarative"):
+                    continue
+                group["nodes"] = [dupes.get(m, m) for m in group.get("nodes", [])]
+                if group["nodes"] and frozenset(group["nodes"]) in declarative_group_sets:
+                    del self.groups[gid]
+        remapped = []
+        for edge in imperative_edges:
+            entry = edge
+            if edge.get("from") in dupes or edge.get("to") in dupes:
+                entry = dict(edge)
+                if entry.get("from") in dupes:
+                    entry["from"] = dupes[entry["from"]]
+                if entry.get("to") in dupes:
+                    entry["to"] = dupes[entry["to"]]
+            remapped.append(entry)
+        self._store_imperative_edges(remapped)
+        logger.info(
+            "Declarative takeover: removed %d imperative duplicate node(s)",
+            len(dupes),
+        )
+        return len(dupes)
+
+    def reload_declarative(self) -> dict:
+        """Re-derive all declarative nodes/edges from the files.
+
+        Edits made in the GUI to declarative nodes are *meant* to be
+        lost here: the files are the source of truth.  Imperative edges
+        that merely touched a declarative node (a user wiring a
+        declarative filter into their own chain) are preserved by
+        snapshotting them and re-adding once the declarative nodes are
+        back."""
+        with self._declarative_lock:
+            self._declarative_reloading = True
+            # A declarative reload tears the declarative half down and
+            # rebuilds it, so raise the GUI's loading overlay for it too.
+            self._begin_heavy_load()
+            try:
+                imperative_edges = self._build_export_config(
+                    imperative_only=True
+                )["edges"]
+                self._remove_declarative_from_space()
+                config = declarative.load_all(
+                    self.declarative_ro, self.declarative_rw
+                )
+                self._declarative_meta = config.get("meta", {}) or {}
+                result = self._load_session(config, declarative=True)
+                self._store_imperative_edges(imperative_edges)
+                result["imperative_taken_over"] = (
+                    self._reconcile_declarative_duplicates()
+                )
+                self._dirty = True
+                self._wake_ticker()
+                return result
+            finally:
+                self._declarative_reloading = False
+                self._end_heavy_load()
+                self._declarative_mtimes = declarative.snapshot(
+                    self._declarative_dirs()
+                )
 
     def _coalesce_reload(self, node: BackedNode) -> None:
         """Coalesce interior-module reloads: reload once the property-
@@ -897,15 +1278,22 @@ class PatchBayDaemon:
     # session persistence
     # ------------------------------------------------------------------
 
-    def _build_export_config(self) -> dict:
+    def _build_export_config(self, imperative_only: bool = False) -> dict:
         with self._lock:
             nodes = {}
             for node_id, node in self.space.nodes.items():
                 if node_id not in self.space.public_nodes:
                     continue
+                if imperative_only and getattr(node, "declarative", False):
+                    continue
                 node_type = CLASS_TO_TYPE.get(type(node), "unknown")
                 params = {}
                 for attr in _SERIAL_ATTRS:
+                    # The declarative flag is provenance, not a setting:
+                    # it is reported by get_nodes so the GUI can tag the
+                    # node, but never written into an exported session.
+                    if attr == "declarative":
+                        continue
                     if hasattr(node, attr):
                         params[attr] = getattr(node, attr)
                 for attr in _LAYOUT_ATTRS:
@@ -922,6 +1310,8 @@ class PatchBayDaemon:
                 nodes[node_id] = {"type": node_type, "params": params}
             edges = []
             for e in self.space.edges.values():
+                if imperative_only and getattr(e, "declarative", False):
+                    continue
                 logical = self._logical_edge(e)
                 if logical is None:
                     continue
@@ -932,12 +1322,21 @@ class PatchBayDaemon:
                 if from_port != "out":
                     entry["from_port"] = from_port
                 edges.append(entry)
-        groups = [dict(g) for g in self.groups.values()]
+        groups = [
+            dict(g)
+            for g in self.groups.values()
+            if not (imperative_only and g.get("declarative"))
+        ]
+        for g in groups:
+            g.pop("declarative", None)
         return {"nodes": nodes, "edges": edges, "groups": groups}
 
     def _auto_export_session(self) -> None:
         try:
-            config = self._build_export_config()
+            # Declarative nodes belong to their files, not to the cache:
+            # if we wrote them here the daemon would resurrect a deleted
+            # declarative node from the cache on the next boot.
+            config = self._build_export_config(imperative_only=True)
             cache_dir = os.path.dirname(SESSION_CACHE_PATH)
             if cache_dir:
                 os.makedirs(cache_dir, exist_ok=True)
@@ -1131,7 +1530,10 @@ class PatchBayDaemon:
         if stored_id in self.space.edges:
             return logical_id, stored_id, False, None
         try:
-            self._store_edge(from_node, to_node, to_port, from_port)
+            self._store_edge(
+                from_node, to_node, to_port, from_port,
+                declarative=bool(edge.get("declarative")),
+            )
         except (KeyError, ValueError) as exc:
             return logical_id, stored_id, False, str(exc)
         return logical_id, stored_id, True, None
@@ -1222,7 +1624,7 @@ class PatchBayDaemon:
                 self.space.sync_locked()
         return self._wire_edge_carefully(edge)
 
-    def _load_session(self, config: dict) -> dict:
+    def _load_session(self, config: dict, declarative: bool = False) -> dict:
         """Stage a full config (same shape export/import already use)
         onto the running PatchSpace: create every node's structural
         pieces up front, bring every BACKED node up one at a time (see
@@ -1321,12 +1723,12 @@ class PatchBayDaemon:
                             (node_id, "exists but with a different type")
                         )
                         continue
-                    for key, value in params.items():
-                        if hasattr(existing, key):
-                            setattr(existing, key, value)
-                    self._adopt_line_volume(existing, params)
-                    if hasattr(existing, "apply_device_settings"):
-                        existing.apply_device_settings()
+                    existing.declarative = bool(
+                        params.get("declarative", declarative)
+                    )
+                    # Shared re-adopt fixups - identical to _cmd_add_node's
+                    # re-apply (see _apply_node_config).
+                    self._apply_node_config(existing, params)
                     if isinstance(existing, SensitivityGateNode):
                         backed_ids.extend(self._ensure_sensitivity_internals(existing))
                     updated.append(node_id)
@@ -1340,6 +1742,7 @@ class PatchBayDaemon:
                 if node is None:
                     node_failures.append((node_id, f"unknown node type {node_type!r}"))
                     continue
+                node.declarative = bool(params.get("declarative", declarative))
                 if "label" in params:
                     node.label = params["label"]
                 _apply_layout_attrs(node, params)
@@ -1437,6 +1840,7 @@ class PatchBayDaemon:
                     "id": gid,
                     "label": raw.get("label", "Group"),
                     "color": raw.get("color", "#3584e4"),
+                    "declarative": bool(raw.get("declarative", declarative)),
                     "nodes": [
                         n for n in raw.get("nodes", []) if n in self.space.nodes
                     ],
@@ -1643,10 +2047,13 @@ class PatchBayDaemon:
             return {"status": "error", "message": "config must be a JSON object"}
 
         def _run():
+            self._begin_heavy_load()
             try:
                 self._load_session(config)
             except Exception:
                 logger.exception("Background session load failed")
+            finally:
+                self._end_heavy_load()
 
         # Backed away from doing this synchronously on the command
         # thread: a session with several effect nodes can legitimately
@@ -1663,6 +2070,601 @@ class PatchBayDaemon:
         return {"status": "ok", "started": True}
 
     # ------------------------------------------------------------------
+    # declarative node commands
+    # ------------------------------------------------------------------
+
+    def _cmd_reload_declarative(self, cmd: dict) -> dict:
+        result = self.reload_declarative()
+        result["declarative_action"] = "reload"
+        return result
+
+    def _cmd_list_declarative(self, cmd: dict) -> dict:
+        """Describe every declarative file (both directories) and what it
+        defines, for the GUI's "Declarative Nodes" list."""
+        files = []
+        for directory, writable in (
+            (self.declarative_ro, False),
+            (self.declarative_rw, True),
+        ):
+            for path in declarative.list_files(directory):
+                entry = {
+                    "path": path,
+                    "name": os.path.basename(path),
+                    "stem": declarative.file_stem(path),
+                    "directory": directory,
+                    "writable": writable,
+                }
+                raw = declarative.read_file(path)
+                if raw is None:
+                    entry["error"] = "unreadable"
+                    files.append(entry)
+                    continue
+                meta = declarative.read_meta(path, raw)
+                entry["label"] = meta["label"]
+                entry["color"] = meta["color"]
+                entry["readonly"] = meta["readonly"]
+                # A file is editable only in the RW directory and not
+                # marked read-only at the top level.
+                entry["writable"] = writable and not meta["readonly"]
+                ns = declarative.namespaced(path, raw)
+                entry["nodes"] = [
+                    {"id": nid, "local_id": declarative.split_namespaced(nid)[1],
+                     "type": cfg.get("type")}
+                    for nid, cfg in ns["nodes"].items()
+                ]
+                entry["edge_count"] = len(ns["edges"])
+                entry["group_count"] = len(ns["groups"])
+                files.append(entry)
+        return {
+            "status": "ok",
+            "directories": {
+                "readonly": self.declarative_ro,
+                "readwrite": self.declarative_rw,
+            },
+            "files": files,
+        }
+
+    def _export_node_params(self, node_id: str, node: Node) -> dict:
+        """One node's serialized params, same shape as _build_export_config
+        but without the declarative provenance marker (the file's name is
+        the provenance in a declarative file)."""
+        node_type = CLASS_TO_TYPE.get(type(node), "unknown")
+        params: Dict[str, Any] = {}
+        for attr in _SERIAL_ATTRS:
+            # Provenance and the live helper's name are not settings: the
+            # file's stem names the node, and the daemon derives a fresh
+            # backing name from the namespaced id.  Reusing the imperative
+            # node's backing name would collide with it.
+            if attr in ("declarative", "backing_node_name"):
+                continue
+            if hasattr(node, attr):
+                params[attr] = getattr(node, attr)
+        for attr in _LAYOUT_ATTRS:
+            value = getattr(node, attr, None)
+            if value is not None:
+                params[attr] = value
+        if isinstance(node, VolumeProcessNode):
+            params["initial_volume"] = node.volume
+        if node_id.startswith("mute_"):
+            params["is_mute"] = True
+        label = getattr(node, "label", "")
+        if label:
+            params["label"] = label
+        return {"type": node_type, "params": params}
+
+    @staticmethod
+    def _file_local_id(stem: str, node_id: str) -> str:
+        file_stem_part, local = declarative.split_namespaced(node_id)
+        return local if file_stem_part == stem else local
+
+    def _declarative_edges_for(self, members, stem: str, include_imperative: bool):
+        """The file-form edges for a member set: internal edges, plus
+        edges to other declarative nodes (a cross-file reference).
+        Edges to ordinary imperative nodes are dropped unless
+        ``include_imperative`` - those belong to the imperative session
+        and stay there."""
+        edges = []
+        for edge in self._build_export_config()["edges"]:
+            f, t = edge.get("from"), edge.get("to")
+            if f in members and t in members:
+                pass
+            elif f in members or t in members:
+                other = t if f in members else f
+                node = self.space.nodes.get(other)
+                if not getattr(node, "declarative", False) and not include_imperative:
+                    continue
+            else:
+                continue
+            entry = {
+                "from": self._file_local_id(stem, f),
+                "to": self._file_local_id(stem, t),
+            }
+            if edge.get("to_port"):
+                entry["to_port"] = edge["to_port"]
+            if edge.get("from_port"):
+                entry["from_port"] = edge["from_port"]
+            edges.append(entry)
+        return edges
+
+    def _declarative_groups_for(self, members, stem: str):
+        """Groups (from the live canvas) whose members include at least
+        one file member, written with local ids so they survive the
+        namespacing round-trip."""
+        groups = []
+        for group in self.groups.values():
+            # Skip groups owned by a *different* declarative file - they
+            # stay in their own file (their id would be re-localised and
+            # collide otherwise).
+            group_stem, _ = declarative.split_namespaced(group["id"])
+            if group_stem is not None and group_stem != stem:
+                continue
+            inside = [n for n in group.get("nodes", []) if n in members]
+            if not inside:
+                continue
+            groups.append(
+                {
+                    "id": self._file_local_id(stem, group["id"]),
+                    "label": group.get("label", "Group"),
+                    "color": group.get("color", declarative.DEFAULT_GROUP_COLOR),
+                    "nodes": [self._file_local_id(stem, n) for n in inside],
+                }
+            )
+        return groups
+
+    def _declarative_write(self, path, stem, members, label, color,
+                           include_imperative=False, readonly=False):
+        """Write one file from a member set.  Shared by create/add/remove."""
+        with self._lock:
+            nodes = {
+                self._file_local_id(stem, nid): self._export_node_params(
+                    nid, self.space.nodes[nid]
+                )
+                for nid in members
+                if nid in self.space.nodes
+            }
+            edges = self._declarative_edges_for(members, stem, include_imperative)
+            groups = self._declarative_groups_for(members, stem)
+        declarative.write_file(
+            path,
+            {"nodes": nodes, "edges": edges, "groups": groups},
+            label=label,
+            color=color,
+            readonly=readonly,
+        )
+        # Our own write must not look like an external file change to the
+        # tick's mtime watcher - otherwise _poll_declarative fires a *full*
+        # reload a second later, tearing down every declarative effect for
+        # nothing (the "unstable loading" + audio dropout).
+        self._declarative_mtimes = declarative.snapshot(self._declarative_dirs())
+        return len(nodes), len(edges)
+
+    def _standardize_nodes(self, node_ids) -> None:
+        """Apply the *standard* per-node setup + careful bring-up to a set
+        of nodes, whichever code path they entered the graph through.
+
+        Historically the per-node fixups (sensitivity internals, live
+        resolve, device settings, and - crucially - the staged careful
+        bring-up for finicky effects) were duplicated inline in
+        ``_cmd_add_node`` and ``_load_session``, while the declarative
+        live move just called ``supervise()``.  So a node moved into/out
+        of a file skipped fixes the other paths apply, which is what made
+        declarative moves unstable (a finicky effect could be left
+        half-wired).  Everything now funnels through here."""
+        finicky = []
+        for node_id in node_ids:
+            with self._lock:
+                node = self.space.nodes.get(node_id)
+                if node is None:
+                    continue
+                if isinstance(node, SensitivityGateNode):
+                    self._ensure_sensitivity_internals(node)
+                if isinstance(node, LiveResolvableNode):
+                    self._try_immediate_resolve(node)
+                if hasattr(node, "apply_device_settings"):
+                    try:
+                        node.apply_device_settings()
+                    except Exception as exc:
+                        logger.warning(
+                            "Settings re-apply for %r failed: %s", node_id, exc
+                        )
+                if hasattr(node, "refresh_live"):
+                    try:
+                        node.refresh_live()
+                    except Exception as exc:
+                        logger.warning(
+                            "Live refresh for %r failed: %s", node_id, exc
+                        )
+            if isinstance(node, _CAREFUL_NODE_TYPES):
+                finicky.append(node)
+        # Same dedicated per-node bring-up (_load_session's careful pass)
+        # so a moved finicky effect's interior is confirmed live.
+        for node in finicky:
+            self._careful_bring_up(node)
+        with self._lock:
+            self.space.supervise()
+
+    def _rename_owned_node(self, old_id: str, new_id: str) -> None:
+        """Rename a node and any hidden companion whose id embeds its own
+        (a Sensitivity gate's pre/post pass-throughs).  rename_node()
+        rebuilds the incident edges, so this stays live - no teardown."""
+        hidden = [
+            (prefix + old_id, prefix + new_id)
+            for prefix in (_SENS_PRE_PREFIX, _SENS_POST_PREFIX)
+            if (prefix + old_id) in self.space.nodes
+        ]
+        self.space.rename_node(old_id, new_id)
+        for h_old, h_new in hidden:
+            if h_old in self.space.nodes and h_new not in self.space.nodes:
+                self.space.rename_node(h_old, h_new)
+
+    def _apply_declarative_membership(
+        self, stem: str, desired, path: str, label: str, color: str
+    ) -> int:
+        """Move ownership so exactly ``desired`` (full ids) belong to file
+        ``stem``, live.
+
+        Only the nodes whose ownership actually changes are renamed and
+        re-tagged; every other declarative node (and its live backing) is
+        left running.  This replaces the old full ``reload_declarative``
+        for a plain add/remove, which tore the whole declarative half
+        down and brought every effect module back up just to move one
+        node.  Edges are rebuilt by ``rename_node`` and re-flagged to
+        match the new ownership; groups are re-pointed; metadata is
+        refreshed.  Raises on any conflict so the caller can fall back to
+        a full reload."""
+        with self._lock:
+            current = {
+                nid
+                for nid, node in self.space.nodes.items()
+                if getattr(node, "declarative", False)
+                and declarative.split_namespaced(nid)[0] == stem
+            }
+            desired = set(desired)
+            to_declare = [n for n in desired if n not in current]
+            to_release = [n for n in current if n not in desired]
+
+            for old in to_declare:
+                new = declarative.namespace_id(
+                    stem, declarative.split_namespaced(old)[1]
+                )
+                if new != old and new in self.space.nodes:
+                    raise ValueError(f"{new} already exists")
+
+            declare_map = {}
+            for old in to_declare:
+                new = declarative.namespace_id(
+                    stem, declarative.split_namespaced(old)[1]
+                )
+                self._rename_owned_node(old, new)
+                self.space.nodes[new].declarative = True
+                declare_map[old] = new
+
+            release_map = {}
+            for old in to_release:
+                local = declarative.split_namespaced(old)[1]
+                if local in self.space.nodes:
+                    raise ValueError(f"{local} already exists")
+                self._rename_owned_node(old, local)
+                self.space.nodes[local].declarative = False
+                release_map[old] = local
+
+            # Re-flag the edges we just rebuilt: an edge is declarative
+            # iff both ends are (an edge to an imperative node stays in
+            # the imperative session).
+            affected = set(declare_map.values()) | set(release_map.values())
+            for eid, edge in list(self.space.edges.items()):
+                if edge.from_node not in affected and edge.to_node not in affected:
+                    continue
+                f = self.space.nodes.get(edge.from_node)
+                t = self.space.nodes.get(edge.to_node)
+                want = bool(
+                    getattr(f, "declarative", False)
+                    and getattr(t, "declarative", False)
+                )
+                # In-place flag flip: keeps the live link (no blip).
+                self.space.set_edge_declarative(eid, want)
+
+            # Re-point group membership on the groups we kept.
+            for group in self.groups.values():
+                group["nodes"] = [
+                    declare_map.get(n, release_map.get(n, n))
+                    for n in group.get("nodes", [])
+                ]
+
+            # Install the file's own groups live, so the canvas reflects
+            # the saved grouping immediately (no reload needed), and drop
+            # any imperative group that is now an exact duplicate of one -
+            # the file owns that grouping.
+            raw = declarative.read_file(path)
+            if raw is not None:
+                file_groups = declarative.namespaced(path, raw)["groups"]
+                new_ids = {g["id"] for g in file_groups}
+                for gid in [
+                    gid
+                    for gid, g in self.groups.items()
+                    if g.get("declarative")
+                    and declarative.split_namespaced(gid)[0] == stem
+                    and gid not in new_ids
+                ]:
+                    del self.groups[gid]
+                decl_sets = set()
+                for g in file_groups:
+                    self.groups[g["id"]] = dict(g)
+                    decl_sets.add(frozenset(g.get("nodes", [])))
+                for gid in [
+                    gid
+                    for gid, g in self.groups.items()
+                    if not g.get("declarative")
+                    and g.get("nodes")
+                    and frozenset(g["nodes"]) in decl_sets
+                ]:
+                    del self.groups[gid]
+
+            self._declarative_meta[stem] = {
+                "stem": stem,
+                "label": label,
+                "color": color,
+                "readonly": False,
+                "writable": True,
+                "path": path,
+            }
+            moved = list(declare_map.values()) + list(release_map.values())
+            self._dirty = True
+            self._wake_ticker()
+        # Outside the lock: run the standard per-node setup + careful
+        # bring-up for everything that changed ownership, exactly like an
+        # add/load would, instead of a bare supervise().
+        self._standardize_nodes(moved)
+        return len(declare_map) + len(release_map)
+
+    def _cmd_export_declarative(self, cmd: dict) -> dict:
+        """Create or edit a declarative file from live nodes.
+
+        ``mode`` is ``create``/``replace`` (write the selection as the
+        file), ``add`` (merge the selection into an existing file) or
+        ``remove`` (take the selection back out of a file, returning the
+        nodes to the imperative graph).  Adding/removing is refused for
+        files outside the read-write directory or marked ``readonly``."""
+        mode = cmd.get("mode", "create")
+        selected = set(cmd.get("node_ids") or [])
+        if not selected:
+            return {"status": "error", "message": "no nodes selected"}
+        include_imperative = bool(cmd.get("include_imperative_edges"))
+
+        with self._lock:
+            missing = [nid for nid in selected if nid not in self.space.nodes]
+            if missing:
+                return {
+                    "status": "error",
+                    "message": f"no such node(s): {', '.join(missing)}",
+                }
+
+        if mode == "create" or mode == "replace":
+            # Replace targets an existing path; create names a new file.
+            name = cmd.get("name") or (
+                os.path.basename(cmd["path"]) if cmd.get("path") else None
+            )
+            if not name:
+                return {"status": "error", "message": "name is required"}
+            stem = os.path.splitext(os.path.basename(name))[0]
+            if not stem:
+                return {"status": "error", "message": "invalid name"}
+            path = os.path.join(self.declarative_rw, f"{stem}.json")
+            if os.path.exists(path):
+                existing_raw = declarative.read_file(path)
+                if existing_raw is not None:
+                    existing_meta = declarative.read_meta(path, existing_raw)
+                    if existing_meta["readonly"]:
+                        return {
+                            "status": "error",
+                            "message": "That declarative group is read-only",
+                        }
+                if not cmd.get("overwrite"):
+                    return {
+                        "status": "error",
+                        "message": f"{os.path.basename(path)} already exists",
+                    }
+            foreign = {
+                n for n in selected
+                if declarative.split_namespaced(n)[0] not in (None, stem)
+            }
+            if foreign:
+                return {
+                    "status": "error",
+                    "message": "Selection includes nodes owned by another "
+                    "declarative group",
+                }
+            members = set(selected)
+            label = cmd.get("label") or stem
+            color = cmd.get("color") or declarative.DEFAULT_GROUP_COLOR
+            try:
+                n, e = self._declarative_write(
+                    path, stem, members, label, color, include_imperative
+                )
+            except OSError as exc:
+                return {"status": "error", "message": f"Could not write {path}: {exc}"}
+            logger.info("Declared %d node(s) into %s", n, path)
+            action = "export"
+        elif mode in ("add", "remove"):
+            path = self._declarative_rw_path({"path": cmd.get("path")})
+            if path is None:
+                return {"status": "error", "message": "path required"}
+            meta = self._declarative_meta.get(
+                declarative.file_stem(path), {}
+            )
+            if not meta.get("writable"):
+                return {
+                    "status": "error",
+                    "message": "That declarative group is read-only",
+                }
+            stem = declarative.file_stem(path)
+            existing = set(
+                nid
+                for nid in self.space.nodes
+                if declarative.split_namespaced(nid)[0] == stem
+            )
+            if mode == "add":
+                # Only bring in nodes that aren't already owned by a
+                # *different* declarative file - that would duplicate the
+                # node across two namespaces.
+                incoming = {
+                    n
+                    for n in selected
+                    if declarative.split_namespaced(n)[0] in (None, stem)
+                }
+                members = existing | incoming
+                selected = incoming
+            else:
+                members = existing - selected
+            label = cmd.get("label") or meta.get("label", stem)
+            color = cmd.get("color") or meta.get("color", declarative.DEFAULT_GROUP_COLOR)
+            try:
+                n, e = self._declarative_write(
+                    path, stem, members, label, color, include_imperative
+                )
+            except OSError as exc:
+                return {"status": "error", "message": f"Could not write {path}: {exc}"}
+            action = mode
+        else:
+            return {"status": "error", "message": f"unknown mode {mode!r}"}
+
+        # Apply the ownership change live: only the nodes that actually
+        # moved are renamed/re-tagged, so unrelated declarative effect
+        # modules keep running (and the GUI doesn't need a full-rebuild
+        # loading screen).  Any conflict falls back to a full reload,
+        # which is always correct, just slower.
+        try:
+            changed = self._apply_declarative_membership(
+                stem, members, path, label, color
+            )
+            logger.info(
+                "Declarative %s %s: %d node(s) moved live",
+                action, stem, changed,
+            )
+        except Exception:
+            logger.exception(
+                "Incremental declarative move failed; falling back to full reload"
+            )
+            self.reload_declarative()
+            changed = -1
+
+        return {
+            "status": "ok",
+            "declarative_action": action,
+            "path": path,
+            "node_count": len(members),
+            "edge_count": e,
+            "imperative_taken_over": changed,
+        }
+
+    def _declarative_rw_path(self, cmd: dict) -> Optional[str]:
+        """Resolve a command's target to a path inside the read-write
+        declarative directory, or None.  Accepts a bare name or a full
+        path, but rejects anything whose parent isn't the RW directory,
+        so ``..`` (or a read-only path) can't be used to write/delete."""
+        name = cmd.get("path") or cmd.get("name")
+        if not name:
+            return None
+        base = os.path.basename(name)
+        parent = os.path.dirname(name)
+        if parent and os.path.realpath(parent) != os.path.realpath(
+            self.declarative_rw
+        ):
+            return None
+        if not base.endswith(declarative.DECLARATIVE_SUFFIX):
+            base += declarative.DECLARATIVE_SUFFIX
+        return os.path.join(self.declarative_rw, base)
+
+    def _cmd_rename_declarative(self, cmd: dict) -> dict:
+        """Rename a declarative file (its stem namespaces every node in
+        it, so this re-prefixes the whole file).  Read-only files are
+        never touched."""
+        old = self._declarative_rw_path({"path": cmd.get("path")})
+        new_name = cmd.get("new_name")
+        if old is None or not new_name:
+            return {"status": "error", "message": "path and new_name required"}
+        new = self._declarative_rw_path({"name": new_name})
+        if new is None:
+            return {"status": "error", "message": "invalid new_name"}
+        if not os.path.exists(old):
+            return {"status": "error", "message": f"No such file: {old}"}
+        if os.path.exists(new) and new != old:
+            return {"status": "error", "message": f"{new} already exists"}
+        try:
+            os.rename(old, new)
+        except OSError as exc:
+            return {"status": "error", "message": str(exc)}
+        self.reload_declarative()
+        return {"status": "ok", "declarative_action": "rename", "path": new}
+
+    def _cmd_edit_declarative(self, cmd: dict) -> dict:
+        """Change a declarative file's label and/or colour, optionally
+        renaming it (which re-prefixes every node in it).  Only writable
+        files are editable; read-only ones are refused."""
+        old = self._declarative_rw_path({"path": cmd.get("path")})
+        if old is None:
+            return {"status": "error", "message": "path required"}
+        stem = declarative.file_stem(old)
+        meta = self._declarative_meta.get(stem, {})
+        if not meta.get("writable"):
+            return {"status": "error", "message": "That declarative group is read-only"}
+        raw = declarative.read_file(old)
+        if raw is None:
+            return {"status": "error", "message": f"No such file: {old}"}
+        config = declarative.extract_config(raw)
+
+        new_path = old
+        new_name = cmd.get("new_name")
+        if new_name:
+            new_path = self._declarative_rw_path({"name": new_name})
+            if new_path is None:
+                return {"status": "error", "message": "invalid new_name"}
+            if os.path.exists(new_path) and new_path != old:
+                return {"status": "error", "message": f"{new_path} already exists"}
+
+        label = cmd.get("label") or meta.get("label", stem)
+        color = cmd.get("color") or meta.get("color", declarative.DEFAULT_GROUP_COLOR)
+        try:
+            declarative.write_file(new_path, config, label=label, color=color)
+            if new_path != old:
+                os.remove(old)
+        except OSError as exc:
+            return {"status": "error", "message": str(exc)}
+        # Same as _declarative_write: our own edit is not an external change.
+        self._declarative_mtimes = declarative.snapshot(self._declarative_dirs())
+        if new_path != old:
+            # Renaming re-prefixes every node in the file, which a live
+            # move can't do without touching the whole stem - full reload.
+            self.reload_declarative()
+        else:
+            # Label/colour only: just refresh the metadata (nodes keep
+            # running; the GUI's tag updates on the next get_nodes).
+            self._declarative_meta[stem] = {
+                "stem": stem,
+                "label": label,
+                "color": color,
+                "readonly": False,
+                "writable": True,
+                "path": new_path,
+            }
+            self._dirty = True
+            self._wake_ticker()
+        return {"status": "ok", "declarative_action": "edit", "path": new_path}
+
+    def _cmd_delete_declarative(self, cmd: dict) -> dict:
+        path = self._declarative_rw_path({"path": cmd.get("path")})
+        if path is None:
+            return {"status": "error", "message": "path required"}
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            return {"status": "error", "message": f"No such file: {path}"}
+        except OSError as exc:
+            return {"status": "error", "message": str(exc)}
+        self.reload_declarative()
+        return {"status": "ok", "declarative_action": "delete", "path": path}
+
+    # ------------------------------------------------------------------
     # node factory
     # ------------------------------------------------------------------
 
@@ -1673,7 +2675,13 @@ class PatchBayDaemon:
         if cls is None:
             return None
         g = config.get
-        backing = g("backing_node_name") or f"patchbay_{node_id}"
+        # Declarative ids are namespaced ("file::node"), and the namespace
+        # separator is not valid in a PipeWire node.name, so sanitise the
+        # generated default.  Imperative ids are already safe and pass
+        # through unchanged.
+        backing = g("backing_node_name") or "patchbay_" + re.sub(
+            r"[^A-Za-z0-9_.-]", "_", node_id
+        )
 
         if cls is RegexInputNode:
             return cls(node_id, g("pattern", ""))
@@ -1722,6 +2730,14 @@ class PatchBayDaemon:
                 ladspa_label=g("ladspa_label", ""),
                 method=g("method", "rnnoise"),
             )
+        if cls in (EchoCancelNode, LightNoiseCancelNode):
+            return cls(
+                node_id,
+                backing,
+                g("library_name", ""),
+                g("aec_args", ""),
+                g("monitor_mode", False),
+            )
         if cls is SensitivityGateNode:
             return cls(
                 node_id,
@@ -1767,14 +2783,6 @@ class PatchBayDaemon:
                 knee_db=g("knee_db", 6.0),
                 limiter_release_s=g("limiter_release_s", 0.5),
                 ladspa_dir=g("ladspa_dir", ""),
-            )
-        if cls in (EchoCancelNode, LightNoiseCancelNode):
-            return cls(
-                node_id,
-                backing,
-                g("library_name", ""),
-                g("aec_args", ""),
-                g("monitor_mode", False),
             )
         if cls in (DeviceInputNode, DeviceOutputNode):
             return cls(
@@ -1825,33 +2833,10 @@ class PatchBayDaemon:
                         "status": "error",
                         "message": f"Node {node_id} exists but with a different type",
                     }
-                # Idempotent re-apply: update config fields. "level" on a
-                # SensitivityGateNode is excluded here and handled below via
-                # set_level() - a raw setattr skips both the 0..100 clamp
-                # and the _control_applied_to cache reset, so a replayed
-                # config wouldn't re-push the live LADSPA threshold a level
-                # change needs (see SensitivityGateNode's docstring).
-                for key, value in config.items():
-                    if key == "level" and isinstance(existing, SensitivityGateNode):
-                        continue
-                    if hasattr(existing, key):
-                        setattr(existing, key, value)
-                self._adopt_line_volume(existing, config)
-                if isinstance(existing, VolumeProcessNode):
-                    if "initial_volume" in config:
-                        existing.set_volume(config["initial_volume"])
-                    if "volume_min" in config or "volume_max" in config:
-                        existing.set_volume_range(
-                            getattr(existing, "volume_min", 0.0),
-                            getattr(existing, "volume_max", 1.0),
-                        )
-                if hasattr(existing, "apply_device_settings"):
-                    existing.apply_device_settings()
+                # Idempotent re-apply through the shared fixups (see
+                # _apply_node_config) so the add and load paths can't drift.
+                self._apply_node_config(existing, config)
                 if isinstance(existing, SensitivityGateNode):
-                    if "level" in config:
-                        existing.set_level(config["level"])
-                    else:
-                        existing.refresh_live()
                     self._ensure_sensitivity_internals(existing)
                 self.space.sync()
                 return {"status": "ok", "node_id": node_id, "already_existed": True}
@@ -2038,9 +3023,12 @@ class PatchBayDaemon:
         to_node: str,
         to_port: str = "in",
         from_port: str = "out",
+        declarative: bool = False,
     ) -> str:
         stored_from, stored_to = self._stored_endpoints(from_node, to_node)
-        return self.space.add_edge(stored_from, stored_to, to_port, from_port)
+        return self.space.add_edge(
+            stored_from, stored_to, to_port, from_port, declarative=declarative
+        )
 
     def _logical_edge(self, edge):
         """(from_node, to_node, to_port, from_port) as the GUI should
@@ -2196,6 +3184,14 @@ class PatchBayDaemon:
                         "status": "error",
                         "message": f"Node has no {prop!r} property",
                     }
+            elif prop == "force_default" and self._line_volume_target(node) is not None:
+                # The line nodes share the built-in's force flag; set it on
+                # the built-in and mirror it back onto every line node.
+                target = self._line_volume_target(node)
+                target.force_default = bool(value)
+                self._mirror_line_volume(target)
+                # Apply immediately rather than waiting for the throttle.
+                self._default_check_at = 0.0
             elif prop == "device_name" and isinstance(node, LiveResolvableNode):
                 node.device_name = value
                 node.resolve_live(None, None)
@@ -2660,14 +3656,20 @@ class PatchBayDaemon:
             return {"status": "error", "message": str(exc)}
 
     def _cmd_get_nodes(self, cmd: dict) -> dict:
+        # Serialize *under* the lock: the supervision tick creates/removes
+        # nodes (e.g. a sensitivity gate's hidden pre/post pair) while the
+        # GUI polls, and iterating space.nodes outside the lock raised
+        # "dictionary changed size during iteration".  It is an RLock, so
+        # nesting the serialize helpers' own acquisitions is fine.
         with self._lock:
             groups = [dict(g) for g in self.groups.values()]
-        return {
-            "status": "ok",
-            "nodes": self._serialize_nodes(),
-            "edges": self._serialize_edges(),
-            "groups": groups,
-        }
+            return {
+                "status": "ok",
+                "nodes": self._serialize_nodes(),
+                "edges": self._serialize_edges(),
+                "groups": groups,
+                "loading": self._startup_loading,
+            }
 
     def _cmd_get_graph(self, cmd: dict) -> dict:
         return {"status": "ok", "graph": self._serialize_graph()}
@@ -2751,16 +3753,27 @@ class PatchBayDaemon:
         and the socket protocol is one-in-flight.  The GUI's get_nodes
         poll observes the nodes land, so the reply just says the rebuild
         started."""
-        config = self._build_export_config()
+        # Declarative nodes are deliberately left out of the captured
+        # config: a rebuild should re-derive them from their files (that
+        # is the whole point), not replay the possibly-edited in-memory
+        # copies.  They are brought back by reload_declarative() below.
+        config = self._build_export_config(imperative_only=True)
         self._teardown_public_graph()
         with self._lock:
             self._dirty = True
 
         def _run():
+            self._begin_heavy_load()
             try:
+                self._load_session(config)
+                self.reload_declarative()
+                # Second pass: imperative edges that target a declarative
+                # node could not be wired until the files were reloaded.
                 self._load_session(config)
             except Exception:
                 logger.exception("Background rebuild failed")
+            finally:
+                self._end_heavy_load()
 
         threading.Thread(target=_run, daemon=True).start()
         return {"status": "ok", "started": True}
@@ -2878,6 +3891,14 @@ class PatchBayDaemon:
                     or getattr(node, "device_name", "")
                     or getattr(node, "app_name", "")
                 )
+            if getattr(node, "declarative", False):
+                stem, _ = declarative.split_namespaced(node_id)
+                meta = self._declarative_meta.get(stem, {})
+                data["declarative_label"] = meta.get("label", stem)
+                data["declarative_color"] = meta.get(
+                    "color", declarative.DEFAULT_GROUP_COLOR
+                )
+                data["declarative_readonly"] = bool(meta.get("readonly", False))
             result[node_id] = data
         return result
 
@@ -2997,6 +4018,18 @@ class PatchBayDaemon:
                 response = self._cmd_export_config(cmd)
             elif command == "load_session":
                 response = self._cmd_load_session(cmd)
+            elif command == "reload_declarative":
+                response = self._cmd_reload_declarative(cmd)
+            elif command == "list_declarative":
+                response = self._cmd_list_declarative(cmd)
+            elif command == "export_declarative":
+                response = self._cmd_export_declarative(cmd)
+            elif command == "rename_declarative":
+                response = self._cmd_rename_declarative(cmd)
+            elif command == "edit_declarative":
+                response = self._cmd_edit_declarative(cmd)
+            elif command == "delete_declarative":
+                response = self._cmd_delete_declarative(cmd)
             elif command == "connect_ports":
                 response = self._cmd_connect_ports(cmd)
             elif command == "disconnect_ports":
@@ -3096,8 +4129,28 @@ class PatchBayDaemon:
 
 
 def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="patchbay-daemon", description="Patch Space daemon"
+    )
+    parser.add_argument(
+        "--declarative-ro",
+        default=DEFAULT_DECLARATIVE_RO,
+        help="Read-only directory of declarative node files (e.g. a Nix "
+        "store path). Never written.",
+    )
+    parser.add_argument(
+        "--declarative-rw",
+        default=DEFAULT_DECLARATIVE_RW,
+        help="Read-write directory of declarative node files.",
+    )
+    args = parser.parse_args()
+
     _install_log_ring()
-    daemon = PatchBayDaemon()
+    daemon = PatchBayDaemon(
+        declarative_ro=args.declarative_ro, declarative_rw=args.declarative_rw
+    )
     try:
         daemon.start()
     finally:
