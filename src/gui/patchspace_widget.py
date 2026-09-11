@@ -251,6 +251,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._marquee_base = set()
         self._marquee_start_world = (0.0, 0.0)
         self._right_drag_moved = False
+        self._right_drag_mods = Gdk.ModifierType(0)
         # Panel-file dialogs: last listing, the open dialog, and the
         # "open the panel list once it arrives" handshake.
         self._pending_panel_list = False
@@ -1657,6 +1658,18 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 return pid
         return None
 
+    def find_panel_settings_at(self, x, y):
+        for pid in self._panel_order_deepest_first():
+            if pid == "":
+                continue
+            rect = self._panel_rect(pid)
+            if rect is None:
+                continue
+            x1, y1, x2, y2 = self._panel_header_rects(pid, rect)["settings"]
+            if x1 <= x <= x2 and y1 <= y <= y2:
+                return pid
+        return None
+
     def find_node_at(self, x, y):
         for nid, node in self._hit_nodes(x, y):
             if node["x"] <= x <= node["x"] + self.node_width(nid) and node["y"] <= y <= node[
@@ -2928,6 +2941,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self.queue_draw()
             return
 
+        # Panel settings (rename / recolour).
+        pid = self.find_panel_settings_at(wx, wy)
+        if pid is not None:
+            self.show_panel_settings_dialog(pid)
+            return
+
         # Group +/- buttons: arm a mode (click again to cancel).
         hit = self.find_group_action_at(wx, wy)
         if hit is not None:
@@ -3372,10 +3391,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self.client.send({"command": "list_panels"})
 
     def show_create_panel_dialog(self):
-        """Prompt for a name/mode and move the current selection into a
-        new panel file."""
-        if not self.selected_nodes:
-            return
+        """Prompt for a name/mode and move the current selection (if any)
+        into a new panel file.  With a selection the panel is sized and
+        placed around those nodes; otherwise it pops up as a square in the
+        middle of the view."""
+        placement = self._new_panel_placement()
         dialog = Gtk.Dialog(
             title="Create Panel", transient_for=self.get_root(), modal=True
         )
@@ -3396,6 +3416,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             if response == Gtk.ResponseType.OK:
                 name = entry.get_text().strip()
                 if name:
+                    x, y, w, h = placement
                     self._begin_load()
                     self.client.send(
                         {
@@ -3403,8 +3424,93 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                             "name": name,
                             "node_ids": list(self.selected_nodes),
                             "readonly": readonly.get_active(),
+                            "x": x,
+                            "y": y,
+                            "w": w,
+                            "h": h,
                         }
                     )
+            dlg.destroy()
+
+        dialog.connect("response", _on_response)
+        dialog.present()
+
+    def _new_panel_placement(self):
+        """(x, y, w, h) for a new top-level panel: fitted around the
+        selected nodes when there are any, else a square centred in the
+        current viewport."""
+        selected = [n for n in self.selected_nodes if n in self.nodes]
+        pad = self.PANEL_PADDING
+        header = self.PANEL_HEADER_H
+        if selected:
+            minx = min(self.nodes[n]["x"] for n in selected)
+            miny = min(self.nodes[n]["y"] for n in selected)
+            maxx = max(
+                self.nodes[n]["x"] + self.node_width(n) for n in selected
+            )
+            maxy = max(
+                self.nodes[n]["y"] + self.node_height(n) for n in selected
+            )
+            return (
+                minx - pad,
+                miny - header - pad,
+                max(200.0, (maxx - minx) + 2 * pad),
+                max(140.0, (maxy - miny) + header + 2 * pad),
+            )
+        side = 320.0
+        view_w = self.get_width() or 800
+        view_h = self.get_height() or 600
+        cx, cy = self.to_world(view_w / 2.0, view_h / 2.0)
+        return (cx - side / 2.0, cy - side / 2.0, side, side)
+
+    def show_panel_settings_dialog(self, panel_id):
+        """Change a panel's display name and colour."""
+        panel = self.panels.get(panel_id)
+        if panel is None or panel.get("readonly") or not panel.get("writable"):
+            self._show_error_dialog("This panel is read-only.")
+            return
+        dialog = Gtk.Dialog(
+            title="Panel Settings", transient_for=self.get_root(), modal=True
+        )
+        content = dialog.get_content_area()
+        content.set_spacing(6)
+        content.set_margin_top(10)
+        content.set_margin_bottom(10)
+        content.set_margin_start(10)
+        content.set_margin_end(10)
+        dialog.set_default_size(360, -1)
+
+        name_entry = Gtk.Entry()
+        name_entry.set_text(str(panel.get("label") or self._panel_local(panel_id)))
+        content.append(self._labeled_row("Name:", name_entry))
+
+        color_picker = ColorPicker(
+            panel.get("color", self.GROUP_COLORS[0]), presets=self.GROUP_COLORS
+        )
+        content.append(self._labeled_row("Color:", color_picker))
+
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Apply", Gtk.ResponseType.APPLY)
+        dialog.set_default_response(Gtk.ResponseType.APPLY)
+
+        def _on_response(dlg, response):
+            if response == Gtk.ResponseType.APPLY:
+                label = name_entry.get_text().strip()
+                if label:
+                    self.client.send(
+                        {
+                            "command": "edit_panel",
+                            "panel_id": panel_id,
+                            "label": label,
+                            "color": color_picker.get_hex(),
+                        }
+                    )
+                    # Optimistic local update so the header reflects the
+                    # change before the next poll.
+                    panel["label"] = label
+                    panel["color"] = color_picker.get_hex()
+                    self._panel_geo_cache.clear()
+                    self.queue_draw()
             dlg.destroy()
 
         dialog.connect("response", _on_response)
@@ -3785,6 +3891,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             pid is not None
             and self.find_panel_reset_at(wx, wy) is None
             and self.find_panel_anchor_at(wx, wy) is None
+            and self.find_panel_settings_at(wx, wy) is None
         ):
             panel = self.panels[pid]
             self.dragging_panel = pid
@@ -5240,8 +5347,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         ax, ay = self._panel_absolute(pid)
         w = float(panel.get("w", 420.0))
         h = float(panel.get("h", 260.0))
+        # Nodes being dragged right now must not count towards a panel's
+        # auto-grown bounds: otherwise the source panel stretches to follow
+        # the cursor and swallows a drop meant for the panel underneath.
+        dragging = set(self.drag_node_starts) if self.dragging_node else set()
         minx = miny = maxx = maxy = None
         for nid in self._panel_member_nodes(pid):
+            if nid in dragging:
+                continue
             node = self.nodes.get(nid)
             if node is None:
                 continue
@@ -5278,7 +5391,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         if self.panels[pid].get("readonly"):
             reset = (x + w - 22, y + 4, x + w - 6, y + self.PANEL_HEADER_H - 4)
         anchor = (x + 6, y + 5, x + 20, y + self.PANEL_HEADER_H - 5)
-        return {"header": header, "resize": resize, "reset": reset, "anchor": anchor}
+        settings = None
+        if self.panels[pid].get("writable") and not self.panels[pid].get("readonly"):
+            settings = (x + w - 22, y + 4, x + w - 6, y + self.PANEL_HEADER_H - 4)
+        return {
+            "header": header, "resize": resize, "reset": reset,
+            "anchor": anchor, "settings": settings,
+        }
 
     def _draw_panel_grid(self, cr, x, y, w, h, rgb):
         spacing = 40
@@ -5366,6 +5485,23 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 cr.set_source_rgb(0.1, 0.1, 0.12)
                 cr.set_line_width(1.4)
                 cr.arc((rx1 + rx2) / 2, (ry1 + ry2) / 2, 5, -1.2, 2.2)
+                cr.stroke()
+            # Settings gear (writable panels; read-only panels show Reset).
+            if geo.get("settings") is not None:
+                sx1, sy1, sx2, sy2 = geo["settings"]
+                scx, scy = (sx1 + sx2) / 2, (sy1 + sy2) / 2
+                cr.set_source_rgba(0.05, 0.05, 0.06, 0.85)
+                cr.set_line_width(1.6)
+                cr.arc(scx, scy, 4.0, 0, 2 * math.pi)
+                cr.stroke()
+                for k in range(8):
+                    ang = k * math.pi / 4.0
+                    cr.move_to(
+                        scx + 4.0 * math.cos(ang), scy + 4.0 * math.sin(ang)
+                    )
+                    cr.line_to(
+                        scx + 6.0 * math.cos(ang), scy + 6.0 * math.sin(ang)
+                    )
                 cr.stroke()
             # Resize triangle bottom-right.
             tx1, ty1, tx2, ty2 = geo["resize"]
@@ -5648,6 +5784,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._right_drag_start_widget = (start_x, start_y)
         self._right_drag_start_world = self.to_world(start_x, start_y)
         self._right_drag_moved = False
+        try:
+            self._right_drag_mods = gesture.get_current_event_state()
+        except Exception:
+            self._right_drag_mods = Gdk.ModifierType(0)
         self.select_rect = None
 
     def on_right_drag_update(self, gesture, offset_x, offset_y):
@@ -5672,6 +5812,21 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         if moved:
             self.queue_draw()
             return
+        # Shift/Ctrl + right-click toggles the node under the pointer in
+        # the selection instead of opening the menu.
+        mods = getattr(self, "_right_drag_mods", Gdk.ModifierType(0))
+        add_sel = bool(mods & Gdk.ModifierType.SHIFT_MASK)
+        rem_sel = bool(mods & Gdk.ModifierType.CONTROL_MASK)
+        if add_sel or rem_sel:
+            wx, wy = self._right_drag_start_world
+            nid = self.find_node_at(wx, wy)
+            if nid is not None:
+                if add_sel:
+                    self._set_selection(self.selected_nodes | {nid})
+                else:
+                    self._set_selection(self.selected_nodes - {nid})
+                self.queue_draw()
+                return
         # No movement -> it was a plain right-click; open the menu.
         x, y = self._right_drag_start_widget
         self._open_context_menu(x, y)

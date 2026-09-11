@@ -1292,12 +1292,19 @@ class PatchBayDaemon:
                 label=cmd.get("label") or name,
                 color=cmd.get("color") or panels.DEFAULT_COLOR,
                 mode=mode, path=path, writable=True,
+                x=float(cmd.get("x", 0.0) or 0.0),
+                y=float(cmd.get("y", 0.0) or 0.0),
+                w=max(panels.MIN_W, float(cmd.get("w", panels.DEFAULT_W) or 0.0)),
+                h=max(panels.MIN_H, float(cmd.get("h", panels.DEFAULT_H) or 0.0)),
                 config={"nodes": {}, "edges": [], "panels": [], "groups": []},
             )
             root = self.panels.get(panels.ROOT_ID)
             if root is not None and stem not in root.config.setdefault("panels", []):
                 root.config["panels"].append(stem)
         self._standardize_nodes(moved)
+        # Refresh the in-memory tree from live state so list_panels (and a
+        # later reset) sees the just-moved nodes as members immediately.
+        self._install_panels(self._build_panels_from_space())
         self._write_panels()
         self._dirty = True
         self._wake_ticker()
@@ -1337,6 +1344,30 @@ class PatchBayDaemon:
         self._dirty = True
         self._wake_ticker()
         return {"status": "ok", "panel_id": panel_id}
+
+    def _cmd_edit_panel(self, cmd: dict) -> dict:
+        """Change a writable panel's display label and/or colour."""
+        panel_id = cmd.get("panel_id", "")
+        panel = self.panels.get(panel_id)
+        if not panel_id or panel is None:
+            return {"status": "error", "message": f"no panel {panel_id!r}"}
+        if panel.is_readonly or not panel.writable:
+            return {"status": "error", "message": f"panel {panel_id!r} is read-only"}
+        label = (cmd.get("label") or "").strip()
+        if label:
+            panel.label = label
+        color = (cmd.get("color") or "").strip()
+        if color:
+            panel.color = color
+        self._write_panels()
+        self._dirty = True
+        self._wake_ticker()
+        return {
+            "status": "ok",
+            "panel_id": panel_id,
+            "label": panel.label,
+            "color": panel.color,
+        }
 
     def _cmd_reload_panels(self, cmd: dict) -> dict:
         with self._panel_lock:
@@ -1495,6 +1526,9 @@ class PatchBayDaemon:
                     refused.append(nid)
         self._standardize_nodes(moved)
         if moved:
+            # Keep the in-memory tree in step with the renames so
+            # list_panels and reset_panel see the new membership.
+            self._install_panels(self._build_panels_from_space())
             self._dirty = True
             self._wake_ticker()
         return {"status": "ok", "moved": moved, "refused": refused}
@@ -2523,7 +2557,9 @@ class PatchBayDaemon:
     def _rename_owned_node(self, old_id: str, new_id: str) -> None:
         """Rename a node and any hidden companion whose id embeds its own
         (a Sensitivity gate's pre/post pass-throughs).  rename_node()
-        rebuilds the incident edges, so this stays live - no teardown."""
+        rebuilds the incident edges, so this stays live - no teardown.
+        Group membership is re-pointed too, so a selected set dragged into
+        another panel keeps the groups it was part of."""
         hidden = [
             (prefix + old_id, prefix + new_id)
             for prefix in (_SENS_PRE_PREFIX, _SENS_POST_PREFIX)
@@ -2533,6 +2569,12 @@ class PatchBayDaemon:
         for h_old, h_new in hidden:
             if h_old in self.space.nodes and h_new not in self.space.nodes:
                 self.space.rename_node(h_old, h_new)
+        for group in self.groups.values():
+            members = group.get("nodes")
+            if members:
+                group["nodes"] = [
+                    new_id if n == old_id else n for n in members
+                ]
 
     # ------------------------------------------------------------------
     # node factory
@@ -3927,6 +3969,8 @@ class PatchBayDaemon:
                 response = self._cmd_create_panel(cmd)
             elif command == "delete_panel":
                 response = self._cmd_delete_panel(cmd)
+            elif command == "edit_panel":
+                response = self._cmd_edit_panel(cmd)
             elif command == "connect_ports":
                 response = self._cmd_connect_ports(cmd)
             elif command == "disconnect_ports":

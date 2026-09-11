@@ -38,7 +38,6 @@ codebase deliberately documents *why* and *what failed before*, not just *what*.
 └── src/                   # the whole implementation (former src-rewrite/)
     ├── main.py            # daemon: socket API, session load, node factory, wiring
     ├── pwnodes.py         # node graph model: PatchSpace, all Node classes, effect sandwich
-    ├── declarative.py     # LEGACY declarative node files (superseded by panels)
     ├── panels.py          # panel containers: namespacing, LCA edges, tree IO, migration
     ├── pwgraph.py         # live PipeWire graph model (pw-dump driven)
     ├── pwproc.py          # OwnedPwNode / OwnedPwProcess (pw-cli/pw-dump subprocesses)
@@ -193,7 +192,8 @@ automatically because ownership is derived from ids.
 restart re-apply the file's membership, positions, edges and params. `read-write` (the
 default) reads and writes. The GUI draws a panel as a tinted-grid box (grid shares the
 world grid's origin/spacing so it overlays it), with a header (label + id + mode + anchor
-glyph), a bottom-right resize triangle, and a top-right Reset button on read-only panels.
+glyph), a bottom-right resize triangle, a top-right settings gear (rename/recolour via
+`edit_panel`), and a Reset button on read-only panels.
 
 *Physics* is hierarchical (`_hierarchical_step`, `on_layout_tick`): node physics runs
 inside each panel in that panel's local frame (internal edges only), then the panels
@@ -201,95 +201,28 @@ themselves repel each other in the parent frame; nodes never exert forces across
 boundary (cross-panel edges only spring the two panels together).
 
 *Reparenting:* dragging a node across a boundary sends `move_nodes`; the daemon
-re-qualifies its id and re-homes its edges. Refused (GUI snaps back) when the source or
-target panel is read-only. Commands: `list_panels`, `reload_panels`, `create_panel`,
-`delete_panel`, `set_panel_layout`, `move_nodes`, `reset_panel`; `get_nodes` carries
-`panels` and per-node provenance is the id prefix.
+re-qualifies its id, re-homes its edges (ownership is derived from ids) and re-points
+group membership, so a selected set moved into a panel keeps its groups. Refused (GUI
+snaps back) when the source or target panel is read-only. While a node is being dragged
+it is excluded from its panel's auto-grown bounds, so the source panel doesn't stretch
+under the cursor and steal the drop. Groups land in the panel that is the LCA of their
+members.
 
-**Declarative node files (`declarative.py`) — LEGACY, superseded by panels.** Kept only
-so old sessions/tests still load; the daemon's active load/autosave path is panels. The
-daemon owns two watched directories — a
-read-only one (a Nix store path, never written) and a read-write one — settable with
-`--declarative-ro/--declarative-rw` (or `PATCHBAY_DECLARATIVE_RO/RW`). Each `*.json` file
-wraps the exported-session shape in a metadata layer — `{"label", "color", "readonly"?,
-"config": {nodes, edges, groups}}` (bare legacy configs are still read, defaulting label to
-the stem) — and is a *source of truth*:
-the daemon loads every file at start-up (`_load_startup_sessions`, run on a background
-thread *after* the socket is listening so a slow effect-heavy session can't make the GUI
-look disconnected; `get_nodes` reports a `loading` flag so the GUI raises its overlay for
-that self-issued load — the flag is a counter (`_begin/_end_heavy_load`) covering startup,
-every `reload_declarative`, and `rebuild`, so a rebuild that nests a reload can't clear it
-early; the GUI *also* raises the overlay optimistically when it issues a declarative
-command, because a synchronous command blocks that connection's `get_nodes` polls so it
-would never observe the flag). On start-up `start()` opens the counter *before* binding the
-socket, binds the socket immediately, then runs the orphan sweep; that way the overlay
-covers the slow crash-recovery destruction of leftover helper processes too, not just the
-session load (the startup-load thread owns closing the counter). Do not move the socket
-bind after the sweep — then the GUI would just show "not connected" through the whole
-cleanup. On `rebuild`
-(`_cmd_rebuild` reloads them instead of replaying in-memory copies), and whenever a file is
-added/edited/removed (the tick's `_poll_declarative`, mtime-based, debounced by
-`DECLARATIVE_POLL_S`). Node ids are namespaced `<file-stem>::<local-id>`, so files can't
-collide and provenance is visible; `declarative.py:namespaced()` does the qualification,
-including edge endpoints (same-file ids only) and group members/ids. Nodes and edges carry a
-`declarative` flag (reported by `get_nodes`, **not** written into exported params).
-Declarative nodes/edges/groups are excluded from the imperative autosave
-(`_build_export_config(imperative_only=True)`), so a deleted declarative node cannot be
-resurrected from the cache. Edits to a declarative node are *supposed* to be lost on reload;
-imperative edges that merely touch one are preserved by `reload_declarative` (snapshot
-imperative edges, drop declarative state, re-apply files, re-add the edges).
-**"Declare" is a move, not a copy, and it is *live*.** A file's node `foo` loads as
-`<stem>::foo`, and the daemon treats an imperative node literally named `foo` as the *same*
-node (`_declarative_duplicate_map`): after a declare/export reload it deletes those
-imperative originals and re-points the edges that reached outside the selection at the
-declarative copies (`_reconcile_declarative_duplicates`, also run at start-up so caches
-written by older builds self-heal). This is what stops a declare from silently doubling a
-chain. Create/add/remove do **not** call `reload_declarative`; `_apply_declarative_membership`
-diff's the file's desired member set against the current owners and only renames/re-tags
-the nodes that actually changed (via `space.rename_node`, which rebuilds their incident
-edges; edge `declarative` flags are then flipped in place
-(`space.set_edge_declarative`, no unlink/relink blip) to "both ends declarative"; groups re-pointed;
-`_rename_owned_node` also renames a Sensitivity gate's hidden pre/post companions). Every
-other declarative node keeps running, so no effect modules are torn down for a one-node
-add. Any conflict falls back to a full `reload_declarative`. `edit_declarative` only
-reloads when it renames; a label/colour tweak just updates `_declarative_meta`.
-**Trap:** every writer of a declarative file (`_declarative_write`, `_cmd_edit_declarative`)
-must refresh `_declarative_mtimes` after `write_file`. Otherwise the tick's mtime watcher
-(`_poll_declarative`) treats our own write as an external change and fires a *full*
-`reload_declarative` ~1.5s later — undoing the live move and tearing down every declared
-effect (audio dropout, loading overlay on every declare). This is the "loading unstable /
-noise suppression kills audio" regression.
-Groups a file takes over move with their nodes (members re-pointed). Declaring captures
-the selected nodes' canvas groups (label/colour/membership) into the file, installs them
-live as declarative groups, and drops any imperative group whose member set exactly matches
-a declarative one (the file owns that grouping, whatever its id/label —
-`_declarative_groups_for`, `_apply_declarative_membership`, `_reconcile_declarative_duplicates`).
-Declare dialog: target dropdown + label/colour, and **Update** merges the selection (and its
-group properties) into the target; Replace overwrites; Remove detaches. `get_nodes` tags each declared node with
-`declarative_label`/`declarative_color` (looked up in `_declarative_meta`) so the GUI can
-draw a semi-transparent coloured label bubble hung *just below* the node, centred, in its
-own draw pass after every node body (paint-only, no `find_*_at` hit-tester, so clicks pass
-through to the canvas). Commands:
-`list_declarative` (returns per-file label/color/readonly/writable + nodes),
-`export_declarative` with `mode` = `create`/`replace`/`add`/`remove` (create needs
-`name`+`label`+`color`+`overwrite`; add/remove edit an existing writable file, refusing
-read-only ones; add/remove is only allowed in the RW dir or for files not marked
-`readonly`), `edit_declarative` (change label/color and optionally rename),
-`rename_declarative` (renaming re-prefixes the whole file), `delete_declarative`,
-`reload_declarative`. GUI: hamburger (top-right) → "Declarative Nodes…" lists files
-(coloured swatch + Select/Edit/Delete, plus "Select Group…"), and "Declare…" in the
-selection toolbar opens a target dropdown (existing writable file or New group…) with
-Add / Remove / Create·Replace, each with a `ColorPicker`. Reload re-applies. The old
-"Import Last Session" button is gone — the imperative cache is now auto-loaded at startup
-(declarative files first so cross-references resolve in either direction, with a second
-idempotent pass for edges that needed the other half).
+*Creating a panel* (`Create Panel…`): with a selection, the new panel is fitted around
+the selected nodes' bounds; with none, a square opens in the middle of the viewport. The
+daemon takes the placement (`x/y/w/h`) in `create_panel`.
+
+Commands: `list_panels`, `reload_panels`, `create_panel`, `delete_panel`, `edit_panel`,
+`set_panel_layout`, `move_nodes`, `reset_panel`; `get_nodes` carries `panels` and per-node
+provenance is the id prefix.
 
 **Canvas selection.** Selection is a plain `set` of node ids. A plain left press on a node
 selects it (replacing the selection unless it is already part of a multi-selection, so a
 whole selection drags together); right-drag marquees replace the selection. Shift/Ctrl +
 left-drag is a modifier marquee (`_marquee_mode`): Shift unions the swept nodes in, Ctrl
 subtracts them, re-derived each update from `_marquee_base`; a Shift/Ctrl *click* (no sweep)
-toggles the node under the pointer.
+toggles the node under the pointer. Shift/Ctrl + right-click on a node does the same
+(add/remove) without opening the context menu.
 
 **Session load is asynchronous.** `_cmd_load_session` starts a background thread and
 immediately returns `{"status": "ok", "started": true}`. There is **no completion

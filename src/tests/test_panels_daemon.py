@@ -165,6 +165,67 @@ def test_move_nodes_refused_from_readonly_panel(tmp_path):
     assert "frozen::x" in d.space.nodes
 
 
+def test_create_panel_honours_placement(tmp_path):
+    d, root, pdir = _daemon(tmp_path)
+    d.panels = d._load_panels_tree()
+    resp = d._cmd_create_panel(
+        {"name": "kit", "x": 10, "y": 20, "w": 333, "h": 222}
+    )
+    assert resp["status"] == "ok", resp
+    panel = d.panels["kit"]
+    assert (panel.x, panel.y, panel.w, panel.h) == (10.0, 20.0, 333.0, 222.0)
+    raw = json.load(open(os.path.join(pdir, "kit.json")))
+    assert raw["placement"] == {
+        "x": 10.0, "y": 20.0, "w": 333.0, "h": 222.0, "anchored": False,
+    }
+
+
+def test_edit_panel_changes_label_and_color(tmp_path):
+    d, root, pdir = _daemon(tmp_path)
+    d.panels = d._load_panels_tree()
+    assert d._cmd_create_panel({"name": "kit"})["status"] == "ok"
+
+    resp = d._cmd_edit_panel(
+        {"panel_id": "kit", "label": "Kitchen", "color": "#112233"}
+    )
+    assert resp["status"] == "ok", resp
+    assert d.panels["kit"].label == "Kitchen"
+    assert d.panels["kit"].color == "#112233"
+    raw = json.load(open(os.path.join(pdir, "kit.json")))
+    assert raw["label"] == "Kitchen"
+    assert raw["color"] == "#112233"
+
+    d.panels["ro"] = panels.Panel(
+        id="ro", parent="", label="RO", color="#000000", mode="read-only",
+        path=os.path.join(pdir, "ro.json"), writable=True,
+        config={"nodes": {}, "edges": [], "panels": [], "groups": []},
+    )
+    assert d._cmd_edit_panel({"panel_id": "ro", "label": "nope"})["status"] == "error"
+
+
+def test_move_nodes_carries_group_membership(tmp_path):
+    d, root, pdir = _daemon(tmp_path)
+    d.panels = d._load_panels_tree()
+    d.handle_command({"command": "add_node", "node_type": "regex_input",
+                      "node_id": "a", "config": {"pattern": ".*"}})
+    d.handle_command({"command": "add_node", "node_type": "regex_output",
+                      "node_id": "b", "config": {"pattern": ".*"}})
+    d.handle_command({"command": "add_group", "group_id": "g", "label": "G",
+                      "nodes": ["a", "b"]})
+
+    resp = d._cmd_create_panel({"name": "kit", "node_ids": ["a", "b"]})
+    assert resp["status"] == "ok", resp
+    # The group's members were re-qualified with the new panel...
+    assert set(d.groups["g"]["nodes"]) == {"kit::a", "kit::b"}
+    # ...and the rebuilt tree nests the group under the panel.
+    tree = d._build_panels_from_space()
+    assert tree["kit"].config["groups"]
+    assert tree["kit"].config["groups"][0]["nodes"] == ["a", "b"]
+    listing = d._cmd_list_panels({})
+    kit = next(f for f in listing["files"] if f["id"] == "kit")
+    assert set(kit["nodes"]) == {"kit::a", "kit::b"}
+
+
 def test_reset_panel_reverts_subtree_scoped(tmp_path):
     d, root, pdir = _daemon(tmp_path)
     frozen = panels.Panel(
