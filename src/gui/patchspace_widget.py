@@ -1713,9 +1713,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     def _panel_order_deepest_first(self):
         return sorted(self.panels, key=lambda p: p.count("::"), reverse=True)
 
-    def find_panel_at(self, x, y):
+    def find_panel_at(self, x, y, exclude=None):
         for pid in self._panel_order_deepest_first():
             if pid == "":
+                continue
+            if exclude and (
+                pid == exclude or pid.startswith(exclude + "::")
+            ):
                 continue
             rect = self._panel_rect(pid)
             if rect is None:
@@ -4546,17 +4550,38 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     def _handle_drag_end(self, gesture, offset_x, offset_y):
         if self.dragging_panel is not None:
-            panel = self.panels.get(self.dragging_panel)
+            dragging = self.dragging_panel
+            panel = self.panels.get(dragging)
             if panel is not None:
-                self.client.send(
-                    {
-                        "command": "set_panel_layout",
-                        "panel_id": self.dragging_panel,
-                        "x": panel["x"],
-                        "y": panel["y"],
-                    }
-                )
+                # Drop over another panel (not this one or its descendants)
+                # nests it inside that panel; otherwise it just moves.
+                rect = self._panel_rect(dragging)
+                target = None
+                if rect is not None:
+                    target = self.find_panel_at(
+                        rect[0] + rect[2] / 2.0, rect[1] + rect[3] / 2.0,
+                        exclude=dragging,
+                    )
+                current = panel.get("parent", "")
+                if target is not None and target != current:
+                    self.client.send(
+                        {
+                            "command": "move_panel",
+                            "panel_id": dragging,
+                            "parent_id": target,
+                        }
+                    )
+                else:
+                    self.client.send(
+                        {
+                            "command": "set_panel_layout",
+                            "panel_id": dragging,
+                            "x": panel["x"],
+                            "y": panel["y"],
+                        }
+                    )
             self.dragging_panel = None
+            self._panel_drag_baseline = {}
             # Nodes moved with the panel during the drag; persist their
             # absolute positions now (the daemon no longer derives them from
             # the panel move).

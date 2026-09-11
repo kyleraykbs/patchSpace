@@ -234,6 +234,12 @@ file) controls whether a standalone panel is loaded at start-up; a `false` panel
 instantiated when referenced as a child (or added by hand). `list_panels`/`get_nodes`
 report it.
 
+*Panels side view.* A docked, scrollable list of panel files lives on the right (the end
+child of an outer `Gtk.Paned`), toggled by a button directly under the top-right
+hamburger (`main_window._panels_toggle` / `_build_panels_view`). Each row shows the
+panel's colour/label with Select and an X to remove that panel (delete moved here from
+the title row).
+
 *Physics* is hierarchical (`_hierarchical_step`, `on_layout_tick`): node physics runs
 inside each panel in that panel's local frame (internal edges only). Panel-vs-panel
 physics (siblings repelling/springing in the parent frame) is **paused by default**
@@ -258,8 +264,11 @@ daemon echoes exactly what was sent.
 
 *Reparenting:* dragging a node across a boundary sends `move_nodes`; the daemon
 re-qualifies its id, re-homes its edges (ownership is derived from ids) and re-points
-group membership, so a selected set moved into a panel keeps its groups. Refused (GUI
-snaps back) when the source or target panel is read-only. While a node is being dragged
+group membership, so a selected set moved into a panel keeps its groups. Dragging a
+*panel* onto another panel sends `move_panel`: the panel keeps its absolute placement,
+is re-keyed under the target's path (`fx` -> `kit::fx`), and every descendant panel/node
+id is re-qualified (edges rebuilt, groups re-pointed), to arbitrary depth; cycles are
+refused. Refused (GUI snaps back) when the source or target panel is read-only. While a node is being dragged
 it is excluded from its panel's auto-grown bounds, so the source panel doesn't stretch
 under the cursor and steal the drop. After the rename the GUI immediately re-sends the
 moved nodes' positions under their *new* ids (`_reparent_after_drag`), because the

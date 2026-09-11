@@ -430,3 +430,42 @@ def test_edit_mode_refused_for_readonly(tmp_path):
     )
     resp = d._cmd_set_panel_edit_mode({"panel_id": "ro", "enabled": True})
     assert resp["status"] == "error"
+
+
+def test_move_panel_nests_and_preserves_placement(tmp_path):
+    d, root, pdir = _daemon(tmp_path)
+    d.panels = d._load_panels_tree()
+    d.handle_command({"command": "add_node", "node_type": "regex_input",
+                      "node_id": "a", "config": {"pattern": ".*"}})
+    assert d._cmd_create_panel({"name": "kit", "node_ids": ["a"]})["status"] == "ok"
+    d.handle_command({"command": "add_node", "node_type": "regex_input",
+                      "node_id": "b", "config": {"pattern": ".*"}})
+    assert d._cmd_create_panel({"name": "fx", "node_ids": ["b"]})["status"] == "ok"
+
+    before = d._panel_origin(d.panels, "fx")
+    resp = d._cmd_move_panel({"panel_id": "fx", "parent_id": "kit"})
+    assert resp["status"] == "ok", resp
+    assert resp["panel_id"] == "kit::fx"
+    assert d.panels["kit::fx"].parent == "kit"
+    assert "kit::fx::b" in d.space.nodes
+    assert "fx::b" not in d.space.nodes
+    # Absolute placement preserved.
+    assert d._panel_origin(d.panels, "kit::fx") == before
+    # Parent link lists updated.
+    assert "fx" in d.panels["kit"].children
+    assert "fx" not in d.panels[panels.ROOT_ID].children
+    # Survives a save/reload round-trip.
+    d._write_panels()
+    tree = d._load_panels_tree()
+    assert "kit::fx" in tree
+    assert "b" in tree["kit::fx"].nodes
+
+
+def test_move_panel_refuses_cycle(tmp_path):
+    d, root, pdir = _daemon(tmp_path)
+    d.panels = d._load_panels_tree()
+    d._cmd_create_panel({"name": "kit"})
+    d._cmd_create_panel({"name": "fx"})
+    d._cmd_move_panel({"panel_id": "fx", "parent_id": "kit"})
+    resp = d._cmd_move_panel({"panel_id": "kit", "parent_id": "kit::fx"})
+    assert resp["status"] == "error"

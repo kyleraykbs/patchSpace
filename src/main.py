@@ -1655,6 +1655,95 @@ class PatchBayDaemon:
         self._dirty = True
         self._wake_ticker()
         return {"status": "ok", "panel_id": panel_id, "edit_mode": enabled}
+
+    def _cmd_move_panel(self, cmd: dict) -> dict:
+        """Nest one panel inside another (``parent_id``, "" = root).
+
+        The moved panel keeps its absolute placement; every panel in its
+        subtree is re-keyed under the new path and every node id is
+        re-qualified (edges are rebuilt by rename, groups re-pointed), so
+        arbitrary nesting depth round-trips through the files."""
+        panel_id = cmd.get("panel_id", "")
+        new_parent = cmd.get("parent_id", "")
+        panel = self.panels.get(panel_id)
+        if not panel_id or panel_id == panels.ROOT_ID or panel is None:
+            return {"status": "error", "message": f"no panel {panel_id!r}"}
+        if panel.is_readonly or not panel.writable:
+            return {"status": "error", "message": f"panel {panel_id!r} is read-only"}
+        if new_parent:
+            target = self.panels.get(new_parent)
+            if target is None:
+                return {"status": "error", "message": f"no panel {new_parent!r}"}
+            if target.is_readonly or not target.writable:
+                return {
+                    "status": "error",
+                    "message": f"panel {new_parent!r} is read-only",
+                }
+        if new_parent == panel_id or (
+            new_parent
+            and new_parent.startswith(panel_id + panels.NAMESPACE_SEP)
+        ):
+            return {"status": "error", "message": "cannot nest a panel in itself"}
+        old_parent = panel.parent or ""
+        if old_parent == new_parent:
+            return {"status": "ok", "panel_id": panel_id, "parent_id": new_parent}
+        prefix = panel_id + panels.NAMESPACE_SEP
+        with self._lock:
+            subtree = [
+                p for p in self.panels
+                if p == panel_id or p.startswith(prefix)
+            ]
+            new_root = panels.make_id(new_parent, panels.local_of(panel_id))
+            id_map = {p: new_root + p[len(panel_id):] for p in subtree}
+            for old, new in id_map.items():
+                if new in self.panels and new not in subtree:
+                    return {"status": "error", "message": f"{new!r} already exists"}
+            old_abs = self._panel_origin(self.panels, panel_id)
+            new_abs = (
+                self._panel_origin(self.panels, new_parent)
+                if new_parent else (0.0, 0.0)
+            )
+            panel.x = old_abs[0] - new_abs[0]
+            panel.y = old_abs[1] - new_abs[1]
+            # Re-qualify every node in the subtree (rebuilds their edges).
+            for nid in [
+                n for n in list(self.space.nodes)
+                if panels.panel_of(n) in id_map
+            ]:
+                new_nid = panels.make_id(
+                    id_map[panels.panel_of(nid)], panels.local_of(nid)
+                )
+                self._rename_owned_node(nid, new_nid)
+            # Re-key the panels (and their snapshots).
+            moved = {}
+            for p in subtree:
+                obj = self.panels.pop(p)
+                obj.id = id_map[p]
+                obj.parent = new_parent if p == panel_id else id_map.get(
+                    obj.parent, new_parent
+                )
+                moved[obj.id] = obj
+            self.panels.update(moved)
+            for store in (self._readonly_snapshots, self._panel_snapshots):
+                for old, new in id_map.items():
+                    if old in store:
+                        store[new] = store.pop(old)
+            self._edit_panels = {id_map.get(p, p) for p in self._edit_panels}
+            local = panels.local_of(panel_id)
+            op = self.panels.get(old_parent)
+            if op is not None:
+                op.config["panels"] = [
+                    s for s in op.config.get("panels", []) if s != local
+                ]
+            np_ = self.panels.get(new_parent)
+            if np_ is not None and local not in np_.config.setdefault("panels", []):
+                np_.config["panels"].append(local)
+        self._install_panels(self._build_panels_from_space())
+        self._write_panels()
+        self._dirty = True
+        self._wake_ticker()
+        return {"status": "ok", "panel_id": id_map[panel_id], "parent_id": new_parent}
+
     def _cmd_move_nodes(self, cmd: dict) -> dict:
         """Reparent a selection into ``panel_id``.  Node ids are
         re-qualified to the new panel, which re-homes every incident edge
@@ -4125,6 +4214,8 @@ class PatchBayDaemon:
                 response = self._cmd_set_panel_edit_mode(cmd)
             elif command == "move_nodes":
                 response = self._cmd_move_nodes(cmd)
+            elif command == "move_panel":
+                response = self._cmd_move_panel(cmd)
             elif command == "create_panel":
                 response = self._cmd_create_panel(cmd)
             elif command == "delete_panel":
