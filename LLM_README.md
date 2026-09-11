@@ -38,7 +38,8 @@ codebase deliberately documents *why* and *what failed before*, not just *what*.
 └── src/                   # the whole implementation (former src-rewrite/)
     ├── main.py            # daemon: socket API, session load, node factory, wiring
     ├── pwnodes.py         # node graph model: PatchSpace, all Node classes, effect sandwich
-    ├── declarative.py     # declarative node files: discovery, namespacing, load/write
+    ├── declarative.py     # LEGACY declarative node files (superseded by panels)
+    ├── panels.py          # panel containers: namespacing, LCA edges, tree IO, migration
     ├── pwgraph.py         # live PipeWire graph model (pw-dump driven)
     ├── pwproc.py          # OwnedPwNode / OwnedPwProcess (pw-cli/pw-dump subprocesses)
     ├── pwmatch.py         # matching helpers for external nodes
@@ -161,7 +162,53 @@ sync, not the chain.
 `get_nodes`/`export` emit, read via `getattr(node, attr)`. `_LAYOUT_ATTRS` (x/y/anchored)
 is separate so unpositioned nodes don't emit nulls.
 
-**Declarative node files (`declarative.py`).** The daemon owns two watched directories — a
+**Panels (`panels.py`) — the file-backed container model (supersedes declarative files).**
+A *panel* is a nestable box that owns nodes and child panels; the whole graph has one
+`root` panel and every non-root panel is one `*.json` file, referenced by its file stem.
+Panel ids are the `::`-joined path of stems from the root (`kit`, `kit::eq`); a
+node/group id is `<panel-id>::<local>` (bare `<local>` at the root). Local ids may not
+contain `::`; split with `rsplit("::", 1)`. A root-level node and a root-level panel may
+not share a name.
+
+*Placement* is parent-relative and lives in the **child** file (`placement: {x,y,w,h,
+anchored}`), so a panel is self-describing; moving a panel translates its whole subtree.
+Node runtime coordinates stay **absolute** in `PatchSpace`/the GUI; `_flatten_panels`
+adds a panel's folded absolute origin when loading and `_build_panels_from_space`
+subtracts it when writing, so only the serialization is panel-relative.
+
+*Edges are owned by the least common ancestor* of the two endpoints' panels
+(`panels.edge_owner`): same-panel edges live in that panel's file, cross-panel edges in
+the deepest common panel, and edges between different top-level panels in the root file.
+An edge is never stored twice; reparenting a node re-homes its incident edges
+automatically because ownership is derived from ids.
+
+*Load dirs* are a list (`--panel-dir PATH[:rw|:ro]`, repeatable, later shadows earlier;
+`PATCHBAY_PANEL_DIR` for the default). The **root panel** is the session autosave
+(`--root-panel`, default `~/.cache/patchbay/last_session.json`) — a legacy
+`{nodes,edges,groups}` cache and old declarative files are migrated in place on load
+(`_load_panels_tree`).
+
+*Read-only panels* (`mode: "read-only"`) keep a frozen snapshot
+(`self._readonly_snapshots`); the GUI controls stay live but `reset_panel` / reload /
+restart re-apply the file's membership, positions, edges and params. `read-write` (the
+default) reads and writes. The GUI draws a panel as a tinted-grid box (grid shares the
+world grid's origin/spacing so it overlays it), with a header (label + id + mode + anchor
+glyph), a bottom-right resize triangle, and a top-right Reset button on read-only panels.
+
+*Physics* is hierarchical (`_hierarchical_step`, `on_layout_tick`): node physics runs
+inside each panel in that panel's local frame (internal edges only), then the panels
+themselves repel each other in the parent frame; nodes never exert forces across a panel
+boundary (cross-panel edges only spring the two panels together).
+
+*Reparenting:* dragging a node across a boundary sends `move_nodes`; the daemon
+re-qualifies its id and re-homes its edges. Refused (GUI snaps back) when the source or
+target panel is read-only. Commands: `list_panels`, `reload_panels`, `create_panel`,
+`delete_panel`, `set_panel_layout`, `move_nodes`, `reset_panel`; `get_nodes` carries
+`panels` and per-node provenance is the id prefix.
+
+**Declarative node files (`declarative.py`) — LEGACY, superseded by panels.** Kept only
+so old sessions/tests still load; the daemon's active load/autosave path is panels. The
+daemon owns two watched directories — a
 read-only one (a Nix store path, never written) and a read-write one — settable with
 `--declarative-ro/--declarative-rw` (or `PATCHBAY_DECLARATIVE_RO/RW`). Each `*.json` file
 wraps the exported-session shape in a metadata layer — `{"label", "color", "readonly"?,
