@@ -344,21 +344,19 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # the rest length grows with each box's bounding box and connected
         # panels settle edge-to-edge instead of overlapping; spring_length
         # is just the gap between them.  There is deliberately *no* global
-        # centre pull and *no* long-range centre repulsion: the centre pull
-        # beat 1/d^2 repulsion past ~600px (so distant panels crept toward
-        # each other), while centre repulsion with no counterforce flung
-        # panels apart without bound.  Both are wrong for boxes - panels
-        # should stay put and only be pushed out of each other when their
-        # rectangles actually overlap, which `_resolve_overlaps` does
-        # directly (and is size/rectangle aware).  The flow bias is for
-        # node chains, so it's off here too.
+        # centre pull (it beat 1/d^2 repulsion past ~600px, so distant
+        # panels crept toward each other).  Repulsion is short-range
+        # (cutoff ~ one box) so nearby panels push apart - visible physics -
+        # but stop instead of flinging apart without bound, and the
+        # rectangle-aware overlap pass handles the rest.  The flow bias is
+        # for node chains, so it's off here too.
         self.panel_force_layout = ForceLayout(
-            repulsion=0.0,
+            repulsion=80000,
             spring_length=120,
             center_k=0.0,
             flow_gap=0,
             flow_k=0.0,
-            repulsion_cutoff=2000,
+            repulsion_cutoff=650,
             size_aware_springs=True,
         )
         self.layout_awake = True
@@ -3919,6 +3917,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self.resizing_panel = pid
             self.resize_start = (wx, wy)
             self.resize_orig = (rect[2], rect[3])
+            self.layout_awake = True
+            self._settle_ticks = 0
             return
         pid = self.find_panel_header_at(wx, wy)
         if (
@@ -3932,6 +3932,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self.drag_panel_start = (wx, wy)
             self.drag_panel_origin = (panel["x"], panel["y"])
             self._drag_panel_applied = (0.0, 0.0)
+            self.layout_awake = True
+            self._settle_ticks = 0
             return
 
         # Inline controls (slider / checkboxes / three-dot menu / text
@@ -4109,6 +4111,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self.drag_panel_start = (wx, wy)
             self.drag_panel_origin = (panel["x"], panel["y"])
             self._drag_panel_applied = (0.0, 0.0)
+            self.layout_awake = True
+            self._settle_ticks = 0
             return
 
         # Pressing empty canvas starts a pan and drops any selection.
@@ -5287,7 +5291,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         bounds = self._group_bounds(gid, group)
         if bounds is None:
             return None
-        x1, y1, _x2, _y2 = bounds
+        x1, y1, x2, _y2 = bounds
         titles = group.get("titles") or [
             {"label": group.get("label") or gid, "color": group.get("color")}
         ]
@@ -5303,15 +5307,15 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             top = y1 - 6 - block_h
         mid_y = top + block_h / 2
         chip = 12
-        chip_x = x1 + label_w + 8
-        chip_y = mid_y - chip / 2
-        # Two small +/- buttons past the colour chip to add/remove
-        # members by clicking nodes.
+        # Colour chip and the +/- membership buttons live on the *right*
+        # edge of the group's box, mirroring the panel title row.
         btn = 15
         btn_y = mid_y - btn / 2
-        add_x = chip_x + chip + 8
+        rem_x = x2 - btn
+        add_x = rem_x - 3 - btn
+        chip_x = add_x - 8 - chip
+        chip_y = mid_y - chip / 2
         add_rect = (add_x, btn_y, add_x + btn, btn_y + btn)
-        rem_x = add_x + btn + 3
         rem_rect = (rem_x, btn_y, rem_x + btn, btn_y + btn)
         return {
             "gid": gid,
@@ -5334,11 +5338,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             "chip_y": chip_y,
             "add_rect": add_rect,
             "rem_rect": rem_rect,
-            # Clickable label/id/chip hotspot...
-            "rect": (x1 - 2, top - 2, chip_x + chip + 2, top + block_h + 2),
-            # ...and the whole block including the +/- buttons, which is
-            # what the collision pass keeps clear of other blocks.
-            "extent": (x1 - 2, top - 2, rem_x + btn + 2, top + block_h + 2),
+            # Clickable label/id hotspot (the title block on the left)...
+            "rect": (
+                x1 - 2, top - 2, x1 + label_w + 2, top + block_h + 2,
+            ),
+            # ...and the whole row (through the right-edge buttons), which
+            # is what the collision pass keeps clear of other blocks.
+            "extent": (x1 - 2, top - 2, x2 + 2, top + block_h + 2),
         }
 
     def _all_group_header_layouts(self):

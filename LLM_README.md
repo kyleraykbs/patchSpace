@@ -211,12 +211,11 @@ the direct child panels repel each other in the parent's local frame (siblings o
 running every panel through one flat pass made a child fight its own parent). Panels use
 a dedicated `panel_force_layout` with *size-aware* springs: an edge's rest length grows by
 each box's half-extent projected onto the edge, so connected panels settle edge-to-edge
-around their bounding boxes. There is **no** long-range repulsion or global centre pull for
-panels - the centre pull beat `1/d^2` repulsion past ~600px (distant panels crept toward
-each other) and centre repulsion with no counterforce flung them apart without bound.
-Panels instead stay put and are pushed out of each other only when their rectangles
-overlap, via the force layout's rectangle-aware `_resolve_overlaps` pass. The layout
-re-arms whenever the
+around their bounding boxes. There is **no** global centre pull (it beat `1/d^2` repulsion
+past ~600px, so distant panels crept toward each other) and repulsion is **short-range**
+(cutoff ~ one box), so nearby panels visibly push apart but don't drift together or fling
+apart without bound; the rectangle-aware `_resolve_overlaps` pass handles the rest. The
+layout re-arms whenever the
 node/edge/panel set changes, so it also runs right after a panel is created or loaded
 (not only after a node is dragged). Nodes never exert forces across a panel boundary
 (cross-panel edges only spring the two panels together). Panel placement is *locally*
@@ -507,7 +506,9 @@ approach for pure GUI behavior). "It passed pytest" is not proof an effect works
   `file::grp`, or the same id in two declarative files) render as **one** outline with the
   contributing groups' titles **stacked** (each in its own colour), via `_merged_groups()` /
   `_group_merge_key()` — all group geometry, headers, hit-testing and the +/- membership
-  buttons iterate the merged view. Exact-member-set duplicates are already removed daemon-side
+  buttons iterate the merged view. The colour chip and the `+`/`-` buttons sit on the
+  **right edge** of the group's box (mirroring the panel title row). Exact-member-set
+  duplicates are already removed daemon-side
   (`_reconcile_declarative_duplicates`), so normally only genuinely-different same-id groups
   stack. The `+`/`-` buttons fan the change out to every group in the merge
   (`_merged_member_gids`).
