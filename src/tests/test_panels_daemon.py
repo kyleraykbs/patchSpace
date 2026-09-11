@@ -650,10 +650,13 @@ def test_panel_port_nodes_round_trip(tmp_path):
     ):
         resp = d.handle_command(
             {"command": "add_node", "node_type": ntype, "node_id": nid,
-             "config": {"port_name": name, "x": 5, "y": 5}}
+             "config": {"port_name": name, "label": name, "anchored": True,
+                        "x": 5, "y": 5}}
         )
         assert resp["status"] == "ok", resp
         assert d.space.nodes[nid].port_name == name
+        assert d.space.nodes[nid].label == name
+        assert d.space.nodes[nid].anchored is True
     assert d.space.nodes["kit::mic"].is_transparent()
     assert d.space.nodes["kit::gate"].port_kind("out", "out") == "boolean"
 
