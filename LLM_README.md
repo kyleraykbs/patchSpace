@@ -251,8 +251,16 @@ start-up; a nested sub-panel is always loaded as a dependency of its parent rega
 its own flag. `list_panel_files`/`set_panel_file_autoload` drive the side view;
 `list_panels`/`get_nodes` report per-placement `stem`/`auto_load`.
 
-*Panels side view.* A docked, scrollable list of panel files lives on the right (the end
-child of an outer `Gtk.Paned`), toggled by a button directly under the top-right
+*Panel ports (IO).* A panel can expose inputs/outputs as lightweight **pass-through proxy
+nodes** placed at its edges: `panel_in`/`panel_out` (audio, `TransparentNode` subclasses)
+and `bool_panel_in`/`bool_panel_out` (boolean; `_resolve_boolean` relays them). Each panel
+draws a thin bar straddling its left (inputs) and right (outputs) edges with a `+` at the
+foot (`_panel_io_rects`); the `+` opens a name/type dialog and drops a port node near that
+edge (`_prompt_add_port`/`_add_panel_port`), shown as a small square with its name beside
+it. Wire the port from outside the panel on its outer side and to internal nodes on its
+inner side - ordinary edges, so LCA edge-ownership already places them in the right file.
+
+*Panels side view.* A docked, scrollable list of panel files lives on the right (the endchild of an outer `Gtk.Paned`), toggled by a button directly under the top-right
 hamburger (`main_window._panels_toggle` / `_build_panels_view`). Each row shows the
 panel's colour/label with Select and an X to remove that panel (delete moved here from
 the title row).

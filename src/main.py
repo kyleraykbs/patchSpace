@@ -54,6 +54,10 @@ from pwnodes import (
     WarpOutNode,
     BooleanWarpInNode,
     BooleanWarpOutNode,
+    PanelInNode,
+    PanelOutNode,
+    BoolPanelInNode,
+    BoolPanelOutNode,
     VolumeProcessNode,
     NoiseCancelNode,
     SensitivityGateNode,
@@ -223,6 +227,10 @@ NODE_TYPE_REGISTRY: Dict[str, type] = {
     "warp_out": WarpOutNode,
     "bool_warp_in": BooleanWarpInNode,
     "bool_warp_out": BooleanWarpOutNode,
+    "panel_in": PanelInNode,
+    "panel_out": PanelOutNode,
+    "bool_panel_in": BoolPanelInNode,
+    "bool_panel_out": BoolPanelOutNode,
     "volume": VolumeProcessNode,
     "noise_cancel": NoiseCancelNode,
     "sensitivity_gate": SensitivityGateNode,
@@ -315,6 +323,7 @@ _SERIAL_ATTRS = (
     "limiter_release_s",
     "ladspa_dir",
     "warp_name",
+    "port_name",
     "plugin_uri",
     "decay_time",
     "room_size",
@@ -3266,6 +3275,8 @@ class PatchBayDaemon:
             return cls(node_id)
         if cls in (WarpInNode, WarpOutNode, BooleanWarpInNode, BooleanWarpOutNode):
             return cls(node_id, g("warp_name", ""))
+        if cls in (PanelInNode, PanelOutNode, BoolPanelInNode, BoolPanelOutNode):
+            return cls(node_id, g("port_name", ""))
         if cls is ExcludeFilterNode:
             return cls(node_id, g("pattern", ""))
         if cls is VolumeProcessNode:
@@ -3731,6 +3742,7 @@ class PatchBayDaemon:
                 "description",
                 "port_type",
                 "warp_name",
+                "port_name",
             ):
                 if hasattr(node, prop):
                     setattr(node, prop, value)

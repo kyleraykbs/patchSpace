@@ -637,3 +637,27 @@ def test_enter_edit_mode_refreshes_params_without_recreating_nodes(tmp_path):
     # Same live node (no reload), but its params are back to the file's.
     assert d.space.nodes["kit::a"] is obj
     assert d.space.nodes["kit::a"].pattern == "orig"
+
+
+def test_panel_port_nodes_round_trip(tmp_path):
+    d, root, pdir = _daemon(tmp_path)
+    d.panels = d._load_panels_tree()
+    d._cmd_create_panel({"name": "kit"})
+    for nid, ntype, name in (
+        ("kit::mic", "panel_in", "Mic"),
+        ("kit::out", "panel_out", "Out"),
+        ("kit::gate", "bool_panel_in", "Gate"),
+    ):
+        resp = d.handle_command(
+            {"command": "add_node", "node_type": ntype, "node_id": nid,
+             "config": {"port_name": name, "x": 5, "y": 5}}
+        )
+        assert resp["status"] == "ok", resp
+        assert d.space.nodes[nid].port_name == name
+    assert d.space.nodes["kit::mic"].is_transparent()
+    assert d.space.nodes["kit::gate"].port_kind("out", "out") == "boolean"
+
+    d._write_panels()
+    tree = d._load_panels_tree()
+    assert tree["kit"].nodes["mic"]["params"]["port_name"] == "Mic"
+    assert tree["kit"].nodes["gate"]["params"]["port_name"] == "Gate"

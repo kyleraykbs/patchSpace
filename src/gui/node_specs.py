@@ -287,6 +287,25 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
         field="warp_name",
         boolean_outputs=["out"],
     ),
+    # Panel ports: pass-through proxy nodes placed at a panel's left
+    # (inputs) / right (outputs) edge.  Audio ones are transparent; boolean
+    # ones carry a boolean control signal.
+    "panel_in": NodeSpec("Panel In", ["in"], ["out"]),
+    "panel_out": NodeSpec("Panel Out", ["in"], ["out"]),
+    "bool_panel_in": NodeSpec(
+        "Bool Panel In",
+        ["in"],
+        ["out"],
+        boolean_inputs=["in"],
+        boolean_outputs=["out"],
+    ),
+    "bool_panel_out": NodeSpec(
+        "Bool Panel Out",
+        ["in"],
+        ["out"],
+        boolean_inputs=["in"],
+        boolean_outputs=["out"],
+    ),
 }
 
 NODE_TYPE_SPECS.update(
@@ -585,6 +604,14 @@ NODE_DESCRIPTIONS: Dict[str, str] = {
     "bool_warp_in": "Publishes a boolean control signal under a name.",
     "bool_warp_out": "Reads the boolean control signal published under a "
     "name.",
+    "panel_in": "A panel input port: wire audio in from outside; inside the "
+    "panel it acts as a source.",
+    "panel_out": "A panel output port: wire audio to it from inside the "
+    "panel; outside it acts as a source.",
+    "bool_panel_in": "A panel boolean input port (control signal from "
+    "outside to inside).",
+    "bool_panel_out": "A panel boolean output port (control signal from "
+    "inside to outside).",
     # Effects
     "echo_cancel": "Removes speaker echo from a microphone using a probe/"
     "reference feed (WebRTC acoustic echo cancellation).",
@@ -901,6 +928,10 @@ CLASS_NAME_TO_TYPE = {
     "WarpOutNode": "warp_out",
     "BooleanWarpInNode": "bool_warp_in",
     "BooleanWarpOutNode": "bool_warp_out",
+    "PanelInNode": "panel_in",
+    "PanelOutNode": "panel_out",
+    "BoolPanelInNode": "bool_panel_in",
+    "BoolPanelOutNode": "bool_panel_out",
     "VolumeProcessNode": "volume",
     "NoiseCancelNode": "noise_cancel",
     "SensitivityGateNode": "sensitivity_gate",

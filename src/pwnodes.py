@@ -1177,6 +1177,53 @@ class BooleanWarpOutNode(Node):
         return "boolean"
 
 
+class PanelInNode(TransparentNode):
+    """A panel input port: external audio arrives on "in" and the panel's
+    internal nodes pull it from "out".  Pure logical pass-through (no
+    backing)."""
+
+    def __init__(self, node_id, port_name: str = ""):
+        super().__init__(node_id)
+        self.port_name = port_name
+
+
+class PanelOutNode(TransparentNode):
+    """A panel output port: internal audio arrives on "in" and external
+    nodes pull it from "out".  Pure logical pass-through (no backing)."""
+
+    def __init__(self, node_id, port_name: str = ""):
+        super().__init__(node_id)
+        self.port_name = port_name
+
+
+class BoolPanelInNode(Node):
+    """Boolean counterpart of PanelInNode: a boolean enters from outside
+    on "in" and is republished internally on "out"."""
+
+    BOOLEAN_INPUT = "in"
+
+    def __init__(self, node_id, port_name: str = ""):
+        super().__init__(node_id)
+        self.port_name = port_name
+
+    def port_kind(self, port: str, direction: str) -> str:
+        return "boolean"
+
+
+class BoolPanelOutNode(Node):
+    """Boolean counterpart of PanelOutNode: internal boolean on "in" is
+    republished outside on "out"."""
+
+    BOOLEAN_INPUT = "in"
+
+    def __init__(self, node_id, port_name: str = ""):
+        super().__init__(node_id)
+        self.port_name = port_name
+
+    def port_kind(self, port: str, direction: str) -> str:
+        return "boolean"
+
+
 class ExcludeFilterNode(TransparentNode):
     """Pass-through that narrows whatever is upstream by excluding a
     nameRegex.  Annotates upstream source filters with "exclude" entries
@@ -3011,6 +3058,9 @@ class PatchSpace:
         if isinstance(node, BooleanLogicNode):
             values = self._resolve_boolean_inputs(node_id, seen)
             return node.combine(values) if values else None
+        if isinstance(node, (BoolPanelInNode, BoolPanelOutNode)):
+            # Panel boolean ports just relay their input.
+            return self._resolve_boolean_input(node_id, seen)
         if isinstance(node, BooleanWarpOutNode):
             name = getattr(node, "warp_name", "")
             if not name:

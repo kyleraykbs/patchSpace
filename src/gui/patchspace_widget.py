@@ -1482,7 +1482,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     # None needs the full type-label + node-id header, so with a label
     # they show only the label and with none they collapse to a square.
     _COMPACT_NODE_TYPES = frozenset(
-        {"splitter", "boolean_and", "boolean_or", "boolean_invert"}
+        {"splitter", "boolean_and", "boolean_or", "boolean_invert",
+         "panel_in", "panel_out", "bool_panel_in", "bool_panel_out"}
     )
 
     @classmethod
@@ -3134,6 +3135,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self._show_panel_menu(pid, x, y)
             return
 
+        # Panel IO "+" (add an input/output port).
+        hit = self.find_panel_io_plus_at(wx, wy)
+        if hit is not None:
+            self._prompt_add_port(hit[0], hit[1])
+            return
+
         # Group settings hamburger (rightmost in the group row).
         gid = self.find_group_menu_at(wx, wy)
         if gid is not None:
@@ -4425,7 +4432,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # means the press was not on a control/edge/socket/node, so any
         # point inside the box (title row or body) moves the panel.
         pid = self.find_panel_at(wx, wy)
-        if pid is not None:
+        if pid is not None and self.find_panel_io_plus_at(wx, wy) is None:
             panel = self.panels[pid]
             self.dragging_panel = pid
             self.drag_panel_start = (wx, wy)
@@ -5788,6 +5795,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     # Panels auto-fit their contents in every direction (like groups) with
     # no manual resize; this is the minimum they shrink to, a square.
     PANEL_MIN_SIDE = 320.0
+    # Panel IO: a thin bar straddling each edge, with a "+" at its foot.
+    PANEL_IO_BAR_W = 16.0
+    PANEL_IO_GAP = 4.0
     # While dragging a node, its panel may grow this far past the size it
     # had at drag start (it never shrinks during the drag).
     PANEL_DRAG_GROW = 280.0
@@ -5961,6 +5971,138 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             "title": title,
         }
 
+    _PORT_IN_TYPES = frozenset({"panel_in", "bool_panel_in"})
+    _PORT_OUT_TYPES = frozenset({"panel_out", "bool_panel_out"})
+
+    def _panel_port_nodes(self, pid, direction):
+        """[(nid, node)] for a panel's input (direction "in") or output
+        ("out") port nodes, top-to-bottom."""
+        types = self._PORT_IN_TYPES if direction == "in" else self._PORT_OUT_TYPES
+        found = []
+        for nid in self._panel_member_nodes(pid):
+            node = self.nodes.get(nid)
+            if node is not None and node.get("type") in types:
+                found.append((nid, node))
+        found.sort(key=lambda t: t[1].get("y") or 0.0)
+        return found
+
+    def _panel_io_rects(self, pid, rect):
+        """Bar + "+" rectangles for a panel's left (inputs) and right
+        (outputs) edge."""
+        x, y, w, h = rect
+        bar_w = self.PANEL_IO_BAR_W
+        gap = self.PANEL_IO_GAP
+
+        def one(edge_x, direction):
+            ports = self._panel_port_nodes(pid, direction)
+            if ports:
+                top = min((n.get("y") or y) for _n, n in ports)
+                bottom = max(
+                    (n.get("y") or y) + self.node_height(nid)
+                    for nid, n in ports
+                )
+            else:
+                top = y + h / 2.0 - bar_w
+                bottom = y + h / 2.0
+            bar = (edge_x - bar_w / 2.0, top, edge_x + bar_w / 2.0, bottom)
+            plus = (
+                edge_x - bar_w / 2.0, bottom + gap,
+                edge_x + bar_w / 2.0, bottom + gap + bar_w,
+            )
+            return bar, plus
+
+        in_bar, in_plus = one(x, "in")
+        out_bar, out_plus = one(x + w, "out")
+        return {
+            "in_bar": in_bar, "in_plus": in_plus,
+            "out_bar": out_bar, "out_plus": out_plus,
+        }
+
+    def find_panel_io_plus_at(self, x, y):
+        for pid in self._panel_order_deepest_first():
+            if pid == "":
+                continue
+            rect = self._panel_rect(pid)
+            if rect is None:
+                continue
+            io = self._panel_io_rects(pid, rect)
+            for direction, key in (("in", "in_plus"), ("out", "out_plus")):
+                x1, y1, x2, y2 = io[key]
+                if x1 - 2 <= x <= x2 + 2 and y1 - 2 <= y <= y2 + 2:
+                    return pid, direction
+        return None
+
+    def _prompt_add_port(self, pid, direction):
+        dialog = Gtk.Dialog(
+            title="Add Panel Port", transient_for=self.get_root(), modal=True
+        )
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Add", Gtk.ResponseType.OK)
+        box = dialog.get_content_area()
+        box.set_spacing(6)
+        for side in ("top", "bottom", "start", "end"):
+            getattr(box, f"set_margin_{side}")(12)
+        box.append(Gtk.Label(label="Name"))
+        name_entry = Gtk.Entry()
+        name_entry.set_text("input" if direction == "in" else "output")
+        box.append(name_entry)
+        kind = Gtk.DropDown.new_from_strings(["Audio", "Boolean"])
+        box.append(self._labeled_row("Type:", kind))
+
+        def on_response(dlg, response):
+            if response == Gtk.ResponseType.OK:
+                name = name_entry.get_text().strip() or (
+                    "input" if direction == "in" else "output"
+                )
+                self._add_panel_port(pid, direction, kind.get_selected() == 1, name)
+            dlg.destroy()
+
+        dialog.connect("response", on_response)
+        dialog.present()
+
+    def _add_panel_port(self, pid, direction, boolean, name):
+        node_type = (
+            "bool_panel_in" if (boolean and direction == "in")
+            else "bool_panel_out" if boolean
+            else "panel_in" if direction == "in"
+            else "panel_out"
+        )
+        local = "".join(
+            c if (c.isalnum() or c in "-_.") else "_" for c in name
+        ) or node_type
+        nid = f"{pid}::{local}" if pid else local
+        base = nid
+        n = 2
+        while nid in self.nodes:
+            nid = f"{base}_{n}"
+            n += 1
+        rect = self._panel_rect(pid)
+        if rect is None:
+            return
+        size = self.SPLITTER_MIN_SIZE
+        ports = self._panel_port_nodes(pid, direction)
+        if ports:
+            last_y = max(
+                (p.get("y") or rect[1]) + self.node_height(nid2)
+                for nid2, p in ports
+            )
+            py = last_y + 8.0
+        else:
+            py = rect[1] + rect[3] / 2.0 - size / 2.0
+        if direction == "in":
+            px = rect[0] + 12.0
+        else:
+            px = rect[0] + rect[2] - size - 12.0
+        self.client.send(
+            {
+                "command": "add_node",
+                "node_type": node_type,
+                "node_id": nid,
+                "config": {"port_name": name, "x": px, "y": py},
+            }
+        )
+        GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
+
     def _draw_panel_grid(self, cr, x, y, w, h, rgb):
         spacing = 40
         cr.set_source_rgba(rgb[0], rgb[1], rgb[2], 0.35)
@@ -6028,6 +6170,39 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 )
                 cr.show_text(text)
                 cr.restore()
+            # IO bars straddling the left (inputs) and right (outputs) edges.
+            io = self._panel_io_rects(pid, rect)
+            cr.set_line_width(1.2)
+            for key in ("in_bar", "out_bar"):
+                bx1, by1, bx2, by2 = io[key]
+                draw_rounded_rect(cr, bx1, by1, bx2 - bx1, by2 - by1, 4)
+                cr.set_source_rgba(r, g, b, 0.30)
+                cr.fill_preserve()
+                cr.set_source_rgb(r, g, b)
+                cr.stroke()
+            # Port names, just inside the edge next to each port square.
+            cr.set_source_rgb(r, g, b)
+            cr.select_font_face("sans")
+            cr.set_font_size(10)
+            for nid, node in self._panel_port_nodes(pid, "in"):
+                name = (node.get("meta") or {}).get("port_name") or ""
+                if not name:
+                    continue
+                cr.move_to(
+                    (node.get("x") or 0) + self.node_width(nid) + 4,
+                    (node.get("y") or 0) + self.node_height(nid) / 2 + 3,
+                )
+                cr.show_text(name)
+            for nid, node in self._panel_port_nodes(pid, "out"):
+                name = (node.get("meta") or {}).get("port_name") or ""
+                if not name:
+                    continue
+                tw, _th = self._text_size(name, 10)
+                cr.move_to(
+                    (node.get("x") or 0) - 4 - tw,
+                    (node.get("y") or 0) + self.node_height(nid) / 2 + 3,
+                )
+                cr.show_text(name)
 
     def _draw_panel_headers(self, cr, pal):
         for pid, panel in self.panels.items():
@@ -6073,6 +6248,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self._draw_panel_button(
                 cr, pal, geo["menu"], (r, g, b),
                 active=False, glyph="hamburger",
+            )
+            # IO "+" buttons at the foot of each edge bar.
+            io = self._panel_io_rects(pid, rect)
+            self._draw_panel_button(
+                cr, pal, io["in_plus"], (r, g, b), active=False, glyph="plus",
+            )
+            self._draw_panel_button(
+                cr, pal, io["out_plus"], (r, g, b), active=False, glyph="plus",
             )
 
     def _draw_panel_button(self, cr, pal, rect, color, active=False,
@@ -6120,6 +6303,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             cr.line_to(cx - size * 0.12, cy + size * 0.26)
             cr.line_to(cx + size * 0.12, cy + size * 0.26)
             cr.line_to(cx + size * 0.16, cy - size * 0.18)
+            cr.stroke()
+        elif glyph == "plus":
+            cr.set_line_width(max(1.4, size * 0.12))
+            cr.move_to(cx - size * 0.20, cy)
+            cr.line_to(cx + size * 0.20, cy)
+            cr.move_to(cx, cy - size * 0.20)
+            cr.line_to(cx, cy + size * 0.20)
             cr.stroke()
         elif glyph == "close":
             cr.set_line_width(max(1.4, size * 0.12))
