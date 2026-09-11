@@ -47,8 +47,14 @@ class FakeGraph:
 
     # -- population helpers ------------------------------------------------
 
-    def add_source(self, node_id, name, media_class="Stream/Output/Audio",
-                   channels=("FL", "FR"), app=None):
+    def add_source(
+        self,
+        node_id,
+        name,
+        media_class="Stream/Output/Audio",
+        channels=("FL", "FR"),
+        app=None,
+    ):
         props = {"node.name": name, "media.class": media_class}
         if app:
             props["application.name"] = app
@@ -70,8 +76,7 @@ class FakeGraph:
             out_ports[ch] = pid
         return out_ports
 
-    def add_sink(self, node_id, name, media_class="Audio/Sink",
-                 channels=("FL", "FR")):
+    def add_sink(self, node_id, name, media_class="Audio/Sink", channels=("FL", "FR")):
         self._nodes[node_id] = {
             "info": {"props": {"node.name": name, "media.class": media_class}}
         }
@@ -94,11 +99,15 @@ class FakeGraph:
 
     def remove_node(self, node_id):
         self._nodes.pop(node_id, None)
-        for pid in [p for p, d in self._ports.items()
-                    if d["info"]["props"].get("node.id") == node_id]:
+        for pid in [
+            p
+            for p, d in self._ports.items()
+            if d["info"]["props"].get("node.id") == node_id
+        ]:
             self._ports.pop(pid, None)
-        self._links = [(o, i) for o, i in self._links
-                       if o in self._ports and i in self._ports]
+        self._links = [
+            (o, i) for o, i in self._links if o in self._ports and i in self._ports
+        ]
 
     # -- accessors used by pwmatch / PatchSpace ----------------------------
 
@@ -110,7 +119,8 @@ class FakeGraph:
 
     def ports_for_node(self, node_id):
         return {
-            pid: d for pid, d in self._ports.items()
+            pid: d
+            for pid, d in self._ports.items()
             if d["info"]["props"].get("node.id") == node_id
         }
 
@@ -369,9 +379,14 @@ def test_switcher_state_propagates_through_downstream_transparent_nodes():
     off_ports = g.add_sink(30, "sinkB")
     space = make_space(g)
     space.mark_graph_loaded()
-    for node in (SrcNode("src"), SwitcherNode("sw", output=1), GateNode("ga"),
-                 GateNode("gb"), NamedSink("on", "sinkA"),
-                 NamedSink("off", "sinkB")):
+    for node in (
+        SrcNode("src"),
+        SwitcherNode("sw", output=1),
+        GateNode("ga"),
+        GateNode("gb"),
+        NamedSink("on", "sinkA"),
+        NamedSink("off", "sinkB"),
+    ):
         space.add_node(node)
     space.add_edge("src", "sw")
     space.add_edge("sw", "ga", from_port="on")
@@ -480,10 +495,10 @@ def test_wiring_issues_nonconflicting_links_in_one_pass():
 
 def test_wiring_connects_internal_dsp_links_before_user_edges():
     g = AsyncFakeGraph()
-    g.add_source(10, "app1")                 # user edge source
+    g.add_source(10, "app1")  # user edge source
     dsp_ports = g.add_source(30, "src_dsp")  # internal link source
     dsp_in_ports = g.add_sink(40, "dsp_in")  # internal link target
-    g.add_sink(50, "dummy_in")               # user edge target
+    g.add_sink(50, "dummy_in")  # user edge target
     space = make_space(g)
     space.mark_graph_loaded()
     space.add_node(SrcNode("src"))
@@ -808,10 +823,10 @@ def test_staged_node_links_are_not_derived_until_unstaged():
     inbound edges here would wire against streams that vanish. Once
     unstaged, the next sync wires both the user edge and the interior."""
     g = FakeGraph()
-    g.add_source(10, "srcnode")          # internal-link source
-    g.add_sink(20, "sinknode")           # internal-link target
-    g.add_source(30, "app1")             # user-edge source
-    g.add_sink(40, "inbound_sink")       # user-edge target
+    g.add_source(10, "srcnode")  # internal-link source
+    g.add_sink(20, "sinknode")  # internal-link target
+    g.add_source(30, "app1")  # user-edge source
+    g.add_sink(40, "inbound_sink")  # user-edge target
     space = make_space(g)
     space.mark_graph_loaded()
 
@@ -1039,13 +1054,13 @@ def test_boolean_and_or_gates_combine_two_inputs():
         space._refresh_boolean_states()
         return space.nodes["ga"].gate_open(), space.nodes["go"].gate_open()
 
-    assert states() == (True, True)    # 1 AND 1 | 1 OR 1
+    assert states() == (True, True)  # 1 AND 1 | 1 OR 1
     space.nodes["s1"].output = 0
-    assert states() == (False, True)   # 0 AND 1 | 0 OR 1
+    assert states() == (False, True)  # 0 AND 1 | 0 OR 1
     space.nodes["s2"].output = 0
     assert states() == (False, False)  # 0 AND 0 | 0 OR 0
     space.nodes["s1"].output = 1
-    assert states() == (False, True)   # 1 AND 0 | 1 OR 0
+    assert states() == (False, True)  # 1 AND 0 | 1 OR 0
 
 
 def test_boolean_logic_single_input_passes_through_and_empty_emits_nothing():
@@ -1055,11 +1070,11 @@ def test_boolean_logic_single_input_passes_through_and_empty_emits_nothing():
     space.add_node(BooleanSourceNode("s", output=1))
     space.add_node(BooleanAndNode("and"))
     space.add_node(GateNode("gate", enabled=False))
-    space.add_edge("s", "and", "a")          # only "a" wired; "b" left open
+    space.add_edge("s", "and", "a")  # only "a" wired; "b" left open
     space.add_edge("and", "gate", "ctrl")
 
     space._refresh_boolean_states()
-    assert space.nodes["gate"].gate_open() is True   # passes the one input
+    assert space.nodes["gate"].gate_open() is True  # passes the one input
     space.nodes["s"].output = 0
     space._refresh_boolean_states()
     assert space.nodes["gate"].gate_open() is False
@@ -1181,17 +1196,42 @@ def test_handle_node_removed_ignores_reused_node_id():
     node.backings.append(owned)
     space.add_node(node)
 
-    space.handle_node_removed(
-        55, {"info": {"props": {"node.name": "some_other_node"}}}
-    )
+    space.handle_node_removed(55, {"info": {"props": {"node.name": "some_other_node"}}})
     assert owned.destroyed is False
     assert owned in node.backings
     assert owned.node_id is None  # stale id forgotten so it re-resolves
 
     # A genuine removal (name matches) still restarts the backing.
     owned.node_id = 55
-    space.handle_node_removed(
-        55, {"info": {"props": {"node.name": "our_node"}}}
-    )
+    space.handle_node_removed(55, {"info": {"props": {"node.name": "our_node"}}})
     assert owned.destroyed is True
     assert owned not in node.backings
+
+
+def test_rename_preserves_internal_link_bookkeeping():
+    """Renaming a node must re-key its id-derived internal-link entries,
+    not drop them.  Dropping them makes the next sync() disconnect the
+    whole effect interior and re-make it, which stalls timing-sensitive
+    modules like RNNoise (the 'noise cancel kills audio' wedge)."""
+    from pwnodes import _DesiredLinks
+
+    g = FakeGraph()
+    space = make_space(g)
+    space.mark_graph_loaded()
+    space.add_node(Node("old"))
+
+    space._edge_links["__internal__:old:0"] = _DesiredLinks(pairs={(1, 2)})
+    space._edge_links["__internal__:old:1"] = _DesiredLinks(pairs={(3, 4)})
+    space._edge_links["user->edge"] = _DesiredLinks(pairs={(5, 6)})
+    space._inflight_links[(1, 2)] = ("__internal__:old:0", 123.0)
+
+    space.rename_node("old", "new")
+
+    assert "__internal__:old:0" not in space._edge_links
+    assert "__internal__:old:1" not in space._edge_links
+    assert space._edge_links["__internal__:new:0"].pairs == {(1, 2)}
+    assert space._edge_links["__internal__:new:1"].pairs == {(3, 4)}
+    # Non-internal entries are untouched.
+    assert space._edge_links["user->edge"].pairs == {(5, 6)}
+    # In-flight bookkeeping follows the re-key too.
+    assert space._inflight_links[(1, 2)][0] == "__internal__:new:0"

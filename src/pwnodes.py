@@ -77,7 +77,7 @@ import re
 import subprocess
 import threading
 import time as _time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import pwmatch
@@ -223,6 +223,11 @@ class Node:
 
     def __init__(self, node_id: NodeId):
         self.id = node_id
+        # True when the daemon created this node from a declarative file.
+        # Declarative nodes/edges are never written back to the imperative
+        # autosave; they are re-derived from their files on start / rebuild
+        # / file change (see main.py's declarative handling).
+        self.declarative = False
 
     def is_transparent(self) -> bool:
         return False
@@ -613,6 +618,29 @@ class BackedNode(Node):
             self._drop(f"{name}_keepalive")
         return owned
 
+    # A keepalive is started right after the sink it targets is
+    # requested, and the link that attaches it can lose the buffer-
+    # allocation race while the target node's ports are still coming up
+    # (PipeWire's impl-link sets the link to ERROR with "Buffer
+    # allocation failed", which the pw-cat client reports and then
+    # exits).  This is a transient start-up race, not a bad command, so
+    # retry a few times with a short gap before declaring failure.
+    _KEEPALIVE_ATTEMPTS = 3
+    _KEEPALIVE_RETRY_DELAY_S = 0.4
+
+    def _create_keepalive(self, name: str, command, pw_cli_command, settle: float,
+                          label: str) -> Optional[OwnedPwProcess]:
+        last = self._KEEPALIVE_ATTEMPTS - 1
+        for attempt in range(self._KEEPALIVE_ATTEMPTS):
+            if attempt:
+                _time.sleep(self._KEEPALIVE_RETRY_DELAY_S)
+            proc = OwnedPwProcess(name, pw_cli_command, settle)
+            if proc.create(command, quiet=attempt < last):
+                self.backings.append(proc)
+                return proc
+        logger.error("Keepalive %s %r failed to start for %r", label, name, self.id)
+        return None
+
     def _ensure_feed(self, name: str, target: str,
                      pw_cli_command=("pw-cli",), settle: float = 0.3) -> Optional[OwnedPwNode]:
         """A silent pw-cat --playback stream permanently feeding
@@ -630,21 +658,16 @@ class BackedNode(Node):
         existing = self._find(name)
         if existing is not None:
             return existing
-        proc = OwnedPwProcess(name, pw_cli_command, settle)
         command = (
             "pw-cat", "--playback", "--volume", "0", "--target", target,
             "--properties", f'{{ node.name = "{name}" node.description = "{name}" }}',
             "--raw", "--format", "s16", "--rate", "48000", "--channels", "2",
             "/dev/zero",
         )
-        if not proc.create(command):
-            logger.error("Keepalive feed %r failed to start for %r", name, self.id)
-            return None
-        self.backings.append(proc)
-        return proc
+        return self._create_keepalive(name, command, pw_cli_command, settle, "feed")
 
     def _ensure_drain(self, name: str, target: str,
-                      pw_cli_command=("pw-cli",), settle: float = 0.3) -> Optional[OwnedPwNode]:
+                     pw_cli_command=("pw-cli",), settle: float = 0.3) -> Optional[OwnedPwNode]:
         """Output-side mirror of _ensure_feed: a silent pw-cat --record
         stream permanently draining ``target`` (PipeWire satisfies a
         record targeting a sink by tapping whatever feeds it).  Same
@@ -652,18 +675,13 @@ class BackedNode(Node):
         existing = self._find(name)
         if existing is not None:
             return existing
-        proc = OwnedPwProcess(name, pw_cli_command, settle)
         command = (
             "pw-cat", "--record", "--target", target,
             "--properties", f'{{ node.name = "{name}" node.description = "{name}" }}',
             "--raw", "--format", "s16", "--rate", "48000", "--channels", "2",
             "/dev/null",
         )
-        if not proc.create(command):
-            logger.error("Keepalive drain %r failed to start for %r", name, self.id)
-            return None
-        self.backings.append(proc)
-        return proc
+        return self._create_keepalive(name, command, pw_cli_command, settle, "drain")
 
 
 # ---------------------------------------------------------------------------
@@ -735,15 +753,21 @@ class PatchBayDeviceNode(InputNode, OutputNode):
     plumbing uses node.names that merely start with "PatchBay".
 
     There can be several of these ("Speaker Line" nodes) at once; they
-    all reference the same built-in sink.  ``device_volume`` /
-    ``volume_locked`` are the shared volume state, mirrored from the
-    built-in device by the daemon (the line node owns no backing)."""
+    all reference the same built-in sink.      ``device_volume`` /
+    ``volume_locked`` / ``force_default`` are the shared state, mirrored
+    from the built-in device by the daemon (the line node owns no
+    backing)."""
+
+    # Keep the built-in sink as the system default output (re-checked
+    # every tick) while True.  Mirrored from the built-in device.
+    force_default = True
 
     def __init__(self, node_id, device_volume: float = 1.0,
                  volume_locked: bool = True):
         super().__init__(node_id)
         self.device_volume = max(0.0, min(1.0, float(device_volume)))
         self.volume_locked = bool(volume_locked)
+        self.force_default = True
 
     def source_filters(self):
         return [{"nodeName": PATCHBAY_VIRTUAL_SINK_NAME}]
@@ -758,13 +782,17 @@ class PatchBayMicDeviceNode(InputNode, OutputNode):
     Audio/Source (PATCHBAY_VIRTUAL_MIC_NAME).
 
     Several may exist at once; they all reference the same built-in mic.
-    ``device_volume`` / ``volume_locked`` mirror that shared device."""
+    ``device_volume`` / ``volume_locked`` / ``force_default`` mirror that
+    shared device."""
+
+    force_default = True
 
     def __init__(self, node_id, device_volume: float = 1.0,
                  volume_locked: bool = True):
         super().__init__(node_id)
         self.device_volume = max(0.0, min(1.0, float(device_volume)))
         self.volume_locked = bool(volume_locked)
+        self.force_default = True
 
     def source_filters(self):
         return [{"nodeName": PATCHBAY_VIRTUAL_MIC_NAME}]
@@ -2484,6 +2512,10 @@ class Edge:
     # "out" is the single-output default every node type had until the
     # Switcher; its two outputs are named "a"/"b" (see SwitcherNode).
     from_port: str = "out"
+    # True when this edge came from a declarative file (or was created by
+    # the GUI as part of one).  Imperative edges are autosaved; declarative
+    # ones are re-derived from their file.
+    declarative: bool = False
 
 
 @dataclass
@@ -2644,6 +2676,7 @@ class PatchSpace:
         to_node: NodeId,
         to_port: str = "in",
         from_port: str = "out",
+        declarative: bool = False,
     ) -> EdgeId:
         with self._lock:
             if from_node not in self.nodes or to_node not in self.nodes:
@@ -2683,7 +2716,7 @@ class PatchSpace:
                     )
             edge_id = self._edge_id(from_node, to_node, to_port, from_port)
             self.edges[edge_id] = Edge(
-                edge_id, from_node, to_node, to_port, from_port
+                edge_id, from_node, to_node, to_port, from_port, declarative
             )
             self._edges_into.setdefault(to_node, []).append(self.edges[edge_id])
             self._edges_out_of.setdefault(from_node, []).append(self.edges[edge_id])
@@ -2692,6 +2725,28 @@ class PatchSpace:
     def remove_edge(self, edge_id: EdgeId) -> None:
         with self._lock:
             self._remove_edge_locked(edge_id)
+
+    def set_edge_declarative(self, edge_id: EdgeId, declarative: bool) -> None:
+        """Flip an existing edge's declarative flag in place.
+
+        Used by a live declarative ownership move: the edge keeps its id,
+        its port pairs and its ``_edge_links`` bookkeeping, so nothing is
+        disconnected - unlike remove+add, which would drop and re-make
+        the live link (an audible blip).  Edge is frozen, so swap in a
+        copy and fix up the adjacency lists' references."""
+        with self._lock:
+            edge = self.edges.get(edge_id)
+            if edge is None or edge.declarative == declarative:
+                return
+            new_edge = replace(edge, declarative=declarative)
+            self.edges[edge_id] = new_edge
+            for lst in (
+                self._edges_into.get(new_edge.to_node, []),
+                self._edges_out_of.get(new_edge.from_node, []),
+            ):
+                for i, existing in enumerate(lst):
+                    if existing is edge:
+                        lst[i] = new_edge
 
     def rename_node(self, old_id: NodeId, new_id: NodeId) -> None:
         with self._lock:
@@ -2736,6 +2791,31 @@ class PatchSpace:
                 self.edges[new_edge.id] = new_edge
                 self._edges_into.setdefault(new_to, []).append(new_edge)
                 self._edges_out_of.setdefault(new_from, []).append(new_edge)
+
+            # Preserve the node's own module interior across the rename.
+            # Its synthetic internal-link bookkeeping is id-derived
+            # (``__internal__:<node_id>:<i>``, see sync_locked).  Without
+            # re-keying, the next sync() treats the old keys as stale,
+            # disconnects the whole capture/playback sandwich and re-makes
+            # it - and that momentary window where the out side has no
+            # consumer is exactly what stalls timing-sensitive modules
+            # (RNNoise; see the NoiseCancelNode docstring).  The pairs are
+            # name/identity-based, so they stay valid across the rename;
+            # if any identity did depend on the id, sync() corrects it.
+            old_prefix = f"__internal__:{old_id}:"
+            new_prefix = f"__internal__:{new_id}:"
+            for link_id in [
+                k for k in self._edge_links if k.startswith(old_prefix)
+            ]:
+                self._edge_links[new_prefix + link_id[len(old_prefix):]] = (
+                    self._edge_links.pop(link_id)
+                )
+            for pair, (link_id, issued_at) in list(self._inflight_links.items()):
+                if link_id.startswith(old_prefix):
+                    self._inflight_links[pair] = (
+                        new_prefix + link_id[len(old_prefix):],
+                        issued_at,
+                    )
 
     @staticmethod
     def _edge_id(

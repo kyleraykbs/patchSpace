@@ -7,15 +7,11 @@ import os
 
 SOCKET_PATH = "/tmp/patchbay.sock"
 
-# Where the daemon auto-saves the current PatchSpace after every
-# structural/config change (see main.py's _auto_export_session). Never
-# loaded automatically on startup - only loaded on an explicit "Import
-# Last Session" from the hamburger menu (see
-# patchspace_widget.show_import_last_session), which just tells the
-# daemon to load its own cache (a bare {"command": "load_session"}) -
-# the GUI no longer reads this file itself. Kept here only in case a
-# future GUI feature needs to *display* the path; if that need never
-# materializes, this constant can go away entirely.
+# Where the daemon auto-saves the imperative half of the PatchSpace after
+# every structural/config change (see main.py's _auto_export_session).
+# The daemon loads it itself at start-up now (no "Import Last Session"
+# button); declared nodes live in the declarative directories, not here.
+# Kept only in case the GUI ever needs to *display* the path.
 SESSION_CACHE_PATH = os.path.expanduser("~/.cache/patchbay/last_session.json")
 
 REFRESH_INTERVAL_MS = 400
@@ -26,6 +22,12 @@ POST_MUTATION_REFRESH_MS = 150
 # show/hide the "Waiting for daemon…" cover. Cheap: it skips straight to
 # False when the socket file doesn't exist.
 DAEMON_POLL_MS = 500
+
+# How often the window retries starting a daemon it believes should be
+# running but can't reach (a failed start, or one that died / lost its
+# socket). A single attempt can block for START_TIMEOUT_S
+# (daemon_control), so the effective period is at least that.
+DAEMON_RETRY_INTERVAL_S = 5.0
 
 # How often the log console (main_window.LogConsole) asks the daemon for
 # new log lines while it is open. Slower than REFRESH_INTERVAL_MS - log

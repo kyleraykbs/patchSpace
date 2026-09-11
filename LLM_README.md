@@ -38,6 +38,7 @@ codebase deliberately documents *why* and *what failed before*, not just *what*.
 └── src/                   # the whole implementation (former src-rewrite/)
     ├── main.py            # daemon: socket API, session load, node factory, wiring
     ├── pwnodes.py         # node graph model: PatchSpace, all Node classes, effect sandwich
+    ├── declarative.py     # declarative node files: discovery, namespacing, load/write
     ├── pwgraph.py         # live PipeWire graph model (pw-dump driven)
     ├── pwproc.py          # OwnedPwNode / OwnedPwProcess (pw-cli/pw-dump subprocesses)
     ├── pwmatch.py         # matching helpers for external nodes
@@ -160,6 +161,89 @@ sync, not the chain.
 `get_nodes`/`export` emit, read via `getattr(node, attr)`. `_LAYOUT_ATTRS` (x/y/anchored)
 is separate so unpositioned nodes don't emit nulls.
 
+**Declarative node files (`declarative.py`).** The daemon owns two watched directories — a
+read-only one (a Nix store path, never written) and a read-write one — settable with
+`--declarative-ro/--declarative-rw` (or `PATCHBAY_DECLARATIVE_RO/RW`). Each `*.json` file
+wraps the exported-session shape in a metadata layer — `{"label", "color", "readonly"?,
+"config": {nodes, edges, groups}}` (bare legacy configs are still read, defaulting label to
+the stem) — and is a *source of truth*:
+the daemon loads every file at start-up (`_load_startup_sessions`, run on a background
+thread *after* the socket is listening so a slow effect-heavy session can't make the GUI
+look disconnected; `get_nodes` reports a `loading` flag so the GUI raises its overlay for
+that self-issued load — the flag is a counter (`_begin/_end_heavy_load`) covering startup,
+every `reload_declarative`, and `rebuild`, so a rebuild that nests a reload can't clear it
+early; the GUI *also* raises the overlay optimistically when it issues a declarative
+command, because a synchronous command blocks that connection's `get_nodes` polls so it
+would never observe the flag). On start-up `start()` opens the counter *before* binding the
+socket, binds the socket immediately, then runs the orphan sweep; that way the overlay
+covers the slow crash-recovery destruction of leftover helper processes too, not just the
+session load (the startup-load thread owns closing the counter). Do not move the socket
+bind after the sweep — then the GUI would just show "not connected" through the whole
+cleanup. On `rebuild`
+(`_cmd_rebuild` reloads them instead of replaying in-memory copies), and whenever a file is
+added/edited/removed (the tick's `_poll_declarative`, mtime-based, debounced by
+`DECLARATIVE_POLL_S`). Node ids are namespaced `<file-stem>::<local-id>`, so files can't
+collide and provenance is visible; `declarative.py:namespaced()` does the qualification,
+including edge endpoints (same-file ids only) and group members/ids. Nodes and edges carry a
+`declarative` flag (reported by `get_nodes`, **not** written into exported params).
+Declarative nodes/edges/groups are excluded from the imperative autosave
+(`_build_export_config(imperative_only=True)`), so a deleted declarative node cannot be
+resurrected from the cache. Edits to a declarative node are *supposed* to be lost on reload;
+imperative edges that merely touch one are preserved by `reload_declarative` (snapshot
+imperative edges, drop declarative state, re-apply files, re-add the edges).
+**"Declare" is a move, not a copy, and it is *live*.** A file's node `foo` loads as
+`<stem>::foo`, and the daemon treats an imperative node literally named `foo` as the *same*
+node (`_declarative_duplicate_map`): after a declare/export reload it deletes those
+imperative originals and re-points the edges that reached outside the selection at the
+declarative copies (`_reconcile_declarative_duplicates`, also run at start-up so caches
+written by older builds self-heal). This is what stops a declare from silently doubling a
+chain. Create/add/remove do **not** call `reload_declarative`; `_apply_declarative_membership`
+diff's the file's desired member set against the current owners and only renames/re-tags
+the nodes that actually changed (via `space.rename_node`, which rebuilds their incident
+edges; edge `declarative` flags are then flipped in place
+(`space.set_edge_declarative`, no unlink/relink blip) to "both ends declarative"; groups re-pointed;
+`_rename_owned_node` also renames a Sensitivity gate's hidden pre/post companions). Every
+other declarative node keeps running, so no effect modules are torn down for a one-node
+add. Any conflict falls back to a full `reload_declarative`. `edit_declarative` only
+reloads when it renames; a label/colour tweak just updates `_declarative_meta`.
+**Trap:** every writer of a declarative file (`_declarative_write`, `_cmd_edit_declarative`)
+must refresh `_declarative_mtimes` after `write_file`. Otherwise the tick's mtime watcher
+(`_poll_declarative`) treats our own write as an external change and fires a *full*
+`reload_declarative` ~1.5s later — undoing the live move and tearing down every declared
+effect (audio dropout, loading overlay on every declare). This is the "loading unstable /
+noise suppression kills audio" regression.
+Groups a file takes over move with their nodes (members re-pointed). Declaring captures
+the selected nodes' canvas groups (label/colour/membership) into the file, installs them
+live as declarative groups, and drops any imperative group whose member set exactly matches
+a declarative one (the file owns that grouping, whatever its id/label —
+`_declarative_groups_for`, `_apply_declarative_membership`, `_reconcile_declarative_duplicates`).
+Declare dialog: target dropdown + label/colour, and **Update** merges the selection (and its
+group properties) into the target; Replace overwrites; Remove detaches. `get_nodes` tags each declared node with
+`declarative_label`/`declarative_color` (looked up in `_declarative_meta`) so the GUI can
+draw a semi-transparent coloured label bubble hung *just below* the node, centred, in its
+own draw pass after every node body (paint-only, no `find_*_at` hit-tester, so clicks pass
+through to the canvas). Commands:
+`list_declarative` (returns per-file label/color/readonly/writable + nodes),
+`export_declarative` with `mode` = `create`/`replace`/`add`/`remove` (create needs
+`name`+`label`+`color`+`overwrite`; add/remove edit an existing writable file, refusing
+read-only ones; add/remove is only allowed in the RW dir or for files not marked
+`readonly`), `edit_declarative` (change label/color and optionally rename),
+`rename_declarative` (renaming re-prefixes the whole file), `delete_declarative`,
+`reload_declarative`. GUI: hamburger (top-right) → "Declarative Nodes…" lists files
+(coloured swatch + Select/Edit/Delete, plus "Select Group…"), and "Declare…" in the
+selection toolbar opens a target dropdown (existing writable file or New group…) with
+Add / Remove / Create·Replace, each with a `ColorPicker`. Reload re-applies. The old
+"Import Last Session" button is gone — the imperative cache is now auto-loaded at startup
+(declarative files first so cross-references resolve in either direction, with a second
+idempotent pass for edges that needed the other half).
+
+**Canvas selection.** Selection is a plain `set` of node ids. A plain left press on a node
+selects it (replacing the selection unless it is already part of a multi-selection, so a
+whole selection drags together); right-drag marquees replace the selection. Shift/Ctrl +
+left-drag is a modifier marquee (`_marquee_mode`): Shift unions the swept nodes in, Ctrl
+subtracts them, re-derived each update from `_marquee_base`; a Shift/Ctrl *click* (no sweep)
+toggles the node under the pointer.
+
 **Session load is asynchronous.** `_cmd_load_session` starts a background thread and
 immediately returns `{"status": "ok", "started": true}`. There is **no completion
 reply**; the GUI's periodic `get_nodes` poll observes nodes/edges landing. The GUI infers
@@ -176,6 +260,15 @@ on window close) stops the daemon only when owned. The hamburger menu's Start/St
 Daemon actions run off the GTK thread (starting/stopping waits on the socket). The daemon
 exposes a `shutdown` command that flips `_running` and replies *before* teardown, so the
 caller can wait for a graceful exit.
+
+The GUI also *retries*: `_poll_daemon_connection` keeps a `_daemon_should_run` flag (True
+unless the user explicitly hit Stop, cleared on close) and re-attempts `start()` at most
+every `DAEMON_RETRY_INTERVAL_S` while the socket is unreachable, off the GTK thread. A
+one-shot `ensure_started()` at launch would otherwise leave the GUI stuck disconnected if
+the daemon happened to be mid-startup or died. On the daemon side, `_socket_is_live()`
+guards `_socket_server`: if a live daemon already answers on `SOCKET_PATH`, a second
+instance refuses to start rather than unlinking and stealing the first one's socket (which
+leaves the victim running but unreachable) — only a stale socket file is reaped.
 
 **Process teardown is batched.** `PatchSpace.detach_nodes()` removes nodes from the model
 and hands back all their backings; `PatchBayDaemon._teardown_public_graph()` / `_cmd_rebuild`
@@ -338,12 +431,56 @@ approach for pure GUI behavior). "It passed pytest" is not proof an effect works
 
 10. **Tracked `__pycache__`.** See §4.
 
-11. **Drains are `pw-cat --record` keepalives whose target semantics are subtle.** The
+11. **Default promotion must retry, not latch optimistically.** `_assert_defaults` may
+    resolve the built-in sink a tick or two before `wpctl set-default` will accept it.
+    Record `_set_default_sink_id`/`_set_default_source_id` **only after** `_set_default`
+    returns success, otherwise one transient failure means PatchBay never becomes the
+    default while everything looks fine (the sink exists and routes). `_set_default`
+    returns bool for exactly this. Each builtin also has a `force_default` flag (mirrored
+    from the Speaker/Mic Line node's force button, default on): while on, `_assert_defaults`
+    re-reads the live default (`wpctl inspect @DEFAULT_AUDIO_SINK@/SOURCE`) every
+    `DEFAULT_CHECK_INTERVAL_S` and puts it back on the builtin if something moved it; while
+    off, the old once-per-resolved-id behaviour applies. `_default_check_at` throttles the
+    check so we don't shell out to wpctl every tick.
+
+12. **Drains are `pw-cat --record` keepalives whose target semantics are subtle.** The
     `--target <sink>` on a record stream does not reliably link to a dummy; internal-link
     wiring and the exact `--target`/autoconnect behaviour have been the source of several
     "it worked one wiring order, not the other" bugs. Before touching
     `_ChainEffect.internal_links()`, `_ensure_drain()`, or the effect sandwich, read the
     relevant docstrings and test on live PipeWire with both wiring orders.
+
+13. **`LightNoiseCancelNode` is a plain `EchoCancelNode` with the `probe` hidden.**
+    It is NOT a separate engine and it does NOT need a daemon-wired reference: it worked
+    before with the probe dummy fed only by its silence keepalive, like the base class.
+    An earlier attempt to "fix" it (a hidden auto-reference edge from the built-in sink,
+    plus `_build_export_config`/`_serialize_edges` filters to hide that edge) broke audio
+    across the whole graph — do not re-introduce it. Keep the class as a bare subclass and
+    let the user wire (or not) the hidden probe via the module's own plumbing.
+
+14. **Internal-link ids are node-id-derived; preserve them across a rename.** `sync_locked`
+    keys an effect's interior as `__internal__:<node_id>:<i>` (`_ChainEffect`).
+    `PatchSpace.rename_node` MUST re-key those in `_edge_links` (and the matching
+    `_inflight_links` values) or the next `sync` disconnects the whole capture/playback
+    sandwich and re-makes it — a window where the out side has no consumer, which stalls
+    RNNoise (see `NoiseCancelNode`'s docstring; the live declarative move renames nodes).
+
+15. **Standardize per-node setup; don't special-case the declarative path.** Two shared
+    helpers own the per-node fixups:
+    - `PatchBayDaemon._apply_node_config(node, config)` — re-adopting an existing node from
+      a config (params with per-type guards, `_adopt_line_volume`, volumes through setters,
+      `SensitivityGateNode.set_level`, `apply_device_settings`). Used by **both**
+      `_cmd_add_node` and `_load_session`; a raw `setattr` loop in `_load_session` was missing
+      the volume/level handling the add path had.
+    - `PatchBayDaemon._standardize_nodes(node_ids)` — post-ownership-change setup
+      (sensitivity internals, `_try_immediate_resolve`, device settings, live refresh) plus
+      the staged `_careful_bring_up` for `_CAREFUL_NODE_TYPES`. The live declarative move
+      (`_apply_declarative_membership`) calls it after the rename; a bare `supervise()` there
+      was what left moved finicky effects half-wired.
+    If you add a per-node fix, put it in one of these (and/or `_create_node`) so
+    add/load/move all get it. There is deliberately **no** ad-hoc tick-level effect healer
+    anymore — do not re-add `_repair_effect_interiors`; route the fix through the standard
+    paths.
 
 ---
 
@@ -358,6 +495,14 @@ approach for pure GUI behavior). "It passed pytest" is not proof an effect works
   - `socket_labels=False` suppresses per-port name labels on the symmetric boolean gates.
   - `settings` rows are `(attr, label, kind[, extra])` with kind `bool|number|choice|text`;
     `number` extra is `{min,max,step}`.
+- **Groups merge by local id.** Canvas groups whose id shares a local part (`grp` and
+  `file::grp`, or the same id in two declarative files) render as **one** outline with the
+  contributing groups' titles **stacked** (each in its own colour), via `_merged_groups()` /
+  `_group_merge_key()` — all group geometry, headers, hit-testing and the +/- membership
+  buttons iterate the merged view. Exact-member-set duplicates are already removed daemon-side
+  (`_reconcile_declarative_duplicates`), so normally only genuinely-different same-id groups
+  stack. The `+`/`-` buttons fan the change out to every group in the merge
+  (`_merged_member_gids`).
 - **Compact nodes.** `_COMPACT_NODE_TYPES` (splitter + the boolean gates) render as a
   small square when unlabelled; the gates keep their type name at the top so they stay
   distinguishable, and the splitter shows only its (optional) label. The node id line is
@@ -384,8 +529,9 @@ approach for pure GUI behavior). "It passed pytest" is not proof an effect works
   cached UI fields (`meta` holds the raw daemon data). Drag guards (`slider_dragging`) and
   the pending-guards above prevent a poll from yanking a control the user just changed.
 - **Daemon controls** live in the top-right hamburger menu (`_build_patchspace_page`):
-  Export / Import / Import Last Session / Rebuild Graph / Start·Stop·Restart Daemon. The
-  bottom toolbar has Logs / Recenter / Group / Anchor.
+  Export / Import / Declarative Nodes… / Reload Declarative Files / Rebuild Graph /
+  Start·Stop·Restart Daemon. The bottom toolbar has Logs / Recenter / Group / Anchor /
+  Declare…. "Declare…" exports the selection to the read-write declarative directory.
 
 ---
 
