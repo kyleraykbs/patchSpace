@@ -5831,6 +5831,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     PANEL_IO_BAR_W = 16.0
     PANEL_IO_GAP = 8.0
     PANEL_IO_PORT_H = 44.0
+    PANEL_IO_PORT_GAP = 20.0
     PANEL_IO_MARGIN = 20.0
     # The bar extends past the top/bottom port by this much.
     PANEL_IO_BAR_PAD = 10.0
@@ -5982,8 +5983,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     right = max(right, maxx + reserve)
                 n = max(len(port_in), len(port_out))
                 stack_h = (
-                    n * (self.PANEL_IO_PORT_H + self.PANEL_IO_GAP)
-                    - self.PANEL_IO_GAP
+                    n * (self.PANEL_IO_PORT_H + self.PANEL_IO_PORT_GAP)
+                    - self.PANEL_IO_PORT_GAP
                 )
                 center = (top + bottom) / 2.0
                 top = min(top, center - stack_h / 2.0 - self.PANEL_IO_MARGIN)
@@ -6092,7 +6093,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         """Center each panel's port nodes on its edges (vertically stacked
         around the box's middle) and persist any that moved.  Called after
         polls/layout so ports follow the panel as it grows with content."""
-        slot = self.PANEL_IO_PORT_H + self.PANEL_IO_GAP
+        slot = self.PANEL_IO_PORT_H + self.PANEL_IO_PORT_GAP
         moved = False
         for pid in list(self.panels):
             if pid == "":
@@ -6106,9 +6107,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 if not ports:
                     continue
                 n = len(ports)
-                start = center_y - (n * slot - self.PANEL_IO_GAP) / 2.0 + (
-                    self.PANEL_IO_PORT_H / 2.0
-                )
+                start = center_y - (
+                    n * slot - self.PANEL_IO_PORT_GAP
+                ) / 2.0 + (self.PANEL_IO_PORT_H / 2.0)
                 edge = rect[0] if direction == "in" else rect[0] + rect[2]
                 for i, (nid, node) in enumerate(ports):
                     ny = start + i * slot - self.PANEL_IO_PORT_H / 2.0
