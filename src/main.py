@@ -1266,6 +1266,24 @@ class PatchBayDaemon:
                         "nodes": [panels.relative_id(owner, m) for m in members],
                     }
                 )
+        # Each placement's geometry lives in its *parent's* child reference
+        # (the panel file is shared), so rewrite the refs from the child
+        # panels we just built.
+        for pid, panel in out.items():
+            if not panel.config.get("panels"):
+                continue
+            refs = []
+            for entry in panel.child_entries:
+                name = panels.child_name(entry)
+                stem = panels.child_stem(entry)
+                child = out.get(panels.make_id(pid, name))
+                if child is not None:
+                    refs.append(
+                        panels.child_ref(name, stem, child.placement())
+                    )
+                else:
+                    refs.append(entry)
+            panel.config["panels"] = refs
         return out
 
     def _write_panels(self) -> None:
@@ -1779,6 +1797,13 @@ class PatchBayDaemon:
         if parent is None:
             return {"status": "error", "message": f"no panel {parent_id!r}"}
         name = (cmd.get("name") or stem).strip() or stem
+        placement = {
+            "x": float(cmd.get("x", 0.0) or 0.0),
+            "y": float(cmd.get("y", 0.0) or 0.0),
+            "w": max(panels.MIN_W, float(cmd.get("w", panels.DEFAULT_W) or 0.0)),
+            "h": max(panels.MIN_H, float(cmd.get("h", panels.DEFAULT_H) or 0.0)),
+            "anchored": bool(cmd.get("anchored", False)),
+        }
         with self._lock:
             existing = set(parent.children)
             base = panels.file_stem(name) or stem
@@ -1787,17 +1812,14 @@ class PatchBayDaemon:
             while local in existing:
                 local = f"{base}_{n}"
                 n += 1
-            parent.config.setdefault("panels", []).append(
-                panels.child_ref(local, stem)
-            )
+            ref = panels.child_ref(local, stem, placement)
+            parent.config.setdefault("panels", []).append(ref)
             # Persist the parent file so the reload finds the new child.
             if parent.path:
                 parent_now = self._build_panels_from_space().get(parent.id)
                 if parent_now is not None:
                     if local not in parent_now.children:
-                        parent_now.config.setdefault("panels", []).append(
-                            panels.child_ref(local, stem)
-                        )
+                        parent_now.config.setdefault("panels", []).append(ref)
                     panels.write_file(parent.path, parent_now)
         self._load_new_placement(panels.make_id(parent_id, local))
         return {"status": "ok", "stem": stem, "name": local, "parent_id": parent_id}

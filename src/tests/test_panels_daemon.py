@@ -593,3 +593,31 @@ def test_moving_a_node_syncs_positions_without_rebuild(tmp_path):
     off_k = d._panel_origin(d.panels, "kit")
     off_o = d._panel_origin(d.panels, other)
     assert abs((d.space.nodes["kit::a"].x - off_k[0]) - (b_obj.x - off_o[0])) < 1e-6
+
+
+def test_placements_keep_their_own_positions(tmp_path):
+    d, root, pdir = _daemon(tmp_path)
+    d.panels = d._load_panels_tree()
+    d.handle_command({"command": "add_node", "node_type": "regex_input",
+                      "node_id": "a", "config": {"pattern": ".*"}})
+    d._cmd_create_panel({"name": "kit", "node_ids": ["a"]})
+    other = d._cmd_place_panel({"stem": "kit", "x": 42, "y": 24})["name"]
+
+    d._cmd_set_panel_layout({"panel_id": "kit", "x": 500, "y": 100})
+    d._cmd_set_panel_layout({"panel_id": other, "x": -300, "y": 800})
+    d._write_panels()
+
+    tree = d._load_panels_tree()
+    assert (tree["kit"].x, tree["kit"].y) == (500, 100)
+    assert (tree[other].x, tree[other].y) == (-300, 800)
+
+
+def test_place_panel_honours_placement(tmp_path):
+    d, root, pdir = _daemon(tmp_path)
+    d.panels = d._load_panels_tree()
+    d._cmd_create_panel({"name": "kit"})
+    other = d._cmd_place_panel({"stem": "kit", "x": 42, "y": 24})["name"]
+    assert (d.panels[other].x, d.panels[other].y) == (42, 24)
+    d._write_panels()
+    tree = d._load_panels_tree()
+    assert (tree[other].x, tree[other].y) == (42, 24)

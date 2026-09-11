@@ -374,6 +374,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._prev_node_ids = set()
         self._prev_edge_set = set()
         self._prev_panel_ids = set()
+        # While a bulk load is running (`loading`), only nodes that have
+        # come up are drawn, so the graph assembles live; None means "show
+        # everything".
+        self._revealed = None
 
         self.set_draw_func(self.on_draw)
         self.set_size_request(*GRAPH_CANVAS_MIN_SIZE)
@@ -455,6 +459,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         if loading == self.loading:
             return
         self.loading = loading
+        if loading:
+            self._revealed = self._revealed if self._revealed is not None else set()
         for cb in self.on_loading_changed:
             try:
                 cb(loading)
@@ -465,12 +471,16 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             # whatever scattered positions it had - frame all of it so the
             # user sees the whole session at once instead of a corner.
             # This supersedes the startup auto-fit.
+            self._revealed = None
             self._needs_initial_fit = False
             # Deferred: the console collapse above changes the canvas
             # height, and fitting before GTK re-lays-out would centre
             # against the old (shorter) canvas and leave the graph sitting
             # high once the console actually disappears.
             self._schedule_fit(80)
+
+    def _node_revealed(self, nid) -> bool:
+        return self._revealed is None or nid in self._revealed
 
     def _schedule_fit(self, delay_ms: int) -> None:
         """(Re)arm the one-shot deferred zoom_to_fit.  Deferring matters:
@@ -499,6 +509,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._load_started_at = now
         self._load_min_visible_until = now + SESSION_LOAD_OVERLAY_MIN_MS / 1000.0
         self._load_timeout_at = now + SESSION_LOAD_OVERLAY_TIMEOUT_MS / 1000.0
+        self._revealed = set()
         self._set_loading(True)
 
     def _update_loading_state(self, daemon_nodes) -> None:
@@ -541,6 +552,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         before the widget has a real size."""
         if not self.nodes:
             return
+        # During a bulk load, frame only the nodes that have come up so far.
+        visible = [
+            (nid, n) for nid, n in self.nodes.items()
+            if self._node_revealed(nid)
+        ]
+        if not visible:
+            return
         view_w = self.get_width()
         view_h = self.get_height()
         if view_w <= 1 or view_h <= 1:
@@ -551,10 +569,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         if view_w <= 1 or view_h <= 1:
             return
 
-        min_x = min(n["x"] for n in self.nodes.values())
-        min_y = min(n["y"] for n in self.nodes.values())
-        max_x = max(n["x"] + self.node_width(nid) for nid, n in self.nodes.items())
-        max_y = max(n["y"] + self.node_height(nid) for nid, n in self.nodes.items())
+        min_x = min(n["x"] for _nid, n in visible)
+        min_y = min(n["y"] for _nid, n in visible)
+        max_x = max(n["x"] + self.node_width(nid) for nid, n in visible)
+        max_y = max(n["y"] + self.node_height(nid) for nid, n in visible)
 
         world_w = max(1.0, max_x - min_x)
         world_h = max(1.0, max_y - min_y)
@@ -1150,6 +1168,23 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             or self.anchored_nodes != anchored_before
         ):
             self._notify_selection_changed()
+
+        # Incremental reveal while a bulk load runs: pop each node onto the
+        # canvas as it comes up, and reframe the growing graph.
+        if self.loading or self._daemon_loading:
+            if self._revealed is None:
+                self._revealed = set()
+            newly = False
+            for nid, ndata in daemon_nodes.items():
+                if nid in self._revealed:
+                    continue
+                if ndata.get("ready", True) and ndata.get("health") != "starting":
+                    self._revealed.add(nid)
+                    newly = True
+            if newly:
+                self.zoom_to_fit()
+        else:
+            self._revealed = None
 
         # A bulk import has no explicit "done" reply (see main.py's
         # _cmd_load_session); infer completion from the node health the
@@ -2272,6 +2307,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 continue
             if edge["from_node"] not in self.nodes or edge["to_node"] not in self.nodes:
                 continue
+            if not (
+                self._node_revealed(edge["from_node"])
+                and self._node_revealed(edge["to_node"])
+            ):
+                continue
             out_x, out_y, in_x, in_y = self._edge_endpoints(edge)
             src_node = self.nodes[edge["from_node"]]
             is_bool = (
@@ -2286,11 +2326,15 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             draw_bezier_link(cr, out_x, out_y, in_x, in_y)
 
         for nid, node in self.nodes.items():
+            if not self._node_revealed(nid):
+                continue
             self._draw_node(cr, pal, nid, node)
 
         # A tiny panel-colour chip at each node's bottom-left corner while
         # the node lives in a non-root panel (root-level nodes get none).
         for nid, node in self.nodes.items():
+            if not self._node_revealed(nid):
+                continue
             pid = self._panel_of_node(nid)
             if not pid:
                 continue
@@ -2313,7 +2357,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # rectangle itself, above the nodes so both stay visible.
         for nid in self.selected_nodes:
             node = self.nodes.get(nid)
-            if node is None:
+            if node is None or not self._node_revealed(nid):
                 continue
             draw_rounded_rect(
                 cr, node["x"], node["y"], self.node_width(nid), self.node_height(nid), 8
@@ -6655,8 +6699,39 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     def _on_node_type_dropped(self, drop_target, value, x, y):
         wx, wy = self.to_world(x, y)
+        if isinstance(value, str) and value.startswith("panel:"):
+            self.place_panel_at(value[len("panel:"):], wx, wy)
+            return True
         self.add_node_at(value, wx, wy)
         return True
+
+    # ---------- placing panels (links) ----------
+
+    def place_panel_at_view_center(self, stem):
+        """Place a new placement of ``stem`` centered in the viewport, as a
+        top-level panel (so it starts on the topmost layer)."""
+        view_w = self.get_width() or 800
+        view_h = self.get_height() or 600
+        cx, cy = self.to_world(view_w / 2.0, view_h / 2.0)
+        self._send_place_panel(stem, cx, cy, "")
+
+    def place_panel_at(self, stem, wx, wy):
+        """Place a placement centered on (wx, wy); nest into the panel under
+        the drop, else the root."""
+        parent = self.find_panel_at(wx, wy) or ""
+        self._send_place_panel(stem, wx, wy, parent)
+
+    def _send_place_panel(self, stem, cx, cy, parent_id):
+        half = self.PANEL_MIN_SIDE / 2.0
+        self.client.send(
+            {
+                "command": "place_panel",
+                "stem": stem,
+                "x": cx - half,
+                "y": cy - half,
+                "parent_id": parent_id,
+            }
+        )
 
     # ---------- add-node side panel (click or drag-and-drop source) ----------
 

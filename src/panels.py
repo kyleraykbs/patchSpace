@@ -167,12 +167,40 @@ def child_stem(entry) -> str:
     return str(entry.get("stem") or entry.get("name") or "")
 
 
-def child_ref(name: str, stem: str):
-    """A child reference, kept as a plain stem string when the placement
-    name and the file stem match (the common case)."""
-    if name == stem:
+def child_ref(name: str, stem: str, placement: Optional[dict] = None):
+    """A child reference.  Placements of the same file each carry their own
+    geometry here (in the *parent's* file, since the panel file itself is
+    shared); ``name == stem`` with no placement stays a bare string."""
+    if placement is None and name == stem:
         return name
-    return {"name": name, "stem": stem}
+    ref = {"name": name, "stem": stem}
+    if isinstance(placement, dict):
+        ref["placement"] = dict(placement)
+    return ref
+
+
+def child_placement(entry) -> Optional[dict]:
+    """Per-placement geometry stored on a child reference, or None."""
+    if isinstance(entry, dict):
+        p = entry.get("placement")
+        if isinstance(p, dict):
+            return p
+    return None
+
+
+def apply_placement(panel: "Panel", placement: dict) -> None:
+    if not isinstance(placement, dict):
+        return
+    if placement.get("x") is not None:
+        panel.x = float(placement["x"])
+    if placement.get("y") is not None:
+        panel.y = float(placement["y"])
+    if placement.get("w") is not None:
+        panel.w = float(placement["w"])
+    if placement.get("h") is not None:
+        panel.h = float(placement["h"])
+    if placement.get("anchored") is not None:
+        panel.anchored = bool(placement["anchored"])
 
 
 # ---------------------------------------------------------------------------
@@ -438,6 +466,7 @@ def load_tree(root_path: str, directories: List[str],
             child = load_panel(
                 child_path, child_id, panel.id, child_writable, stem=stem
             )
+            apply_placement(child, child_placement(entry) or {})
             _load(child)
 
     _load(root)

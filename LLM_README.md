@@ -233,12 +233,16 @@ snapshot for panels in `_edit_panels`). The panel is darkened and stamped with a
 loaded instance with its own `id` (its path) and file (`path`), so the same file can be
 loaded in several places. A child reference is a stem string, or `{name, stem}` when the
 placement name differs from the file stem (`panels.child_name/child_stem/child_ref`).
-Placements keep independent live settings (their own nodes), but structure, positions and
-(in edit mode) parameters sync: `_canonical_by_stem` finds the placement that changed,
-`_write_panels` writes the file from it, and `_sync_placements` copies positions to the
-others (cheap) and reverts them to the changed config for structural/param changes
-(independent 'live' settings are not shared). `place_panel` adds a placement of a file
-(root by default).
+Each placement's geometry is stored in its **parent's** child reference
+(`child_ref(name, stem, placement)`, `child_placement`), not in the shared panel file —
+so several placements of one file each keep their own position. Placements keep
+independent live settings (their own nodes), but structure, positions and (in edit mode)
+parameters sync: `_canonical_by_stem` finds the placement that changed, `_write_panels`
+writes the file from it, and `_sync_placements` copies positions to the others (cheap) and
+reverts them to the changed config for structural/param changes (independent 'live'
+settings are not shared). `place_panel` adds a placement of a file (root by default); the
+side view's **Place** button puts one in the middle of the viewport at the top level, and
+rows are **draggable onto the canvas** (dropped over a panel it nests there, else root).
 
 *Auto-load.* `auto_load` (default **false**, top-level in the file, a checkbox in the
 right side view) controls whether a standalone panel placement is spawned at the root on
@@ -316,6 +320,12 @@ selection and confirms (Gtk.AlertDialog) before removing the selected nodes.
 immediately returns `{"status": "ok", "started": true}`. There is **no completion
 reply**; the GUI's periodic `get_nodes` poll observes nodes/edges landing. The GUI infers
 "load done" from node `ready`/`health`.
+
+**Incremental load reveal (GUI).** While the loading overlay is up, the widget tracks a
+`_revealed` set (None = show everything); each poll it adds nodes whose `ready`/`health`
+have landed, draws only revealed nodes/edges, and calls `zoom_to_fit()` (which frames only
+the revealed set) so the graph assembles live and stays centred. `_begin_load` resets the
+set, `_set_loading(False)` clears it to None and does the final fit.
 
 **Node readiness surfaced to the GUI:** `ready` (bool) and `health` (`"ok"` /
 `"starting"` / `"dead"`). `"dead"` means failed/timed out; `"starting"` means still

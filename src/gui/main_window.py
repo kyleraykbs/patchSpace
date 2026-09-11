@@ -20,7 +20,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Gdk, GLib, Pango, Adw
+from gi.repository import Gtk, Gdk, GLib, GObject, Pango, Adw
 
 from constants import (
     POLL_RESPONSES_MS,
@@ -630,11 +630,21 @@ class MainWindow(Gtk.ApplicationWindow):
             place.set_tooltip_text("Add a placement of this panel to the canvas")
             place.connect(
                 "clicked",
-                lambda _b, e=entry: self.client.send(
-                    {"command": "place_panel", "stem": e.get("stem")}
+                lambda _b, e=entry: self.ps_widget.place_panel_at_view_center(
+                    e.get("stem")
                 ),
             )
             row.append(place)
+            # Drag the row onto the canvas to place it where dropped.
+            drag_source = Gtk.DragSource.new()
+            drag_source.set_actions(Gdk.DragAction.COPY)
+            drag_source.connect(
+                "prepare",
+                lambda _s, _x, _y, e=entry: Gdk.ContentProvider.new_for_value(
+                    GObject.Value(GObject.TYPE_STRING, "panel:" + str(e.get("stem")))
+                ),
+            )
+            row.add_controller(drag_source)
             self._panels_list_box.append(row)
 
     def _build_loading_overlay(self):
