@@ -314,9 +314,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self.drag_panel_start = (0.0, 0.0)
         self.drag_panel_origin = (0.0, 0.0)
         self._drag_panel_applied = (0.0, 0.0)
-        self.resizing_panel = None
-        self.resize_start = (0.0, 0.0)
-        self.resize_orig = (0.0, 0.0)
         self._panel_geo_cache: dict = {}
         # Armed by a panel header's +/- button to add/remove the next
         # clicked node from that panel.
@@ -736,7 +733,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         for p in daemon_panels:
             pid = p.get("id", "")
             live.add(pid)
-            if pid == self.dragging_panel or pid == self.resizing_panel:
+            if pid == self.dragging_panel:
                 continue
             reported = (
                 float(p.get("x", 0.0) or 0.0),
@@ -1227,14 +1224,20 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         for parent, pids in by_parent.items():
             if len(pids) < 2:
                 continue
-            positions = {
-                pid: (self.panels[pid]["x"], self.panels[pid]["y"])
-                for pid in pids
-            }
+            # The box auto-fits its contents, so its top-left can be left/
+            # above the declared panel origin; physics must use the box
+            # corner (in the parent's local frame), not panel["x"/"y"].
+            pax, pay = self._panel_absolute(parent) if parent else (0.0, 0.0)
+            positions = {}
             sizes = {}
             for pid in pids:
-                rect = self._panel_rect(pid)
-                sizes[pid] = (rect[2], rect[3]) if rect else (420.0, 260.0)
+                r = self._panel_rect(pid)
+                if r is None:
+                    positions[pid] = (0.0, 0.0)
+                    sizes[pid] = (420.0, 260.0)
+                else:
+                    positions[pid] = (r[0] - pax, r[1] - pay)
+                    sizes[pid] = (r[2], r[3])
             kid_set = set(pids)
             edges = []
             for e in self.edges.values():
@@ -1250,9 +1253,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             for pid in pids:
                 if self.dragging_panel == pid:
                     continue
+                r_old = self._panel_rect(pid)
+                ox = (r_old[0] - pax) if r_old else 0.0
+                oy = (r_old[1] - pay) if r_old else 0.0
                 nx, ny = positions[pid]
-                dx = nx - self.panels[pid]["x"]
-                dy = ny - self.panels[pid]["y"]
+                dx = nx - ox
+                dy = ny - oy
                 if dx or dy:
                     self.panels[pid]["x"] += dx
                     self.panels[pid]["y"] += dy
@@ -1689,18 +1695,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 continue
             px, py, pw, ph = rect
             if px <= x <= px + pw and py <= y <= py + ph:
-                return pid
-        return None
-
-    def find_panel_resize_at(self, x, y):
-        for pid in self._panel_order_deepest_first():
-            if pid == "":
-                continue
-            rect = self._panel_rect(pid)
-            if rect is None:
-                continue
-            x1, y1, x2, y2 = self._panel_header_rects(pid, rect)["resize"]
-            if x1 - 4 <= x <= x2 + 4 and y1 - 4 <= y <= y2 + 4:
                 return pid
         return None
 
@@ -2952,6 +2946,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             or self.find_settings_gear_at(wx, wy) is not None
             or self.find_group_label_at(wx, wy) is not None
             or self.find_group_action_at(wx, wy) is not None
+            or self.find_group_menu_at(wx, wy) is not None
         ):
             self.set_cursor(Gdk.Cursor.new_from_name("pointer", None))
         else:
@@ -2995,6 +2990,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         pid = self.find_panel_settings_at(wx, wy)
         if pid is not None:
             self.show_panel_settings_dialog(pid)
+            return
+
+        # Group settings hamburger (rightmost in the group row).
+        gid = self.find_group_menu_at(wx, wy)
+        if gid is not None:
+            self.show_group_settings_dialog(gid)
             return
 
         # Group +/- buttons: arm a mode (click again to cancel).
@@ -3467,12 +3468,29 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 name = entry.get_text().strip()
                 if name:
                     x, y, w, h = placement
+                    node_ids = list(self.selected_nodes)
+                    # Make sure the daemon has the nodes' current positions
+                    # *before* it renames them into the panel, or they'd
+                    # come back at their last-saved (pickup) spot.
+                    layout = {
+                        nid: {
+                            "x": float(self.nodes[nid]["x"]),
+                            "y": float(self.nodes[nid]["y"]),
+                            "anchored": nid in self.anchored_nodes,
+                        }
+                        for nid in node_ids
+                        if nid in self.nodes
+                    }
+                    if layout:
+                        self.client.send(
+                            {"command": "set_node_layout", "layout": layout}
+                        )
                     self._begin_load()
                     self.client.send(
                         {
                             "command": "create_panel",
                             "name": name,
-                            "node_ids": list(self.selected_nodes),
+                            "node_ids": node_ids,
                             "readonly": readonly.get_active(),
                             "x": x,
                             "y": y,
@@ -3907,7 +3925,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self.detaching_edge = None
         self.dragging_node = None
         self.dragging_panel = None
-        self.resizing_panel = None
         self.drag_node_starts = {}
         self.hover_target_node = None
         self.panning = False
@@ -3944,18 +3961,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         if self._group_pick_mode is not None or self._panel_pick_mode is not None:
             return
 
-        # Panel resize handle / header: the panel's own affordances, above
-        # the canvas.  Handled before node hit-tests so the header strip is
-        # always draggable.
-        pid = self.find_panel_resize_at(wx, wy)
-        if pid is not None:
-            rect = self._panel_rect(pid)
-            self.resizing_panel = pid
-            self.resize_start = (wx, wy)
-            self.resize_orig = (rect[2], rect[3])
-            self.layout_awake = True
-            self._settle_ticks = 0
-            return
+        # Panel header: the panel's own affordance, above the canvas.
+        # Handled before node hit-tests so the title strip is always
+        # draggable.
         pid = self.find_panel_header_at(wx, wy)
         if (
             pid is not None
@@ -4077,6 +4085,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             or self.find_field_at(wx, wy) is not None
             or self.find_group_label_at(wx, wy) is not None
             or self.find_group_action_at(wx, wy) is not None
+            or self.find_group_menu_at(wx, wy) is not None
             or device_row_hit is not None
         ):
             # Single-click toggles/menus, handled entirely by
@@ -4158,17 +4167,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._set_selection(())
 
     def on_drag_update(self, gesture, offset_x, offset_y):
-        if self.resizing_panel is not None:
-            dx = offset_x / self.zoom
-            dy = offset_y / self.zoom
-            panel = self.panels.get(self.resizing_panel)
-            if panel is not None:
-                panel["w"] = max(140.0, self.resize_orig[0] + dx)
-                panel["h"] = max(90.0, self.resize_orig[1] + dy)
-                self._panel_geo_cache.pop(self.resizing_panel, None)
-                self._mark_panel_moved(self.resizing_panel)
-                self.queue_draw()
-            return
         if self.dragging_panel is not None:
             dx = offset_x / self.zoom
             dy = offset_y / self.zoom
@@ -4342,20 +4340,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self.queue_draw()
 
     def _handle_drag_end(self, gesture, offset_x, offset_y):
-        if self.resizing_panel is not None:
-            panel = self.panels.get(self.resizing_panel)
-            if panel is not None:
-                self.client.send(
-                    {
-                        "command": "set_panel_layout",
-                        "panel_id": self.resizing_panel,
-                        "w": panel["w"],
-                        "h": panel["h"],
-                    }
-                )
-            self.resizing_panel = None
-            self._mark_layout_dirty()
-            return
         if self.dragging_panel is not None:
             panel = self.panels.get(self.dragging_panel)
             if panel is not None:
@@ -4535,7 +4519,25 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self.client.send(
             {"command": "move_nodes", "panel_id": target, "node_ids": members}
         )
-
+        # Persist the dropped positions under their *new* ids right away.
+        # The debounced layout save still holds the old ids (the rename
+        # poll hasn't arrived yet), so its set_node_layout is ignored after
+        # the rename and the daemon would keep the pickup positions - the
+        # "nodes teleport back to where I picked them up" bug.
+        layout = {}
+        for nid in members:
+            node = self.nodes.get(nid)
+            if node is None:
+                continue
+            local = nid.rsplit("::", 1)[-1]
+            new_id = f"{target}::{local}" if target else local
+            layout[new_id] = {
+                "x": float(node["x"]),
+                "y": float(node["y"]),
+                "anchored": nid in self.anchored_nodes,
+            }
+        if layout:
+            self.client.send({"command": "set_node_layout", "layout": layout})
     # ---------- context menus ----------
 
     def show_node_menu(self, node_id, screen_x, screen_y):
@@ -5344,16 +5346,19 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             top = y1 - 6 - block_h
         mid_y = top + block_h / 2
         chip = 12
-        # Colour chip and the +/- membership buttons live on the *right*
-        # edge of the group's box, mirroring the panel title row.
+        # Colour chip, the +/- membership buttons and a settings hamburger
+        # live on the *right* edge of the group's box, mirroring the panel
+        # title row (the hamburger at the very right).
         btn = 15
         btn_y = mid_y - btn / 2
-        rem_x = x2 - btn
+        menu_x = x2 - btn
+        rem_x = menu_x - 3 - btn
         add_x = rem_x - 3 - btn
         chip_x = add_x - 8 - chip
         chip_y = mid_y - chip / 2
         add_rect = (add_x, btn_y, add_x + btn, btn_y + btn)
         rem_rect = (rem_x, btn_y, rem_x + btn, btn_y + btn)
+        menu_rect = (menu_x, btn_y, menu_x + btn, btn_y + btn)
         return {
             "gid": gid,
             "primary_gid": group.get("id", gid),
@@ -5375,6 +5380,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             "chip_y": chip_y,
             "add_rect": add_rect,
             "rem_rect": rem_rect,
+            "menu_rect": menu_rect,
             # Clickable label/id hotspot (the title block on the left)...
             "rect": (
                 x1 - 2, top - 2, x1 + label_w + 2, top + block_h + 2,
@@ -5450,6 +5456,17 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     return (info["primary_gid"], action)
         return None
 
+    def find_group_menu_at(self, x, y):
+        """primary group id for the settings hamburger in the group row."""
+        for gid, group in self._merged_groups().items():
+            info = self._group_header_layout(gid, group)
+            if info is None:
+                continue
+            r = info.get("menu_rect")
+            if r is not None and r[0] <= x <= r[2] and r[1] <= y <= r[3]:
+                return info["primary_gid"]
+        return None
+
     def find_group_label_at(self, x, y):
         for gid, group in self._merged_groups().items():
             info = self._group_header_layout(gid, group)
@@ -5463,8 +5480,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     # ---------- panels ----------
 
     PANEL_HEADER_H = 26
-    PANEL_TRIANGLE = 16
     PANEL_PADDING = 26
+    # Panels auto-fit their contents in every direction (like groups) with
+    # no manual resize; this is the minimum they shrink to, a square.
+    PANEL_MIN_SIDE = 320.0
 
     @staticmethod
     def _panel_local(pid):
@@ -5481,8 +5500,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         return min(14.0, 40.0 / z)
 
     def _panel_rect(self, pid):
-        """(x, y, w, h) absolute box for a panel: its explicit placement,
-        auto-grown to contain its member nodes and child panels."""
+        """(x, y, w, h) absolute box for a panel: it auto-fits its member
+        nodes and child panels with padding on every side, like a group,
+        with a square minimum size and no manual resize."""
         cached = self._panel_geo_cache.get(pid)
         if cached is not None:
             return cached
@@ -5490,8 +5510,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         if panel is None:
             return None
         ax, ay = self._panel_absolute(pid)
-        w = float(panel.get("w", 420.0))
-        h = float(panel.get("h", 260.0))
+        pad = self.PANEL_PADDING
+        side = self.PANEL_MIN_SIDE
         # Nodes being dragged right now must not count towards a panel's
         # auto-grown bounds: otherwise the source panel stretches to follow
         # the cursor and swallows a drop meant for the panel underneath.
@@ -5518,10 +5538,18 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             miny = cy if miny is None else min(miny, cy)
             maxx = cx + cw if maxx is None else max(maxx, cx + cw)
             maxy = cy + ch if maxy is None else max(maxy, cy + ch)
-        if minx is not None:
-            w = max(w, (maxx - ax) + self.PANEL_PADDING)
-            h = max(h, (maxy - ay) + self.PANEL_PADDING)
-        rect = (ax, ay, w, h)
+        if minx is None:
+            rect = (ax, ay, side, side)
+        else:
+            left = min(ax, minx - pad)
+            top = min(ay, miny - pad)
+            right = max(ax + side, maxx + pad)
+            bottom = max(ay + side, maxy + pad)
+            if right - left < side:
+                right = left + side
+            if bottom - top < side:
+                bottom = top + side
+            rect = (left, top, right - left, bottom - top)
         self._panel_geo_cache[pid] = rect
         return rect
 
@@ -5555,13 +5583,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             btn_left = delete[0]
         anchor = (btn_left - gap - d, top, btn_left - gap, top + d)
         title = (x, top, max(x, anchor[0] - gap), top + th)
-        resize = (
-            x + w - self.PANEL_TRIANGLE, y + h - self.PANEL_TRIANGLE,
-            x + w, y + h,
-        )
         header = (x, top, right_edge, top + d)
         return {
-            "header": header, "resize": resize, "reset": reset,
+            "header": header, "reset": reset,
             "anchor": anchor, "settings": settings, "delete": delete,
             "title": title,
         }
@@ -5650,14 +5674,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     cr, pal, geo["reset"], (r, g, b),
                     active=False, glyph="reset",
                 )
-            # Resize triangle bottom-right.
-            tx1, ty1, tx2, ty2 = geo["resize"]
-            cr.set_source_rgba(r, g, b, 0.95)
-            cr.move_to(tx2, ty2)
-            cr.line_to(tx1, ty2)
-            cr.line_to(tx2, ty1)
-            cr.close_path()
-            cr.fill()
 
     def _draw_panel_button(self, cr, pal, rect, color, active=False,
                            glyph="hamburger"):
@@ -5772,6 +5788,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self._draw_group_button(
                 cr, pal, info["rem_rect"], "\u2212",
                 (info["primary_gid"], "remove"), (r, g, b),
+            )
+            # Settings hamburger at the very right of the group row.
+            self._draw_panel_button(
+                cr, pal, info["menu_rect"], (r, g, b),
+                active=False, glyph="hamburger",
             )
 
     def _draw_group_button(self, cr, pal, rect, symbol, mode, color):

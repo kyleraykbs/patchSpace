@@ -204,8 +204,10 @@ same outline style as the group +/- buttons: the settings "hamburger" (rename/re
 `edit_panel`) at the very right, a delete (trash) button to its left, and the physics-stop
 (pin/pause) toggle left of that (filled when pinned); a read-only panel shows a Reset
 button instead. Delete asks whether to also delete the panel's nodes or keep them (moved
-up into the parent panel; `delete_panel` with `keep_nodes`). The box has a bottom-right
-resize triangle.
+up into the parent panel; `delete_panel` with `keep_nodes`). The box **auto-fits its
+contents in every direction** (like a group, including left/up of the declared origin)
+with `PANEL_PADDING`, and has a **square minimum size** (`PANEL_MIN_SIDE`); there is no
+manual resize handle.
 
 *Physics* is hierarchical (`_hierarchical_step`, `on_layout_tick`): node physics runs
 inside each panel in that panel's local frame (internal edges only); then, per parent,
@@ -231,8 +233,11 @@ re-qualifies its id, re-homes its edges (ownership is derived from ids) and re-p
 group membership, so a selected set moved into a panel keeps its groups. Refused (GUI
 snaps back) when the source or target panel is read-only. While a node is being dragged
 it is excluded from its panel's auto-grown bounds, so the source panel doesn't stretch
-under the cursor and steal the drop. Groups land in the panel that is the LCA of their
-members.
+under the cursor and steal the drop. After the rename the GUI immediately re-sends the
+moved nodes' positions under their *new* ids (`_reparent_after_drag`), because the
+debounced layout save still holds the old ids and would be ignored - otherwise the nodes
+bounce back to where they were picked up. Groups land in the panel that is the LCA of
+their members.
 
 *Creating a panel* (`Create Panel…`): with a selection, the new panel is fitted around
 the selected nodes' bounds; with none, a square opens in the middle of the viewport. The
@@ -508,8 +513,9 @@ approach for pure GUI behavior). "It passed pytest" is not proof an effect works
   `file::grp`, or the same id in two declarative files) render as **one** outline with the
   contributing groups' titles **stacked** (each in its own colour), via `_merged_groups()` /
   `_group_merge_key()` — all group geometry, headers, hit-testing and the +/- membership
-  buttons iterate the merged view. The colour chip and the `+`/`-` buttons sit on the
-  **right edge** of the group's box (mirroring the panel title row). Exact-member-set
+  buttons iterate the merged view. The colour chip, the `+`/`-` buttons and a settings
+  hamburger sit on the **right edge** of the group's box (hamburger rightmost; the
+  hamburger and clicking the title both open `show_group_settings_dialog`). Exact-member-set
   duplicates are already removed daemon-side
   (`_reconcile_declarative_duplicates`), so normally only genuinely-different same-id groups
   stack. The `+`/`-` buttons fan the change out to every group in the merge
