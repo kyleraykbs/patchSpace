@@ -300,6 +300,24 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # then the next node click adjusts that group's membership.
         self._group_pick_mode = None
 
+        # Panels: first-class container boxes (see main.py's panels).
+        # panel_id -> {id,parent,label,color,mode,readonly,writable,x,y,w,h,
+        # anchored,path,children}.  Placement is parent-relative; the
+        # canvas draws each box at the folded absolute origin.  The root
+        # panel ("") is the canvas itself and is not drawn.
+        self.panels: dict = {}
+        self.dragging_panel = None
+        self.drag_panel_start = (0.0, 0.0)
+        self.drag_panel_origin = (0.0, 0.0)
+        self._drag_panel_applied = (0.0, 0.0)
+        self.resizing_panel = None
+        self.resize_start = (0.0, 0.0)
+        self.resize_orig = (0.0, 0.0)
+        self._panel_geo_cache: dict = {}
+        # Armed by a panel header's +/- button to add/remove the next
+        # clicked node from that panel.
+        self._panel_pick_mode = None
+
         # font_size -> single line's pixel height (measured once via
         # wrapped_text_height(), see _single_line_height()). Used to
         # tell whether a header block actually needed to wrap onto
@@ -677,9 +695,78 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     # ---------- daemon state -> local model ----------
 
+    def _update_panels_from_daemon(self, daemon_panels):
+        """Refresh the local panel model from a get_nodes poll.  Panel
+        placement is authoritative on the daemon; we keep the local copy
+        while a panel is actively being dragged/resized."""
+        live = set()
+        for p in daemon_panels:
+            pid = p.get("id", "")
+            live.add(pid)
+            if pid == self.dragging_panel or pid == self.resizing_panel:
+                continue
+            self.panels[pid] = {
+                "id": pid,
+                "parent": p.get("parent", ""),
+                "label": p.get("label", ""),
+                "color": p.get("color", "#3584e4"),
+                "mode": p.get("mode", "read-write"),
+                "readonly": bool(p.get("readonly", False)),
+                "writable": bool(p.get("writable", True)),
+                "x": float(p.get("x", 0.0) or 0.0),
+                "y": float(p.get("y", 0.0) or 0.0),
+                "w": float(p.get("w", 420.0) or 420.0),
+                "h": float(p.get("h", 260.0) or 260.0),
+                "anchored": bool(p.get("anchored", False)),
+                "path": p.get("path"),
+                "children": list(p.get("children") or []),
+            }
+        for pid in list(self.panels):
+            if pid not in live:
+                del self.panels[pid]
+        self._panel_geo_cache.clear()
+
+    def _panel_absolute(self, panel_id):
+        """Absolute (x, y) top-left of a panel, folding ancestor offsets."""
+        x = y = 0.0
+        pid = panel_id
+        guard = 0
+        while pid and pid in self.panels and guard < 64:
+            panel = self.panels[pid]
+            x += panel["x"]
+            y += panel["y"]
+            pid = panel.get("parent", "")
+            guard += 1
+        return x, y
+
+    def _panel_member_nodes(self, panel_id):
+        prefix = panel_id + "::" if panel_id else ""
+        out = []
+        for nid in self.nodes:
+            if panel_id:
+                if nid.startswith(prefix):
+                    out.append(nid)
+            elif "::" not in nid:
+                out.append(nid)
+        return out
+
+    def _translate_panel_local(self, panel_id, dx, dy):
+        """Shift a panel's subtree in the local model: child panels store
+        parent-relative placement, nodes store absolute positions."""
+        prefix = panel_id + "::"
+        for pid, panel in self.panels.items():
+            if pid != panel_id and pid.startswith(prefix):
+                panel["x"] += dx
+                panel["y"] += dy
+        for nid, node in self.nodes.items():
+            if nid.startswith(prefix):
+                node["x"] += dx
+                node["y"] += dy
+
     def update_from_daemon(self, data):
         daemon_nodes = data.get("nodes", {})
         daemon_edges = data.get("edges", {})
+        self._update_panels_from_daemon(data.get("panels", []))
         # The daemon auto-loads the saved session on start-up; show the
         # same loading overlay the GUI would for an import it triggered,
         # raising it only on the False->True edge.
@@ -1460,6 +1547,71 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     return iter(((nid, node),))
         return reversed(self.nodes.items())
 
+    # ---------- panel hit tests ----------
+
+    def _panel_order_deepest_first(self):
+        return sorted(self.panels, key=lambda p: p.count("::"), reverse=True)
+
+    def find_panel_at(self, x, y):
+        for pid in self._panel_order_deepest_first():
+            if pid == "":
+                continue
+            rect = self._panel_rect(pid)
+            if rect is None:
+                continue
+            px, py, pw, ph = rect
+            if px <= x <= px + pw and py <= y <= py + ph:
+                return pid
+        return None
+
+    def find_panel_resize_at(self, x, y):
+        for pid in self._panel_order_deepest_first():
+            if pid == "":
+                continue
+            rect = self._panel_rect(pid)
+            if rect is None:
+                continue
+            x1, y1, x2, y2 = self._panel_header_rects(pid, rect)["resize"]
+            if x1 - 4 <= x <= x2 + 4 and y1 - 4 <= y <= y2 + 4:
+                return pid
+        return None
+
+    def find_panel_reset_at(self, x, y):
+        for pid, panel in self.panels.items():
+            if pid == "" or not panel.get("readonly"):
+                continue
+            rect = self._panel_rect(pid)
+            if rect is None:
+                continue
+            r = self._panel_header_rects(pid, rect)["reset"]
+            if r is not None and r[0] <= x <= r[2] and r[1] <= y <= r[3]:
+                return pid
+        return None
+
+    def find_panel_anchor_at(self, x, y):
+        for pid in self._panel_order_deepest_first():
+            if pid == "":
+                continue
+            rect = self._panel_rect(pid)
+            if rect is None:
+                continue
+            x1, y1, x2, y2 = self._panel_header_rects(pid, rect)["anchor"]
+            if x1 <= x <= x2 and y1 <= y <= y2:
+                return pid
+        return None
+
+    def find_panel_header_at(self, x, y):
+        for pid in self._panel_order_deepest_first():
+            if pid == "":
+                continue
+            rect = self._panel_rect(pid)
+            if rect is None:
+                continue
+            x1, y1, x2, y2 = self._panel_header_rects(pid, rect)["header"]
+            if x1 <= x <= x2 and y1 <= y <= y2:
+                return pid
+        return None
+
     def find_node_at(self, x, y):
         for nid, node in self._hit_nodes(x, y):
             if node["x"] <= x <= node["x"] + self.node_width(nid) and node["y"] <= y <= node[
@@ -1905,6 +2057,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
         draw_grid_background(cr, pal, self.pan_x, self.pan_y, self.zoom, w, h)
 
+        # Panels are the outermost containers, then group annotations.
+        self._draw_panel_boxes(cr, pal)
+
         # Group boxes sit behind the graph; their headers are drawn on
         # top of the nodes further down so the label stays clickable.
         self._draw_group_boxes(cr, pal)
@@ -1957,6 +2112,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
         # Group labels/ids/colour chips on top of the nodes.
         self._draw_group_headers(cr, pal)
+        # Panel headers/labels/reset/resize on the very top.
+        self._draw_panel_headers(cr, pal)
 
         if self.select_rect:
             x1, y1, x2, y2 = self.select_rect
@@ -2707,6 +2864,24 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             return
         self.grab_focus()
         wx, wy = self.to_world(x, y)
+
+        # Panel reset button (read-only panels) - re-apply the file state.
+        pid = self.find_panel_reset_at(wx, wy)
+        if pid is not None:
+            self._begin_load()
+            self.client.send({"command": "reset_panel", "panel_id": pid})
+            return
+        # Panel anchor toggle.
+        pid = self.find_panel_anchor_at(wx, wy)
+        if pid is not None:
+            panel = self.panels[pid]
+            panel["anchored"] = not panel.get("anchored", False)
+            self.client.send(
+                {"command": "set_panel_layout", "panel_id": pid,
+                 "anchored": panel["anchored"]}
+            )
+            self.queue_draw()
+            return
 
         # Group +/- buttons: arm a mode (click again to cancel).
         hit = self.find_group_action_at(wx, wy)
@@ -3754,6 +3929,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self.connecting_from = None
         self.detaching_edge = None
         self.dragging_node = None
+        self.dragging_panel = None
+        self.resizing_panel = None
         self.drag_node_starts = {}
         self.hover_target_node = None
         self.panning = False
@@ -3787,7 +3964,30 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
         # A group +/- mode is armed - the click is a membership pick,
         # handled entirely by on_click; never start a drag/pan under it.
-        if self._group_pick_mode is not None:
+        if self._group_pick_mode is not None or self._panel_pick_mode is not None:
+            return
+
+        # Panel resize handle / header: the panel's own affordances, above
+        # the canvas.  Handled before node hit-tests so the header strip is
+        # always draggable.
+        pid = self.find_panel_resize_at(wx, wy)
+        if pid is not None:
+            rect = self._panel_rect(pid)
+            self.resizing_panel = pid
+            self.resize_start = (wx, wy)
+            self.resize_orig = (rect[2], rect[3])
+            return
+        pid = self.find_panel_header_at(wx, wy)
+        if (
+            pid is not None
+            and self.find_panel_reset_at(wx, wy) is None
+            and self.find_panel_anchor_at(wx, wy) is None
+        ):
+            panel = self.panels[pid]
+            self.dragging_panel = pid
+            self.drag_panel_start = (wx, wy)
+            self.drag_panel_origin = (panel["x"], panel["y"])
+            self._drag_panel_applied = (0.0, 0.0)
             return
 
         # Inline controls (slider / checkboxes / three-dot menu / text
@@ -3961,6 +4161,37 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._set_selection(())
 
     def on_drag_update(self, gesture, offset_x, offset_y):
+        if self.resizing_panel is not None:
+            dx = offset_x / self.zoom
+            dy = offset_y / self.zoom
+            panel = self.panels.get(self.resizing_panel)
+            if panel is not None:
+                panel["w"] = max(140.0, self.resize_orig[0] + dx)
+                panel["h"] = max(90.0, self.resize_orig[1] + dy)
+                self._panel_geo_cache.pop(self.resizing_panel, None)
+                self.queue_draw()
+            return
+        if self.dragging_panel is not None:
+            dx = offset_x / self.zoom
+            dy = offset_y / self.zoom
+            panel = self.panels.get(self.dragging_panel)
+            if panel is not None:
+                panel["x"] = self.drag_panel_origin[0] + dx
+                panel["y"] = self.drag_panel_origin[1] + dy
+                desired = (
+                    panel["x"] - self.drag_panel_origin[0],
+                    panel["y"] - self.drag_panel_origin[1],
+                )
+                inc = (
+                    desired[0] - self._drag_panel_applied[0],
+                    desired[1] - self._drag_panel_applied[1],
+                )
+                if inc != (0.0, 0.0):
+                    self._translate_panel_local(self.dragging_panel, inc[0], inc[1])
+                    self._drag_panel_applied = desired
+                self._panel_geo_cache.clear()
+                self.queue_draw()
+            return
         if self._marquee_mode is not None:
             sx, sy = self._marquee_start_world
             ex = sx + offset_x / self.zoom
@@ -4112,6 +4343,32 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self.queue_draw()
 
     def _handle_drag_end(self, gesture, offset_x, offset_y):
+        if self.resizing_panel is not None:
+            panel = self.panels.get(self.resizing_panel)
+            if panel is not None:
+                self.client.send(
+                    {
+                        "command": "set_panel_layout",
+                        "panel_id": self.resizing_panel,
+                        "w": panel["w"],
+                        "h": panel["h"],
+                    }
+                )
+            self.resizing_panel = None
+            return
+        if self.dragging_panel is not None:
+            panel = self.panels.get(self.dragging_panel)
+            if panel is not None:
+                self.client.send(
+                    {
+                        "command": "set_panel_layout",
+                        "panel_id": self.dragging_panel,
+                        "x": panel["x"],
+                        "y": panel["y"],
+                    }
+                )
+            self.dragging_panel = None
+            return
         if self._marquee_mode is not None:
             # A modifier *click* (no sweep) toggles just the node under
             # the pointer; a modifier drag already updated the selection
@@ -5117,6 +5374,164 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             if rx1 <= x <= rx2 and ry1 <= y <= ry2:
                 return info["primary_gid"]
         return None
+
+    # ---------- panels ----------
+
+    PANEL_HEADER_H = 26
+    PANEL_TRIANGLE = 16
+    PANEL_PADDING = 26
+
+    @staticmethod
+    def _panel_local(pid):
+        return pid.rsplit("::", 1)[-1] if pid else "root"
+
+    def _panel_rect(self, pid):
+        """(x, y, w, h) absolute box for a panel: its explicit placement,
+        auto-grown to contain its member nodes and child panels."""
+        cached = self._panel_geo_cache.get(pid)
+        if cached is not None:
+            return cached
+        panel = self.panels.get(pid)
+        if panel is None:
+            return None
+        ax, ay = self._panel_absolute(pid)
+        w = float(panel.get("w", 420.0))
+        h = float(panel.get("h", 260.0))
+        minx = miny = maxx = maxy = None
+        for nid in self._panel_member_nodes(pid):
+            node = self.nodes.get(nid)
+            if node is None:
+                continue
+            nx, ny = node["x"], node["y"]
+            nr, nb = nx + self.node_width(nid), ny + self.node_height(nid)
+            minx = nx if minx is None else min(minx, nx)
+            miny = ny if miny is None else min(miny, ny)
+            maxx = nr if maxx is None else max(maxx, nr)
+            maxy = nb if maxy is None else max(maxy, nb)
+        for child in panel.get("children", []):
+            cr_rect = self._panel_rect(child)
+            if cr_rect is None:
+                continue
+            cx, cy, cw, ch = cr_rect
+            minx = cx if minx is None else min(minx, cx)
+            miny = cy if miny is None else min(miny, cy)
+            maxx = cx + cw if maxx is None else max(maxx, cx + cw)
+            maxy = cy + ch if maxy is None else max(maxy, cy + ch)
+        if minx is not None:
+            w = max(w, (maxx - ax) + self.PANEL_PADDING)
+            h = max(h, (maxy - ay) + self.PANEL_PADDING)
+        rect = (ax, ay, w, h)
+        self._panel_geo_cache[pid] = rect
+        return rect
+
+    def _panel_header_rects(self, pid, rect):
+        x, y, w, h = rect
+        header = (x, y, x + w, y + self.PANEL_HEADER_H)
+        resize = (
+            x + w - self.PANEL_TRIANGLE, y + h - self.PANEL_TRIANGLE,
+            x + w, y + h,
+        )
+        reset = None
+        if self.panels[pid].get("readonly"):
+            reset = (x + w - 22, y + 4, x + w - 6, y + self.PANEL_HEADER_H - 4)
+        anchor = (x + 6, y + 5, x + 20, y + self.PANEL_HEADER_H - 5)
+        return {"header": header, "resize": resize, "reset": reset, "anchor": anchor}
+
+    def _draw_panel_grid(self, cr, x, y, w, h, rgb):
+        spacing = 40
+        cr.set_source_rgba(rgb[0], rgb[1], rgb[2], 0.35)
+        cr.set_line_width(1.0 / max(self.zoom, 1e-6))
+        gx = math.ceil(x / spacing) * spacing
+        while gx <= x + w:
+            cr.move_to(gx, y)
+            cr.line_to(gx, y + h)
+            gx += spacing
+        gy = math.ceil(y / spacing) * spacing
+        while gy <= y + h:
+            cr.move_to(x, gy)
+            cr.line_to(x + w, gy)
+            gy += spacing
+        cr.stroke()
+
+    def _draw_panel_boxes(self, cr, pal):
+        # Deepest first so a nested panel's box sits on top.
+        for pid in sorted(self.panels, key=lambda p: p.count("::"), reverse=True):
+            if pid == "":
+                continue
+            rect = self._panel_rect(pid)
+            if rect is None:
+                continue
+            x, y, w, h = rect
+            panel = self.panels[pid]
+            r, g, b = self._hex_to_rgb(panel.get("color"))
+            cr.save()
+            draw_rounded_rect(cr, x, y, w, h, 12)
+            cr.clip()
+            cr.set_source_rgba(r, g, b, 0.10)
+            cr.rectangle(x, y, w, h)
+            cr.fill()
+            self._draw_panel_grid(cr, x, y, w, h, (r, g, b))
+            cr.restore()
+            cr.set_source_rgb(r, g, b)
+            cr.set_line_width(2.0)
+            if panel.get("readonly"):
+                cr.set_dash([6.0, 4.0], 0.0)
+            draw_rounded_rect(cr, x, y, w, h, 12)
+            cr.stroke()
+            cr.set_dash([])
+
+    def _draw_panel_headers(self, cr, pal):
+        for pid, panel in self.panels.items():
+            if pid == "":
+                continue
+            rect = self._panel_rect(pid)
+            if rect is None:
+                continue
+            x, y, w, h = rect
+            geo = self._panel_header_rects(pid, rect)
+            r, g, b = self._hex_to_rgb(panel.get("color"))
+            cr.set_source_rgba(r, g, b, 0.92)
+            draw_rounded_rect(cr, x, y, w, self.PANEL_HEADER_H, 12)
+            cr.fill()
+            cr.set_source_rgb(0.05, 0.05, 0.06)
+            cr.select_font_face("sans")
+            cr.set_font_size(12)
+            cr.move_to(x + 26, y + 17)
+            cr.show_text(panel.get("label") or self._panel_local(pid))
+            cr.set_font_size(9)
+            cr.set_source_rgba(0.05, 0.05, 0.06, 0.7)
+            cr.move_to(x + 26, y + self.PANEL_HEADER_H + 11)
+            cr.show_text(self._panel_local(pid))
+            # Anchor glyph.
+            ax1, ay1, ax2, ay2 = geo["anchor"]
+            cr.set_source_rgb(0.05, 0.05, 0.06)
+            cr.set_line_width(1.3)
+            cr.arc((ax1 + ax2) / 2, ay1 + 3, 3, 0, 2 * math.pi)
+            cr.stroke()
+            cr.move_to((ax1 + ax2) / 2, ay1 + 6)
+            cr.line_to((ax1 + ax2) / 2, ay2 - 1)
+            cr.stroke()
+            if panel.get("anchored"):
+                cr.arc((ax1 + ax2) / 2, ay1 + 3, 5, 0, 2 * math.pi)
+                cr.stroke()
+            # Reset button (read-only panels).
+            if geo["reset"] is not None:
+                rx1, ry1, rx2, ry2 = geo["reset"]
+                draw_rounded_rect(cr, rx1, ry1, rx2 - rx1, ry2 - ry1, 3)
+                cr.set_source_rgb(0.96, 0.96, 0.96)
+                cr.fill()
+                cr.set_source_rgb(0.1, 0.1, 0.12)
+                cr.set_line_width(1.4)
+                cr.arc((rx1 + rx2) / 2, (ry1 + ry2) / 2, 5, -1.2, 2.2)
+                cr.stroke()
+            # Resize triangle bottom-right.
+            tx1, ty1, tx2, ty2 = geo["resize"]
+            cr.set_source_rgba(r, g, b, 0.95)
+            cr.move_to(tx2, ty2)
+            cr.line_to(tx1, ty2)
+            cr.line_to(tx2, ty1)
+            cr.close_path()
+            cr.fill()
 
     def _draw_group_boxes(self, cr, pal):
         # Draw enclosing groups first (most nested children first), so a
