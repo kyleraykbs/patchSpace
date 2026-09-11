@@ -1119,11 +1119,14 @@ class PatchBayDaemon:
         self._panel_mtimes = panels.snapshot(self._panel_dir_paths())
         self._dirty = True
 
-    def _build_panels_from_space(self, imperative_only: bool = False
+    def _build_panels_from_space(self, imperative_only: bool = False,
+                                 use_snapshots: bool = True
                                  ) -> Dict[str, panels.Panel]:
         """Serialize the live graph into a panel tree.  Read-only panels
         keep their frozen snapshot (runtime edits are not persisted);
-        read-write panels and the root are rebuilt from live state."""
+        read-write panels and the root are rebuilt from live state.
+        ``use_snapshots=False`` rebuilds read-only panels from live state
+        too (for the "copy/save current state" and clone actions)."""
         out: Dict[str, panels.Panel] = {}
 
         def ensure(pid: str) -> panels.Panel:
@@ -1145,8 +1148,9 @@ class PatchBayDaemon:
                     color=panels.DEFAULT_COLOR, mode=panels.MODE_RW,
                     config={"nodes": {}, "edges": [], "panels": [], "groups": []},
                 )
-            # Read-only panels are not rebuilt from live state.
-            if panel.is_readonly and pid in self._readonly_snapshots:
+            # Read-only panels are not rebuilt from live state (unless the
+            # caller explicitly asks for the current state).
+            if use_snapshots and panel.is_readonly and pid in self._readonly_snapshots:
                 out[pid] = self._readonly_snapshots[pid]
                 return out[pid]
             out[pid] = panel
@@ -1401,6 +1405,76 @@ class PatchBayDaemon:
             "label": panel.label,
             "color": panel.color,
         }
+
+    def _cmd_export_panel(self, cmd: dict) -> dict:
+        """Return a panel's *current* file payload (live state, even for a
+        read-only panel) for the GUI's copy/save actions."""
+        panel_id = cmd.get("panel_id", "")
+        if panel_id not in self.panels:
+            return {"status": "error", "message": f"no panel {panel_id!r}"}
+        tree = self._build_panels_from_space(use_snapshots=False)
+        panel = tree.get(panel_id)
+        if panel is None:
+            return {"status": "error", "message": f"no panel {panel_id!r}"}
+        return {
+            "status": "ok",
+            "panel_id": panel_id,
+            "payload": panels.build_payload(panel),
+        }
+
+    def _cmd_clone_panel(self, cmd: dict) -> dict:
+        """Duplicate a panel (its current live nodes/edges/groups) into a
+        new panel file, offset slightly, then reload so the copy is live."""
+        panel_id = cmd.get("panel_id", "")
+        src = self.panels.get(panel_id)
+        if panel_id == "" or src is None:
+            return {"status": "error", "message": f"no panel {panel_id!r}"}
+        name = (cmd.get("name") or "").strip()
+        if not name:
+            return {"status": "error", "message": "name required"}
+        stem = self._panel_slug(name)
+        if stem in self.panels:
+            return {"status": "error", "message": f"panel {stem!r} already exists"}
+        src_dir = None
+        if src.path and src.writable and not src.is_readonly:
+            src_dir = os.path.dirname(src.path)
+        target_dir = src_dir if src_dir and os.path.isdir(src_dir) else next(
+            (d for d, w in self.panel_dirs if d and w), None
+        )
+        if target_dir is None:
+            return {"status": "error", "message": "no writable panel directory"}
+        path = os.path.join(target_dir, stem + panels.PANEL_SUFFIX)
+        live = self._build_panels_from_space(use_snapshots=False).get(panel_id)
+        if live is None:
+            return {"status": "error", "message": f"no panel {panel_id!r}"}
+        clone = panels.Panel(
+            id=stem, parent=src.parent, label=name, color=src.color,
+            mode=panels.MODE_RW, x=src.x + 40.0, y=src.y + 40.0,
+            w=src.w, h=src.h, path=path, writable=True,
+            config={
+                "nodes": dict(live.config.get("nodes") or {}),
+                "edges": list(live.config.get("edges") or []),
+                "panels": [],
+                "groups": list(live.config.get("groups") or []),
+            },
+        )
+        panels.write_file(path, clone)
+        # Persist the parent's child list so the reload finds the clone.
+        parent = self.panels.get(src.parent or "")
+        if parent is not None:
+            if stem not in parent.config.setdefault("panels", []):
+                parent.config["panels"].append(stem)
+            if parent.path:
+                parent_now = self._build_panels_from_space(
+                    use_snapshots=False
+                ).get(parent.id)
+                if parent_now is not None:
+                    if stem not in parent_now.config.setdefault("panels", []):
+                        parent_now.config["panels"].append(stem)
+                    panels.write_file(parent.path, parent_now)
+        # Bring the clone's nodes up.
+        self._cmd_reload_panels({})
+        return {"status": "ok", "panel_id": stem, "path": path}
 
     def _cmd_reload_panels(self, cmd: dict) -> dict:
         with self._panel_lock:
@@ -3978,6 +4052,10 @@ class PatchBayDaemon:
                 response = self._cmd_delete_panel(cmd)
             elif command == "edit_panel":
                 response = self._cmd_edit_panel(cmd)
+            elif command == "export_panel":
+                response = self._cmd_export_panel(cmd)
+            elif command == "clone_panel":
+                response = self._cmd_clone_panel(cmd)
             elif command == "connect_ports":
                 response = self._cmd_connect_ports(cmd)
             elif command == "disconnect_ports":

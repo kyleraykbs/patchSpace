@@ -319,3 +319,34 @@ def test_delete_panel_keep_nodes_moves_them_to_parent(tmp_path):
     assert "a" in tree[panels.ROOT_ID].config["nodes"]
     listing = d._cmd_list_panels({})
     assert all(f["id"] != "kit" for f in listing["files"])
+
+
+def test_export_panel_returns_live_state(tmp_path):
+    d, root, pdir = _daemon(tmp_path)
+    d.panels = d._load_panels_tree()
+    d.handle_command({"command": "add_node", "node_type": "regex_input",
+                      "node_id": "a", "config": {"pattern": ".*"}})
+    assert d._cmd_create_panel({"name": "kit", "node_ids": ["a"]})["status"] == "ok"
+    # A runtime edit not yet persisted.
+    d.space.nodes["kit::a"].pattern = "edited"
+    resp = d._cmd_export_panel({"panel_id": "kit"})
+    assert resp["status"] == "ok", resp
+    assert resp["payload"]["type"] == "panel"
+    assert resp["payload"]["config"]["nodes"]["a"]["params"]["pattern"] == "edited"
+
+
+def test_clone_panel_creates_a_new_live_panel(tmp_path):
+    d, root, pdir = _daemon(tmp_path)
+    d.panels = d._load_panels_tree()
+    d.handle_command({"command": "add_node", "node_type": "regex_input",
+                      "node_id": "a", "config": {"pattern": ".*"}})
+    assert d._cmd_create_panel({"name": "kit", "node_ids": ["a"]})["status"] == "ok"
+
+    resp = d._cmd_clone_panel({"panel_id": "kit", "name": "Kit Copy"})
+    assert resp["status"] == "ok", resp
+    stem = resp["panel_id"]
+    assert os.path.isfile(os.path.join(pdir, stem + ".json"))
+    assert stem in d.panels
+    # The clone's node is live and namespaced under the new panel.
+    assert f"{stem}::a" in d.space.nodes
+    assert "kit::a" in d.space.nodes

@@ -199,16 +199,20 @@ default) reads and writes. The GUI draws a panel as a tinted-grid box (grid shar
 world grid's origin/spacing so it overlays it). Its title floats just above the box like a
 group's title (panel colour, zoom-scaled font clamped so it stops growing past a point).
 A left-drag on the title *or any empty panel background* moves the panel; on the right of
-the title row are three rounded-square buttons in the
-same outline style as the group +/- buttons: the settings "hamburger" (rename/recolour via
-`edit_panel`) at the very right, a delete (trash) button to its left, and the physics-stop
-(pin/pause) toggle left of that (filled when pinned); a read-only panel shows a Reset
-button instead. Delete asks whether to also delete the panel's nodes or keep them (moved
-up into the parent panel; `delete_panel` with `keep_nodes`). The box **tightly auto-fits
-its contents** in every direction (like a group) with `PANEL_PADDING`: member nodes,
-child panels, and the outlines **and title blocks** of groups owned by the panel (all
-members inside it), so group titles/edges are never clipped. It has a **square minimum
-size** (`PANEL_MIN_SIDE`, centred on the content); there is no manual resize handle. While
+the title row are rounded-square buttons in the same outline style as the group +/-
+buttons: the physics-stop (pin/pause) toggle, then a delete (trash) button on writable
+panels (a Reset button on read-only ones), and the **hamburger menu** at the very edge.
+The hamburger opens `Settings\u2026` (writable; rename/recolour via `edit_panel`),
+`Duplicate\u2026` (asks for a name, then `clone_panel` copies the panel's *current* nodes into
+a new file and reloads so the copy is live), and `Copy as JSON` / `Save to File\u2026`
+(which ask the daemon for the panel's current state via `export_panel`, so they work on
+read-only panels too). Delete asks whether to also delete the panel's nodes or keep them
+(moved up into the parent panel; `delete_panel` with `keep_nodes`). The box **tightly
+auto-fits its contents** in every direction (like a group) with `PANEL_PADDING`: member
+nodes, child panels, and the outlines **and title blocks** of groups owned by the panel
+(all members inside it), so group titles/edges are never clipped. It has a **square
+minimum size** (`PANEL_MIN_SIDE`, centred on the content); there is no manual resize
+handle. While
 a node is being dragged, its panel is held at the size it had when the drag began
 (`_panel_drag_baseline`) and may only **grow** toward the node, capped at
 `PANEL_DRAG_GROW` past the baseline - so picking a node up never shrinks the box, nudging
@@ -255,8 +259,8 @@ the selected nodes' bounds; with none, a square opens in the middle of the viewp
 daemon takes the placement (`x/y/w/h`) in `create_panel`.
 
 Commands: `list_panels`, `reload_panels`, `create_panel`, `delete_panel`, `edit_panel`,
-`set_panel_layout`, `move_nodes`, `reset_panel`; `get_nodes` carries `panels` and per-node
-provenance is the id prefix.
+`export_panel`, `clone_panel`, `set_panel_layout`, `move_nodes`, `reset_panel`; `get_nodes`
+carries `panels` and per-node provenance is the id prefix.
 
 **Canvas selection.** Selection is a plain `set` of node ids. A plain left press on a node
 selects it (replacing the selection unless it is already part of a multi-selection, so a

@@ -787,6 +787,8 @@ class MainWindow(Gtk.ApplicationWindow):
                     self.ps_widget.on_export_config(resp["config"])
                 elif "files" in resp and "directories" in resp:
                     self.ps_widget.on_panels_list(resp)
+                elif "payload" in resp and "panel_id" in resp:
+                    self.ps_widget.on_panel_export(resp)
                 elif "nodes" in resp:
                     self.ps_widget.update_from_daemon(resp)
             except Exception:

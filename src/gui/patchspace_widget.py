@@ -258,6 +258,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._pending_panel_list = False
         self._panel_files = []
         self._panel_dialog = None
+        # (panel_id, "copy"|"save") while waiting for an export_panel reply.
+        self._pending_panel_export = None
         # Panels whose local placement is ahead of the daemon (physics /
         # drag): pid -> (x, y, w, h, anchored).  See
         # _update_panels_from_daemon.
@@ -1757,14 +1759,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 return pid
         return None
 
-    def find_panel_settings_at(self, x, y):
+    def find_panel_menu_at(self, x, y):
         for pid in self._panel_order_deepest_first():
             if pid == "":
                 continue
             rect = self._panel_rect(pid)
             if rect is None:
                 continue
-            x1, y1, x2, y2 = self._panel_header_rects(pid, rect)["settings"]
+            x1, y1, x2, y2 = self._panel_header_rects(pid, rect)["menu"]
             if x1 <= x <= x2 and y1 <= y <= y2:
                 return pid
         return None
@@ -3009,10 +3011,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self.confirm_delete_panel_with_nodes(pid)
             return
 
-        # Panel settings (rename / recolour).
-        pid = self.find_panel_settings_at(wx, wy)
+        # Panel hamburger menu.
+        pid = self.find_panel_menu_at(wx, wy)
         if pid is not None:
-            self.show_panel_settings_dialog(pid)
+            self._show_panel_menu(pid, x, y)
             return
 
         # Group settings hamburger (rightmost in the group row).
@@ -3860,6 +3862,116 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     def _confirm_delete_panel(self, entry, parent):
         self.confirm_delete_panel_with_nodes(entry.get("id"))
 
+    def _show_panel_menu(self, panel_id, x, y):
+        """The panel hamburger dropdown: settings (writable), duplicate,
+        and copy/save the panel's current state as JSON."""
+        panel = self.panels.get(panel_id)
+        if panel is None:
+            return
+        popover = Gtk.Popover()
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        box.set_margin_top(6)
+        box.set_margin_bottom(6)
+        box.set_margin_start(6)
+        box.set_margin_end(6)
+        box.set_size_request(200, -1)
+
+        def add(label, cb):
+            btn = Gtk.Button(label=label)
+            btn.get_child().set_wrap(False)
+            btn.connect("clicked", lambda _b: (popover.popdown(), cb()))
+            box.append(btn)
+
+        if panel.get("writable") and not panel.get("readonly"):
+            add("Settings\u2026", lambda: self.show_panel_settings_dialog(panel_id))
+        add("Duplicate\u2026", lambda: self._prompt_clone_panel(panel_id))
+        box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+        add("Copy as JSON", lambda: self._export_panel(panel_id, "copy"))
+        add("Save to File\u2026", lambda: self._export_panel(panel_id, "save"))
+
+        popover.set_child(box)
+        self.popup_context_menu(popover, x, y)
+
+    def _prompt_clone_panel(self, panel_id):
+        """Ask for a name and duplicate the panel (and its current nodes)
+        into a new file."""
+        panel = self.panels.get(panel_id)
+        if panel is None:
+            return
+        dialog = Gtk.Dialog(
+            title="Duplicate Panel", transient_for=self.get_root(), modal=True
+        )
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Duplicate", Gtk.ResponseType.OK)
+        box = dialog.get_content_area()
+        box.set_spacing(6)
+        for side in ("top", "bottom", "start", "end"):
+            getattr(box, f"set_margin_{side}")(12)
+        box.append(Gtk.Label(label="New panel name"))
+        entry = Gtk.Entry()
+        entry.set_text((panel.get("label") or self._panel_local(panel_id)) + " copy")
+        box.append(entry)
+
+        def on_response(dlg, response):
+            if response == Gtk.ResponseType.OK:
+                name = entry.get_text().strip()
+                if name:
+                    self._begin_load()
+                    self.client.send(
+                        {
+                            "command": "clone_panel",
+                            "panel_id": panel_id,
+                            "name": name,
+                        }
+                    )
+            dlg.destroy()
+
+        dialog.connect("response", on_response)
+        dialog.present()
+
+    def _export_panel(self, panel_id, action):
+        """Ask the daemon for the panel's current JSON, then either copy it
+        to the clipboard or save it to a file."""
+        self._pending_panel_export = (panel_id, action)
+        self.client.send({"command": "export_panel", "panel_id": panel_id})
+
+    def on_panel_export(self, resp):
+        pending = getattr(self, "_pending_panel_export", None)
+        self._pending_panel_export = None
+        if pending is None:
+            return
+        panel_id, action = pending
+        payload = resp.get("payload")
+        if not isinstance(payload, dict):
+            self._show_error_dialog("Could not read the panel's state.")
+            return
+        text = json.dumps(payload, indent=2, sort_keys=True)
+        if action == "copy":
+            clipboard = Gdk.Display.get_default().get_clipboard()
+            provider = Gdk.ContentProvider.new_for_value(
+                GObject.Value(GObject.TYPE_STRING, text)
+            )
+            clipboard.set_content(provider)
+            return
+        panel = self.panels.get(panel_id, {})
+        name = panel.get("label") or self._panel_local(panel_id)
+        name = "".join(
+            c if (c.isalnum() or c in "-_.") else "_" for c in str(name)
+        ) or "panel"
+
+        def on_path(path):
+            if not path:
+                return
+            try:
+                with open(path, "w") as f:
+                    f.write(text)
+            except OSError as exc:
+                self._show_error_dialog(f"Could not save file: {exc}")
+
+        save_file(
+            self.get_root(), "Save Panel", name + ".json", on_path
+        )
+
     def _on_panels_dialog_response(self, dialog, response):
         if response == Gtk.ResponseType.APPLY:
             self._pending_panel_list = True
@@ -3993,7 +4105,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             pid is not None
             and self.find_panel_reset_at(wx, wy) is None
             and self.find_panel_anchor_at(wx, wy) is None
-            and self.find_panel_settings_at(wx, wy) is None
+            and self.find_panel_menu_at(wx, wy) is None
             and self.find_panel_delete_at(wx, wy) is None
         ):
             panel = self.panels[pid]
@@ -5666,9 +5778,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     def _panel_header_rects(self, pid, rect):
         """Hit/draw geometry for a panel's title row, which sits just above
         the box (like a group's title).  The title is on the left; the
-        action buttons are on the right, the settings/reset button at the
-        very edge with the physics-stop toggle immediately to its left.
-        Buttons are rounded squares that scale with the title font."""
+        action buttons are on the right, the hamburger menu at the very
+        edge, with the delete (or Reset on read-only) button and then the
+        physics-stop toggle to its left.  Buttons are rounded squares that
+        scale with the title font."""
         x, y, w, h = rect
         panel = self.panels[pid]
         font = self._panel_title_font()
@@ -5680,23 +5793,22 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         gap = max(18.0, font * 1.2)
         top = y - th - gap
         right_edge = x + w
+        menu = (right_edge - d, top, right_edge, top + d)
         reset = None
-        settings = None
         delete = None
-        btn_left = right_edge
+        btn_left = menu[0]
         if panel.get("readonly"):
-            reset = (right_edge - d, top, right_edge, top + d)
+            reset = (btn_left - gap - d, top, btn_left - gap, top + d)
             btn_left = reset[0]
         elif panel.get("writable"):
-            settings = (right_edge - d, top, right_edge, top + d)
-            delete = (settings[0] - gap - d, top, settings[0] - gap, top + d)
+            delete = (btn_left - gap - d, top, btn_left - gap, top + d)
             btn_left = delete[0]
         anchor = (btn_left - gap - d, top, btn_left - gap, top + d)
         title = (x, top, max(x, anchor[0] - gap), top + th)
         header = (x, top, right_edge, top + d)
         return {
             "header": header, "reset": reset,
-            "anchor": anchor, "settings": settings, "delete": delete,
+            "anchor": anchor, "menu": menu, "delete": delete,
             "title": title,
         }
 
@@ -5774,16 +5886,16 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     cr, pal, geo["delete"], (r, g, b),
                     active=False, glyph="trash",
                 )
-            if geo["settings"] is not None:
-                self._draw_panel_button(
-                    cr, pal, geo["settings"], (r, g, b),
-                    active=False, glyph="hamburger",
-                )
-            elif geo["reset"] is not None:
+            if geo.get("reset") is not None:
                 self._draw_panel_button(
                     cr, pal, geo["reset"], (r, g, b),
                     active=False, glyph="reset",
                 )
+            # Hamburger menu at the very right of the row.
+            self._draw_panel_button(
+                cr, pal, geo["menu"], (r, g, b),
+                active=False, glyph="hamburger",
+            )
 
     def _draw_panel_button(self, cr, pal, rect, color, active=False,
                            glyph="hamburger"):
