@@ -212,7 +212,9 @@ auto-fits its contents** in every direction (like a group) with `PANEL_PADDING`:
 nodes, child panels, and the outlines **and title blocks** of groups owned by the panel
 (all members inside it), so group titles/edges are never clipped. It has a **square
 minimum size** (`PANEL_MIN_SIDE`, centred on the content); there is no manual resize
-handle. While
+handle. Each node living in a non-root panel also gets a tiny panel-coloured chip at its
+bottom-left corner (root-level nodes get none), drawn in `on_draw` from
+`_panel_of_node`/the panel's colour. While
 a node is being dragged, its panel is held at the size it had when the drag began
 (`_panel_drag_baseline`) and may only **grow** toward the node, capped at
 `PANEL_DRAG_GROW` past the baseline - so picking a node up never shrinks the box, nudging

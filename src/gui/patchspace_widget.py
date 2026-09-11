@@ -2258,6 +2258,27 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         for nid, node in self.nodes.items():
             self._draw_node(cr, pal, nid, node)
 
+        # A tiny panel-colour chip at each node's bottom-left corner while
+        # the node lives in a non-root panel (root-level nodes get none).
+        for nid, node in self.nodes.items():
+            pid = self._panel_of_node(nid)
+            if not pid:
+                continue
+            panel = self.panels.get(pid)
+            if panel is None:
+                continue
+            r, g, b = self._hex_to_rgb(panel.get("color", "#3584e4"))
+            side = 9.0
+            px = node["x"]
+            py = node["y"] + self.node_height(nid) + 3
+            draw_rounded_rect(cr, px, py, side, side, 2.5)
+            cr.set_source_rgb(r, g, b)
+            cr.fill()
+            cr.set_source_rgba(0.0, 0.0, 0.0, 0.35)
+            cr.set_line_width(1.0)
+            draw_rounded_rect(cr, px, py, side, side, 2.5)
+            cr.stroke()
+
         # Highlight the current marquee selection, then the rubber-band
         # rectangle itself, above the nodes so both stay visible.
         for nid in self.selected_nodes:
