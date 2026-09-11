@@ -1311,25 +1311,55 @@ class PatchBayDaemon:
         return {"status": "ok", "panel_id": stem, "moved": moved, "path": path}
 
     def _cmd_delete_panel(self, cmd: dict) -> dict:
+        """Delete a panel file.
+
+        ``keep_nodes`` (default False) removes just the panel container and
+        moves its direct nodes up into the parent panel (re-qualified);
+        otherwise the panel's whole subtree - nodes and child panels - is
+        removed with it."""
         panel_id = cmd.get("panel_id", "")
         panel = self.panels.get(panel_id)
         if not panel_id or panel is None:
             return {"status": "error", "message": f"no panel {panel_id!r}"}
         if panel.is_readonly or not panel.writable:
             return {"status": "error", "message": f"panel {panel_id!r} is read-only"}
+        keep_nodes = bool(cmd.get("keep_nodes"))
+        parent_id = panel.parent or ""
         prefix = panel_id + panels.NAMESPACE_SEP
         with self._lock:
-            for nid in [
-                n for n in self.space.nodes
-                if n == panel_id or n.startswith(prefix)
-            ]:
-                self.space.remove_node(nid)
-            for pid in [
-                p for p in self.panels
-                if p == panel_id or p.startswith(prefix)
-            ]:
-                self.panels.pop(pid, None)
-            parent = self.panels.get(panel.parent or "")
+            if keep_nodes:
+                if panel.children:
+                    return {
+                        "status": "error",
+                        "message": "panel has child panels; delete them first",
+                    }
+                for nid in [
+                    n for n in self.space.nodes
+                    if panels.panel_of(n) == panel_id
+                ]:
+                    new_id = panels.make_id(parent_id, panels.local_of(nid))
+                    if new_id == nid or new_id in self.space.nodes:
+                        continue
+                    try:
+                        self._rename_owned_node(nid, new_id)
+                    except (KeyError, ValueError) as exc:
+                        logger.warning(
+                            "delete_panel keep %r -> %r failed: %s",
+                            nid, new_id, exc,
+                        )
+                self.panels.pop(panel_id, None)
+            else:
+                for nid in [
+                    n for n in self.space.nodes
+                    if n == panel_id or n.startswith(prefix)
+                ]:
+                    self.space.remove_node(nid)
+                for pid in [
+                    p for p in self.panels
+                    if p == panel_id or p.startswith(prefix)
+                ]:
+                    self.panels.pop(pid, None)
+            parent = self.panels.get(parent_id)
             if parent is not None:
                 local = panels.local_of(panel_id)
                 parent.config["panels"] = [
@@ -1340,10 +1370,13 @@ class PatchBayDaemon:
                 os.remove(panel.path)
             except OSError as exc:
                 logger.warning("Could not delete panel file %r: %s", panel.path, exc)
+        # Refresh the in-memory tree so list_panels reflects the moved or
+        # removed nodes immediately.
+        self._install_panels(self._build_panels_from_space())
         self._write_panels()
         self._dirty = True
         self._wake_ticker()
-        return {"status": "ok", "panel_id": panel_id}
+        return {"status": "ok", "panel_id": panel_id, "kept_nodes": keep_nodes}
 
     def _cmd_edit_panel(self, cmd: dict) -> dict:
         """Change a writable panel's display label and/or colour."""

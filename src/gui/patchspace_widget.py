@@ -1752,6 +1752,18 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 return pid
         return None
 
+    def find_panel_delete_at(self, x, y):
+        for pid in self._panel_order_deepest_first():
+            if pid == "":
+                continue
+            rect = self._panel_rect(pid)
+            if rect is None:
+                continue
+            r = self._panel_header_rects(pid, rect).get("delete")
+            if r is not None and r[0] <= x <= r[2] and r[1] <= y <= r[3]:
+                return pid
+        return None
+
     def find_node_at(self, x, y):
         for nid, node in self._hit_nodes(x, y):
             if node["x"] <= x <= node["x"] + self.node_width(nid) and node["y"] <= y <= node[
@@ -2973,6 +2985,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self.queue_draw()
             return
 
+        # Panel delete (asks whether to keep the nodes).
+        pid = self.find_panel_delete_at(wx, wy)
+        if pid is not None:
+            self.confirm_delete_panel_with_nodes(pid)
+            return
+
         # Panel settings (rename / recolour).
         pid = self.find_panel_settings_at(wx, wy)
         if pid is not None:
@@ -3756,32 +3774,50 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._begin_load()
         self.client.send({"command": "reset_panel", "panel_id": entry.get("id")})
 
-    def _confirm_delete_panel(self, entry, parent):
-        confirm = Gtk.AlertDialog()
-        confirm.set_modal(True)
-        confirm.set_message(f"Delete panel {entry.get('label', entry.get('id'))}?")
-        confirm.set_detail(
-            "Every node and edge defined by this panel will be removed."
+    def confirm_delete_panel_with_nodes(self, panel_id):
+        """Ask whether to delete a panel's nodes too or move them up to the
+        parent panel, then send the delete."""
+        panel = self.panels.get(panel_id)
+        if panel is None:
+            return
+        label = panel.get("label") or self._panel_local(panel_id)
+        dialog = Gtk.AlertDialog()
+        dialog.set_modal(True)
+        dialog.set_message(f"Delete panel {label}?")
+        dialog.set_detail(
+            "Delete its nodes too, or keep them by moving them up into the "
+            "parent panel."
         )
-        confirm.set_buttons(["Cancel", "Delete"])
-        confirm.set_cancel_button(0)
-        confirm.set_default_button(1)
-        confirm.choose(
-            parent,
+        # 0 = cancel, 1 = keep nodes, 2 = delete nodes.
+        dialog.set_buttons(["Cancel", "Keep Nodes", "Delete Nodes"])
+        dialog.set_cancel_button(0)
+        dialog.set_default_button(1)
+        dialog.choose(
+            self.get_root(),
             None,
-            lambda d, result, e=entry: self._on_delete_panel_chosen(d, result, e),
+            lambda d, result, pid=panel_id: self._on_delete_panel_choice(
+                d, result, pid
+            ),
         )
 
-    def _on_delete_panel_chosen(self, dialog, result, entry):
+    def _on_delete_panel_choice(self, dialog, result, panel_id):
         try:
             index = dialog.choose_finish(result)
         except GLib.Error:
             return
-        if index == 1:
-            self._begin_load()
-            self.client.send(
-                {"command": "delete_panel", "panel_id": entry.get("id")}
-            )
+        if index == 0:
+            return
+        self._begin_load()
+        self.client.send(
+            {
+                "command": "delete_panel",
+                "panel_id": panel_id,
+                "keep_nodes": index == 1,
+            }
+        )
+
+    def _confirm_delete_panel(self, entry, parent):
+        self.confirm_delete_panel_with_nodes(entry.get("id"))
 
     def _on_panels_dialog_response(self, dialog, response):
         if response == Gtk.ResponseType.APPLY:
@@ -3926,6 +3962,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             and self.find_panel_reset_at(wx, wy) is None
             and self.find_panel_anchor_at(wx, wy) is None
             and self.find_panel_settings_at(wx, wy) is None
+            and self.find_panel_delete_at(wx, wy) is None
         ):
             panel = self.panels[pid]
             self.dragging_panel = pid
@@ -5507,13 +5544,15 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         right_edge = x + w
         reset = None
         settings = None
+        delete = None
         btn_left = right_edge
         if panel.get("readonly"):
             reset = (right_edge - d, top, right_edge, top + d)
             btn_left = reset[0]
         elif panel.get("writable"):
             settings = (right_edge - d, top, right_edge, top + d)
-            btn_left = settings[0]
+            delete = (settings[0] - gap - d, top, settings[0] - gap, top + d)
+            btn_left = delete[0]
         anchor = (btn_left - gap - d, top, btn_left - gap, top + d)
         title = (x, top, max(x, anchor[0] - gap), top + th)
         resize = (
@@ -5523,7 +5562,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         header = (x, top, right_edge, top + d)
         return {
             "header": header, "resize": resize, "reset": reset,
-            "anchor": anchor, "settings": settings, "title": title,
+            "anchor": anchor, "settings": settings, "delete": delete,
+            "title": title,
         }
 
     def _draw_panel_grid(self, cr, x, y, w, h, rgb):
@@ -5595,6 +5635,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 cr, pal, geo["anchor"], (r, g, b),
                 active=bool(panel.get("anchored")), glyph="pause",
             )
+            if geo.get("delete") is not None:
+                self._draw_panel_button(
+                    cr, pal, geo["delete"], (r, g, b),
+                    active=False, glyph="trash",
+                )
             if geo["settings"] is not None:
                 self._draw_panel_button(
                     cr, pal, geo["settings"], (r, g, b),
@@ -5644,6 +5689,21 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             for dy in (-1, 0, 1):
                 cr.move_to(cx - size * 0.22, cy + dy * size * 0.18)
                 cr.line_to(cx + size * 0.22, cy + dy * size * 0.18)
+            cr.stroke()
+        elif glyph == "trash":
+            cr.set_line_width(max(1.4, size * 0.10))
+            # Lid + handle.
+            cr.move_to(cx - size * 0.22, cy - size * 0.18)
+            cr.line_to(cx + size * 0.22, cy - size * 0.18)
+            cr.move_to(cx - size * 0.07, cy - size * 0.18)
+            cr.line_to(cx - size * 0.07, cy - size * 0.28)
+            cr.line_to(cx + size * 0.07, cy - size * 0.28)
+            cr.line_to(cx + size * 0.07, cy - size * 0.18)
+            # Can body.
+            cr.move_to(cx - size * 0.16, cy - size * 0.18)
+            cr.line_to(cx - size * 0.12, cy + size * 0.26)
+            cr.line_to(cx + size * 0.12, cy + size * 0.26)
+            cr.line_to(cx + size * 0.16, cy - size * 0.18)
             cr.stroke()
         else:  # reset - a circular arrow
             cr.set_line_width(max(1.4, size * 0.10))

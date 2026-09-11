@@ -286,3 +286,36 @@ def test_reset_panel_reverts_subtree_scoped(tmp_path):
     # ...while the imperative cross-panel edge survives.
     assert "frozen::x->y" in d.space.edges
     assert "y" in d.space.nodes
+
+
+def test_delete_panel_with_nodes_removes_them(tmp_path):
+    d, root, pdir = _daemon(tmp_path)
+    d.panels = d._load_panels_tree()
+    d.handle_command({"command": "add_node", "node_type": "regex_input",
+                      "node_id": "a", "config": {"pattern": ".*"}})
+    assert d._cmd_create_panel({"name": "kit", "node_ids": ["a"]})["status"] == "ok"
+
+    resp = d._cmd_delete_panel({"panel_id": "kit"})
+    assert resp["status"] == "ok", resp
+    assert "kit::a" not in d.space.nodes
+    assert not os.path.exists(os.path.join(pdir, "kit.json"))
+
+
+def test_delete_panel_keep_nodes_moves_them_to_parent(tmp_path):
+    d, root, pdir = _daemon(tmp_path)
+    d.panels = d._load_panels_tree()
+    d.handle_command({"command": "add_node", "node_type": "regex_input",
+                      "node_id": "a", "config": {"pattern": ".*"}})
+    assert d._cmd_create_panel({"name": "kit", "node_ids": ["a"]})["status"] == "ok"
+    assert "kit::a" in d.space.nodes
+
+    resp = d._cmd_delete_panel({"panel_id": "kit", "keep_nodes": True})
+    assert resp["status"] == "ok", resp
+    assert "a" in d.space.nodes
+    assert "kit::a" not in d.space.nodes
+    assert not os.path.exists(os.path.join(pdir, "kit.json"))
+    # The node is now owned by the root panel.
+    tree = d._build_panels_from_space()
+    assert "a" in tree[panels.ROOT_ID].config["nodes"]
+    listing = d._cmd_list_panels({})
+    assert all(f["id"] != "kit" for f in listing["files"])

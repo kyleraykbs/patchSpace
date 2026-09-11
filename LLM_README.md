@@ -199,10 +199,12 @@ default) reads and writes. The GUI draws a panel as a tinted-grid box (grid shar
 world grid's origin/spacing so it overlays it). Its title floats just above the box like a
 group's title (panel colour, zoom-scaled font clamped so it stops growing past a point).
 A left-drag on the title *or any empty panel background* moves the panel; on the right of
-the title row are two rounded-square buttons in the
+the title row are three rounded-square buttons in the
 same outline style as the group +/- buttons: the settings "hamburger" (rename/recolour via
-`edit_panel`) at the very right and the physics-stop (pin/pause) toggle to its left (filled
-when pinned); a read-only panel shows a Reset button instead. The box has a bottom-right
+`edit_panel`) at the very right, a delete (trash) button to its left, and the physics-stop
+(pin/pause) toggle left of that (filled when pinned); a read-only panel shows a Reset
+button instead. Delete asks whether to also delete the panel's nodes or keep them (moved
+up into the parent panel; `delete_panel` with `keep_nodes`). The box has a bottom-right
 resize triangle.
 
 *Physics* is hierarchical (`_hierarchical_step`, `on_layout_tick`): node physics runs
