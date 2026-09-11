@@ -1507,6 +1507,16 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         logic gate) with no label collapses to a square
         (SPLITTER_MIN_SIZE); every other node - and a labelled compact
         one, which wraps its text - uses the normal node width."""
+        if node["type"] in self._PORT_IN_TYPES | self._PORT_OUT_TYPES:
+            # Ports size to their label, capped at the normal node width.
+            label = node.get("label") or ""
+            if not label:
+                return self.SPLITTER_MIN_SIZE
+            tw, _th = self._text_size(label, 12)
+            return max(
+                self.SPLITTER_MIN_SIZE,
+                min(self.NODE_WIDTH, int(tw) + 24),
+            )
         if self._is_compact_node(node) and not node.get("label"):
             if node["type"] == "splitter":
                 return self.SPLITTER_MIN_SIZE
@@ -2202,6 +2212,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     def find_three_dots_at(self, x, y):
         for nid, node in self._hit_nodes(x, y):
+            if node.get("type") in self._PORT_IN_TYPES | self._PORT_OUT_TYPES:
+                continue
             dot_x = node["x"] + self.node_width(nid) - 14
             dot_y = node["y"] + 12
             if dot_x - 10 <= x <= dot_x + 10 and dot_y - 10 <= y <= dot_y + 22:
@@ -2463,7 +2475,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self._draw_anchor_icon(
                 cr, pal, x, y, node_w, nid in self.anchored_nodes
             )
-        self._draw_three_dots(cr, x, y, node_w)
+            self._draw_three_dots(cr, x, y, node_w)
 
         self._draw_header(cr, pal, nid, node, x, y)
 
@@ -5820,6 +5832,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     PANEL_IO_GAP = 8.0
     PANEL_IO_PORT_H = 44.0
     PANEL_IO_MARGIN = 20.0
+    # The bar extends past the top/bottom port by this much.
+    PANEL_IO_BAR_PAD = 10.0
     # While dragging a node, its panel may grow this far past the size it
     # had at drag start (it never shrinks during the drag).
     PANEL_DRAG_GROW = 280.0
@@ -6047,15 +6061,16 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         x, y, w, h = rect
         bar_w = self.PANEL_IO_BAR_W
         gap = self.PANEL_IO_GAP
+        pad = self.PANEL_IO_BAR_PAD
 
         def one(edge_x, direction):
             ports = self._panel_port_nodes(pid, direction)
             if ports:
-                top = min((n.get("y") or y) for _n, n in ports)
+                top = min((n.get("y") or y) for _n, n in ports) - pad
                 bottom = max(
                     (n.get("y") or y) + self.node_height(nid)
                     for nid, n in ports
-                )
+                ) + pad
             else:
                 top = y + h / 2.0 - bar_w
                 bottom = y + h / 2.0
@@ -6077,7 +6092,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         """Center each panel's port nodes on its edges (vertically stacked
         around the box's middle) and persist any that moved.  Called after
         polls/layout so ports follow the panel as it grows with content."""
-        width = self.NODE_WIDTH
         slot = self.PANEL_IO_PORT_H + self.PANEL_IO_GAP
         moved = False
         for pid in list(self.panels):
@@ -6095,13 +6109,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 start = center_y - (n * slot - self.PANEL_IO_GAP) / 2.0 + (
                     self.PANEL_IO_PORT_H / 2.0
                 )
-                x = (
-                    rect[0] - width / 2.0
-                    if direction == "in"
-                    else rect[0] + rect[2] - width / 2.0
-                )
+                edge = rect[0] if direction == "in" else rect[0] + rect[2]
                 for i, (nid, node) in enumerate(ports):
                     ny = start + i * slot - self.PANEL_IO_PORT_H / 2.0
+                    x = edge - self.node_width(nid) / 2.0
                     if (
                         abs((node.get("x") or 0.0) - x) > 0.5
                         or abs((node.get("y") or 0.0) - ny) > 0.5
