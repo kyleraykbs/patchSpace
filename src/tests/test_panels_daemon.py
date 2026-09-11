@@ -2,6 +2,7 @@
 listing, and migration.  Leaf node types only, so no PipeWire starts."""
 
 import json
+import os
 
 import panels
 from main import PatchBayDaemon
@@ -115,3 +116,50 @@ def test_legacy_session_cache_migrates_to_root_panel(tmp_path):
     # The root file was rewritten in the panel shape.
     raw = json.load(open(root))
     assert raw.get("type") == panels.TYPE_PANEL
+
+
+def test_create_and_delete_panel(tmp_path):
+    d, root, pdir = _daemon(tmp_path)
+    d.panels = d._load_panels_tree()
+    d.handle_command({"command": "add_node", "node_type": "regex_input",
+                      "node_id": "a", "config": {"pattern": ".*"}})
+
+    resp = d._cmd_create_panel({"name": "Kitchen", "node_ids": ["a"]})
+    assert resp["status"] == "ok", resp
+    assert resp["panel_id"] == "Kitchen"
+    assert "Kitchen::a" in d.space.nodes
+    assert os.path.isfile(os.path.join(pdir, "Kitchen.json"))
+
+    listing = d._cmd_list_panels({})
+    assert any(f["id"] == "Kitchen" for f in listing["files"])
+
+    assert d._cmd_delete_panel({"panel_id": "Kitchen"})["status"] == "ok"
+    assert "Kitchen::a" not in d.space.nodes
+    assert not os.path.exists(os.path.join(pdir, "Kitchen.json"))
+
+
+def test_move_nodes_refused_from_readonly_panel(tmp_path):
+    d, root, pdir = _daemon(tmp_path)
+    frozen = panels.Panel(
+        id="frozen", parent="", label="Frozen", color="#abc", mode="read-only",
+        path=os.path.join(pdir, "frozen.json"), writable=True,
+        config={"nodes": {"x": {"type": "regex_input",
+                                "params": {"x": 0, "y": 0, "pattern": ".*"}}},
+                "edges": [], "panels": [], "groups": []},
+    )
+    panels.write_file(os.path.join(pdir, "frozen.json"), frozen)
+    panels.write_file(root, panels.Panel(
+        id="", parent=None, label="root", color="#fff", mode="read-write",
+        writable=True,
+        config={"nodes": {}, "edges": [], "panels": ["frozen"], "groups": []},
+    ))
+    d.panels = d._load_panels_tree()
+    assert d.panels["frozen"].is_readonly
+    d._load_session(d._flatten_panels(d.panels), declarative=True)
+    assert "frozen::x" in d.space.nodes
+
+    resp = d._cmd_move_nodes({"panel_id": "", "node_ids": ["frozen::x"]})
+    assert resp["status"] == "ok"
+    assert resp["moved"] == []
+    assert "frozen::x" in resp["refused"]
+    assert "frozen::x" in d.space.nodes

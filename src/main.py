@@ -1290,6 +1290,91 @@ class PatchBayDaemon:
             "files": files,
         }
 
+    def _panel_slug(self, name: str) -> str:
+        """A filesystem-safe panel stem from a display name."""
+        stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", (name or "").strip()).strip("_")
+        return stem or f"panel_{int(time.time() * 1000)}"
+
+    def _cmd_create_panel(self, cmd: dict) -> dict:
+        """Create a new top-level panel (a file) and move the selection
+        into it.  This is the panel form of the old "Declare" action."""
+        name = (cmd.get("name") or "").strip()
+        if not name:
+            return {"status": "error", "message": "name required"}
+        stem = self._panel_slug(name)
+        if stem in self.panels:
+            return {"status": "error", "message": f"panel {stem!r} already exists"}
+        target_dir = next(
+            (d for d, w in self.panel_dirs if d and w), None
+        )
+        if target_dir is None:
+            return {"status": "error", "message": "no writable panel directory"}
+        path = os.path.join(target_dir, stem + panels.PANEL_SUFFIX)
+        node_ids = list(cmd.get("node_ids") or [])
+        moved: List[str] = []
+        with self._lock:
+            for nid in node_ids:
+                if nid not in self.space.nodes:
+                    continue
+                new_id = panels.make_id(stem, panels.local_of(nid))
+                if new_id in self.space.nodes:
+                    continue
+                try:
+                    self._rename_owned_node(nid, new_id)
+                    moved.append(new_id)
+                except (KeyError, ValueError) as exc:
+                    logger.warning("create_panel move %r failed: %s", nid, exc)
+            mode = panels.MODE_RO if cmd.get("readonly") else panels.MODE_RW
+            self.panels[stem] = panels.Panel(
+                id=stem, parent=panels.ROOT_ID,
+                label=cmd.get("label") or name,
+                color=cmd.get("color") or panels.DEFAULT_COLOR,
+                mode=mode, path=path, writable=True,
+                config={"nodes": {}, "edges": [], "panels": [], "groups": []},
+            )
+            root = self.panels.get(panels.ROOT_ID)
+            if root is not None and stem not in root.config.setdefault("panels", []):
+                root.config["panels"].append(stem)
+        self._write_panels()
+        self._dirty = True
+        self._wake_ticker()
+        return {"status": "ok", "panel_id": stem, "moved": moved, "path": path}
+
+    def _cmd_delete_panel(self, cmd: dict) -> dict:
+        panel_id = cmd.get("panel_id", "")
+        panel = self.panels.get(panel_id)
+        if not panel_id or panel is None:
+            return {"status": "error", "message": f"no panel {panel_id!r}"}
+        if panel.is_readonly or not panel.writable:
+            return {"status": "error", "message": f"panel {panel_id!r} is read-only"}
+        prefix = panel_id + panels.NAMESPACE_SEP
+        with self._lock:
+            for nid in [
+                n for n in self.space.nodes
+                if n == panel_id or n.startswith(prefix)
+            ]:
+                self.space.remove_node(nid)
+            for pid in [
+                p for p in self.panels
+                if p == panel_id or p.startswith(prefix)
+            ]:
+                self.panels.pop(pid, None)
+            parent = self.panels.get(panel.parent or "")
+            if parent is not None:
+                local = panels.local_of(panel_id)
+                parent.config["panels"] = [
+                    s for s in parent.config.get("panels", []) if s != local
+                ]
+        if panel.path and os.path.isfile(panel.path):
+            try:
+                os.remove(panel.path)
+            except OSError as exc:
+                logger.warning("Could not delete panel file %r: %s", panel.path, exc)
+        self._write_panels()
+        self._dirty = True
+        self._wake_ticker()
+        return {"status": "ok", "panel_id": panel_id}
+
     def _cmd_reload_panels(self, cmd: dict) -> dict:
         with self._panel_lock:
             self._panel_reloading = True
@@ -4494,6 +4579,10 @@ class PatchBayDaemon:
                 response = self._cmd_reset_panel(cmd)
             elif command == "move_nodes":
                 response = self._cmd_move_nodes(cmd)
+            elif command == "create_panel":
+                response = self._cmd_create_panel(cmd)
+            elif command == "delete_panel":
+                response = self._cmd_delete_panel(cmd)
             elif command == "reload_declarative":
                 response = self._cmd_reload_declarative(cmd)
             elif command == "list_declarative":

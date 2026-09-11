@@ -681,12 +681,11 @@ class MainWindow(Gtk.ApplicationWindow):
         self._ps_declare_button = Gtk.Button(label="Create Panel\u2026")
         self._ps_declare_button.set_sensitive(False)
         self._ps_declare_button.set_tooltip_text(
-            "Export the selected nodes to a declarative file in the "
-            "read-write declarative directory"
+            "Move the selected nodes into a new panel file"
         )
         self._ps_declare_button.connect(
             "clicked",
-            lambda _b: self.ps_widget.show_export_declarative_dialog(),
+            lambda _b: self.ps_widget.show_create_panel_dialog(),
         )
         bar.append(self._ps_declare_button)
 

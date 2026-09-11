@@ -3374,6 +3374,45 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._pending_declarative_list = True
         self.client.send({"command": "list_panels"})
 
+    def show_create_panel_dialog(self):
+        """Prompt for a name/mode and move the current selection into a
+        new panel file."""
+        if not self.selected_nodes:
+            return
+        dialog = Gtk.Dialog(
+            title="Create Panel", transient_for=self.get_root(), modal=True
+        )
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Create", Gtk.ResponseType.OK)
+        box = dialog.get_content_area()
+        box.set_spacing(6)
+        for side in ("top", "bottom", "start", "end"):
+            getattr(box, f"set_margin_{side}")(12)
+        box.append(Gtk.Label(label="Panel name"))
+        entry = Gtk.Entry()
+        entry.set_text(f"panel_{int(time.time() * 1000) % 100000}")
+        box.append(entry)
+        readonly = Gtk.CheckButton(label="Read-only (controls reset on reload)")
+        box.append(readonly)
+
+        def _on_response(dlg, response):
+            if response == Gtk.ResponseType.OK:
+                name = entry.get_text().strip()
+                if name:
+                    self._begin_load()
+                    self.client.send(
+                        {
+                            "command": "create_panel",
+                            "name": name,
+                            "node_ids": list(self.selected_nodes),
+                            "readonly": readonly.get_active(),
+                        }
+                    )
+            dlg.destroy()
+
+        dialog.connect("response", _on_response)
+        dialog.present()
+
     def on_declarative_files(self, resp):
         # Cache the listing so the Declare dialog can offer a target
         # dropdown without another round trip.
