@@ -785,7 +785,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 "w": w,
                 "h": h,
                 "anchored": anchored,
-                "auto_load": bool(p.get("auto_load", True)),
+                "auto_load": bool(p.get("auto_load", False)),
                 "edit_mode": bool(p.get("edit_mode", False)),
                 "path": p.get("path"),
                 "children": list(p.get("children") or []),
@@ -3634,7 +3634,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         content.append(self._labeled_row("Color:", color_picker))
 
         autoload = Gtk.CheckButton(label="Auto-load at startup")
-        autoload.set_active(bool(panel.get("auto_load", True)))
+        autoload.set_active(bool(panel.get("auto_load", False)))
         autocontent = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         autocontent.append(autoload)
         content.append(autocontent)
