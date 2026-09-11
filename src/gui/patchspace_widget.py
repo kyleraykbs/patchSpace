@@ -1080,34 +1080,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self.queue_draw()
 
     def on_layout_tick(self):
-        if not self.layout_awake or len(self.nodes) < 2:
+        if not self.layout_awake:
             return True
 
-        positions = {nid: (n["x"], n["y"]) for nid, n in self.nodes.items()}
-        sizes = {nid: (self.node_width(nid), self.node_height(nid)) for nid in self.nodes}
-        edges = [
-            (e["from_node"], e["to_node"])
-            for e in self.edges.values()
-            if e["from_node"] in self.nodes and e["to_node"] in self.nodes
-        ]
-        # Anchored nodes behave exactly like a node being dragged:
-        # pinned (never moved by the physics) but still exerting their
-        # own forces on everything else.
-        pinned = set(self.pinned_nodes) | self.anchored_nodes
-        if self.dragging_node is not None:
-            pinned.add(self.dragging_node)
-        # A multi-node drag holds every node in the selection, not just
-        # the one under the pointer.
-        pinned.update(self.drag_node_starts)
-        max_delta = self.force_layout.step(
-            self.nodes.keys(), positions, sizes, edges, pinned
-        )
+        max_delta = self._hierarchical_step()
 
-        for nid, (x, y) in positions.items():
-            self.nodes[nid]["x"] = x
-            self.nodes[nid]["y"] = y
-
-        if max_delta < LAYOUT_SETTLE_EPSILON and self.dragging_node is None:
+        if max_delta < LAYOUT_SETTLE_EPSILON and self.dragging_node is None \
+                and self.dragging_panel is None:
             self._settle_ticks += 1
             if self._settle_ticks > LAYOUT_SETTLE_TICKS:
                 self.layout_awake = False
@@ -1132,6 +1111,74 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
         self.queue_draw()
         return True
+
+    def _hierarchical_step(self):
+        """One physics step: node physics runs *inside* each panel (in the
+        panel's local frame, internal edges only) and then the panels
+        themselves repel each other in the parent frame.  Nodes never exert
+        forces across a panel boundary; cross-panel edges gently spring the
+        two panels together instead."""
+        max_delta = 0.0
+        for pid in [""] + [p for p in self.panels if p]:
+            members = self._panel_member_nodes(pid)
+            if len(members) < 2:
+                continue
+            ox, oy = self._panel_absolute(pid) if pid else (0.0, 0.0)
+            mset = set(members)
+            positions = {
+                nid: (self.nodes[nid]["x"] - ox, self.nodes[nid]["y"] - oy)
+                for nid in members
+            }
+            sizes = {
+                nid: (self.node_width(nid), self.node_height(nid))
+                for nid in members
+            }
+            edges = [
+                (e["from_node"], e["to_node"])
+                for e in self.edges.values()
+                if e["from_node"] in mset and e["to_node"] in mset
+            ]
+            pinned = (set(self.pinned_nodes) | self.anchored_nodes) & mset
+            if self.dragging_node in mset:
+                pinned.add(self.dragging_node)
+            pinned |= {n for n in self.drag_node_starts if n in mset}
+            delta = self.force_layout.step(members, positions, sizes, edges, pinned)
+            max_delta = max(max_delta, delta)
+            for nid in members:
+                self.nodes[nid]["x"] = positions[nid][0] + ox
+                self.nodes[nid]["y"] = positions[nid][1] + oy
+
+        pids = [p for p in self.panels if p]
+        if len(pids) >= 2:
+            positions = {pid: self._panel_absolute(pid) for pid in pids}
+            sizes = {}
+            for pid in pids:
+                rect = self._panel_rect(pid)
+                sizes[pid] = (rect[2], rect[3]) if rect else (420.0, 260.0)
+            edges = []
+            for e in self.edges.values():
+                a = e["from_node"].rsplit("::", 1)[0] if "::" in e["from_node"] else ""
+                b = e["to_node"].rsplit("::", 1)[0] if "::" in e["to_node"] else ""
+                if a and b and a != b and a in positions and b in positions:
+                    edges.append((a, b))
+            pinned = {pid for pid in pids if self.panels[pid].get("anchored")}
+            if self.dragging_panel:
+                pinned.add(self.dragging_panel)
+            delta = self.force_layout.step(pids, positions, sizes, edges, pinned)
+            max_delta = max(max_delta, delta)
+            for pid in pids:
+                if self.dragging_panel == pid:
+                    continue
+                ax, ay = positions[pid]
+                old_x = self._panel_absolute(pid)
+                dx, dy = ax - old_x[0], ay - old_x[1]
+                if dx or dy:
+                    self.panels[pid]["x"] += dx
+                    self.panels[pid]["y"] += dy
+                    self._translate_panel_local(pid, dx, dy)
+        if pids:
+            self._panel_geo_cache.clear()
+        return max_delta
 
     # ---------- geometry ----------
 
@@ -5044,6 +5091,22 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             for nid, node in self.nodes.items()
         }
         self.client.send({"command": "set_node_layout", "layout": layout})
+        # Panels too: the hierarchical physics can move them, and their
+        # placement is persisted separately from node positions.
+        for pid, panel in self.panels.items():
+            if pid == "":
+                continue
+            self.client.send(
+                {
+                    "command": "set_panel_layout",
+                    "panel_id": pid,
+                    "x": float(panel["x"]),
+                    "y": float(panel["y"]),
+                    "w": float(panel["w"]),
+                    "h": float(panel["h"]),
+                    "anchored": bool(panel.get("anchored", False)),
+                }
+            )
         return False
 
     def _nodes_in_rect(self, rect):
