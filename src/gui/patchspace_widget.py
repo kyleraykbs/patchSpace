@@ -750,13 +750,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         return out
 
     def _translate_panel_local(self, panel_id, dx, dy):
-        """Shift a panel's subtree in the local model: child panels store
-        parent-relative placement, nodes store absolute positions."""
+        """Shift a panel's subtree's *nodes* in the local model.
+
+        Nodes store absolute positions, so moving a panel must move them.
+        Child panels store parent-relative placement and derive their
+        absolute position by folding ancestors (`_panel_absolute`), so they
+        already move with their parent and must **not** be shifted here -
+        doing so moved them by 2*dx and made the boxes fight their nodes."""
         prefix = panel_id + "::"
-        for pid, panel in self.panels.items():
-            if pid != panel_id and pid.startswith(prefix):
-                panel["x"] += dx
-                panel["y"] += dy
         for nid, node in self.nodes.items():
             if nid.startswith(prefix):
                 node["x"] += dx
@@ -4265,6 +4266,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     }
                 )
             self.resizing_panel = None
+            self._mark_layout_dirty()
             return
         if self.dragging_panel is not None:
             panel = self.panels.get(self.dragging_panel)
@@ -4278,6 +4280,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     }
                 )
             self.dragging_panel = None
+            # Nodes moved with the panel during the drag; persist their
+            # absolute positions now (the daemon no longer derives them from
+            # the panel move).
+            self._mark_layout_dirty()
             return
         if self._marquee_mode is not None:
             # A modifier *click* (no sweep) toggles just the node under
@@ -4945,17 +4951,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._layout_save_source = 0
         if not self.nodes:
             return False
-        layout = {
-            nid: {
-                "x": float(node["x"]),
-                "y": float(node["y"]),
-                "anchored": nid in self.anchored_nodes,
-            }
-            for nid, node in self.nodes.items()
-        }
-        self.client.send({"command": "set_node_layout", "layout": layout})
-        # Panels too: the hierarchical physics can move them, and their
-        # placement is persisted separately from node positions.
+        # Panel placement first, then absolute node positions: the daemon
+        # treats node positions as authoritative and does not move nodes
+        # when a panel moves, so sending nodes last leaves the two
+        # consistent even if an autosave lands between the commands.
         for pid, panel in self.panels.items():
             if pid == "":
                 continue
@@ -4970,6 +4969,15 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     "anchored": bool(panel.get("anchored", False)),
                 }
             )
+        layout = {
+            nid: {
+                "x": float(node["x"]),
+                "y": float(node["y"]),
+                "anchored": nid in self.anchored_nodes,
+            }
+            for nid, node in self.nodes.items()
+        }
+        self.client.send({"command": "set_node_layout", "layout": layout})
         return False
 
     def _nodes_in_rect(self, rect):

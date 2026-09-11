@@ -75,7 +75,10 @@ def test_build_panels_round_trips_through_space(tmp_path):
                for e in tree[""].config["edges"])
 
 
-def test_set_panel_layout_translates_subtree(tmp_path):
+def test_set_panel_layout_is_metadata_only(tmp_path):
+    # Panel placement is metadata; the GUI moves the nodes and sends their
+    # absolute positions separately (set_node_layout), so the daemon must
+    # not translate them again here.
     d, root, pdir = _daemon(tmp_path)
     _write_initial_tree(root, pdir)
     d.panels = d._load_panels_tree()
@@ -84,7 +87,27 @@ def test_set_panel_layout_translates_subtree(tmp_path):
     before = d.space.nodes["kit::a"].x
     d._cmd_set_panel_layout({"panel_id": "kit", "x": 200})
     assert d.panels["kit"].x == 200
-    assert d.space.nodes["kit::a"].x == before + 100
+    assert d.space.nodes["kit::a"].x == before
+
+
+def test_panel_and_node_layout_round_trip_relative(tmp_path):
+    # Simulate what the GUI sends when a panel + its node move together:
+    # the node's absolute position and the panel origin both shift by the
+    # same delta, so the serialized relative position is unchanged.
+    d, root, pdir = _daemon(tmp_path)
+    _write_initial_tree(root, pdir)
+    d.panels = d._load_panels_tree()
+    d._load_session(d._flatten_panels(d.panels), declarative=True)
+
+    node = d.space.nodes["kit::a"]
+    assert (node.x, node.y) == (110, 70)  # 100/50 origin + 10/20 local
+    node.x += 100
+    node.y += 40
+    d._cmd_set_panel_layout({"panel_id": "kit", "x": 200, "y": 90})
+
+    tree = d._build_panels_from_space()
+    rel = tree["kit"].config["nodes"]["a"]["params"]
+    assert (rel["x"], rel["y"]) == (10, 20)
 
 
 def test_list_panels(tmp_path):

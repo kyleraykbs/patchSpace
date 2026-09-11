@@ -170,10 +170,15 @@ contain `::`; split with `rsplit("::", 1)`. A root-level node and a root-level p
 not share a name.
 
 *Placement* is parent-relative and lives in the **child** file (`placement: {x,y,w,h,
-anchored}`), so a panel is self-describing; moving a panel translates its whole subtree.
-Node runtime coordinates stay **absolute** in `PatchSpace`/the GUI; `_flatten_panels`
-adds a panel's folded absolute origin when loading and `_build_panels_from_space`
-subtracts it when writing, so only the serialization is panel-relative.
+anchored}`), so a panel is self-describing. Node runtime coordinates stay **absolute**
+in `PatchSpace`/the GUI and are authoritative: the GUI moves a panel's nodes itself and
+persists their absolute positions (`set_node_layout`) alongside the panel's placement
+(`set_panel_layout`); the daemon only stores the panel metadata and never derives node
+positions from it (doing both moved nodes twice and made the boxes fight their contents).
+`_flatten_panels` adds a panel's folded absolute origin when loading and
+`_build_panels_from_space` subtracts it when writing, so only the serialization is
+panel-relative. Child panels are never shifted when a parent moves - they derive their
+absolute position by folding ancestors.
 
 *Edges are owned by the least common ancestor* of the two endpoints' panels
 (`panels.edge_owner`): same-panel edges live in that panel's file, cross-panel edges in

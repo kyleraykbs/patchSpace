@@ -1392,13 +1392,16 @@ class PatchBayDaemon:
                 self._panel_mtimes = panels.snapshot(self._panel_dir_paths())
 
     def _cmd_set_panel_layout(self, cmd: dict) -> dict:
-        """Set a panel's placement (x/y/w/h/anchored) and translate its
-        subtree so nodes keep their absolute positions when it moves."""
+        """Set a panel's placement (x/y/w/h/anchored).
+
+        Node positions are absolute and authoritative, and the GUI sends
+        them separately (`set_node_layout`) after translating them with the
+        panel.  Translating the subtree here as well would move every node
+        twice, so this only updates the panel metadata."""
         panel_id = cmd.get("panel_id", "")
         panel = self.panels.get(panel_id)
         if panel is None:
             return {"status": "error", "message": f"no panel {panel_id!r}"}
-        old_x, old_y = panel.x, panel.y
         if cmd.get("x") is not None:
             panel.x = float(cmd["x"])
         if cmd.get("y") is not None:
@@ -1409,30 +1412,9 @@ class PatchBayDaemon:
             panel.h = max(panels.MIN_H, float(cmd["h"]))
         if cmd.get("anchored") is not None:
             panel.anchored = bool(cmd["anchored"])
-        dx, dy = panel.x - old_x, panel.y - old_y
-        if dx or dy:
-            self._translate_panel(panel_id, dx, dy)
         self._dirty = True
         self._wake_ticker()
         return {"status": "ok", "panel_id": panel_id}
-
-    def _translate_panel(self, panel_id: str, dx: float, dy: float) -> None:
-        """Move a panel and everything inside it by (dx, dy).  Child
-        panels store parent-relative placement, so they just shift; nodes
-        store absolute positions, so theirs shift too."""
-        with self._lock:
-            prefix = panel_id + panels.NAMESPACE_SEP
-            for pid, panel in self.panels.items():
-                if pid == panel_id or pid.startswith(prefix):
-                    if pid != panel_id:
-                        panel.x += dx
-                        panel.y += dy
-            for nid, node in self.space.nodes.items():
-                if nid == panel_id or nid.startswith(prefix):
-                    if getattr(node, "x", None) is not None:
-                        node.x += dx
-                    if getattr(node, "y", None) is not None:
-                        node.y += dy
 
     @staticmethod
     def _in_panel_subtree(node_id: str, panel_id: str) -> bool:
