@@ -5489,6 +5489,23 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     def _panel_local(pid):
         return pid.rsplit("::", 1)[-1] if pid else "root"
 
+    @staticmethod
+    def _panel_of_node(nid):
+        return nid.rsplit("::", 1)[0] if "::" in nid else ""
+
+    @staticmethod
+    def _panel_lca(a, b):
+        if a == b:
+            return a
+        pa = a.split("::") if a else []
+        pb = b.split("::") if b else []
+        common = []
+        for x, y in zip(pa, pb):
+            if x != y:
+                break
+            common.append(x)
+        return "::".join(common)
+
     def _panel_title_font(self):
         """World-unit font size for a panel's floating title.
 
@@ -5538,6 +5555,29 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             miny = cy if miny is None else min(miny, cy)
             maxx = cx + cw if maxx is None else max(maxx, cx + cw)
             maxy = cy + ch if maxy is None else max(maxy, cy + ch)
+        # Groups owned by this panel (all members inside it) contribute
+        # their outline *and* the title block above it, so the panel box
+        # leaves room for a group's title and edges instead of clipping
+        # them.
+        for gid, group in self._merged_groups().items():
+            members = [n for n in (group.get("nodes") or []) if n in self.nodes]
+            if not members:
+                continue
+            owner = self._panel_of_node(members[0])
+            for m in members[1:]:
+                owner = self._panel_lca(owner, self._panel_of_node(m))
+            if owner != pid:
+                continue
+            gb = self._group_bounds(gid, group)
+            if gb is None:
+                continue
+            gx1, gy1, gx2, gy2 = gb
+            info = self._group_header_layout(gid, group)
+            gtop = info["top"] if info is not None else gy1
+            minx = gx1 if minx is None else min(minx, gx1)
+            miny = gtop if miny is None else min(miny, gtop)
+            maxx = gx2 if maxx is None else max(maxx, gx2)
+            maxy = gy2 if maxy is None else max(maxy, gy2)
         if minx is None:
             rect = (ax, ay, side, side)
         else:

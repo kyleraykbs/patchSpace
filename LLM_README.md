@@ -205,9 +205,10 @@ same outline style as the group +/- buttons: the settings "hamburger" (rename/re
 (pin/pause) toggle left of that (filled when pinned); a read-only panel shows a Reset
 button instead. Delete asks whether to also delete the panel's nodes or keep them (moved
 up into the parent panel; `delete_panel` with `keep_nodes`). The box **tightly auto-fits
-its contents** in every direction (like a group) with `PANEL_PADDING`, and has a **square
-minimum size** (`PANEL_MIN_SIDE`, centred on the content); there is no manual resize
-handle.
+its contents** in every direction (like a group) with `PANEL_PADDING`: member nodes,
+child panels, and the outlines **and title blocks** of groups owned by the panel (all
+members inside it), so group titles/edges are never clipped. It has a **square minimum
+size** (`PANEL_MIN_SIDE`, centred on the content); there is no manual resize handle.
 
 *Physics* is hierarchical (`_hierarchical_step`, `on_layout_tick`): node physics runs
 inside each panel in that panel's local frame (internal edges only); then, per parent,
