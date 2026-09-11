@@ -206,8 +206,10 @@ box has a bottom-right resize triangle.
 inside each panel in that panel's local frame (internal edges only); then, per parent,
 the direct child panels repel each other in the parent's local frame (siblings only -
 running every panel through one flat pass made a child fight its own parent). Panels use
-a dedicated `panel_force_layout` with longer springs and stronger repulsion than nodes,
-so connected boxes don't get yanked into each other. The layout re-arms whenever the
+a dedicated `panel_force_layout` with stronger repulsion and *size-aware* springs: an
+edge's rest length grows by each box's half-extent projected onto the edge, so connected
+panels settle edge-to-edge around their bounding boxes instead of overlapping at a fixed
+distance (the left-to-right flow bias is off for boxes). The layout re-arms whenever the
 node/edge/panel set changes, so it also runs right after a panel is created or loaded
 (not only after a node is dragged). Nodes never exert forces across a panel boundary
 (cross-panel edges only spring the two panels together). Panel placement is *locally*

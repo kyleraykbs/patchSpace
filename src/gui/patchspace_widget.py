@@ -340,16 +340,18 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self.force_layout = ForceLayout(
             spring_length=280, repulsion=70000, flow_gap=500, flow_k=0.035
         )
-        # Panels are large boxes, so they need longer springs and stronger
-        # repulsion than nodes: sharing the node layout's 280px spring
-        # yanked connected panels into each other and the overlap pass
-        # then fought the spring (the "boxes pulled together" jitter).
+        # Panels are large boxes.  Their edges use size-aware springs, so
+        # the rest length grows with each box's bounding box and connected
+        # panels settle edge-to-edge instead of overlapping; spring_length
+        # is just the gap between them.  The left-to-right flow bias is for
+        # node chains, so it's off for boxes.
         self.panel_force_layout = ForceLayout(
             repulsion=200000,
-            spring_length=700,
-            flow_gap=900,
-            flow_k=0.02,
+            spring_length=120,
+            flow_gap=0,
+            flow_k=0.0,
             repulsion_cutoff=2000,
+            size_aware_springs=True,
         )
         self.layout_awake = True
         self._settle_ticks = 0

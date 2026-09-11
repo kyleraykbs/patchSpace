@@ -27,6 +27,7 @@ class ForceLayout:
         flow_gap=400.0,
         flow_k=0.025,
         repulsion_cutoff=1200.0,
+        size_aware_springs=False,
     ):
         self.repulsion = repulsion
         self.spring_length = spring_length
@@ -42,6 +43,10 @@ class ForceLayout:
         # what makes grid bucketing below pay off on a large graph,
         # where most pairs are farther apart than this anyway.
         self.repulsion_cutoff = repulsion_cutoff
+        # When True, an edge's rest length grows by each end's half-size
+        # projected onto the edge direction, so large boxes (panels) spring
+        # to sit edge-to-edge instead of overlapping at a fixed distance.
+        self.size_aware_springs = size_aware_springs
         self.velocities: dict = {}
 
     def _ensure(self, node_id):
@@ -139,7 +144,16 @@ class ForceLayout:
             dx = bx - ax
             dy = by - ay
             dist = math.hypot(dx, dy) or 1.0
-            stretch = dist - self.spring_length
+            rest = self.spring_length
+            if self.size_aware_springs:
+                ux, uy = dx / dist, dy / dist
+                aw, ah = sizes.get(a, (160.0, 80.0))
+                bw, bh = sizes.get(b, (160.0, 80.0))
+                rest += (
+                    abs(ux) * aw / 2.0 + abs(uy) * ah / 2.0
+                    + abs(ux) * bw / 2.0 + abs(uy) * bh / 2.0
+                )
+            stretch = dist - rest
             force = stretch * self.spring_k
             fx = (dx / dist) * force
             fy = (dy / dist) * force
