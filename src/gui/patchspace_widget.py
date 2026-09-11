@@ -3040,12 +3040,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self.queue_draw()
             return
 
-        # Panel delete (asks whether to keep the nodes).
-        pid = self.find_panel_delete_at(wx, wy)
-        if pid is not None:
-            self.confirm_delete_panel_with_nodes(pid)
-            return
-
         # Panel edit-mode toggle (refresh from file, then persist edits).
         pid = self.find_panel_edit_at(wx, wy)
         if pid is not None:
@@ -5857,15 +5851,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         right_edge = x + w
         menu = (right_edge - d, top, right_edge, top + d)
         reset = None
-        delete = None
         edit = None
         btn_left = menu[0]
         if panel.get("readonly"):
             reset = (btn_left - gap - d, top, btn_left - gap, top + d)
             btn_left = reset[0]
         elif panel.get("writable"):
-            delete = (btn_left - gap - d, top, btn_left - gap, top + d)
-            btn_left = delete[0]
             edit = (btn_left - gap - d, top, btn_left - gap, top + d)
             btn_left = edit[0]
         anchor = (btn_left - gap - d, top, btn_left - gap, top + d)
@@ -5873,7 +5864,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         header = (x, top, right_edge, top + d)
         return {
             "header": header, "reset": reset,
-            "anchor": anchor, "menu": menu, "delete": delete, "edit": edit,
+            "anchor": anchor, "menu": menu, "edit": edit,
             "title": title,
         }
 
@@ -5971,11 +5962,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 cr, pal, geo["anchor"], (r, g, b),
                 active=bool(panel.get("anchored")), glyph="pause",
             )
-            if geo.get("delete") is not None:
-                self._draw_panel_button(
-                    cr, pal, geo["delete"], (r, g, b),
-                    active=False, glyph="trash",
-                )
             if geo.get("edit") is not None:
                 self._draw_panel_button(
                     cr, pal, geo["edit"], (r, g, b),

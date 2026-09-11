@@ -20,7 +20,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Gdk, GLib, Adw
+from gi.repository import Gtk, Gdk, GLib, Pango, Adw
 
 from constants import (
     POLL_RESPONSES_MS,
@@ -444,6 +444,17 @@ class MainWindow(Gtk.ApplicationWindow):
 
         overlay.add_overlay(menu_button)
 
+        # Panels side-view toggle, directly under the hamburger, top-right.
+        self._panels_toggle = Gtk.ToggleButton()
+        self._panels_toggle.set_icon_name("sidebar-show-symbolic")
+        self._panels_toggle.set_tooltip_text("Show/hide the panels list")
+        self._panels_toggle.set_halign(Gtk.Align.END)
+        self._panels_toggle.set_valign(Gtk.Align.START)
+        self._panels_toggle.set_margin_top(48)
+        self._panels_toggle.set_margin_end(8)
+        self._panels_toggle.connect("toggled", self._on_panels_toggled)
+        overlay.add_overlay(self._panels_toggle)
+
         # Floating delete button for the current selection, pinned to the
         # canvas's bottom-right and shown only while something is selected.
         # Asks for confirmation before removing anything.
@@ -514,7 +525,111 @@ class MainWindow(Gtk.ApplicationWindow):
 
         page.connect("notify::position", _clamp_panel_width)
 
-        return page
+        # The panels side view (list of panel files, hidden by default) as
+        # the end child of an outer paned, so opening it shrinks the canvas
+        # rather than covering it.
+        self.panels_view = self._build_panels_view()
+        self.panels_view.set_visible(False)
+        outer = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        outer.set_start_child(page)
+        outer.set_resize_start_child(True)
+        outer.set_shrink_start_child(True)
+        outer.set_end_child(self.panels_view)
+        outer.set_resize_end_child(False)
+        outer.set_shrink_end_child(False)
+        self._panels_outer = outer
+        return outer
+
+    def _build_panels_view(self):
+        """A docked, scrollable list of the panel files on the right."""
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        box.set_size_request(240, -1)
+        box.set_margin_top(6)
+        box.set_margin_bottom(6)
+        box.set_margin_start(6)
+        box.set_margin_end(6)
+
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        title = Gtk.Label(label="Panels")
+        title.set_xalign(0)
+        title.set_hexpand(True)
+        title.add_css_class("heading")
+        header.append(title)
+        close = Gtk.Button.new_from_icon_name("window-close-symbolic")
+        close.add_css_class("flat")
+        close.set_tooltip_text("Hide the panels list")
+        close.connect("clicked", lambda _b: self._panels_toggle.set_active(False))
+        header.append(close)
+        box.append(header)
+
+        self._panels_list_box = Gtk.ListBox()
+        self._panels_list_box.set_selection_mode(Gtk.SelectionMode.NONE)
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.set_vexpand(True)
+        scrolled.set_hexpand(True)
+        scrolled.set_child(self._panels_list_box)
+        box.append(scrolled)
+        return box
+
+    def _on_panels_toggled(self, button):
+        self.panels_view.set_visible(button.get_active())
+        if button.get_active():
+            # Refresh the listing for the side view.
+            self.client.send({"command": "list_panels"})
+
+    def _update_panels_view(self, resp):
+        """Rebuild the side-view rows from a list_panels reply."""
+        if not hasattr(self, "_panels_list_box"):
+            return
+        while True:
+            child = self._panels_list_box.get_first_child()
+            if child is None:
+                break
+            self._panels_list_box.remove(child)
+        files = resp.get("files", [])
+        if not files:
+            placeholder = Gtk.Label(label="No panels")
+            placeholder.set_margin_top(12)
+            placeholder.add_css_class("dim-label")
+            self._panels_list_box.append(placeholder)
+            return
+        for entry in files:
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            row.set_margin_top(3)
+            row.set_margin_bottom(3)
+            dot = Gtk.Label()
+            dot.set_markup(
+                "<span foreground='{}'>\u25cf</span>".format(
+                    GLib.markup_escape_text(str(entry.get("color", "#3584e4")))
+                )
+            )
+            row.append(dot)
+            name = Gtk.Label(label=str(entry.get("label") or entry.get("id", "?")))
+            name.set_xalign(0)
+            name.set_hexpand(True)
+            name.set_ellipsize(Pango.EllipsizeMode.END)
+            row.append(name)
+            select = Gtk.Button(label="Select")
+            select.add_css_class("flat")
+            select.set_tooltip_text("Select this panel's nodes on the canvas")
+            select.connect(
+                "clicked",
+                lambda _b, e=entry: self.ps_widget._select_panel_nodes(
+                    e.get("nodes", [])
+                ),
+            )
+            row.append(select)
+            delete = Gtk.Button.new_from_icon_name("window-close-symbolic")
+            delete.add_css_class("flat")
+            delete.set_tooltip_text("Remove this panel")
+            delete.connect(
+                "clicked",
+                lambda _b, e=entry: self.ps_widget.confirm_delete_panel_with_nodes(
+                    e.get("id")
+                ),
+            )
+            row.append(delete)
+            self._panels_list_box.append(row)
 
     def _build_loading_overlay(self):
         """A translucent full-canvas sheet with a centered Gtk.Spinner,
@@ -787,6 +902,7 @@ class MainWindow(Gtk.ApplicationWindow):
                     self.ps_widget.on_export_config(resp["config"])
                 elif "files" in resp and "directories" in resp:
                     self.ps_widget.on_panels_list(resp)
+                    self._update_panels_view(resp)
                 elif "payload" in resp and "panel_id" in resp:
                     self.ps_widget.on_panel_export(resp)
                 elif "nodes" in resp:
