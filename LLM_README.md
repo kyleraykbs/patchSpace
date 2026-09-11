@@ -197,8 +197,9 @@ automatically because ownership is derived from ids.
 restart re-apply the file's membership, positions, edges and params. `read-write` (the
 default) reads and writes. The GUI draws a panel as a tinted-grid box (grid shares the
 world grid's origin/spacing so it overlays it). Its title floats just above the box like a
-group's title (panel colour, zoom-scaled font clamped so it stops growing past a point) and
-is the drag handle. On the right of the title row are two rounded-square buttons in the
+group's title (panel colour, zoom-scaled font clamped so it stops growing past a point).
+A left-drag on the title *or any empty panel background* moves the panel; on the right of
+the title row are two rounded-square buttons in the
 same outline style as the group +/- buttons: the settings "hamburger" (rename/recolour via
 `edit_panel`) at the very right and the physics-stop (pin/pause) toggle to its left (filled
 when pinned); a read-only panel shows a Reset button instead. The box has a bottom-right
@@ -208,10 +209,14 @@ resize triangle.
 inside each panel in that panel's local frame (internal edges only); then, per parent,
 the direct child panels repel each other in the parent's local frame (siblings only -
 running every panel through one flat pass made a child fight its own parent). Panels use
-a dedicated `panel_force_layout` with stronger repulsion and *size-aware* springs: an
-edge's rest length grows by each box's half-extent projected onto the edge, so connected
-panels settle edge-to-edge around their bounding boxes instead of overlapping at a fixed
-distance (the left-to-right flow bias is off for boxes). The layout re-arms whenever the
+a dedicated `panel_force_layout` with *size-aware* springs: an edge's rest length grows by
+each box's half-extent projected onto the edge, so connected panels settle edge-to-edge
+around their bounding boxes. There is **no** long-range repulsion or global centre pull for
+panels - the centre pull beat `1/d^2` repulsion past ~600px (distant panels crept toward
+each other) and centre repulsion with no counterforce flung them apart without bound.
+Panels instead stay put and are pushed out of each other only when their rectangles
+overlap, via the force layout's rectangle-aware `_resolve_overlaps` pass. The layout
+re-arms whenever the
 node/edge/panel set changes, so it also runs right after a panel is created or loaded
 (not only after a node is dragged). Nodes never exert forces across a panel boundary
 (cross-panel edges only spring the two panels together). Panel placement is *locally*

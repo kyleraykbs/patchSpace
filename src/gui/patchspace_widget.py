@@ -343,11 +343,19 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # Panels are large boxes.  Their edges use size-aware springs, so
         # the rest length grows with each box's bounding box and connected
         # panels settle edge-to-edge instead of overlapping; spring_length
-        # is just the gap between them.  The left-to-right flow bias is for
-        # node chains, so it's off for boxes.
+        # is just the gap between them.  There is deliberately *no* global
+        # centre pull and *no* long-range centre repulsion: the centre pull
+        # beat 1/d^2 repulsion past ~600px (so distant panels crept toward
+        # each other), while centre repulsion with no counterforce flung
+        # panels apart without bound.  Both are wrong for boxes - panels
+        # should stay put and only be pushed out of each other when their
+        # rectangles actually overlap, which `_resolve_overlaps` does
+        # directly (and is size/rectangle aware).  The flow bias is for
+        # node chains, so it's off here too.
         self.panel_force_layout = ForceLayout(
-            repulsion=200000,
+            repulsion=0.0,
             spring_length=120,
+            center_k=0.0,
             flow_gap=0,
             flow_k=0.0,
             repulsion_cutoff=2000,
@@ -4091,6 +4099,18 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self._settle_ticks = 0
             return
 
+        # Empty panel background: drag the panel itself.  Reaching here
+        # means the press was not on a control/edge/socket/node, so any
+        # point inside the box (title row or body) moves the panel.
+        pid = self.find_panel_at(wx, wy)
+        if pid is not None:
+            panel = self.panels[pid]
+            self.dragging_panel = pid
+            self.drag_panel_start = (wx, wy)
+            self.drag_panel_origin = (panel["x"], panel["y"])
+            self._drag_panel_applied = (0.0, 0.0)
+            return
+
         # Pressing empty canvas starts a pan and drops any selection.
         self.panning = True
         self.pan_drag_start = (self.pan_x, self.pan_y)
@@ -5474,7 +5494,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         label = panel.get("label") or self._panel_local(pid)
         _tw, th = self._text_size(label, font)
         d = max(18.0, th * 1.6)
-        gap = max(6.0, font * 0.5)
+        # Sit the title/buttons a little further above the box so the row
+        # clears the border and the buttons don't crowd the top edge.
+        gap = max(12.0, font * 0.9)
         top = y - th - gap
         right_edge = x + w
         reset = None
