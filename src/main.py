@@ -1012,6 +1012,11 @@ class PatchBayDaemon:
                     stem = panels.file_stem(path)
                     if stem in referenced:
                         continue
+                    raw = panels.read_file(path)
+                    if isinstance(raw, dict) and raw.get("auto_load") is False:
+                        # Explicitly not auto-loaded; it only comes up when
+                        # referenced as a child (or added by hand).
+                        continue
                     referenced.add(stem)
                     root.config.setdefault("panels", []).append(stem)
                     added = True
@@ -1138,6 +1143,7 @@ class PatchBayDaemon:
                     id=pid, parent=meta.parent, label=meta.label, color=meta.color,
                     mode=meta.mode, x=meta.x, y=meta.y, w=meta.w, h=meta.h,
                     anchored=meta.anchored, path=meta.path, writable=meta.writable,
+                    auto_load=meta.auto_load,
                     config={"nodes": {}, "edges": [], "panels": list(meta.children),
                             "groups": []},
                 )
@@ -1242,6 +1248,7 @@ class PatchBayDaemon:
                 "mode": panel.mode,
                 "readonly": panel.is_readonly,
                 "writable": panel.writable,
+                "auto_load": panel.auto_load,
                 "path": panel.path,
                 "directory": os.path.dirname(panel.path) if panel.path else None,
                 "nodes": [panels.make_id(pid, n) for n in panel.nodes],
@@ -1396,6 +1403,8 @@ class PatchBayDaemon:
         color = (cmd.get("color") or "").strip()
         if color:
             panel.color = color
+        if cmd.get("auto_load") is not None:
+            panel.auto_load = bool(cmd["auto_load"])
         self._write_panels()
         self._dirty = True
         self._wake_ticker()
@@ -1451,6 +1460,7 @@ class PatchBayDaemon:
             id=stem, parent=src.parent, label=name, color=src.color,
             mode=panels.MODE_RW, x=src.x + 40.0, y=src.y + 40.0,
             w=src.w, h=src.h, path=path, writable=True,
+            auto_load=src.auto_load,
             config={
                 "nodes": dict(live.config.get("nodes") or {}),
                 "edges": list(live.config.get("edges") or []),
@@ -3861,6 +3871,7 @@ class PatchBayDaemon:
                     "w": panel.w,
                     "h": panel.h,
                     "anchored": panel.anchored,
+                    "auto_load": panel.auto_load,
                     "path": panel.path,
                     "children": panel.child_ids(),
                 }

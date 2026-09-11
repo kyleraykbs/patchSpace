@@ -171,6 +171,10 @@ class Panel:
     anchored: bool = False
     path: Optional[str] = None
     writable: bool = False
+    # Load automatically at start-up / from the panels view?  A panel with
+    # auto_load False is only instantiated when referenced as a child (or
+    # added by hand).
+    auto_load: bool = True
     config: dict = field(default_factory=dict)
 
     @property
@@ -259,6 +263,7 @@ def placement_from_raw(raw: dict) -> dict:
         "w": float(p.get("w", raw.get("w", DEFAULT_W)) or DEFAULT_W),
         "h": float(p.get("h", raw.get("h", DEFAULT_H)) or DEFAULT_H),
         "anchored": bool(p.get("anchored", raw.get("anchored", False))),
+        "auto_load": bool(raw.get("auto_load", True)),
     }
 
 
@@ -289,6 +294,7 @@ def build_payload(panel: Panel) -> dict:
         "mode": panel.mode,
         "label": panel.label,
         "color": panel.color,
+        "auto_load": panel.auto_load,
         "placement": panel.placement(),
         "config": {
             "nodes": panel.nodes,

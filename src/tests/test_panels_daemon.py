@@ -350,3 +350,35 @@ def test_clone_panel_creates_a_new_live_panel(tmp_path):
     # The clone's node is live and namespaced under the new panel.
     assert f"{stem}::a" in d.space.nodes
     assert "kit::a" in d.space.nodes
+
+
+def test_auto_load_false_panel_is_not_loaded_at_start(tmp_path):
+    d, root, pdir = _daemon(tmp_path)
+    panels.write_file(
+        os.path.join(pdir, "hidden.json"),
+        panels.Panel(
+            id="hidden", parent="", label="Hidden", color="#123456",
+            mode="read-write", path=os.path.join(pdir, "hidden.json"),
+            writable=True, auto_load=False,
+            config={"nodes": {}, "edges": [], "panels": [], "groups": []},
+        ),
+    )
+    panels.write_file(root, panels.Panel(
+        id="", parent=None, label="root", color="#ffffff", mode="read-write",
+        writable=True,
+        config={"nodes": {}, "edges": [], "panels": [], "groups": []},
+    ))
+    tree = d._load_panels_tree()
+    assert "hidden" not in tree
+
+
+def test_edit_panel_sets_auto_load(tmp_path):
+    d, root, pdir = _daemon(tmp_path)
+    d.panels = d._load_panels_tree()
+    assert d._cmd_create_panel({"name": "kit"})["status"] == "ok"
+    assert d.panels["kit"].auto_load is True
+    resp = d._cmd_edit_panel({"panel_id": "kit", "auto_load": False})
+    assert resp["status"] == "ok", resp
+    assert d.panels["kit"].auto_load is False
+    raw = json.load(open(os.path.join(pdir, "kit.json")))
+    assert raw["auto_load"] is False

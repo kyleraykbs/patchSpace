@@ -785,6 +785,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 "w": w,
                 "h": h,
                 "anchored": anchored,
+                "auto_load": bool(p.get("auto_load", True)),
                 "path": p.get("path"),
                 "children": list(p.get("children") or []),
             }
@@ -3603,6 +3604,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         )
         content.append(self._labeled_row("Color:", color_picker))
 
+        autoload = Gtk.CheckButton(label="Auto-load at startup")
+        autoload.set_active(bool(panel.get("auto_load", True)))
+        autocontent = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        autocontent.append(autoload)
+        content.append(autocontent)
+
         dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
         dialog.add_button("Apply", Gtk.ResponseType.APPLY)
         dialog.set_default_response(Gtk.ResponseType.APPLY)
@@ -3617,12 +3624,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                             "panel_id": panel_id,
                             "label": label,
                             "color": color_picker.get_hex(),
+                            "auto_load": autoload.get_active(),
                         }
                     )
                     # Optimistic local update so the header reflects the
                     # change before the next poll.
                     panel["label"] = label
                     panel["color"] = color_picker.get_hex()
+                    panel["auto_load"] = autoload.get_active()
                     self._panel_geo_cache.clear()
                     self.queue_draw()
             dlg.destroy()
