@@ -509,3 +509,39 @@ def test_list_panel_files_and_autoload_toggle(tmp_path):
     assert raw["auto_load"] is True
     listing = d._cmd_list_panel_files({})
     assert next(f for f in listing["files"] if f["stem"] == "kit")["auto_load"] is True
+
+
+def test_placements_sync_structure(tmp_path):
+    d, root, pdir = _daemon(tmp_path)
+    d.panels = d._load_panels_tree()
+    d.handle_command({"command": "add_node", "node_type": "regex_input",
+                      "node_id": "a", "config": {"pattern": ".*"}})
+    d._cmd_create_panel({"name": "kit", "node_ids": ["a"]})
+    other = d._cmd_place_panel({"stem": "kit"})["name"]
+    assert "kit::a" in d.space.nodes and f"{other}::a" in d.space.nodes
+
+    # Add a node to one placement; the shared file syncs the other.
+    d.handle_command({"command": "add_node", "node_type": "regex_output",
+                      "node_id": "kit::b", "config": {"pattern": ".*"}})
+    d._write_panels()
+    assert f"{other}::b" in d.space.nodes
+
+
+def test_placements_sync_positions(tmp_path):
+    d, root, pdir = _daemon(tmp_path)
+    d.panels = d._load_panels_tree()
+    d.handle_command({"command": "add_node", "node_type": "regex_input",
+                      "node_id": "a", "config": {"pattern": ".*", "x": 10, "y": 20}})
+    d._cmd_create_panel({"name": "kit", "node_ids": ["a"]})
+    other = d._cmd_place_panel({"stem": "kit"})["name"]
+
+    rel = d.space.nodes["kit::a"]
+    rel.x += 100
+    rel.y += 40
+    d._write_panels()
+    o = d.space.nodes[f"{other}::a"]
+    # Same relative offset within each placement's own origin.
+    off_k = d._panel_origin(d.panels, "kit")
+    off_o = d._panel_origin(d.panels, other)
+    assert abs((rel.x - off_k[0]) - (o.x - off_o[0])) < 1e-6
+    assert abs((rel.y - off_k[1]) - (o.y - off_o[1])) < 1e-6

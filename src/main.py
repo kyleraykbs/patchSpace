@@ -1255,6 +1255,7 @@ class PatchBayDaemon:
     def _write_panels(self) -> None:
         """Write the root panel and every writable read-write panel."""
         tree = self._build_panels_from_space()
+        canon = self._canonical_by_stem()
         root = tree.get(panels.ROOT_ID)
         if root is not None:
             panels.write_file(self.root_panel_path, root)
@@ -1264,17 +1265,152 @@ class PatchBayDaemon:
                 continue
             if not panel.writable or panel.is_readonly or not panel.path:
                 continue
-            # Placements of the same file share it; write it once.
+            # Placements of the same file share it; write it once, from the
+            # placement that actually changed.
             if panel.path in written:
                 continue
             written.add(panel.path)
-            panels.write_file(panel.path, panel)
-        # A panel in edit mode has just committed its live parameters;
-        # make that the new frozen state.
+            write_panel = tree.get(canon.get(panel.stem or "", pid), panel)
+            panels.write_file(panel.path, write_panel)
+        # A panel in edit mode (or one whose change was just written as the
+        # canonical placement) has committed; make that the frozen state.
         for pid in list(self._edit_panels):
             if pid in tree:
                 self._panel_snapshots[pid] = tree[pid]
+        for pid in canon.values():
+            if pid in tree:
+                self._panel_snapshots[pid] = tree[pid]
+        self._sync_placements(canon)
         self._panel_mtimes = panels.snapshot(self._panel_dir_paths())
+
+    def _placement_differs(self, snap, live, include_params):
+        """Whether ``live`` differs from committed ``snap`` in a way that
+        should sync to the file's other placements (structure, positions,
+        and - in edit mode - parameters)."""
+        if set(snap.nodes) != set(live.nodes):
+            return True
+        if snap.children != live.children:
+            return True
+        snap_edges = {
+            (e.get("from"), e.get("to"), e.get("to_port", "in"),
+             e.get("from_port", "out"))
+            for e in snap.edges
+        }
+        live_edges = {
+            (e.get("from"), e.get("to"), e.get("to_port", "in"),
+             e.get("from_port", "out"))
+            for e in live.edges
+        }
+        if snap_edges != live_edges:
+            return True
+        if [g.get("id") for g in snap.groups] != [
+            g.get("id") for g in live.groups
+        ]:
+            return True
+        for local, cfg in live.nodes.items():
+            other = snap.nodes.get(local)
+            if other is None:
+                return True
+            lp = cfg.get("params") or {}
+            sp = other.get("params") or {}
+            for key in ("x", "y"):
+                lv, sv = lp.get(key), sp.get(key)
+                if lv is not None and sv is not None and abs(lv - sv) > 1e-6:
+                    return True
+            if include_params:
+                for key in set(lp) | set(sp):
+                    if key in ("x", "y", "anchored"):
+                        continue
+                    if lp.get(key) != sp.get(key):
+                        return True
+        return False
+
+    def _plan_placement_groups(self):
+        groups: Dict[str, list] = {}
+        for pid, p in self.panels.items():
+            if pid == panels.ROOT_ID or not p.stem:
+                continue
+            groups.setdefault(p.stem, []).append(pid)
+        return groups
+
+    def _canonical_by_stem(self) -> Dict[str, str]:
+        """{stem: placement id} for stems with several placements, picking
+        the placement whose live state diverged from its snapshot (the one
+        that changed); empty when nothing needs syncing."""
+        groups = self._plan_placement_groups()
+        if not any(len(v) > 1 for v in groups.values()):
+            return {}
+        live_all = self._build_panels_from_space(
+            use_snapshots=False, freeze_params=False
+        )
+        canon: Dict[str, str] = {}
+        for stem, pids in groups.items():
+            if len(pids) < 2:
+                continue
+            for pid in pids:
+                snap = self._panel_snapshots.get(pid)
+                live = live_all.get(pid)
+                if snap is not None and live is not None and self._placement_differs(
+                    snap, live, pid in self._edit_panels
+                ):
+                    canon[stem] = pid
+                    break
+        return canon
+
+    def _sync_placements(self, canon: Optional[Dict[str, str]] = None) -> None:
+        """Fan a changed placement out to the file's other placements:
+        positions are copied live (cheap), structural/parameter changes
+        revert the siblings to the changed placement's config."""
+        if canon is None:
+            canon = self._canonical_by_stem()
+        if not canon:
+            return
+        groups = self._plan_placement_groups()
+        live_all = self._build_panels_from_space(
+            use_snapshots=False, freeze_params=False
+        )
+        for stem, pid in canon.items():
+            source = live_all.get(pid)
+            if source is None:
+                continue
+            off_src = self._panel_origin(self.panels, pid)
+            for other in groups.get(stem, []):
+                if other == pid:
+                    continue
+                # Cheap position sync.
+                off_other = self._panel_origin(self.panels, other)
+                for local, cfg in source.nodes.items():
+                    node = self.space.nodes.get(panels.make_id(other, local))
+                    params = cfg.get("params") or {}
+                    if node is None or params.get("x") is None:
+                        continue
+                    node.x = off_other[0] + float(params["x"])
+                    node.y = off_other[1] + float(params["y"])
+                snap = self._panel_snapshots.get(other)
+                if snap is None or not self._placement_differs(
+                    snap, source, other in self._edit_panels
+                ):
+                    continue
+                other_panel = self.panels.get(other)
+                if other_panel is None:
+                    continue
+                adapted = panels.Panel(
+                    id=other_panel.id, parent=other_panel.parent,
+                    label=other_panel.label, color=other_panel.color,
+                    mode=other_panel.mode, x=other_panel.x, y=other_panel.y,
+                    w=other_panel.w, h=other_panel.h,
+                    anchored=other_panel.anchored, path=other_panel.path,
+                    writable=other_panel.writable, stem=other_panel.stem,
+                    auto_load=other_panel.auto_load,
+                    config={
+                        "nodes": dict(source.config.get("nodes") or {}),
+                        "edges": list(source.config.get("edges") or []),
+                        "panels": list(source.child_entries),
+                        "groups": list(source.config.get("groups") or []),
+                    },
+                )
+                self._panel_snapshots[other] = adapted
+                self._revert_panel(other, {other: adapted})
 
     def _cmd_list_panels(self, cmd: dict) -> dict:
         files = []
@@ -1627,9 +1763,10 @@ class PatchBayDaemon:
             if parent.path:
                 parent_now = self._build_panels_from_space().get(parent.id)
                 if parent_now is not None:
-                    parent_now.config.setdefault("panels", []).append(
-                        panels.child_ref(local, stem)
-                    )
+                    if local not in parent_now.children:
+                        parent_now.config.setdefault("panels", []).append(
+                            panels.child_ref(local, stem)
+                        )
                     panels.write_file(parent.path, parent_now)
         self._cmd_reload_panels({})
         return {"status": "ok", "stem": stem, "name": local, "parent_id": parent_id}
@@ -1640,10 +1777,7 @@ class PatchBayDaemon:
             self._begin_heavy_load()
             try:
                 tree = self._load_panels_tree()
-                self.panels = tree
-                self._readonly_snapshots = {
-                    pid: p for pid, p in tree.items() if p.is_readonly
-                }
+                self._install_panels(tree)
                 config = self._flatten_panels(tree)
                 self._remove_panels_from_space()
                 result = self._load_session(config, declarative=True)

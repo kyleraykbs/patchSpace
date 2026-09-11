@@ -229,10 +229,22 @@ you start from the file's values, then edits persist (`_write_panels` refreshes 
 snapshot for panels in `_edit_panels`). The panel is darkened and stamped with a large
 "EDIT MODE" water-mark while on. Read-only panels can't enter edit mode.
 
-*Auto-load.* `auto_load` (default true, a Settings-dialog checkbox, top-level in the
-file) controls whether a standalone panel is loaded at start-up; a `false` panel is only
-instantiated when referenced as a child (or added by hand). `list_panels`/`get_nodes`
-report it.
+*Files vs placements.* A panel *file* (its `stem`) is the backend; a *placement* is one
+loaded instance with its own `id` (its path) and file (`path`), so the same file can be
+loaded in several places. A child reference is a stem string, or `{name, stem}` when the
+placement name differs from the file stem (`panels.child_name/child_stem/child_ref`).
+Placements keep independent live settings (their own nodes), but structure, positions and
+(in edit mode) parameters sync: `_canonical_by_stem` finds the placement that changed,
+`_write_panels` writes the file from it, and `_sync_placements` copies positions to the
+others (cheap) and reverts them to the changed config for structural/param changes
+(independent 'live' settings are not shared). `place_panel` adds a placement of a file
+(root by default).
+
+*Auto-load.* `auto_load` (default **false**, top-level in the file, a checkbox in the
+right side view) controls whether a standalone panel placement is spawned at the root on
+start-up; a nested sub-panel is always loaded as a dependency of its parent regardless of
+its own flag. `list_panel_files`/`set_panel_file_autoload` drive the side view;
+`list_panels`/`get_nodes` report per-placement `stem`/`auto_load`.
 
 *Panels side view.* A docked, scrollable list of panel files lives on the right (the end
 child of an outer `Gtk.Paned`), toggled by a button directly under the top-right
@@ -284,8 +296,10 @@ the selected nodes' bounds; with none, a square opens in the middle of the viewp
 daemon takes the placement (`x/y/w/h`) in `create_panel`.
 
 Commands: `list_panels`, `reload_panels`, `create_panel`, `delete_panel`, `edit_panel`,
-`export_panel`, `clone_panel`, `set_panel_layout`, `move_nodes`, `reset_panel`; `get_nodes`
-carries `panels` and per-node provenance is the id prefix.
+`export_panel`, `clone_panel`, `list_panel_files`, `set_panel_file_autoload`,
+`place_panel`, `move_panel`, `set_panel_layout`, `move_nodes`, `reset_panel`,
+`set_panel_edit_mode`; `get_nodes` carries `panels` and per-node provenance is the id
+prefix.
 
 **Canvas selection.** Selection is a plain `set` of node ids. A plain left press on a node
 selects it (replacing the selection unless it is already part of a multi-selection, so a
