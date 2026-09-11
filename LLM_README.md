@@ -211,7 +211,10 @@ members inside it), so group titles/edges are never clipped. It has a **square m
 size** (`PANEL_MIN_SIDE`, centred on the content); there is no manual resize handle.
 
 *Physics* is hierarchical (`_hierarchical_step`, `on_layout_tick`): node physics runs
-inside each panel in that panel's local frame (internal edges only); then, per parent,
+inside each panel in that panel's local frame (internal edges only). Panel-vs-panel
+physics (siblings repelling/springing in the parent frame) is **paused by default**
+(`panel_physics_active = False`) and opted into from the hamburger menu ("Panel Physics");
+until then panels stay exactly where placed. When on, per parent,
 the direct child panels repel each other in the parent's local frame (siblings only -
 running every panel through one flat pass made a child fight its own parent). Panels use
 a dedicated `panel_force_layout` with *size-aware* springs: an edge's rest length grows by

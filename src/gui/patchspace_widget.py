@@ -358,6 +358,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         )
         self.layout_awake = True
         self._settle_ticks = 0
+        # Panel-vs-panel physics (repulsion/springs between boxes) is paused
+        # by default: panels stay exactly where they're placed until the
+        # user turns it on from the menu.  Node physics is unaffected.
+        self.panel_physics_active = False
         # Consecutive awake layout ticks since the last settle/sleep -
         # capped in on_layout_tick so a non-converging layout can't
         # spin the CPU forever (see that method).
@@ -556,6 +560,15 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
         self.pan_x = view_w / 2.0 - ((min_x + max_x) / 2.0) * self.zoom
         self.pan_y = view_h / 2.0 - ((min_y + max_y) / 2.0) * self.zoom
+        self.queue_draw()
+
+    def set_panel_physics_active(self, active):
+        """Turn the panel-vs-panel physics on/off.  Off by default, so
+        panels stay where they're placed until the user opts in."""
+        self.panel_physics_active = bool(active)
+        if self.panel_physics_active:
+            self.layout_awake = True
+            self._settle_ticks = 0
         self.queue_draw()
 
     # ---------- commands to the daemon ----------
@@ -1213,6 +1226,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # offsets), which is what pushed nested panels apart endlessly.
         def panel_of(nid):
             return nid.rsplit("::", 1)[0] if "::" in nid else ""
+
+        # Panel-vs-panel physics is opt-in (paused by default).  Still drop
+        # the geometry cache so the auto-fit boxes follow the nodes that did
+        # move.
+        if not self.panel_physics_active:
+            self._panel_geo_cache.clear()
+            return max_delta
 
         by_parent = {}
         for pid in self.panels:

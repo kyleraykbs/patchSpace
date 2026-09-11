@@ -387,6 +387,19 @@ class MainWindow(Gtk.ApplicationWindow):
         )
         box.append(reload_panels_btn)
 
+        # Panel-vs-panel physics is paused by default (panels stay exactly
+        # where placed); this opts in.
+        physics_check = Gtk.CheckButton(label="Panel Physics")
+        physics_check.set_active(False)
+        physics_check.set_tooltip_text(
+            "Let panels repel/spring against each other (off: panels stay put)"
+        )
+        physics_check.connect(
+            "toggled",
+            lambda b: self.ps_widget.set_panel_physics_active(b.get_active()),
+        )
+        box.append(physics_check)
+
         box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
 
         # "Rebuild" lives in this menu - it's a rarely-needed recovery
