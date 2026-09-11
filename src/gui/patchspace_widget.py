@@ -5541,14 +5541,20 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         if minx is None:
             rect = (ax, ay, side, side)
         else:
-            left = min(ax, minx - pad)
-            top = min(ay, miny - pad)
-            right = max(ax + side, maxx + pad)
-            bottom = max(ay + side, maxy + pad)
+            # Tight fit around the contents, like a group, with the square
+            # minimum centred on the content when it's smaller.
+            left = minx - pad
+            top = miny - pad
+            right = maxx + pad
+            bottom = maxy + pad
             if right - left < side:
-                right = left + side
+                grow = (side - (right - left)) / 2.0
+                left -= grow
+                right += grow
             if bottom - top < side:
-                bottom = top + side
+                grow = (side - (bottom - top)) / 2.0
+                top -= grow
+                bottom += grow
             rect = (left, top, right - left, bottom - top)
         self._panel_geo_cache[pid] = rect
         return rect

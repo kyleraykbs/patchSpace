@@ -204,10 +204,10 @@ same outline style as the group +/- buttons: the settings "hamburger" (rename/re
 `edit_panel`) at the very right, a delete (trash) button to its left, and the physics-stop
 (pin/pause) toggle left of that (filled when pinned); a read-only panel shows a Reset
 button instead. Delete asks whether to also delete the panel's nodes or keep them (moved
-up into the parent panel; `delete_panel` with `keep_nodes`). The box **auto-fits its
-contents in every direction** (like a group, including left/up of the declared origin)
-with `PANEL_PADDING`, and has a **square minimum size** (`PANEL_MIN_SIDE`); there is no
-manual resize handle.
+up into the parent panel; `delete_panel` with `keep_nodes`). The box **tightly auto-fits
+its contents** in every direction (like a group) with `PANEL_PADDING`, and has a **square
+minimum size** (`PANEL_MIN_SIDE`, centred on the content); there is no manual resize
+handle.
 
 *Physics* is hierarchical (`_hierarchical_step`, `on_layout_tick`): node physics runs
 inside each panel in that panel's local frame (internal edges only); then, per parent,
