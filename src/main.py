@@ -1121,6 +1121,22 @@ class PatchBayDaemon:
         self._panel_snapshots = dict(tree)
         self._edit_panels &= set(tree)
 
+    def _load_new_placement(self, root_id: str) -> None:
+        """Bring up just one newly-added placement subtree, without tearing
+        down the rest of the graph (unlike a full reload)."""
+        tree = self._load_panels_tree()
+        self._install_panels(tree)
+        new_ids = {
+            pid for pid in tree
+            if pid == root_id or pid.startswith(root_id + panels.NAMESPACE_SEP)
+        }
+        if not new_ids:
+            return
+        config = self._flatten_panels(tree, only_panels=new_ids)
+        self._load_session(config, declarative=True)
+        self._dirty = True
+        self._wake_ticker()
+
     def _startup_load_panels(self) -> None:
         tree = self._load_panels_tree()
         self._install_panels(tree)
@@ -1671,8 +1687,8 @@ class PatchBayDaemon:
                             panels.child_ref(stem, stem)
                         )
                     panels.write_file(parent.path, parent_now)
-        # Bring the clone's nodes up.
-        self._cmd_reload_panels({})
+        # Bring the clone's nodes up (without reloading everything).
+        self._load_new_placement(stem)
         return {"status": "ok", "panel_id": stem, "path": path}
 
     def _panel_file_path(self, stem: str):
@@ -1768,7 +1784,7 @@ class PatchBayDaemon:
                             panels.child_ref(local, stem)
                         )
                     panels.write_file(parent.path, parent_now)
-        self._cmd_reload_panels({})
+        self._load_new_placement(panels.make_id(parent_id, local))
         return {"status": "ok", "stem": stem, "name": local, "parent_id": parent_id}
 
     def _cmd_remove_panel_placement(self, cmd: dict) -> dict:
