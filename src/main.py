@@ -1989,6 +1989,36 @@ class PatchBayDaemon:
             return {"status": "error", "message": f"reset {panel_id!r} failed"}
         return {"status": "ok", "panel_id": panel_id, "reverted": True}
 
+    def _refresh_panel_params_from_file(self, panel_id: str) -> bool:
+        """Re-apply a panel file's parameter values to its live nodes
+        *without* recreating them.
+
+        Entering edit mode only needs to discard runtime knob/switch tweaks
+        and restore the file's values; membership, edges and layout already
+        track the file, so a full node teardown/rebuild (``_revert_panel``)
+        is unnecessary - and was re-loading every effect each time."""
+        panel = self.panels.get(panel_id)
+        if panel is None or not panel.path:
+            return False
+        raw = panels.read_file(panel.path)
+        if raw is None:
+            return False
+        cfg = panels.config_from_raw(raw)
+        ox, oy = self._panel_origin(self.panels, panel_id)
+        with self._lock:
+            for local, ncfg in (cfg.get("nodes") or {}).items():
+                node = self.space.nodes.get(panels.make_id(panel_id, local))
+                if node is None:
+                    continue
+                params = dict(ncfg.get("params") or {})
+                if params.get("x") is not None:
+                    params["x"] = float(params["x"]) + ox
+                if params.get("y") is not None:
+                    params["y"] = float(params["y"]) + oy
+                self._apply_node_config(node, params)
+            self.space.sync()
+        return True
+
     def _cmd_set_panel_edit_mode(self, cmd: dict) -> dict:
         """Enter/leave a panel's edit mode.
 
@@ -2005,7 +2035,7 @@ class PatchBayDaemon:
                     "status": "error",
                     "message": f"panel {panel_id!r} is read-only",
                 }
-            if not self._revert_panel(panel_id, self._panel_snapshots):
+            if not self._refresh_panel_params_from_file(panel_id):
                 return {"status": "error", "message": f"refresh {panel_id!r} failed"}
             self._edit_panels.add(panel_id)
         else:

@@ -224,10 +224,11 @@ the edge makes room, and dragging well past the cap takes the node out.
 written back to its file by default - the daemon serves the committed file values from
 `_panel_snapshots` (only layout stays live), so runtime tweaks are ephemeral until you
 commit them. The pencil button in the title row sends `set_panel_edit_mode`; enabling it
-first reverts the panel to its snapshot (`_revert_panel`, shared with `reset_panel`) so
-you start from the file's values, then edits persist (`_write_panels` refreshes the
-snapshot for panels in `_edit_panels`). The panel is darkened and stamped with a large
-"EDIT MODE" water-mark while on. Read-only panels can't enter edit mode.
+first refreshes the panel to its file's values in place
+(`_refresh_panel_params_from_file` re-applies params to the existing live nodes - no
+node teardown/rebuild), then edits persist (`_write_panels` refreshes the snapshot for
+panels in `_edit_panels`). The panel is darkened and stamped with a large "EDIT MODE"
+water-mark while on. Read-only panels can't enter edit mode.
 
 *Files vs placements.* A panel *file* (its `stem`) is the backend; a *placement* is one
 loaded instance with its own `id` (its path) and file (`path`), so the same file can be

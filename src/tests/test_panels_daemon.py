@@ -621,3 +621,19 @@ def test_place_panel_honours_placement(tmp_path):
     d._write_panels()
     tree = d._load_panels_tree()
     assert (tree[other].x, tree[other].y) == (42, 24)
+
+
+def test_enter_edit_mode_refreshes_params_without_recreating_nodes(tmp_path):
+    d, root, pdir = _daemon(tmp_path)
+    d.panels = d._load_panels_tree()
+    d.handle_command({"command": "add_node", "node_type": "regex_input",
+                      "node_id": "a", "config": {"pattern": "orig"}})
+    d._cmd_create_panel({"name": "kit", "node_ids": ["a"]})
+
+    obj = d.space.nodes["kit::a"]
+    d.space.nodes["kit::a"].pattern = "live"
+    resp = d._cmd_set_panel_edit_mode({"panel_id": "kit", "enabled": True})
+    assert resp["status"] == "ok", resp
+    # Same live node (no reload), but its params are back to the file's.
+    assert d.space.nodes["kit::a"] is obj
+    assert d.space.nodes["kit::a"].pattern == "orig"
