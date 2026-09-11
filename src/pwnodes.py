@@ -1182,18 +1182,20 @@ class PanelInNode(TransparentNode):
     internal nodes pull it from "out".  Pure logical pass-through (no
     backing)."""
 
-    def __init__(self, node_id, port_name: str = ""):
+    def __init__(self, node_id, port_name: str = "", description: str = ""):
         super().__init__(node_id)
         self.port_name = port_name
+        self.description = description
 
 
 class PanelOutNode(TransparentNode):
     """A panel output port: internal audio arrives on "in" and external
     nodes pull it from "out".  Pure logical pass-through (no backing)."""
 
-    def __init__(self, node_id, port_name: str = ""):
+    def __init__(self, node_id, port_name: str = "", description: str = ""):
         super().__init__(node_id)
         self.port_name = port_name
+        self.description = description
 
 
 class BoolPanelInNode(Node):
@@ -1202,9 +1204,10 @@ class BoolPanelInNode(Node):
 
     BOOLEAN_INPUT = "in"
 
-    def __init__(self, node_id, port_name: str = ""):
+    def __init__(self, node_id, port_name: str = "", description: str = ""):
         super().__init__(node_id)
         self.port_name = port_name
+        self.description = description
 
     def port_kind(self, port: str, direction: str) -> str:
         return "boolean"
@@ -1216,9 +1219,10 @@ class BoolPanelOutNode(Node):
 
     BOOLEAN_INPUT = "in"
 
-    def __init__(self, node_id, port_name: str = ""):
+    def __init__(self, node_id, port_name: str = "", description: str = ""):
         super().__init__(node_id)
         self.port_name = port_name
+        self.description = description
 
     def port_kind(self, port: str, direction: str) -> str:
         return "boolean"

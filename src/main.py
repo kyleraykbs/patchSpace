@@ -1432,25 +1432,26 @@ class PatchBayDaemon:
                     node.x = off_other[0] + float(params["x"])
                     node.y = off_other[1] + float(params["y"])
                 snap = self._panel_snapshots.get(other)
+                other_panel = self.panels.get(other)
+                if snap is None or other_panel is None:
+                    continue
                 # Keep the sibling's snapshot in step for the copied
                 # positions, so it doesn't look "changed" next time.
-                if snap is not None:
-                    for local, cfg in source.nodes.items():
-                        sc = snap.nodes.get(local)
-                        params = cfg.get("params") or {}
-                        if sc is None or params.get("x") is None:
-                            continue
-                        sp = sc.setdefault("params", {})
-                        sp["x"] = float(params["x"])
-                        sp["y"] = float(params["y"])
-                # Only structural/parameter changes rebuild a sibling;
-                # position-only changes are handled by the cheap copy above.
-                if snap is None or not self._placement_differs(
-                    snap, source, other in self._edit_panels, positions=False
-                ):
-                    continue
-                other_panel = self.panels.get(other)
-                if other_panel is None:
+                for local, cfg in source.nodes.items():
+                    sc = snap.nodes.get(local)
+                    params = cfg.get("params") or {}
+                    if sc is None or params.get("x") is None:
+                        continue
+                    sp = sc.setdefault("params", {})
+                    sp["x"] = float(params["x"])
+                    sp["y"] = float(params["y"])
+                structural = self._placement_differs(
+                    snap, source, include_params=False, positions=False
+                )
+                params_differ = self._placement_differs(
+                    snap, source, include_params=True, positions=False
+                )
+                if not structural and not params_differ:
                     continue
                 adapted = panels.Panel(
                     id=other_panel.id, parent=other_panel.parent,
@@ -1468,7 +1469,12 @@ class PatchBayDaemon:
                     },
                 )
                 self._panel_snapshots[other] = adapted
-                self._revert_panel(other, {other: adapted})
+                if structural:
+                    # Membership/edges differ: rebuild the sibling subtree.
+                    self._revert_panel(other, {other: adapted})
+                else:
+                    # Parameters only: apply in place (no node reload).
+                    self._apply_panel_params(other, source)
 
     def _cmd_list_panels(self, cmd: dict) -> dict:
         files = []
@@ -2027,6 +2033,21 @@ class PatchBayDaemon:
                 self._apply_node_config(node, params)
             self.space.sync()
         return True
+
+    def _apply_panel_params(self, panel_id: str, source) -> None:
+        """Apply another placement's parameter values to this placement's
+        live nodes in place (no reload) - used to sync an edit across
+        placements of the same file."""
+        with self._lock:
+            for local, cfg in (source.config.get("nodes") or {}).items():
+                node = self.space.nodes.get(panels.make_id(panel_id, local))
+                if node is None:
+                    continue
+                params = dict(cfg.get("params") or {})
+                for key in ("x", "y", "anchored"):
+                    params.pop(key, None)
+                self._apply_node_config(node, params)
+            self.space.sync()
 
     def _cmd_set_panel_edit_mode(self, cmd: dict) -> dict:
         """Enter/leave a panel's edit mode.
@@ -3276,7 +3297,7 @@ class PatchBayDaemon:
         if cls in (WarpInNode, WarpOutNode, BooleanWarpInNode, BooleanWarpOutNode):
             return cls(node_id, g("warp_name", ""))
         if cls in (PanelInNode, PanelOutNode, BoolPanelInNode, BoolPanelOutNode):
-            return cls(node_id, g("port_name", ""))
+            return cls(node_id, g("port_name", ""), g("description", ""))
         if cls is ExcludeFilterNode:
             return cls(node_id, g("pattern", ""))
         if cls is VolumeProcessNode:

@@ -192,6 +192,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._node_seq = 0
 
         self.dragging_node = None
+        # A panel port being dragged to reorder (vertical-only).
+        self.dragging_port = None
+        self._port_drag_start_y = 0.0
         self.drag_node_start = (0, 0)
         # When a drag moves a multi-node selection, every dragged node's
         # start position is remembered here (id -> (x, y)) so each can be
@@ -1515,7 +1518,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             tw, _th = self._text_size(label, 12)
             return max(
                 self.SPLITTER_MIN_SIZE,
-                min(self.NODE_WIDTH, int(tw) + 44),
+                min(self.NODE_WIDTH, int(tw) + 34),
             )
         if self._is_compact_node(node) and not node.get("label"):
             if node["type"] == "splitter":
@@ -4224,6 +4227,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self.detaching_edge = None
         self.dragging_node = None
         self.dragging_panel = None
+        self.dragging_port = None
         self.drag_node_starts = {}
         self._panel_drag_baseline = {}
         self.hover_target_node = None
@@ -4434,10 +4438,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             # moves together.
             if nid not in self.selected_nodes:
                 self._set_selection({nid})
-            # Panel port squares are locked to their bar; don't drag them.
+            # Panel ports are locked to their bar but can be dragged
+            # vertically to reorder.
             if self.nodes[nid].get("type") in (
                 self._PORT_IN_TYPES | self._PORT_OUT_TYPES
             ):
+                self.dragging_port = nid
+                self._port_drag_start_y = self.nodes[nid].get("y") or 0.0
                 return
             # Freeze each panel's size for this drag (see _panel_rect): the
             # box keeps its size on pickup and may only grow toward the
@@ -4485,6 +4492,17 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._set_selection(())
 
     def on_drag_update(self, gesture, offset_x, offset_y):
+        if self.dragging_port is not None:
+            node = self.nodes.get(self.dragging_port)
+            if node is not None:
+                ny = self._port_drag_start_y + offset_y / self.zoom
+                rect = self._panel_rect(self._panel_of_node(self.dragging_port))
+                if rect is not None:
+                    h = self.node_height(self.dragging_port)
+                    ny = max(rect[1] + 4.0, min(rect[1] + rect[3] - h - 4.0, ny))
+                node["y"] = ny
+            self.queue_draw()
+            return
         if self.dragging_panel is not None:
             dx = offset_x / self.zoom
             dy = offset_y / self.zoom
@@ -4660,6 +4678,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self.queue_draw()
 
     def _handle_drag_end(self, gesture, offset_x, offset_y):
+        if self.dragging_port is not None:
+            self.dragging_port = None
+            # Re-sort by the dropped y and re-center the stack.
+            self._mark_layout_dirty()
+            self._layout_panel_ports()
+            self.queue_draw()
+            return
         if self.dragging_panel is not None:
             dragging = self.dragging_panel
             panel = self.panels.get(dragging)
@@ -6103,6 +6128,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         around the box's middle) and persist any that moved.  Called after
         polls/layout so ports follow the panel as it grows with content.
         Stacked by each port's real height with a PANEL_IO_PORT_GAP gap."""
+        if self.dragging_port is not None:
+            # A port is mid-reorder; don't fight the pointer.
+            return
         gap = self.PANEL_IO_PORT_GAP
         moved = False
         for pid in list(self.panels):

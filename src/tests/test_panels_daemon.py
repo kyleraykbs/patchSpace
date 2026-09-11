@@ -651,11 +651,12 @@ def test_panel_port_nodes_round_trip(tmp_path):
         resp = d.handle_command(
             {"command": "add_node", "node_type": ntype, "node_id": nid,
              "config": {"port_name": name, "label": name, "anchored": True,
-                        "x": 5, "y": 5}}
+                        "description": name + " port", "x": 5, "y": 5}}
         )
         assert resp["status"] == "ok", resp
         assert d.space.nodes[nid].port_name == name
         assert d.space.nodes[nid].label == name
+        assert d.space.nodes[nid].description == name + " port"
         assert d.space.nodes[nid].anchored is True
     assert d.space.nodes["kit::mic"].is_transparent()
     assert d.space.nodes["kit::gate"].port_kind("out", "out") == "boolean"
@@ -664,3 +665,25 @@ def test_panel_port_nodes_round_trip(tmp_path):
     tree = d._load_panels_tree()
     assert tree["kit"].nodes["mic"]["params"]["port_name"] == "Mic"
     assert tree["kit"].nodes["gate"]["params"]["port_name"] == "Gate"
+
+
+def test_edit_mode_params_sync_across_placements(tmp_path):
+    d, root, pdir = _daemon(tmp_path)
+    d.panels = d._load_panels_tree()
+    d.handle_command({"command": "add_node", "node_type": "regex_input",
+                      "node_id": "a", "config": {"pattern": "orig", "x": 10, "y": 20}})
+    d._cmd_create_panel({"name": "kit", "node_ids": ["a"]})
+    d._write_panels()
+    other = d._cmd_place_panel({"stem": "kit"})["name"]
+
+    d._cmd_set_panel_edit_mode({"panel_id": other, "enabled": True})
+    d.space.nodes[f"{other}::a"].pattern = "edited"
+    d._write_panels()
+    # The edit is mirrored onto the sibling...
+    assert d.space.nodes["kit::a"].pattern == "edited"
+    # ...and repeated writes don't clobber it back.
+    d._write_panels()
+    assert d.space.nodes["kit::a"].pattern == "edited"
+    assert d.space.nodes[f"{other}::a"].pattern == "edited"
+    raw = json.load(open(os.path.join(pdir, "kit.json")))
+    assert raw["config"]["nodes"]["a"]["params"]["pattern"] == "edited"

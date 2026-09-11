@@ -240,8 +240,10 @@ so several placements of one file each keep their own position. Placements keep
 independent live settings (their own nodes), but structure, positions and (in edit mode)
 parameters sync: `_canonical_by_stem` finds the placement that changed, `_write_panels`
 writes the file from it, and `_sync_placements` copies positions to the others (cheap) and
-reverts them to the changed config for structural/param changes (independent 'live'
-settings are not shared). `place_panel` adds a placement of a file (root by default); the
+syncs structural/parameter changes: a structural difference reverts the sibling
+subtree, while a parameter-only difference is applied in place
+(`_apply_panel_params`, no node reload) with the sibling's snapshot updated - so editing
+one placement updates the others and repeated writes can't clobber the file back. `place_panel` adds a placement of a file (root by default); the
 side view's **Place** button puts one in the middle of the viewport at the top level, and
 rows are **draggable onto the canvas** (dropped over a panel it nests there, else root).
 
@@ -259,7 +261,9 @@ foot (`_panel_io_rects`); the `+` opens a name/type dialog and drops a port node
 edge (`_prompt_add_port`/`_add_panel_port`), showing **only its label** (no type/id) and
 sized to the label (capped at `NODE_WIDTH`). Port nodes are centered on the edge (the bar
 runs through the middle of each), locked `anchored` and always pinned in the physics - no
-unanchor control, no three-dots badge (right-click for the menu). The bar extends
+unanchor control, no three-dots badge (right-click for the menu). Ports can be dragged
+**vertically only** to reorder the stack (clamped to the box); the settings dialog has a
+`description` row. The bar extends
 `PANEL_IO_BAR_PAD` past the top/bottom port. `_layout_panel_ports` re-centers the stack
 after every poll so ports follow the box as it grows/moves, and the panel reserves
 `NODE_WIDTH/2 + PANEL_IO_MARGIN` inside each port edge (and enough height for the stack) so

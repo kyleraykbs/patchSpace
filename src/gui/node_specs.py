@@ -290,14 +290,21 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
     # Panel ports: pass-through proxy nodes placed at a panel's left
     # (inputs) / right (outputs) edge.  Audio ones are transparent; boolean
     # ones carry a boolean control signal.
-    "panel_in": NodeSpec("Panel In", ["in"], ["out"]),
-    "panel_out": NodeSpec("Panel Out", ["in"], ["out"]),
+    "panel_in": NodeSpec(
+        "Panel In", ["in"], ["out"],
+        settings=[("description", "Description:", "text")],
+    ),
+    "panel_out": NodeSpec(
+        "Panel Out", ["in"], ["out"],
+        settings=[("description", "Description:", "text")],
+    ),
     "bool_panel_in": NodeSpec(
         "Bool Panel In",
         ["in"],
         ["out"],
         boolean_inputs=["in"],
         boolean_outputs=["out"],
+        settings=[("description", "Description:", "text")],
     ),
     "bool_panel_out": NodeSpec(
         "Bool Panel Out",
@@ -305,6 +312,7 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
         ["out"],
         boolean_inputs=["in"],
         boolean_outputs=["out"],
+        settings=[("description", "Description:", "text")],
     ),
 }
 
