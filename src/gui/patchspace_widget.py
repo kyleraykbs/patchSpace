@@ -857,15 +857,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     # _node_health. Only backed nodes carry it; anything
                     # else is treated as healthy.
                     "health": ndata.get("health", "ok"),
-                    # File-backed node (see main.py's declarative support):
-                    # drawn with a small blue corner dot so the user can
-                    # tell at a glance which nodes a declarative file owns
-                    # and will re-derive on reload.
-                    "declarative": bool(ndata.get("declarative", False)),
-                    "declarative_label": ndata.get("declarative_label", ""),
-                    "declarative_color": ndata.get(
-                        "declarative_color", "#3584e4"
-                    ),
                     "device_volume": ndata.get("device_volume", 1.0),
                     "profile_index": ndata.get("profile_index"),
                     "codec_label": ndata.get("profile_description", ""),
@@ -918,11 +909,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 node["selection_label"] = ndata.get("selection_label", "")
                 node["ready"] = ndata.get("ready", True)
                 node["health"] = ndata.get("health", "ok")
-                node["declarative"] = bool(ndata.get("declarative", False))
-                node["declarative_label"] = ndata.get("declarative_label", "")
-                node["declarative_color"] = ndata.get(
-                    "declarative_color", "#3584e4"
-                )
                 # Only update volume if not dragging this node
                 # Only update volume if not dragging this node
                 if self.slider_dragging != ("process", nid):
@@ -2146,16 +2132,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         for nid, node in self.nodes.items():
             self._draw_node(cr, pal, nid, node)
 
-        # Declarative name bubbles hang just below their node.  Drawn in
-        # their own pass after every node body, so a node sitting under
-        # another can't paint over the bubble.
-        for nid, node in self.nodes.items():
-            if node.get("declarative"):
-                self._draw_declarative_chip(
-                    cr, pal, nid, node, node["x"], node["y"],
-                    self.node_height(nid),
-                )
-
         # Highlight the current marquee selection, then the rubber-band
         # rectangle itself, above the nodes so both stay visible.
         for nid in self.selected_nodes:
@@ -2450,47 +2426,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             cr.arc(dot_x, start_y + i * 6, 2.2, 0, 2 * math.pi)
             cr.set_source_rgb(0.7, 0.7, 0.7)
             cr.fill()
-
-    def _draw_declarative_chip(self, cr, pal, nid, node, x, y, node_h):
-        """A small coloured tag hanging just below the node, centred,
-        naming the declarative file that owns it, filled with the file's
-        colour.  Replaces the old plain blue dot: one canvas can hold
-        several declared groups, and the label+colour keeps them
-        distinguishable at a glance.  Below the node so it never covers a
-        socket/control/row; painting only, with no hit-tester, so clicks
-        fall through to the canvas."""
-        label = (node.get("declarative_label") or "").strip() or "declared"
-        color = node.get("declarative_color") or "#3584e4"
-        font_size = 9
-        text_w, text_h = self._text_size(label, font_size)
-        chip_h = max(14.0, text_h + 5)
-        chip_w = min(text_w + 14, max(24.0, self.node_width(nid) - 16))
-        cx = x + (self.node_width(nid) - chip_w) / 2.0
-        cy = y + node_h + 3
-        r, g, b = self._hex_to_rgb(color)
-        cr.save()
-        draw_rounded_rect(cr, cx, cy, chip_w, chip_h, chip_h / 2.0)
-        # Semi-transparent so whatever sits under the tag (a socket label,
-        # a control) still reads through it.  The tag is painting only -
-        # there is deliberately no find_declarative_chip_at() hit-tester,
-        # so clicks pass straight through to the node/control beneath.
-        cr.set_source_rgba(r, g, b, 0.5)
-        cr.fill_preserve()
-        cr.set_source_rgba(*pal["node_bg"], 0.6)
-        cr.set_line_width(1.0)
-        cr.stroke()
-        lum = 0.299 * r + 0.587 * g + 0.114 * b
-        text_rgb = (0.08, 0.08, 0.08) if lum > 0.6 else (1.0, 1.0, 1.0)
-        draw_text_ellipsized(
-            cr,
-            cx + 7,
-            cy + (chip_h - text_h) / 2.0,
-            label,
-            chip_w - 14,
-            font_size,
-            text_rgb,
-        )
-        cr.restore()
 
     def _draw_settings_gear(self, cr, pal, x, y, node_h):
         """Small cog in the node's bottom-right corner marking "this

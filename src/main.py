@@ -3810,14 +3810,6 @@ class PatchBayDaemon:
                     or getattr(node, "device_name", "")
                     or getattr(node, "app_name", "")
                 )
-            if getattr(node, "declarative", False):
-                pid = panels.panel_of(node_id)
-                panel = self.panels.get(pid)
-                data["declarative_label"] = panel.label if panel else pid
-                data["declarative_color"] = (
-                    panel.color if panel else panels.DEFAULT_COLOR
-                )
-                data["declarative_readonly"] = bool(panel and panel.is_readonly)
             result[node_id] = data
         return result
 
