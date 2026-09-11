@@ -340,6 +340,17 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self.force_layout = ForceLayout(
             spring_length=280, repulsion=70000, flow_gap=500, flow_k=0.035
         )
+        # Panels are large boxes, so they need longer springs and stronger
+        # repulsion than nodes: sharing the node layout's 280px spring
+        # yanked connected panels into each other and the overlap pass
+        # then fought the spring (the "boxes pulled together" jitter).
+        self.panel_force_layout = ForceLayout(
+            repulsion=200000,
+            spring_length=700,
+            flow_gap=900,
+            flow_k=0.02,
+            repulsion_cutoff=2000,
+        )
         self.layout_awake = True
         self._settle_ticks = 0
         # Consecutive awake layout ticks since the last settle/sleep -
@@ -348,6 +359,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._awake_ticks = 0
         self._prev_node_ids = set()
         self._prev_edge_set = set()
+        self._prev_panel_ids = set()
 
         self.set_draw_func(self.on_draw)
         self.set_size_request(*GRAPH_CANVAS_MIN_SIZE)
@@ -1090,7 +1102,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             for e in self.edges.values()
         }
         nodes_added = new_node_ids != self._prev_node_ids
-        if nodes_added or new_edge_set != self._prev_edge_set:
+        panels_changed = set(self.panels) != self._prev_panel_ids
+        if nodes_added or panels_changed or new_edge_set != self._prev_edge_set:
+            # A new/changed panel needs the layout to run so the boxes are
+            # arranged; otherwise the physics stays asleep until a node is
+            # moved by hand.
             self.layout_awake = True
             self._settle_ticks = 0
         if nodes_added:
@@ -1098,7 +1114,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self._mark_layout_dirty()
         self._prev_node_ids = new_node_ids
         self._prev_edge_set = new_edge_set
+        self._prev_panel_ids = set(self.panels)
         self.force_layout.prune(new_node_ids)
+        self.panel_force_layout.prune(set(self.panels))
 
         # A poll can add/remove nodes (and thus anchored/selected ids);
         # keep the tool panel in sync when it did.
@@ -1219,7 +1237,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             pinned = {pid for pid in pids if self.panels[pid].get("anchored")}
             if self.dragging_panel in kid_set:
                 pinned.add(self.dragging_panel)
-            delta = self.force_layout.step(pids, positions, sizes, edges, pinned)
+            delta = self.panel_force_layout.step(pids, positions, sizes, edges, pinned)
             max_delta = max(max_delta, delta)
             for pid in pids:
                 if self.dragging_panel == pid:
@@ -5350,6 +5368,16 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     def _panel_local(pid):
         return pid.rsplit("::", 1)[-1] if pid else "root"
 
+    def _panel_title_font(self):
+        """World-unit font size for a panel's floating title.
+
+        Drawing is scaled by the view zoom, so a fixed world size grows
+        without bound on screen.  Clamp the *screen* size so the title
+        scales with zoom up to a point and then stays legible and out of
+        the way."""
+        z = max(self.zoom, 1e-6)
+        return min(14.0, 30.0 / z)
+
     def _panel_rect(self, pid):
         """(x, y, w, h) absolute box for a panel: its explicit placement,
         auto-grown to contain its member nodes and child panels."""
@@ -5396,22 +5424,37 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         return rect
 
     def _panel_header_rects(self, pid, rect):
+        """Hit/draw geometry for a panel's floating title row, which sits
+        just above the box (like a group's title): the physics-stop (pin)
+        circle on the left, the title, then the settings/reset circle."""
         x, y, w, h = rect
-        header = (x, y, x + w, y + self.PANEL_HEADER_H)
+        panel = self.panels[pid]
+        font = self._panel_title_font()
+        label = panel.get("label") or self._panel_local(pid)
+        tw, th = self._text_size(label, font)
+        d = max(16.0, th * 1.5)
+        gap = max(6.0, font * 0.5)
+        top = y - th - gap
+        anchor = (x, top, x + d, top + d)
+        tx = x + d + gap
+        title = (tx, top, tx + tw, top + th)
+        right = tx + tw
+        reset = None
+        settings = None
+        if panel.get("readonly"):
+            reset = (right + gap, top, right + gap + d, top + d)
+            right = reset[2]
+        elif panel.get("writable"):
+            settings = (right + gap, top, right + gap + d, top + d)
+            right = settings[2]
         resize = (
             x + w - self.PANEL_TRIANGLE, y + h - self.PANEL_TRIANGLE,
             x + w, y + h,
         )
-        reset = None
-        if self.panels[pid].get("readonly"):
-            reset = (x + w - 22, y + 4, x + w - 6, y + self.PANEL_HEADER_H - 4)
-        anchor = (x + 6, y + 5, x + 20, y + self.PANEL_HEADER_H - 5)
-        settings = None
-        if self.panels[pid].get("writable") and not self.panels[pid].get("readonly"):
-            settings = (x + w - 22, y + 4, x + w - 6, y + self.PANEL_HEADER_H - 4)
+        header = (x, top, right, top + d)
         return {
             "header": header, "resize": resize, "reset": reset,
-            "anchor": anchor, "settings": settings,
+            "anchor": anchor, "settings": settings, "title": title,
         }
 
     def _draw_panel_grid(self, cr, x, y, w, h, rgb):
@@ -5467,57 +5510,65 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             x, y, w, h = rect
             geo = self._panel_header_rects(pid, rect)
             r, g, b = self._hex_to_rgb(panel.get("color"))
-            cr.set_source_rgba(r, g, b, 0.92)
-            draw_rounded_rect(cr, x, y, w, self.PANEL_HEADER_H, 12)
-            cr.fill()
-            cr.set_source_rgb(0.05, 0.05, 0.06)
-            cr.select_font_face("sans")
-            cr.set_font_size(12)
-            cr.move_to(x + 26, y + 17)
-            cr.show_text(panel.get("label") or self._panel_local(pid))
-            cr.set_font_size(9)
-            cr.set_source_rgba(0.05, 0.05, 0.06, 0.7)
-            cr.move_to(x + 26, y + self.PANEL_HEADER_H + 11)
-            cr.show_text(self._panel_local(pid))
-            # Anchor glyph.
+            font = self._panel_title_font()
+            # Title, drawn like a group title (floating above the box, in
+            # the panel's colour, scaling with zoom up to a point).
+            tx1, ty1, _tx2, _ty2 = geo["title"]
+            draw_text_unbounded(
+                cr, tx1, ty1,
+                panel.get("label") or self._panel_local(pid),
+                font, (r, g, b),
+            )
+            # Physics-stop (pin) circle to the left of the title: filled
+            # when the panel is pinned, with a pause glyph.
             ax1, ay1, ax2, ay2 = geo["anchor"]
-            cr.set_source_rgb(0.05, 0.05, 0.06)
-            cr.set_line_width(1.3)
-            cr.arc((ax1 + ax2) / 2, ay1 + 3, 3, 0, 2 * math.pi)
-            cr.stroke()
-            cr.move_to((ax1 + ax2) / 2, ay1 + 6)
-            cr.line_to((ax1 + ax2) / 2, ay2 - 1)
-            cr.stroke()
+            acx, acy = (ax1 + ax2) / 2.0, (ay1 + ay2) / 2.0
+            ar = (ax2 - ax1) / 2.0
+            bcx = max(2.0, ar * 0.55)
+            cr.set_line_width(1.6)
             if panel.get("anchored"):
-                cr.arc((ax1 + ax2) / 2, ay1 + 3, 5, 0, 2 * math.pi)
+                cr.set_source_rgb(r, g, b)
+                cr.arc(acx, acy, ar, 0, 2 * math.pi)
+                cr.fill()
+                cr.set_source_rgb(0.05, 0.05, 0.06)
+            else:
+                cr.set_source_rgb(0.05, 0.05, 0.06)
+                cr.arc(acx, acy, ar, 0, 2 * math.pi)
                 cr.stroke()
-            # Reset button (read-only panels).
-            if geo["reset"] is not None:
-                rx1, ry1, rx2, ry2 = geo["reset"]
-                draw_rounded_rect(cr, rx1, ry1, rx2 - rx1, ry2 - ry1, 3)
+            bar_h = ar
+            bar_w = max(1.5, ar * 0.28)
+            cr.rectangle(acx - ar * 0.45 - bar_w / 2, acy - bar_h / 2, bar_w, bar_h)
+            cr.rectangle(acx + ar * 0.45 - bar_w / 2, acy - bar_h / 2, bar_w, bar_h)
+            cr.fill()
+            # Settings (writable) / Reset (read-only) circle, right of the
+            # title.
+            circle = geo["settings"] if geo["settings"] is not None else geo["reset"]
+            if circle is not None:
+                cx1, cy1, cx2, cy2 = circle
+                ccx, ccy = (cx1 + cx2) / 2.0, (cy1 + cy2) / 2.0
+                crr = (cx2 - cx1) / 2.0
                 cr.set_source_rgb(0.96, 0.96, 0.96)
+                cr.arc(ccx, ccy, crr, 0, 2 * math.pi)
                 cr.fill()
                 cr.set_source_rgb(0.1, 0.1, 0.12)
-                cr.set_line_width(1.4)
-                cr.arc((rx1 + rx2) / 2, (ry1 + ry2) / 2, 5, -1.2, 2.2)
-                cr.stroke()
-            # Settings gear (writable panels; read-only panels show Reset).
-            if geo.get("settings") is not None:
-                sx1, sy1, sx2, sy2 = geo["settings"]
-                scx, scy = (sx1 + sx2) / 2, (sy1 + sy2) / 2
-                cr.set_source_rgba(0.05, 0.05, 0.06, 0.85)
-                cr.set_line_width(1.6)
-                cr.arc(scx, scy, 4.0, 0, 2 * math.pi)
-                cr.stroke()
-                for k in range(8):
-                    ang = k * math.pi / 4.0
-                    cr.move_to(
-                        scx + 4.0 * math.cos(ang), scy + 4.0 * math.sin(ang)
-                    )
-                    cr.line_to(
-                        scx + 6.0 * math.cos(ang), scy + 6.0 * math.sin(ang)
-                    )
-                cr.stroke()
+                cr.set_line_width(1.5)
+                if geo["settings"] is not None:
+                    # Three-dot "menu" glyph.
+                    dot = max(1.0, crr * 0.16)
+                    for dy in (-1, 0, 1):
+                        cr.arc(ccx, ccy + dy * crr * 0.5, dot, 0, 2 * math.pi)
+                        cr.fill()
+                else:
+                    # Reset: a circular arrow.
+                    cr.arc(ccx, ccy, crr * 0.55, -1.0, 2.3)
+                    cr.stroke()
+                    a = 2.3
+                    hx, hy = ccx + crr * 0.55 * math.cos(a), ccy + crr * 0.55 * math.sin(a)
+                    cr.move_to(hx - 3, hy - 1)
+                    cr.line_to(hx + 1, hy - 3)
+                    cr.line_to(hx + 1, hy + 2)
+                    cr.close_path()
+                    cr.fill()
             # Resize triangle bottom-right.
             tx1, ty1, tx2, ty2 = geo["resize"]
             cr.set_source_rgba(r, g, b, 0.95)

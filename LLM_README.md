@@ -196,19 +196,25 @@ automatically because ownership is derived from ids.
 (`self._readonly_snapshots`); the GUI controls stay live but `reset_panel` / reload /
 restart re-apply the file's membership, positions, edges and params. `read-write` (the
 default) reads and writes. The GUI draws a panel as a tinted-grid box (grid shares the
-world grid's origin/spacing so it overlays it), with a header (label + id + mode + anchor
-glyph), a bottom-right resize triangle, a top-right settings gear (rename/recolour via
-`edit_panel`), and a Reset button on read-only panels.
+world grid's origin/spacing so it overlays it). Its title floats just above the box like a
+group's title (panel colour, zoom-scaled font clamped so it stops growing past a point)
+and is the drag handle; a circular physics-stop (pin) button sits to its left, and a
+circular settings (rename/recolour via `edit_panel`) or Reset button to its right. The
+box has a bottom-right resize triangle.
 
 *Physics* is hierarchical (`_hierarchical_step`, `on_layout_tick`): node physics runs
 inside each panel in that panel's local frame (internal edges only); then, per parent,
 the direct child panels repel each other in the parent's local frame (siblings only -
-running every panel through one flat pass made a child fight its own parent). Nodes never
-exert forces across a panel boundary (cross-panel edges only spring the two panels
-together). Panel placement is *locally* authoritative while physics/drag moves it
-(`_pending_panels`): a poll carries the last flushed placement, so accepting it would
-snap the panel - and, since moving a panel moves its nodes, drag every node back - each
-refresh. It is handed back to the daemon when the daemon echoes exactly what was sent.
+running every panel through one flat pass made a child fight its own parent). Panels use
+a dedicated `panel_force_layout` with longer springs and stronger repulsion than nodes,
+so connected boxes don't get yanked into each other. The layout re-arms whenever the
+node/edge/panel set changes, so it also runs right after a panel is created or loaded
+(not only after a node is dragged). Nodes never exert forces across a panel boundary
+(cross-panel edges only spring the two panels together). Panel placement is *locally*
+authoritative while physics/drag moves it (`_pending_panels`): a poll carries the last
+flushed placement, so accepting it would snap the panel - and, since moving a panel moves
+its nodes, drag every node back - each refresh. It is handed back to the daemon when the
+daemon echoes exactly what was sent.
 
 *Reparenting:* dragging a node across a boundary sends `move_nodes`; the daemon
 re-qualifies its id, re-homes its edges (ownership is derived from ids) and re-points
