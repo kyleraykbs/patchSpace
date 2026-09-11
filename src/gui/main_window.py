@@ -431,6 +431,26 @@ class MainWindow(Gtk.ApplicationWindow):
 
         overlay.add_overlay(menu_button)
 
+        # Floating delete button for the current selection, pinned to the
+        # canvas's bottom-right and shown only while something is selected.
+        # Asks for confirmation before removing anything.
+        self._ps_delete_button = Gtk.Button()
+        self._ps_delete_button.add_css_class("selection-delete")
+        self._ps_delete_button.set_child(
+            Gtk.Image.new_from_icon_name("user-trash-symbolic")
+        )
+        self._ps_delete_button.set_size_request(40, 40)
+        self._ps_delete_button.set_tooltip_text("Delete the selected nodes")
+        self._ps_delete_button.set_halign(Gtk.Align.END)
+        self._ps_delete_button.set_valign(Gtk.Align.END)
+        self._ps_delete_button.set_margin_end(16)
+        self._ps_delete_button.set_margin_bottom(16)
+        self._ps_delete_button.set_visible(False)
+        self._ps_delete_button.connect(
+            "clicked", lambda _b: self.ps_widget.confirm_delete_selection()
+        )
+        overlay.add_overlay(self._ps_delete_button)
+
         # Transparent loading wheel + faint dim over the canvas, shown
         # while a session import stages its nodes (see
         # PatchSpaceGraphWidget.on_loading_changed).  Created here so it
@@ -575,6 +595,11 @@ class MainWindow(Gtk.ApplicationWindow):
             b"  background-color: rgba(150, 44, 44, 0.92);"
             b"  border-radius: 10px; padding: 5px 10px; }"
             b".disconnected-badge label { color: #ffffff; font-size: 12px; }"
+            b".selection-delete {"
+            b"  background-color: rgba(180, 50, 50, 0.92);"
+            b"  border-radius: 999px; padding: 8px;"
+            b"  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35); }"
+            b".selection-delete image { color: #ffffff; }"
         )
         display = Gdk.Display.get_default()
         if display is not None:
@@ -708,6 +733,8 @@ class MainWindow(Gtk.ApplicationWindow):
     def _update_patchspace_toolbar(self):
         widget = self.ps_widget
         count = len(widget.selected_nodes)
+        if hasattr(self, "_ps_delete_button"):
+            self._ps_delete_button.set_visible(count > 0)
         if count == 0:
             self._ps_selection_label.set_label("No selection")
             self._ps_group_button.set_sensitive(False)

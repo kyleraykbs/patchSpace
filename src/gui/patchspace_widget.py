@@ -4499,6 +4499,43 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self.client.send({"command": "remove_node", "node_id": node_id})
         GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
 
+    def confirm_delete_selection(self):
+        """Ask before deleting every selected node (the floating
+        bottom-right delete button; see main_window)."""
+        node_ids = [n for n in self.selected_nodes if n in self.nodes]
+        if not node_ids:
+            return
+        plural = "s" if len(node_ids) != 1 else ""
+        confirm = Gtk.AlertDialog()
+        confirm.set_modal(True)
+        confirm.set_message(f"Delete {len(node_ids)} node{plural}?")
+        confirm.set_detail(
+            "Their edges are removed with them. This cannot be undone."
+        )
+        confirm.set_buttons(["Cancel", "Delete"])
+        confirm.set_cancel_button(0)
+        confirm.set_default_button(1)
+        confirm.choose(
+            self.get_root(),
+            None,
+            lambda d, result, ids=node_ids: self._on_delete_selection_chosen(
+                d, result, ids
+            ),
+        )
+
+    def _on_delete_selection_chosen(self, dialog, result, node_ids):
+        try:
+            index = dialog.choose_finish(result)
+        except GLib.Error:
+            return
+        if index != 1:
+            return
+        for nid in node_ids:
+            if nid in self.nodes:
+                self.client.send({"command": "remove_node", "node_id": nid})
+        self._set_selection(())
+        GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
+
     def _on_open_settings(self, button, node_id, popover):
         popover.popdown()
         self.show_settings_dialog(node_id)

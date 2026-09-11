@@ -239,7 +239,9 @@ left-drag is a modifier marquee (`_marquee_mode`): Shift unions the swept nodes 
 subtracts them, re-derived each update from `_marquee_base`; a Shift/Ctrl *click* (no sweep)
 toggles the node under the pointer. Shift/Ctrl + right-click on a node does the same
 (add/remove) without opening the context menu, and Shift/Ctrl + right-drag is a modifier
-marquee (Shift adds the swept nodes, Ctrl removes them; a bare right-drag replaces).
+marquee (Shift adds the swept nodes, Ctrl removes them; a bare right-drag replaces). A
+floating circular Delete button sits at the canvas's bottom-right whenever there is a
+selection and confirms (Gtk.AlertDialog) before removing the selected nodes.
 
 **Session load is asynchronous.** `_cmd_load_session` starts a background thread and
 immediately returns `{"status": "ok", "started": true}`. There is **no completion
