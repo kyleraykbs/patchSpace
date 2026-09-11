@@ -786,6 +786,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 "h": h,
                 "anchored": anchored,
                 "auto_load": bool(p.get("auto_load", True)),
+                "edit_mode": bool(p.get("edit_mode", False)),
                 "path": p.get("path"),
                 "children": list(p.get("children") or []),
             }
@@ -1780,6 +1781,18 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             if rect is None:
                 continue
             r = self._panel_header_rects(pid, rect).get("delete")
+            if r is not None and r[0] <= x <= r[2] and r[1] <= y <= r[3]:
+                return pid
+        return None
+
+    def find_panel_edit_at(self, x, y):
+        for pid in self._panel_order_deepest_first():
+            if pid == "":
+                continue
+            rect = self._panel_rect(pid)
+            if rect is None:
+                continue
+            r = self._panel_header_rects(pid, rect).get("edit")
             if r is not None and r[0] <= x <= r[2] and r[1] <= y <= r[3]:
                 return pid
         return None
@@ -3033,6 +3046,24 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self.confirm_delete_panel_with_nodes(pid)
             return
 
+        # Panel edit-mode toggle (refresh from file, then persist edits).
+        pid = self.find_panel_edit_at(wx, wy)
+        if pid is not None:
+            panel = self.panels.get(pid, {})
+            new_state = not bool(panel.get("edit_mode"))
+            panel["edit_mode"] = new_state
+            self._panel_geo_cache.clear()
+            self._begin_load()
+            self.client.send(
+                {
+                    "command": "set_panel_edit_mode",
+                    "panel_id": pid,
+                    "enabled": new_state,
+                }
+            )
+            self.queue_draw()
+            return
+
         # Panel hamburger menu.
         pid = self.find_panel_menu_at(wx, wy)
         if pid is not None:
@@ -4137,6 +4168,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             and self.find_panel_anchor_at(wx, wy) is None
             and self.find_panel_menu_at(wx, wy) is None
             and self.find_panel_delete_at(wx, wy) is None
+            and self.find_panel_edit_at(wx, wy) is None
         ):
             panel = self.panels[pid]
             self.dragging_panel = pid
@@ -5826,6 +5858,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         menu = (right_edge - d, top, right_edge, top + d)
         reset = None
         delete = None
+        edit = None
         btn_left = menu[0]
         if panel.get("readonly"):
             reset = (btn_left - gap - d, top, btn_left - gap, top + d)
@@ -5833,12 +5866,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         elif panel.get("writable"):
             delete = (btn_left - gap - d, top, btn_left - gap, top + d)
             btn_left = delete[0]
+            edit = (btn_left - gap - d, top, btn_left - gap, top + d)
+            btn_left = edit[0]
         anchor = (btn_left - gap - d, top, btn_left - gap, top + d)
         title = (x, top, max(x, anchor[0] - gap), top + th)
         header = (x, top, right_edge, top + d)
         return {
             "header": header, "reset": reset,
-            "anchor": anchor, "menu": menu, "delete": delete,
+            "anchor": anchor, "menu": menu, "delete": delete, "edit": edit,
             "title": title,
         }
 
@@ -5884,6 +5919,31 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             draw_rounded_rect(cr, x, y, w, h, 12)
             cr.stroke()
             cr.set_dash([])
+            if panel.get("edit_mode"):
+                # Darken the panel and stamp a big "EDIT MODE" water-mark
+                # behind its contents, sized to (roughly) fill the box.
+                cr.save()
+                draw_rounded_rect(cr, x, y, w, h, 12)
+                cr.clip()
+                cr.set_source_rgba(0.0, 0.0, 0.0, 0.28)
+                cr.rectangle(x, y, w, h)
+                cr.fill()
+                text = "EDIT MODE"
+                cr.select_font_face("sans")
+                size = max(10.0, h * 0.5)
+                cr.set_font_size(size)
+                ext = cr.text_extents(text)
+                while ext.width > w * 0.92 and size > 8.0:
+                    size *= 0.9
+                    cr.set_font_size(size)
+                    ext = cr.text_extents(text)
+                cr.set_source_rgba(1.0, 1.0, 1.0, 0.16)
+                cr.move_to(
+                    x + (w - ext.width) / 2.0 - ext.x_bearing,
+                    y + (h - ext.height) / 2.0 - ext.y_bearing,
+                )
+                cr.show_text(text)
+                cr.restore()
 
     def _draw_panel_headers(self, cr, pal):
         for pid, panel in self.panels.items():
@@ -5915,6 +5975,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 self._draw_panel_button(
                     cr, pal, geo["delete"], (r, g, b),
                     active=False, glyph="trash",
+                )
+            if geo.get("edit") is not None:
+                self._draw_panel_button(
+                    cr, pal, geo["edit"], (r, g, b),
+                    active=bool(panel.get("edit_mode")), glyph="pencil",
                 )
             if geo.get("reset") is not None:
                 self._draw_panel_button(
@@ -5972,6 +6037,18 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             cr.line_to(cx - size * 0.12, cy + size * 0.26)
             cr.line_to(cx + size * 0.12, cy + size * 0.26)
             cr.line_to(cx + size * 0.16, cy - size * 0.18)
+            cr.stroke()
+        elif glyph == "pencil":
+            cr.set_line_width(max(1.4, size * 0.10))
+            # A diagonal pencil body with a tip.
+            cr.move_to(cx - size * 0.22, cy + size * 0.22)
+            cr.line_to(cx + size * 0.16, cy - size * 0.24)
+            cr.line_to(cx + size * 0.24, cy - size * 0.16)
+            cr.line_to(cx - size * 0.14, cy + size * 0.28)
+            cr.close_path()
+            cr.stroke()
+            cr.move_to(cx - size * 0.22, cy + size * 0.22)
+            cr.line_to(cx - size * 0.14, cy + size * 0.28)
             cr.stroke()
         else:  # reset - a circular arrow
             cr.set_line_width(max(1.4, size * 0.10))

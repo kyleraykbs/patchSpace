@@ -368,6 +368,12 @@ class PatchBayDaemon:
         # Frozen copy of each read-only panel's file state, re-applied on
         # reload/restart and on reset_panel.
         self._readonly_snapshots: Dict[str, panels.Panel] = {}
+        # Last committed file state for *every* panel: parameter edits
+        # outside a panel's edit mode are not written back (they're served
+        # from this snapshot), and entering edit mode refreshes to it.
+        self._panel_snapshots: Dict[str, panels.Panel] = {}
+        # Panels currently in edit mode (parameter changes are persisted).
+        self._edit_panels: set = set()
         self._panel_mtimes: Dict[str, float] = {}
         self._panel_poll_at = 0.0
         self._panel_reloading = False
@@ -1102,12 +1108,15 @@ class PatchBayDaemon:
         return {"nodes": nodes, "edges": edges, "groups": groups}
 
     def _install_panels(self, tree: Dict[str, panels.Panel]) -> None:
-        """Adopt a loaded panel tree and freeze the read-only panels'
-        snapshots (re-applied by reset_panel / reload / restart)."""
+        """Adopt a loaded panel tree, freeze the read-only panels'
+        snapshots and the committed file state used for edit-mode
+        gating."""
         self.panels = tree
         self._readonly_snapshots = {
             pid: p for pid, p in tree.items() if p.is_readonly
         }
+        self._panel_snapshots = dict(tree)
+        self._edit_panels &= set(tree)
 
     def _startup_load_panels(self) -> None:
         tree = self._load_panels_tree()
@@ -1125,13 +1134,16 @@ class PatchBayDaemon:
         self._dirty = True
 
     def _build_panels_from_space(self, imperative_only: bool = False,
-                                 use_snapshots: bool = True
+                                 use_snapshots: bool = True,
+                                 freeze_params: bool = True
                                  ) -> Dict[str, panels.Panel]:
         """Serialize the live graph into a panel tree.  Read-only panels
         keep their frozen snapshot (runtime edits are not persisted);
         read-write panels and the root are rebuilt from live state.
         ``use_snapshots=False`` rebuilds read-only panels from live state
-        too (for the "copy/save current state" and clone actions)."""
+        too.  ``freeze_params=False`` also disables the edit-mode parameter
+        freezing (used by copy/save-as-json and clone, which want the
+        current live state)."""
         out: Dict[str, panels.Panel] = {}
 
         def ensure(pid: str) -> panels.Panel:
@@ -1182,6 +1194,22 @@ class PatchBayDaemon:
                     inner["x"] = float(inner["x"]) - ox
                 if inner.get("y") is not None:
                     inner["y"] = float(inner["y"]) - oy
+                # Outside a panel's edit mode, write the file's committed
+                # parameter values (only layout stays live), so runtime
+                # knob/switch tweaks aren't persisted until you edit.
+                if (
+                    freeze_params
+                    and pid not in self._edit_panels
+                    and pid != panels.ROOT_ID
+                ):
+                    snap = self._panel_snapshots.get(pid)
+                    snap_node = snap.nodes.get(panels.local_of(nid)) if snap else None
+                    if snap_node:
+                        frozen = dict(snap_node.get("params") or {})
+                        for key in ("x", "y", "anchored"):
+                            if key in inner:
+                                frozen[key] = inner[key]
+                        entry["params"] = frozen
                 panel.config["nodes"][panels.local_of(nid)] = entry
             for edge in self.space.edges.values():
                 logical = self._logical_edge(edge)
@@ -1233,6 +1261,11 @@ class PatchBayDaemon:
             if not panel.writable or panel.is_readonly or not panel.path:
                 continue
             panels.write_file(panel.path, panel)
+        # A panel in edit mode has just committed its live parameters;
+        # make that the new frozen state.
+        for pid in list(self._edit_panels):
+            if pid in tree:
+                self._panel_snapshots[pid] = tree[pid]
         self._panel_mtimes = panels.snapshot(self._panel_dir_paths())
 
     def _cmd_list_panels(self, cmd: dict) -> dict:
@@ -1421,7 +1454,7 @@ class PatchBayDaemon:
         panel_id = cmd.get("panel_id", "")
         if panel_id not in self.panels:
             return {"status": "error", "message": f"no panel {panel_id!r}"}
-        tree = self._build_panels_from_space(use_snapshots=False)
+        tree = self._build_panels_from_space(use_snapshots=False, freeze_params=False)
         panel = tree.get(panel_id)
         if panel is None:
             return {"status": "error", "message": f"no panel {panel_id!r}"}
@@ -1453,7 +1486,7 @@ class PatchBayDaemon:
         if target_dir is None:
             return {"status": "error", "message": "no writable panel directory"}
         path = os.path.join(target_dir, stem + panels.PANEL_SUFFIX)
-        live = self._build_panels_from_space(use_snapshots=False).get(panel_id)
+        live = self._build_panels_from_space(use_snapshots=False, freeze_params=False).get(panel_id)
         if live is None:
             return {"status": "error", "message": f"no panel {panel_id!r}"}
         clone = panels.Panel(
@@ -1539,23 +1572,22 @@ class PatchBayDaemon:
             panel_id + panels.NAMESPACE_SEP
         )
 
-    def _cmd_reset_panel(self, cmd: dict) -> dict:
-        """Revert one read-only panel's subtree to its file snapshot:
-        membership, positions, edges, groups and params.  Edges that merely
-        cross into the panel (owned by an ancestor, hence imperative) are
-        preserved and re-added."""
-        panel_id = cmd.get("panel_id", "")
-        if panel_id not in self._readonly_snapshots:
-            return {"status": "error", "message": f"no read-only panel {panel_id!r}"}
+    def _revert_panel(self, panel_id: str, snapshots) -> bool:
+        """Revert one panel's subtree to a snapshot: membership, positions,
+        edges, groups and params.  Edges that merely cross into the panel
+        (owned by an ancestor, hence imperative) are preserved and
+        re-added."""
         with self._panel_lock:
             self._panel_reloading = True
             self._begin_heavy_load()
             try:
                 subtree = {
-                    pid: p for pid, p in self._readonly_snapshots.items()
+                    pid: p for pid, p in snapshots.items()
                     if pid == panel_id
                     or pid.startswith(panel_id + panels.NAMESPACE_SEP)
                 }
+                if panel_id not in subtree:
+                    return False
                 imperative = [
                     e for e in self._build_export_config(imperative_only=True)["edges"]
                     if self._in_panel_subtree(e.get("from", ""), panel_id)
@@ -1582,14 +1614,47 @@ class PatchBayDaemon:
                 self._store_imperative_edges(imperative)
                 self._dirty = True
                 self._wake_ticker()
-                return {"status": "ok", "panel_id": panel_id, "reverted": True}
-            except Exception as exc:
-                logger.exception("reset_panel %r failed", panel_id)
-                return {"status": "error", "message": str(exc)}
+                return True
+            except Exception:
+                logger.exception("revert panel %r failed", panel_id)
+                return False
             finally:
                 self._panel_reloading = False
                 self._end_heavy_load()
 
+    def _cmd_reset_panel(self, cmd: dict) -> dict:
+        """Revert one read-only panel's subtree to its file snapshot."""
+        panel_id = cmd.get("panel_id", "")
+        if panel_id not in self._readonly_snapshots:
+            return {"status": "error", "message": f"no read-only panel {panel_id!r}"}
+        if not self._revert_panel(panel_id, self._readonly_snapshots):
+            return {"status": "error", "message": f"reset {panel_id!r} failed"}
+        return {"status": "ok", "panel_id": panel_id, "reverted": True}
+
+    def _cmd_set_panel_edit_mode(self, cmd: dict) -> dict:
+        """Enter/leave a panel's edit mode.
+
+        Entering refreshes the panel to the file state, then parameter
+        changes are written back to the file while editing."""
+        panel_id = cmd.get("panel_id", "")
+        panel = self.panels.get(panel_id)
+        if panel is None or panel_id == panels.ROOT_ID:
+            return {"status": "error", "message": f"no panel {panel_id!r}"}
+        enabled = bool(cmd.get("enabled"))
+        if enabled:
+            if panel.is_readonly:
+                return {
+                    "status": "error",
+                    "message": f"panel {panel_id!r} is read-only",
+                }
+            if not self._revert_panel(panel_id, self._panel_snapshots):
+                return {"status": "error", "message": f"refresh {panel_id!r} failed"}
+            self._edit_panels.add(panel_id)
+        else:
+            self._edit_panels.discard(panel_id)
+        self._dirty = True
+        self._wake_ticker()
+        return {"status": "ok", "panel_id": panel_id, "edit_mode": enabled}
     def _cmd_move_nodes(self, cmd: dict) -> dict:
         """Reparent a selection into ``panel_id``.  Node ids are
         re-qualified to the new panel, which re-homes every incident edge
@@ -3872,6 +3937,7 @@ class PatchBayDaemon:
                     "h": panel.h,
                     "anchored": panel.anchored,
                     "auto_load": panel.auto_load,
+                    "edit_mode": pid in self._edit_panels,
                     "path": panel.path,
                     "children": panel.child_ids(),
                 }
@@ -4055,6 +4121,8 @@ class PatchBayDaemon:
                 response = self._cmd_set_panel_layout(cmd)
             elif command == "reset_panel":
                 response = self._cmd_reset_panel(cmd)
+            elif command == "set_panel_edit_mode":
+                response = self._cmd_set_panel_edit_mode(cmd)
             elif command == "move_nodes":
                 response = self._cmd_move_nodes(cmd)
             elif command == "create_panel":

@@ -220,6 +220,20 @@ a node is being dragged, its panel is held at the size it had when the drag bega
 `PANEL_DRAG_GROW` past the baseline - so picking a node up never shrinks the box, nudging
 the edge makes room, and dragging well past the cap takes the node out.
 
+*Edit mode.* A panel's parameter values (volumes, switches, effect knobs) are **not**
+written back to its file by default - the daemon serves the committed file values from
+`_panel_snapshots` (only layout stays live), so runtime tweaks are ephemeral until you
+commit them. The pencil button in the title row sends `set_panel_edit_mode`; enabling it
+first reverts the panel to its snapshot (`_revert_panel`, shared with `reset_panel`) so
+you start from the file's values, then edits persist (`_write_panels` refreshes the
+snapshot for panels in `_edit_panels`). The panel is darkened and stamped with a large
+"EDIT MODE" water-mark while on. Read-only panels can't enter edit mode.
+
+*Auto-load.* `auto_load` (default true, a Settings-dialog checkbox, top-level in the
+file) controls whether a standalone panel is loaded at start-up; a `false` panel is only
+instantiated when referenced as a child (or added by hand). `list_panels`/`get_nodes`
+report it.
+
 *Physics* is hierarchical (`_hierarchical_step`, `on_layout_tick`): node physics runs
 inside each panel in that panel's local frame (internal edges only). Panel-vs-panel
 physics (siblings repelling/springing in the parent frame) is **paused by default**

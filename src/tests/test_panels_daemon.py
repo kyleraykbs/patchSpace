@@ -382,3 +382,51 @@ def test_edit_panel_sets_auto_load(tmp_path):
     assert d.panels["kit"].auto_load is False
     raw = json.load(open(os.path.join(pdir, "kit.json")))
     assert raw["auto_load"] is False
+
+
+def test_edit_mode_gates_param_persistence(tmp_path):
+    d, root, pdir = _daemon(tmp_path)
+    d.panels = d._load_panels_tree()
+    d.handle_command({"command": "add_node", "node_type": "regex_input",
+                      "node_id": "a", "config": {"pattern": "orig"}})
+    assert d._cmd_create_panel({"name": "kit", "node_ids": ["a"]})["status"] == "ok"
+    kit_path = os.path.join(pdir, "kit.json")
+
+    def file_pattern():
+        raw = json.load(open(kit_path))
+        return raw["config"]["nodes"]["a"]["params"]["pattern"]
+
+    # Outside edit mode, a runtime tweak is not written.
+    d.space.nodes["kit::a"].pattern = "live"
+    d._write_panels()
+    assert file_pattern() == "orig"
+
+    # Entering edit mode refreshes to the file value.
+    resp = d._cmd_set_panel_edit_mode({"panel_id": "kit", "enabled": True})
+    assert resp["status"] == "ok", resp
+    assert d.space.nodes["kit::a"].pattern == "orig"
+
+    # While editing, changes are persisted.
+    d.space.nodes["kit::a"].pattern = "committed"
+    d._write_panels()
+    assert file_pattern() == "committed"
+
+    # Leaving edit mode stops persisting further tweaks.
+    assert d._cmd_set_panel_edit_mode(
+        {"panel_id": "kit", "enabled": False}
+    )["status"] == "ok"
+    d.space.nodes["kit::a"].pattern = "live2"
+    d._write_panels()
+    assert file_pattern() == "committed"
+
+
+def test_edit_mode_refused_for_readonly(tmp_path):
+    d, root, pdir = _daemon(tmp_path)
+    d.panels = d._load_panels_tree()
+    d.panels["ro"] = panels.Panel(
+        id="ro", parent="", label="RO", color="#000", mode="read-only",
+        path=os.path.join(pdir, "ro.json"), writable=True,
+        config={"nodes": {}, "edges": [], "panels": [], "groups": []},
+    )
+    resp = d._cmd_set_panel_edit_mode({"panel_id": "ro", "enabled": True})
+    assert resp["status"] == "error"
