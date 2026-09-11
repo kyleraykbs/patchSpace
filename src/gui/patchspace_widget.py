@@ -4526,13 +4526,17 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
         if self.dragging_node is not None:
             dragged = self.dragging_node
+            # Decide the target from the *drag-time* geometry (baseline +
+            # capped growth) while the drag state is still active.  Once we
+            # clear it every panel re-fits to include the dropped node, so
+            # the source panel would always contain it and a node could
+            # never be dragged out.
+            self._panel_geo_cache.clear()
+            self._reparent_after_drag(dragged)
             self.dragging_node = None
-            # Drop the drag-time (grown) geometry so the drop target is
-            # computed from the real, settled boxes.
             self._panel_geo_cache.clear()
             # Persist where the user dropped it.
             self._mark_layout_dirty()
-            self._reparent_after_drag(dragged)
             self.queue_draw()
             return
 

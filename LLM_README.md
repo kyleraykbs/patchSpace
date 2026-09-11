@@ -244,7 +244,10 @@ it is excluded from its panel's auto-grown bounds, so the source panel doesn't s
 under the cursor and steal the drop. After the rename the GUI immediately re-sends the
 moved nodes' positions under their *new* ids (`_reparent_after_drag`), because the
 debounced layout save still holds the old ids and would be ignored - otherwise the nodes
-bounce back to where they were picked up. Groups land in the panel that is the LCA of
+bounce back to where they were picked up. The drop target is resolved from the *drag-time*
+geometry (baseline + capped growth) while the drag state is still active; after it's
+cleared every panel re-fits to include the dropped node, so the source would always win
+and a node could never be dragged out. Groups land in the panel that is the LCA of
 their members.
 
 *Creating a panel* (`Create Panel…`): with a selection, the new panel is fitted around
