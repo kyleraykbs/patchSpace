@@ -85,6 +85,7 @@ from pwnodes import (
 
 import session_repair
 import declarative
+import panels
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
@@ -145,6 +146,17 @@ DEFAULT_DECLARATIVE_RW = os.environ.get(
 DEFAULT_DECLARATIVE_RO = os.environ.get("PATCHBAY_DECLARATIVE_RO")
 # How often the tick rescans the declarative directories for changes.
 DECLARATIVE_POLL_S = 1.5
+
+# Panels: each non-root panel is one file, referenced by stem.  The
+# daemon takes a list of directories to search (later shadows earlier);
+# a directory is writable unless it is a read-only source like a Nix
+# store path.  The root panel is the session autosave file.
+DEFAULT_PANEL_DIR = os.environ.get(
+    "PATCHBAY_PANEL_DIR",
+    os.path.expanduser("~/.local/share/patchbay/panels"),
+)
+DEFAULT_ROOT_PANEL = os.environ.get("PATCHBAY_ROOT_PANEL", SESSION_CACHE_PATH)
+PANEL_POLL_S = DECLARATIVE_POLL_S
 
 # How often the default-device "force" check runs (each check shells out
 # to wpctl to read the live default, so it's throttled well below the
@@ -344,6 +356,8 @@ class PatchBayDaemon:
         self,
         declarative_ro: Optional[str] = None,
         declarative_rw: Optional[str] = None,
+        panel_dirs: Optional[List[tuple]] = None,
+        root_panel_path: Optional[str] = None,
     ):
         self.graph = PipewireGraph(pw_cli_command=("pw-cli",))
         self.space = PatchSpace(self.graph)
@@ -361,6 +375,25 @@ class PatchBayDaemon:
         # declarative.py for the file format and why this exists.
         self.declarative_ro = declarative_ro or DEFAULT_DECLARATIVE_RO
         self.declarative_rw = declarative_rw or DEFAULT_DECLARATIVE_RW
+
+        # Panels: first-class nested containers.  Each non-root panel is
+        # one file; the root panel is the session autosave.  `panel_dirs`
+        # is a list of (path, writable) searched in order (later wins).
+        self.panel_dirs: List[tuple] = (
+            list(panel_dirs)
+            if panel_dirs is not None
+            else self._default_panel_dirs(self.declarative_ro, self.declarative_rw)
+        )
+        self.root_panel_path = root_panel_path or DEFAULT_ROOT_PANEL
+        # panel_id -> Panel (includes the root under "").
+        self.panels: Dict[str, panels.Panel] = {}
+        # Frozen copy of each read-only panel's file state, re-applied on
+        # reload/restart and on reset_panel.
+        self._readonly_snapshots: Dict[str, panels.Panel] = {}
+        self._panel_mtimes: Dict[str, float] = {}
+        self._panel_poll_at = 0.0
+        self._panel_reloading = False
+        self._panel_lock = threading.Lock()
         self._declarative_mtimes: Dict[str, float] = {}
         self._declarative_poll_at = 0.0
         # stem -> {"label","color","readonly","writable","path",...} for
@@ -411,6 +444,17 @@ class PatchBayDaemon:
     # ------------------------------------------------------------------
     # lifecycle
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _default_panel_dirs(declarative_ro, declarative_rw) -> List[tuple]:
+        """Panel directories searched in order (later wins).  The legacy
+        declarative dirs are included so old files migrate in place."""
+        dirs: List[tuple] = [(DEFAULT_PANEL_DIR, True)]
+        if declarative_rw:
+            dirs.append((declarative_rw, True))
+        if declarative_ro:
+            dirs.append((declarative_ro, False))
+        return dirs
 
     def _wake_ticker(self) -> None:
         if self._ticker is not None:
@@ -964,7 +1008,7 @@ class PatchBayDaemon:
         if self._dirty and not self._declarative_reloading:
             self._dirty = False
             self._auto_export_session()
-        self._poll_declarative()
+        self._poll_panels()
 
     # ------------------------------------------------------------------
     # declarative node files
@@ -972,6 +1016,365 @@ class PatchBayDaemon:
 
     def _declarative_dirs(self) -> tuple:
         return (self.declarative_ro, self.declarative_rw)
+
+    # ------------------------------------------------------------------
+    # panels
+    # ------------------------------------------------------------------
+
+    def _panel_dir_paths(self) -> List[str]:
+        seen: List[str] = []
+        for path, _writable in self.panel_dirs:
+            if path and path not in seen:
+                seen.append(path)
+        return seen
+
+    def _panel_dir_writable(self) -> Dict[str, bool]:
+        out: Dict[str, bool] = {}
+        for path, writable in self.panel_dirs:
+            if path:
+                out[path] = writable  # later dirs win
+        return out
+
+    def _load_panels_tree(self) -> Dict[str, panels.Panel]:
+        """Load the root panel + every reachable panel, migrating the
+        legacy shapes in place (a bare session cache, and any old
+        declarative files sitting in the panel dirs)."""
+        root_path = self.root_panel_path
+        dirs = self._panel_dir_paths()
+        raw = panels.read_file(root_path) if root_path else None
+        if raw is not None and raw.get("type") != panels.TYPE_PANEL:
+            logger.info("Migrating legacy session cache %r to a root panel", root_path)
+            panels.write_file(root_path, panels.migrate_legacy_session(raw))
+
+        tree = panels.load_tree(root_path, dirs, self._panel_dir_writable())
+
+        # Migrate old declarative files that aren't referenced yet: make
+        # each a top-level panel and move its namespaced nodes out of the
+        # root config (the file is now the source of truth).
+        root = tree.get(panels.ROOT_ID)
+        if root is not None:
+            referenced = set(root.children)
+            added = False
+            for directory in dirs:
+                for path in panels.list_files(directory):
+                    stem = panels.file_stem(path)
+                    if stem in referenced:
+                        continue
+                    referenced.add(stem)
+                    root.config.setdefault("panels", []).append(stem)
+                    added = True
+            if added:
+                # Drop root nodes that now belong to a migrated panel.
+                root.config["nodes"] = {
+                    nid: cfg
+                    for nid, cfg in (root.config.get("nodes") or {}).items()
+                    if panels.panel_of(nid) == panels.ROOT_ID
+                }
+                tree = panels.load_tree(root_path, dirs, self._panel_dir_writable())
+                panels.write_file(root_path, tree[panels.ROOT_ID])
+        return tree
+
+    @staticmethod
+    def _panel_origin(tree: Dict[str, panels.Panel], panel_id: str) -> tuple:
+        """Absolute (x, y) of a panel's top-left, by folding ancestors.
+
+        Node runtime coordinates are absolute, so serialization converts
+        to panel-relative by subtracting this and loading adds it back."""
+        x = y = 0.0
+        pid = panel_id
+        guard = 0
+        while pid and pid in tree and guard < 64:
+            panel = tree[pid]
+            x += panel.x
+            y += panel.y
+            pid = panel.parent or ""
+            guard += 1
+        return x, y
+
+    def _flatten_panels(self, tree: Dict[str, panels.Panel]) -> dict:
+        """Panels -> one load-ready config with fully-qualified node ids
+        and absolute node coordinates."""
+        nodes: Dict[str, dict] = {}
+        edges: List[dict] = []
+        groups: List[dict] = []
+        for pid, panel in tree.items():
+            ox, oy = self._panel_origin(tree, pid)
+            for local, cfg in panel.nodes.items():
+                qid = panels.make_id(pid, local)
+                params = dict(cfg.get("params") or {})
+                if params.get("x") is not None:
+                    params["x"] = float(params["x"]) + ox
+                if params.get("y") is not None:
+                    params["y"] = float(params["y"]) + oy
+                params["declarative"] = pid != panels.ROOT_ID
+                nodes[qid] = {"type": cfg.get("type"), "params": params}
+            for e in panel.edges:
+                src, dst = e.get("from"), e.get("to")
+                if not src or not dst:
+                    continue
+                entry = {
+                    "from": panels.make_id(pid, src),
+                    "to": panels.make_id(pid, dst),
+                    "declarative": pid != panels.ROOT_ID,
+                }
+                if e.get("to_port"):
+                    entry["to_port"] = e["to_port"]
+                if e.get("from_port"):
+                    entry["from_port"] = e["from_port"]
+                edges.append(entry)
+            for g in panel.groups:
+                gid = g.get("id")
+                if not gid:
+                    continue
+                groups.append(
+                    {
+                        "id": panels.make_id(pid, gid),
+                        "label": g.get("label", "Group"),
+                        "color": g.get("color"),
+                        "declarative": pid != panels.ROOT_ID,
+                        "nodes": [
+                            panels.make_id(pid, m) for m in g.get("nodes") or []
+                        ],
+                    }
+                )
+        return {"nodes": nodes, "edges": edges, "groups": groups}
+
+    def _startup_load_panels(self) -> None:
+        tree = self._load_panels_tree()
+        self.panels = tree
+        self._readonly_snapshots = {
+            pid: p for pid, p in tree.items() if p.is_readonly
+        }
+        config = self._flatten_panels(tree)
+        if not config["nodes"]:
+            self._panel_mtimes = declarative.snapshot(self._panel_dir_paths())
+            return
+        logger.info(
+            "Auto-loading %d panel(s), %d node(s)",
+            max(0, len(tree) - 1), len(config["nodes"]),
+        )
+        self._load_session(config, declarative=False)
+        self._panel_mtimes = declarative.snapshot(self._panel_dir_paths())
+        self._dirty = True
+
+    def _build_panels_from_space(self, imperative_only: bool = False
+                                 ) -> Dict[str, panels.Panel]:
+        """Serialize the live graph into a panel tree.  Read-only panels
+        keep their frozen snapshot (runtime edits are not persisted);
+        read-write panels and the root are rebuilt from live state."""
+        out: Dict[str, panels.Panel] = {}
+
+        def ensure(pid: str) -> panels.Panel:
+            if pid in out:
+                return out[pid]
+            meta = self.panels.get(pid)
+            if meta is not None:
+                panel = panels.Panel(
+                    id=pid, parent=meta.parent, label=meta.label, color=meta.color,
+                    mode=meta.mode, x=meta.x, y=meta.y, w=meta.w, h=meta.h,
+                    anchored=meta.anchored, path=meta.path, writable=meta.writable,
+                    config={"nodes": {}, "edges": [], "panels": list(meta.children),
+                            "groups": []},
+                )
+            else:
+                panel = panels.Panel(
+                    id=pid, parent=panels.parent_panel(pid),
+                    label=panels.local_of(pid) if pid else "root",
+                    color=panels.DEFAULT_COLOR, mode=panels.MODE_RW,
+                    config={"nodes": {}, "edges": [], "panels": [], "groups": []},
+                )
+            # Read-only panels are not rebuilt from live state.
+            if panel.is_readonly and pid in self._readonly_snapshots:
+                out[pid] = self._readonly_snapshots[pid]
+                return out[pid]
+            out[pid] = panel
+            return panel
+
+        ensure(panels.ROOT_ID)
+        # Preserve existing panels even if empty.
+        for pid in self.panels:
+            ensure(pid)
+
+        with self._lock:
+            for nid, node in self.space.nodes.items():
+                if nid not in self.space.public_nodes:
+                    continue
+                if imperative_only and getattr(node, "declarative", False):
+                    continue
+                pid = panels.panel_of(nid)
+                panel = ensure(pid)
+                entry = self._export_node_params(nid, node)
+                inner = entry["params"]
+                ox, oy = self._panel_origin(out, pid)
+                if inner.get("x") is not None:
+                    inner["x"] = float(inner["x"]) - ox
+                if inner.get("y") is not None:
+                    inner["y"] = float(inner["y"]) - oy
+                panel.config["nodes"][panels.local_of(nid)] = entry
+            for edge in self.space.edges.values():
+                logical = self._logical_edge(edge)
+                if logical is None:
+                    continue
+                if imperative_only and getattr(edge, "declarative", False):
+                    continue
+                f, t, tp, fp = logical
+                owner = panels.edge_owner(f, t)
+                panel = ensure(owner)
+                entry = {
+                    "from": panels.relative_id(owner, f),
+                    "to": panels.relative_id(owner, t),
+                }
+                if tp != "in":
+                    entry["to_port"] = tp
+                if fp != "out":
+                    entry["from_port"] = fp
+                panel.config["edges"].append(entry)
+            for gid, g in self.groups.items():
+                if imperative_only and g.get("declarative"):
+                    continue
+                members = list(g.get("nodes") or [])
+                if not members:
+                    continue
+                owner = panels.panel_of(members[0])
+                for m in members[1:]:
+                    owner = panels.lca(owner, panels.panel_of(m))
+                panel = ensure(owner)
+                panel.config["groups"].append(
+                    {
+                        "id": panels.relative_id(owner, gid),
+                        "label": g.get("label", "Group"),
+                        "color": g.get("color"),
+                        "nodes": [panels.relative_id(owner, m) for m in members],
+                    }
+                )
+        return out
+
+    def _write_panels(self) -> None:
+        """Write the root panel and every writable read-write panel."""
+        tree = self._build_panels_from_space()
+        root = tree.get(panels.ROOT_ID)
+        if root is not None:
+            panels.write_file(self.root_panel_path, root)
+        for pid, panel in tree.items():
+            if pid == panels.ROOT_ID:
+                continue
+            if not panel.writable or panel.is_readonly or not panel.path:
+                continue
+            panels.write_file(panel.path, panel)
+        self._panel_mtimes = declarative.snapshot(self._panel_dir_paths())
+
+    def _cmd_list_panels(self, cmd: dict) -> dict:
+        files = []
+        for pid, panel in sorted(self.panels.items()):
+            if pid == panels.ROOT_ID:
+                continue
+            files.append({
+                "id": pid,
+                "name": panels.local_of(pid),
+                "label": panel.label,
+                "color": panel.color,
+                "mode": panel.mode,
+                "readonly": panel.is_readonly,
+                "writable": panel.writable,
+                "path": panel.path,
+                "directory": os.path.dirname(panel.path) if panel.path else None,
+                "nodes": [panels.make_id(pid, n) for n in panel.nodes],
+                "children": panel.child_ids(),
+            })
+        return {
+            "status": "ok",
+            "root": self.root_panel_path,
+            "directories": [
+                {"path": p, "writable": w} for p, w in self.panel_dirs
+            ],
+            "files": files,
+        }
+
+    def _cmd_reload_panels(self, cmd: dict) -> dict:
+        with self._panel_lock:
+            self._panel_reloading = True
+            self._begin_heavy_load()
+            try:
+                tree = self._load_panels_tree()
+                self.panels = tree
+                self._readonly_snapshots = {
+                    pid: p for pid, p in tree.items() if p.is_readonly
+                }
+                config = self._flatten_panels(tree)
+                self._remove_declarative_from_space()
+                result = self._load_session(config, declarative=True)
+                result["panels"] = len(tree) - 1
+                self._dirty = True
+                self._wake_ticker()
+                return result
+            finally:
+                self._panel_reloading = False
+                self._end_heavy_load()
+                self._panel_mtimes = declarative.snapshot(self._panel_dir_paths())
+
+    def _cmd_set_panel_layout(self, cmd: dict) -> dict:
+        """Set a panel's placement (x/y/w/h/anchored) and translate its
+        subtree so nodes keep their absolute positions when it moves."""
+        panel_id = cmd.get("panel_id", "")
+        panel = self.panels.get(panel_id)
+        if panel is None:
+            return {"status": "error", "message": f"no panel {panel_id!r}"}
+        old_x, old_y = panel.x, panel.y
+        if cmd.get("x") is not None:
+            panel.x = float(cmd["x"])
+        if cmd.get("y") is not None:
+            panel.y = float(cmd["y"])
+        if cmd.get("w") is not None:
+            panel.w = max(panels.MIN_W, float(cmd["w"]))
+        if cmd.get("h") is not None:
+            panel.h = max(panels.MIN_H, float(cmd["h"]))
+        if cmd.get("anchored") is not None:
+            panel.anchored = bool(cmd["anchored"])
+        dx, dy = panel.x - old_x, panel.y - old_y
+        if dx or dy:
+            self._translate_panel(panel_id, dx, dy)
+        self._dirty = True
+        self._wake_ticker()
+        return {"status": "ok", "panel_id": panel_id}
+
+    def _translate_panel(self, panel_id: str, dx: float, dy: float) -> None:
+        """Move a panel and everything inside it by (dx, dy).  Child
+        panels store parent-relative placement, so they just shift; nodes
+        store absolute positions, so theirs shift too."""
+        with self._lock:
+            prefix = panel_id + panels.NAMESPACE_SEP
+            for pid, panel in self.panels.items():
+                if pid == panel_id or pid.startswith(prefix):
+                    if pid != panel_id:
+                        panel.x += dx
+                        panel.y += dy
+            for nid, node in self.space.nodes.items():
+                if nid == panel_id or nid.startswith(prefix):
+                    if getattr(node, "x", None) is not None:
+                        node.x += dx
+                    if getattr(node, "y", None) is not None:
+                        node.y += dy
+
+    def _cmd_reset_panel(self, cmd: dict) -> dict:
+        panel_id = cmd.get("panel_id", "")
+        snap = self._readonly_snapshots.get(panel_id)
+        if snap is None:
+            return {"status": "error", "message": f"no read-only panel {panel_id!r}"}
+        return self._cmd_reload_panels(cmd)
+
+    def _poll_panels(self) -> None:
+        """Cheap mtime scan on the tick; reload when a panel file is
+        added, removed or touched."""
+        if self._panel_reloading:
+            return
+        now = time.monotonic()
+        if now < self._panel_poll_at:
+            return
+        self._panel_poll_at = now + PANEL_POLL_S
+        state = declarative.snapshot(self._panel_dir_paths())
+        if state != self._panel_mtimes:
+            self._panel_mtimes = state
+            self._cmd_reload_panels({})
 
     def _begin_heavy_load(self) -> None:
         with self._loading_lock:
@@ -1000,6 +1403,11 @@ class PatchBayDaemon:
             self._end_heavy_load()
 
     def _load_startup_sessions(self) -> None:
+        """Boot the graph from the panel tree (root autosave + panel
+        files), migrating the legacy session/declarative shapes."""
+        self._startup_load_panels()
+
+    def _load_startup_sessions_legacy(self) -> None:
         """Boot the graph from the imperative cache plus every
         declarative file, replacing the old "Import Last Session"
         button.  When both halves are present, two passes are run so an
@@ -1333,19 +1741,13 @@ class PatchBayDaemon:
 
     def _auto_export_session(self) -> None:
         try:
-            # Declarative nodes belong to their files, not to the cache:
-            # if we wrote them here the daemon would resurrect a deleted
-            # declarative node from the cache on the next boot.
-            config = self._build_export_config(imperative_only=True)
-            cache_dir = os.path.dirname(SESSION_CACHE_PATH)
-            if cache_dir:
-                os.makedirs(cache_dir, exist_ok=True)
-            tmp = SESSION_CACHE_PATH + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump(config, f, indent=2, sort_keys=True)
-            os.replace(tmp, SESSION_CACHE_PATH)
+            # Panels are the persistence unit now: the root panel (and
+            # every writable read-write panel) is rewritten from live
+            # state; read-only panels keep their frozen snapshot so a
+            # runtime edit is reverted on the next boot.
+            self._write_panels()
         except OSError as exc:
-            logger.warning("Failed to auto-save session cache: %s", exc)
+            logger.warning("Failed to auto-save panels: %s", exc)
 
     # ------------------------------------------------------------------
     # staged session load
@@ -3668,6 +4070,7 @@ class PatchBayDaemon:
                 "nodes": self._serialize_nodes(),
                 "edges": self._serialize_edges(),
                 "groups": groups,
+                "panels": self._serialize_panels(),
                 "loading": self._startup_loading,
             }
 
@@ -3840,6 +4243,31 @@ class PatchBayDaemon:
     # ------------------------------------------------------------------
     # serialization
     # ------------------------------------------------------------------
+
+    def _serialize_panels(self) -> list:
+        """Panel metadata for get_nodes.  Panel placement is stored on the
+        daemon; a panel's on-canvas bounds are derived by the GUI from its
+        member nodes (the box auto-fits, with an explicit min w/h)."""
+        with self._lock:
+            return [
+                {
+                    "id": pid,
+                    "parent": panel.parent or "",
+                    "label": panel.label,
+                    "color": panel.color,
+                    "mode": panel.mode,
+                    "readonly": panel.is_readonly,
+                    "writable": panel.writable,
+                    "x": panel.x,
+                    "y": panel.y,
+                    "w": panel.w,
+                    "h": panel.h,
+                    "anchored": panel.anchored,
+                    "path": panel.path,
+                    "children": panel.child_ids(),
+                }
+                for pid, panel in self.panels.items()
+            ]
 
     def _serialize_nodes(self) -> dict:
         result = {}
@@ -4018,6 +4446,14 @@ class PatchBayDaemon:
                 response = self._cmd_export_config(cmd)
             elif command == "load_session":
                 response = self._cmd_load_session(cmd)
+            elif command == "reload_panels":
+                response = self._cmd_reload_panels(cmd)
+            elif command == "list_panels":
+                response = self._cmd_list_panels(cmd)
+            elif command == "set_panel_layout":
+                response = self._cmd_set_panel_layout(cmd)
+            elif command == "reset_panel":
+                response = self._cmd_reset_panel(cmd)
             elif command == "reload_declarative":
                 response = self._cmd_reload_declarative(cmd)
             elif command == "list_declarative":
@@ -4135,21 +4571,45 @@ def main():
         prog="patchbay-daemon", description="Patch Space daemon"
     )
     parser.add_argument(
+        "--panel-dir",
+        action="append",
+        default=None,
+        metavar="PATH[:rw|:ro]",
+        help="Directory to load panel files from (repeatable; later dirs "
+        "shadow earlier).  Suffix :ro marks it unwritable.",
+    )
+    parser.add_argument(
+        "--root-panel",
+        default=DEFAULT_ROOT_PANEL,
+        help="Path of the root panel file (session autosave).",
+    )
+    parser.add_argument(
         "--declarative-ro",
         default=DEFAULT_DECLARATIVE_RO,
-        help="Read-only directory of declarative node files (e.g. a Nix "
-        "store path). Never written.",
+        help="(deprecated) read-only declarative dir, loaded as panels.",
     )
     parser.add_argument(
         "--declarative-rw",
         default=DEFAULT_DECLARATIVE_RW,
-        help="Read-write directory of declarative node files.",
+        help="(deprecated) read-write declarative dir, loaded as panels.",
     )
     args = parser.parse_args()
 
+    panel_dirs = None
+    if args.panel_dir:
+        panel_dirs = []
+        for spec in args.panel_dir:
+            path, _, mode = spec.rpartition(":")
+            if mode not in ("rw", "ro") or not path:
+                path, mode = spec, "rw"
+            panel_dirs.append((path, mode == "rw"))
+
     _install_log_ring()
     daemon = PatchBayDaemon(
-        declarative_ro=args.declarative_ro, declarative_rw=args.declarative_rw
+        declarative_ro=args.declarative_ro,
+        declarative_rw=args.declarative_rw,
+        panel_dirs=panel_dirs,
+        root_panel_path=args.root_panel,
     )
     try:
         daemon.start()
