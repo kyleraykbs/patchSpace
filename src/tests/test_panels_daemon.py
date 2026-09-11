@@ -75,10 +75,10 @@ def test_build_panels_round_trips_through_space(tmp_path):
                for e in tree[""].config["edges"])
 
 
-def test_set_panel_layout_is_metadata_only(tmp_path):
-    # Panel placement is metadata; the GUI moves the nodes and sends their
-    # absolute positions separately (set_node_layout), so the daemon must
-    # not translate them again here.
+def test_set_panel_layout_moves_nodes_with_the_panel(tmp_path):
+    # Moving a panel shifts its nodes by the same delta so their positions
+    # relative to the panel stay put (the GUI's own node layout is the same,
+    # so re-sending it is idempotent).
     d, root, pdir = _daemon(tmp_path)
     _write_initial_tree(root, pdir)
     d.panels = d._load_panels_tree()
@@ -87,13 +87,11 @@ def test_set_panel_layout_is_metadata_only(tmp_path):
     before = d.space.nodes["kit::a"].x
     d._cmd_set_panel_layout({"panel_id": "kit", "x": 200})
     assert d.panels["kit"].x == 200
-    assert d.space.nodes["kit::a"].x == before
+    assert d.space.nodes["kit::a"].x == before + 100
 
 
 def test_panel_and_node_layout_round_trip_relative(tmp_path):
-    # Simulate what the GUI sends when a panel + its node move together:
-    # the node's absolute position and the panel origin both shift by the
-    # same delta, so the serialized relative position is unchanged.
+    # Moving a panel keeps its node's serialized relative position unchanged.
     d, root, pdir = _daemon(tmp_path)
     _write_initial_tree(root, pdir)
     d.panels = d._load_panels_tree()
@@ -101,8 +99,6 @@ def test_panel_and_node_layout_round_trip_relative(tmp_path):
 
     node = d.space.nodes["kit::a"]
     assert (node.x, node.y) == (110, 70)  # 100/50 origin + 10/20 local
-    node.x += 100
-    node.y += 40
     d._cmd_set_panel_layout({"panel_id": "kit", "x": 200, "y": 90})
 
     tree = d._build_panels_from_space()
@@ -562,3 +558,38 @@ def test_remove_panel_placement_keeps_file(tmp_path):
     # The file and the other placement survive.
     assert os.path.isfile(os.path.join(pdir, "kit.json"))
     assert "kit" in d.panels and "kit::a" in d.space.nodes
+
+
+def test_moving_a_placement_does_not_rebuild_siblings(tmp_path):
+    d, root, pdir = _daemon(tmp_path)
+    d.panels = d._load_panels_tree()
+    d.handle_command({"command": "add_node", "node_type": "regex_input",
+                      "node_id": "a", "config": {"pattern": ".*", "x": 10, "y": 20}})
+    d._cmd_create_panel({"name": "kit", "node_ids": ["a"]})
+    other = d._cmd_place_panel({"stem": "kit"})["name"]
+
+    a_obj = d.space.nodes["kit::a"]
+    b_obj = d.space.nodes[f"{other}::a"]
+    d._cmd_set_panel_layout({"panel_id": "kit", "x": 500, "y": 100})
+    d._write_panels()
+    # Live nodes untouched (no rebuild), only positions shifted.
+    assert d.space.nodes["kit::a"] is a_obj
+    assert d.space.nodes[f"{other}::a"] is b_obj
+    assert a_obj.x == 510
+
+
+def test_moving_a_node_syncs_positions_without_rebuild(tmp_path):
+    d, root, pdir = _daemon(tmp_path)
+    d.panels = d._load_panels_tree()
+    d.handle_command({"command": "add_node", "node_type": "regex_input",
+                      "node_id": "a", "config": {"pattern": ".*", "x": 10, "y": 20}})
+    d._cmd_create_panel({"name": "kit", "node_ids": ["a"]})
+    other = d._cmd_place_panel({"stem": "kit"})["name"]
+
+    b_obj = d.space.nodes[f"{other}::a"]
+    d.space.nodes["kit::a"].x += 100
+    d._write_panels()
+    assert d.space.nodes[f"{other}::a"] is b_obj  # no rebuild
+    off_k = d._panel_origin(d.panels, "kit")
+    off_o = d._panel_origin(d.panels, other)
+    assert abs((d.space.nodes["kit::a"].x - off_k[0]) - (b_obj.x - off_o[0])) < 1e-6

@@ -1299,10 +1299,11 @@ class PatchBayDaemon:
         self._sync_placements(canon)
         self._panel_mtimes = panels.snapshot(self._panel_dir_paths())
 
-    def _placement_differs(self, snap, live, include_params):
+    def _placement_differs(self, snap, live, include_params, positions=True):
         """Whether ``live`` differs from committed ``snap`` in a way that
-        should sync to the file's other placements (structure, positions,
-        and - in edit mode - parameters)."""
+        should sync to the file's other placements.  ``positions=False``
+        ignores node x/y, leaving only structural/parameter differences
+        (which are the ones that need a sibling rebuild)."""
         if set(snap.nodes) != set(live.nodes):
             return True
         if snap.children != live.children:
@@ -1329,10 +1330,11 @@ class PatchBayDaemon:
                 return True
             lp = cfg.get("params") or {}
             sp = other.get("params") or {}
-            for key in ("x", "y"):
-                lv, sv = lp.get(key), sp.get(key)
-                if lv is not None and sv is not None and abs(lv - sv) > 1e-6:
-                    return True
+            if positions:
+                for key in ("x", "y"):
+                    lv, sv = lp.get(key), sp.get(key)
+                    if lv is not None and sv is not None and abs(lv - sv) > 1e-6:
+                        return True
             if include_params:
                 for key in set(lp) | set(sp):
                     if key in ("x", "y", "anchored"):
@@ -1403,8 +1405,21 @@ class PatchBayDaemon:
                     node.x = off_other[0] + float(params["x"])
                     node.y = off_other[1] + float(params["y"])
                 snap = self._panel_snapshots.get(other)
+                # Keep the sibling's snapshot in step for the copied
+                # positions, so it doesn't look "changed" next time.
+                if snap is not None:
+                    for local, cfg in source.nodes.items():
+                        sc = snap.nodes.get(local)
+                        params = cfg.get("params") or {}
+                        if sc is None or params.get("x") is None:
+                            continue
+                        sp = sc.setdefault("params", {})
+                        sp["x"] = float(params["x"])
+                        sp["y"] = float(params["y"])
+                # Only structural/parameter changes rebuild a sibling;
+                # position-only changes are handled by the cheap copy above.
                 if snap is None or not self._placement_differs(
-                    snap, source, other in self._edit_panels
+                    snap, source, other in self._edit_panels, positions=False
                 ):
                     continue
                 other_panel = self.panels.get(other)
@@ -1851,14 +1866,17 @@ class PatchBayDaemon:
     def _cmd_set_panel_layout(self, cmd: dict) -> dict:
         """Set a panel's placement (x/y/w/h/anchored).
 
-        Node positions are absolute and authoritative, and the GUI sends
-        them separately (`set_node_layout`) after translating them with the
-        panel.  Translating the subtree here as well would move every node
-        twice, so this only updates the panel metadata."""
+        Moving the panel also shifts its subtree's *nodes* by the same
+        delta so the panel keeps its contents (the GUI sends matching
+        absolute positions afterwards, so this is idempotent).  Doing it
+        here keeps node-relative-to-panel stable even if an autosave lands
+        before the GUI's node layout arrives, which otherwise looked like a
+        content change and rebuilt the file's other placements."""
         panel_id = cmd.get("panel_id", "")
         panel = self.panels.get(panel_id)
         if panel is None:
             return {"status": "error", "message": f"no panel {panel_id!r}"}
+        old_x, old_y = panel.x, panel.y
         if cmd.get("x") is not None:
             panel.x = float(cmd["x"])
         if cmd.get("y") is not None:
@@ -1869,6 +1887,17 @@ class PatchBayDaemon:
             panel.h = max(panels.MIN_H, float(cmd["h"]))
         if cmd.get("anchored") is not None:
             panel.anchored = bool(cmd["anchored"])
+        dx, dy = panel.x - old_x, panel.y - old_y
+        if dx or dy:
+            prefix = panel_id + panels.NAMESPACE_SEP
+            with self._lock:
+                for nid, node in self.space.nodes.items():
+                    if nid != panel_id and not nid.startswith(prefix):
+                        continue
+                    if getattr(node, "x", None) is not None:
+                        node.x += dx
+                    if getattr(node, "y", None) is not None:
+                        node.y += dy
         self._dirty = True
         self._wake_ticker()
         return {"status": "ok", "panel_id": panel_id}
