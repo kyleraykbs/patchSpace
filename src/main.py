@@ -1362,6 +1362,44 @@ class PatchBayDaemon:
             return {"status": "error", "message": f"no read-only panel {panel_id!r}"}
         return self._cmd_reload_panels(cmd)
 
+    def _cmd_move_nodes(self, cmd: dict) -> dict:
+        """Reparent a selection into ``panel_id``.  Node ids are
+        re-qualified to the new panel, which re-homes every incident edge
+        to its new least-common-ancestor automatically.  Refused (for the
+        GUI to snap back) when the node's current panel or the target is
+        read-only."""
+        panel_id = cmd.get("panel_id", "")
+        node_ids = list(cmd.get("node_ids") or [])
+        target = self.panels.get(panel_id)
+        if target is None:
+            return {"status": "error", "message": f"no panel {panel_id!r}"}
+        moved, refused = [], []
+        with self._lock:
+            for nid in node_ids:
+                if nid not in self.space.nodes:
+                    continue
+                cur = panels.panel_of(nid)
+                if cur == panel_id:
+                    continue
+                cur_panel = self.panels.get(cur)
+                if (cur_panel is not None and cur_panel.is_readonly) or target.is_readonly:
+                    refused.append(nid)
+                    continue
+                new_id = panels.make_id(panel_id, panels.local_of(nid))
+                if new_id in self.space.nodes:
+                    refused.append(nid)
+                    continue
+                try:
+                    self._rename_owned_node(nid, new_id)
+                    moved.append(new_id)
+                except (KeyError, ValueError) as exc:
+                    logger.warning("move %r -> %r failed: %s", nid, new_id, exc)
+                    refused.append(nid)
+        if moved:
+            self._dirty = True
+            self._wake_ticker()
+        return {"status": "ok", "moved": moved, "refused": refused}
+
     def _poll_panels(self) -> None:
         """Cheap mtime scan on the tick; reload when a panel file is
         added, removed or touched."""
@@ -4454,6 +4492,8 @@ class PatchBayDaemon:
                 response = self._cmd_set_panel_layout(cmd)
             elif command == "reset_panel":
                 response = self._cmd_reset_panel(cmd)
+            elif command == "move_nodes":
+                response = self._cmd_move_nodes(cmd)
             elif command == "reload_declarative":
                 response = self._cmd_reload_declarative(cmd)
             elif command == "list_declarative":

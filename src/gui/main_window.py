@@ -359,7 +359,7 @@ class MainWindow(Gtk.ApplicationWindow):
         # "Import Last Session" button is gone.  This dialog is the
         # management surface: list files, rename/delete the writable ones,
         # and see which nodes each one defines.
-        declarative_btn = Gtk.Button(label="Declarative Nodes\u2026")
+        declarative_btn = Gtk.Button(label="Panels\u2026")
         declarative_btn.get_child().set_wrap(False)
         declarative_btn.set_tooltip_text(
             "Manage file-backed nodes loaded from the declarative directories"
@@ -373,7 +373,7 @@ class MainWindow(Gtk.ApplicationWindow):
         )
         box.append(declarative_btn)
 
-        reload_declarative_btn = Gtk.Button(label="Reload Declarative Files")
+        reload_declarative_btn = Gtk.Button(label="Reload Panels")
         reload_declarative_btn.get_child().set_wrap(False)
         reload_declarative_btn.set_tooltip_text(
             "Re-read every declarative file now (daemon-side edits will be lost)"
@@ -678,7 +678,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
         # Write the selection into a declarative file, so a Nix config
         # (or anything else) can own and re-derive it.
-        self._ps_declare_button = Gtk.Button(label="Declare\u2026")
+        self._ps_declare_button = Gtk.Button(label="Create Panel\u2026")
         self._ps_declare_button.set_sensitive(False)
         self._ps_declare_button.set_tooltip_text(
             "Export the selected nodes to a declarative file in the "

@@ -3321,11 +3321,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # flag can't be seen here because the synchronous command blocks
         # this connection's get_nodes polls until it finishes.
         self._begin_load()
-        self.client.send({"command": "reload_declarative"})
+        self.client.send({"command": "reload_panels"})
 
     def show_declarative_dialog(self):
         self._pending_declarative_list = True
-        self.client.send({"command": "list_declarative"})
+        self.client.send({"command": "list_panels"})
 
     def on_declarative_files(self, resp):
         # Cache the listing so the Declare dialog can offer a target
@@ -3354,7 +3354,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             # the daemon for the new state (on_declarative_files reopens).
             dialog.destroy()
             self._pending_declarative_list = True
-            self.client.send({"command": "list_declarative"})
+            self.client.send({"command": "list_panels"})
 
     def _select_declarative_nodes(self, node_ids):
         """Select the given full-id nodes on the canvas so the user can
@@ -3554,7 +3554,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     def _on_declarative_dialog_response(self, dialog, response):
         if response == Gtk.ResponseType.APPLY:
             self._pending_declarative_list = True
-            self.client.send({"command": "list_declarative"})
+            self.client.send({"command": "list_panels"})
         dialog.destroy()
 
     def _on_declarative_dialog_destroy(self, dialog):
@@ -3673,7 +3673,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             return
         self._pending_declare_nodes = node_ids
         self._pending_declare_open = True
-        self.client.send({"command": "list_declarative"})
+        self.client.send({"command": "list_panels"})
 
     def _group_for_selection(self, node_ids):
         """A canvas group whose members are exactly `node_ids`, or None.
@@ -4500,13 +4500,37 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             return
 
         if self.dragging_node is not None:
+            dragged = self.dragging_node
             self.dragging_node = None
             # Persist where the user dropped it.
             self._mark_layout_dirty()
+            self._reparent_after_drag(dragged)
             self.queue_draw()
             return
 
         self.panning = False
+
+    def _reparent_after_drag(self, dragged):
+        """If a dragged node was dropped inside a different panel, move it
+        (and the rest of the selection) into that panel.  The daemon
+        refuses and the poll snaps it back when the source or target panel
+        is read-only."""
+        node = self.nodes.get(dragged)
+        if node is None:
+            return
+        cx = node["x"] + self.node_width(dragged) / 2
+        cy = node["y"] + self.node_height(dragged) / 2
+        pid = self.find_panel_at(cx, cy)
+        target = pid if pid is not None else ""
+        current = dragged.rsplit("::", 1)[0] if "::" in dragged else ""
+        if target == current:
+            return
+        members = [n for n in self.selected_nodes if n in self.nodes]
+        if dragged not in members:
+            members = [dragged]
+        self.client.send(
+            {"command": "move_nodes", "panel_id": target, "node_ids": members}
+        )
 
     # ---------- context menus ----------
 
