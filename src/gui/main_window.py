@@ -575,10 +575,12 @@ class MainWindow(Gtk.ApplicationWindow):
         self.panels_view.set_visible(button.get_active())
         if button.get_active():
             # Refresh the listing for the side view.
-            self.client.send({"command": "list_panels"})
+            self.client.send({"command": "list_panel_files"})
 
     def _update_panels_view(self, resp):
-        """Rebuild the side-view rows from a list_panels reply."""
+        """Rebuild the side-view rows from a list_panel_files reply: one
+        row per panel *file*, with an auto-load checkbox and a Place
+        action."""
         if not hasattr(self, "_panels_list_box"):
             return
         while True:
@@ -588,7 +590,7 @@ class MainWindow(Gtk.ApplicationWindow):
             self._panels_list_box.remove(child)
         files = resp.get("files", [])
         if not files:
-            placeholder = Gtk.Label(label="No panels")
+            placeholder = Gtk.Label(label="No panel files")
             placeholder.set_margin_top(12)
             placeholder.add_css_class("dim-label")
             self._panels_list_box.append(placeholder)
@@ -604,31 +606,35 @@ class MainWindow(Gtk.ApplicationWindow):
                 )
             )
             row.append(dot)
-            name = Gtk.Label(label=str(entry.get("label") or entry.get("id", "?")))
+            name = Gtk.Label(label=str(entry.get("label") or entry.get("stem", "?")))
             name.set_xalign(0)
             name.set_hexpand(True)
             name.set_ellipsize(Pango.EllipsizeMode.END)
             row.append(name)
-            select = Gtk.Button(label="Select")
-            select.add_css_class("flat")
-            select.set_tooltip_text("Select this panel's nodes on the canvas")
-            select.connect(
-                "clicked",
-                lambda _b, e=entry: self.ps_widget._select_panel_nodes(
-                    e.get("nodes", [])
+            auto = Gtk.CheckButton()
+            auto.set_active(bool(entry.get("auto_load")))
+            auto.set_tooltip_text("Load this panel at startup")
+            auto.connect(
+                "toggled",
+                lambda b, e=entry: self.client.send(
+                    {
+                        "command": "set_panel_file_autoload",
+                        "stem": e.get("stem"),
+                        "enabled": b.get_active(),
+                    }
                 ),
             )
-            row.append(select)
-            delete = Gtk.Button.new_from_icon_name("window-close-symbolic")
-            delete.add_css_class("flat")
-            delete.set_tooltip_text("Remove this panel")
-            delete.connect(
+            row.append(auto)
+            place = Gtk.Button.new_from_icon_name("list-add-symbolic")
+            place.add_css_class("flat")
+            place.set_tooltip_text("Add a placement of this panel to the canvas")
+            place.connect(
                 "clicked",
-                lambda _b, e=entry: self.ps_widget.confirm_delete_panel_with_nodes(
-                    e.get("id")
+                lambda _b, e=entry: self.client.send(
+                    {"command": "place_panel", "stem": e.get("stem")}
                 ),
             )
-            row.append(delete)
+            row.append(place)
             self._panels_list_box.append(row)
 
     def _build_loading_overlay(self):
@@ -902,6 +908,7 @@ class MainWindow(Gtk.ApplicationWindow):
                     self.ps_widget.on_export_config(resp["config"])
                 elif "files" in resp and "directories" in resp:
                     self.ps_widget.on_panels_list(resp)
+                elif resp.get("panel_files"):
                     self._update_panels_view(resp)
                 elif "payload" in resp and "panel_id" in resp:
                     self.ps_widget.on_panel_export(resp)

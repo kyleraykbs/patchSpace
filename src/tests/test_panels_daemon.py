@@ -376,12 +376,12 @@ def test_edit_panel_sets_auto_load(tmp_path):
     d, root, pdir = _daemon(tmp_path)
     d.panels = d._load_panels_tree()
     assert d._cmd_create_panel({"name": "kit"})["status"] == "ok"
-    assert d.panels["kit"].auto_load is True
-    resp = d._cmd_edit_panel({"panel_id": "kit", "auto_load": False})
-    assert resp["status"] == "ok", resp
     assert d.panels["kit"].auto_load is False
+    resp = d._cmd_edit_panel({"panel_id": "kit", "auto_load": True})
+    assert resp["status"] == "ok", resp
+    assert d.panels["kit"].auto_load is True
     raw = json.load(open(os.path.join(pdir, "kit.json")))
-    assert raw["auto_load"] is False
+    assert raw["auto_load"] is True
 
 
 def test_edit_mode_gates_param_persistence(tmp_path):
@@ -469,3 +469,43 @@ def test_move_panel_refuses_cycle(tmp_path):
     d._cmd_move_panel({"panel_id": "fx", "parent_id": "kit"})
     resp = d._cmd_move_panel({"panel_id": "kit", "parent_id": "kit::fx"})
     assert resp["status"] == "error"
+
+
+def test_place_panel_adds_a_second_placement(tmp_path):
+    d, root, pdir = _daemon(tmp_path)
+    d.panels = d._load_panels_tree()
+    d.handle_command({"command": "add_node", "node_type": "regex_input",
+                      "node_id": "a", "config": {"pattern": ".*"}})
+    assert d._cmd_create_panel({"name": "kit", "node_ids": ["a"]})["status"] == "ok"
+
+    resp = d._cmd_place_panel({"stem": "kit"})
+    assert resp["status"] == "ok", resp
+    name = resp["name"]
+    assert name != "kit"
+    assert name in d.panels
+    assert d.panels[name].stem == "kit"
+    # Both placements have their own live nodes from the shared file.
+    assert "kit::a" in d.space.nodes
+    assert f"{name}::a" in d.space.nodes
+    # The file is shared.
+    assert d.panels[name].path == d.panels["kit"].path
+
+
+def test_list_panel_files_and_autoload_toggle(tmp_path):
+    d, root, pdir = _daemon(tmp_path)
+    d.panels = d._load_panels_tree()
+    assert d._cmd_create_panel({"name": "kit"})["status"] == "ok"
+
+    listing = d._cmd_list_panel_files({})
+    assert listing["status"] == "ok"
+    stems = {f["stem"]: f for f in listing["files"]}
+    assert "kit" in stems
+    assert stems["kit"]["auto_load"] is False
+
+    assert d._cmd_set_panel_file_autoload(
+        {"stem": "kit", "enabled": True}
+    )["status"] == "ok"
+    raw = json.load(open(os.path.join(pdir, "kit.json")))
+    assert raw["auto_load"] is True
+    listing = d._cmd_list_panel_files({})
+    assert next(f for f in listing["files"] if f["stem"] == "kit")["auto_load"] is True

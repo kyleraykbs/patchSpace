@@ -152,6 +152,29 @@ def is_descendant(panel_id: str, ancestor: str) -> bool:
     return panel_id == ancestor or panel_id.startswith(ancestor + NAMESPACE_SEP)
 
 
+def child_name(entry) -> str:
+    """A child reference's placement local name (str is legacy shorthand:
+    the name and the file stem are the same)."""
+    if isinstance(entry, str):
+        return entry
+    return str(entry.get("name") or entry.get("stem") or "")
+
+
+def child_stem(entry) -> str:
+    """The panel file stem a child reference points at."""
+    if isinstance(entry, str):
+        return entry
+    return str(entry.get("stem") or entry.get("name") or "")
+
+
+def child_ref(name: str, stem: str):
+    """A child reference, kept as a plain stem string when the placement
+    name and the file stem match (the common case)."""
+    if name == stem:
+        return name
+    return {"name": name, "stem": stem}
+
+
 # ---------------------------------------------------------------------------
 # panel model
 # ---------------------------------------------------------------------------
@@ -171,10 +194,12 @@ class Panel:
     anchored: bool = False
     path: Optional[str] = None
     writable: bool = False
-    # Load automatically at start-up / from the panels view?  A panel with
-    # auto_load False is only instantiated when referenced as a child (or
-    # added by hand).
-    auto_load: bool = True
+    # The file stem this placement references (placements of the same file
+    # share it).  ``None`` for the root.
+    stem: Optional[str] = None
+    # Load automatically at start-up?  A panel with auto_load False is only
+    # instantiated when referenced as a child (or placed by hand).
+    auto_load: bool = False
     config: dict = field(default_factory=dict)
 
     @property
@@ -186,8 +211,18 @@ class Panel:
         return self.mode == MODE_RO
 
     @property
-    def children(self) -> List[str]:
+    def child_entries(self) -> List:
+        """Raw child references (a stem string, or {name, stem})."""
         return list(self.config.get("panels") or [])
+
+    @property
+    def children(self) -> List[str]:
+        """Local placement names of this panel's child placements."""
+        return [child_name(e) for e in self.child_entries]
+
+    def child_stems(self) -> Dict[str, str]:
+        """{placement local name: file stem} for the children."""
+        return {child_name(e): child_stem(e) for e in self.child_entries}
 
     @property
     def nodes(self) -> Dict[str, dict]:
@@ -263,7 +298,7 @@ def placement_from_raw(raw: dict) -> dict:
         "w": float(p.get("w", raw.get("w", DEFAULT_W)) or DEFAULT_W),
         "h": float(p.get("h", raw.get("h", DEFAULT_H)) or DEFAULT_H),
         "anchored": bool(p.get("anchored", raw.get("anchored", False))),
-        "auto_load": bool(raw.get("auto_load", True)),
+        "auto_load": bool(raw.get("auto_load", False)),
     }
 
 
@@ -302,7 +337,7 @@ def build_payload(panel: Panel) -> dict:
         },
     }
     if panel.config.get("panels"):
-        payload["config"]["panels"] = panel.children
+        payload["config"]["panels"] = panel.child_entries
     if panel.config.get("groups"):
         payload["config"]["groups"] = panel.groups
     return payload
@@ -325,9 +360,13 @@ def write_file(path: str, panel: Panel) -> None:
 
 
 def load_panel(path: str, panel_id: str, parent: Optional[str],
-               writable: bool) -> Panel:
+               writable: bool, stem: Optional[str] = None) -> Panel:
     raw = read_file(path) or {}
     placement = placement_from_raw(raw)
+    if not panel_id and stem is None:
+        stem = None
+    elif stem is None:
+        stem = file_stem(path)
     return Panel(
         id=panel_id,
         parent=parent,
@@ -336,6 +375,7 @@ def load_panel(path: str, panel_id: str, parent: Optional[str],
         mode=mode_from_raw(raw),
         path=path,
         writable=writable,
+        stem=stem,
         config=config_from_raw(raw),
         **placement,
     )
@@ -374,7 +414,11 @@ def load_tree(root_path: str, directories: List[str],
             return
         seen.add(panel.id)
         panels[panel.id] = panel
-        for stem in panel.children:
+        for entry in panel.child_entries:
+            name = child_name(entry)
+            stem = child_stem(entry)
+            if not name or not stem:
+                continue
             child_path = None
             child_writable = False
             for directory in directories:
@@ -386,12 +430,14 @@ def load_tree(root_path: str, directories: List[str],
                     child_writable = bool(dir_writable.get(directory, True))
             if child_path is None:
                 logger.warning(
-                    "Panel %r references unknown child %r",
-                    panel.id or "root", stem,
+                    "Panel %r references unknown child %r (stem %r)",
+                    panel.id or "root", name, stem,
                 )
                 continue
-            child_id = make_id(panel.id, stem)
-            child = load_panel(child_path, child_id, panel.id, child_writable)
+            child_id = make_id(panel.id, name)
+            child = load_panel(
+                child_path, child_id, panel.id, child_writable, stem=stem
+            )
             _load(child)
 
     _load(root)

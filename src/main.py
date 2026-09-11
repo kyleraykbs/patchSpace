@@ -1011,7 +1011,7 @@ class PatchBayDaemon:
         # root config (the file is now the source of truth).
         root = tree.get(panels.ROOT_ID)
         if root is not None:
-            referenced = set(root.children)
+            referenced = set(root.child_stems().values())
             added = False
             for directory in dirs:
                 for path in panels.list_files(directory):
@@ -1019,12 +1019,15 @@ class PatchBayDaemon:
                     if stem in referenced:
                         continue
                     raw = panels.read_file(path)
-                    if isinstance(raw, dict) and raw.get("auto_load") is False:
-                        # Explicitly not auto-loaded; it only comes up when
-                        # referenced as a child (or added by hand).
+                    # Only files that opt in are spawned at the root;
+                    # everything else comes up only when referenced as a
+                    # sub-panel (nested panels always auto-load).
+                    if not (isinstance(raw, dict) and raw.get("auto_load")):
                         continue
                     referenced.add(stem)
-                    root.config.setdefault("panels", []).append(stem)
+                    root.config.setdefault("panels", []).append(
+                        panels.child_ref(stem, stem)
+                    )
                     added = True
             if added:
                 # Drop root nodes that now belong to a migrated panel.
@@ -1155,9 +1158,9 @@ class PatchBayDaemon:
                     id=pid, parent=meta.parent, label=meta.label, color=meta.color,
                     mode=meta.mode, x=meta.x, y=meta.y, w=meta.w, h=meta.h,
                     anchored=meta.anchored, path=meta.path, writable=meta.writable,
-                    auto_load=meta.auto_load,
-                    config={"nodes": {}, "edges": [], "panels": list(meta.children),
-                            "groups": []},
+                    stem=meta.stem, auto_load=meta.auto_load,
+                    config={"nodes": {}, "edges": [],
+                            "panels": list(meta.child_entries), "groups": []},
                 )
             else:
                 panel = panels.Panel(
@@ -1255,11 +1258,16 @@ class PatchBayDaemon:
         root = tree.get(panels.ROOT_ID)
         if root is not None:
             panels.write_file(self.root_panel_path, root)
+        written = set()
         for pid, panel in tree.items():
             if pid == panels.ROOT_ID:
                 continue
             if not panel.writable or panel.is_readonly or not panel.path:
                 continue
+            # Placements of the same file share it; write it once.
+            if panel.path in written:
+                continue
+            written.add(panel.path)
             panels.write_file(panel.path, panel)
         # A panel in edit mode has just committed its live parameters;
         # make that the new frozen state.
@@ -1282,6 +1290,7 @@ class PatchBayDaemon:
                 "readonly": panel.is_readonly,
                 "writable": panel.writable,
                 "auto_load": panel.auto_load,
+                "stem": panel.stem,
                 "path": panel.path,
                 "directory": os.path.dirname(panel.path) if panel.path else None,
                 "nodes": [panels.make_id(pid, n) for n in panel.nodes],
@@ -1335,7 +1344,7 @@ class PatchBayDaemon:
                 id=stem, parent=panels.ROOT_ID,
                 label=cmd.get("label") or name,
                 color=cmd.get("color") or panels.DEFAULT_COLOR,
-                mode=mode, path=path, writable=True,
+                mode=mode, path=path, writable=True, stem=stem,
                 x=float(cmd.get("x", 0.0) or 0.0),
                 y=float(cmd.get("y", 0.0) or 0.0),
                 w=max(panels.MIN_W, float(cmd.get("w", panels.DEFAULT_W) or 0.0)),
@@ -1343,8 +1352,10 @@ class PatchBayDaemon:
                 config={"nodes": {}, "edges": [], "panels": [], "groups": []},
             )
             root = self.panels.get(panels.ROOT_ID)
-            if root is not None and stem not in root.config.setdefault("panels", []):
-                root.config["panels"].append(stem)
+            if root is not None and stem not in root.children:
+                root.config.setdefault("panels", []).append(
+                    panels.child_ref(stem, stem)
+                )
         self._standardize_nodes(moved)
         # Refresh the in-memory tree from live state so list_panels (and a
         # later reset) sees the just-moved nodes as members immediately.
@@ -1407,9 +1418,14 @@ class PatchBayDaemon:
             if parent is not None:
                 local = panels.local_of(panel_id)
                 parent.config["panels"] = [
-                    s for s in parent.config.get("panels", []) if s != local
+                    s for s in parent.config.get("panels", [])
+                    if panels.child_name(s) != local
                 ]
-        if panel.path and os.path.isfile(panel.path):
+        others = [
+            p for p in self.panels.values()
+            if p.id != panel_id and p.stem and p.stem == panel.stem
+        ]
+        if not others and panel.path and os.path.isfile(panel.path):
             try:
                 os.remove(panel.path)
             except OSError as exc:
@@ -1505,19 +1521,118 @@ class PatchBayDaemon:
         # Persist the parent's child list so the reload finds the clone.
         parent = self.panels.get(src.parent or "")
         if parent is not None:
-            if stem not in parent.config.setdefault("panels", []):
-                parent.config["panels"].append(stem)
+            if stem not in parent.children:
+                parent.config.setdefault("panels", []).append(
+                    panels.child_ref(stem, stem)
+                )
             if parent.path:
                 parent_now = self._build_panels_from_space(
                     use_snapshots=False
                 ).get(parent.id)
                 if parent_now is not None:
-                    if stem not in parent_now.config.setdefault("panels", []):
-                        parent_now.config["panels"].append(stem)
+                    if stem not in parent_now.children:
+                        parent_now.config.setdefault("panels", []).append(
+                            panels.child_ref(stem, stem)
+                        )
                     panels.write_file(parent.path, parent_now)
         # Bring the clone's nodes up.
         self._cmd_reload_panels({})
         return {"status": "ok", "panel_id": stem, "path": path}
+
+    def _panel_file_path(self, stem: str):
+        """Locate a panel file by stem across the load dirs (later dirs
+        shadow earlier).  Returns (path, writable) or (None, False)."""
+        found = None
+        for directory, writable in self.panel_dirs:
+            if not directory:
+                continue
+            candidate = os.path.join(directory, stem + panels.PANEL_SUFFIX)
+            if os.path.isfile(candidate):
+                found = (candidate, writable)
+        return found if found else (None, False)
+
+    def _cmd_list_panel_files(self, cmd: dict) -> dict:
+        """The panel *files* (backends), de-duplicated by stem; the side
+        view lists these and each can be placed and auto-loaded."""
+        by_stem = {}
+        for directory, writable in self.panel_dirs:
+            if not directory:
+                continue
+            for path in panels.list_files(directory):
+                stem = panels.file_stem(path)
+                raw = panels.read_file(path) or {}
+                by_stem[stem] = {
+                    "stem": stem,
+                    "label": raw.get("label") or stem,
+                    "color": raw.get("color") or panels.DEFAULT_COLOR,
+                    "mode": panels.mode_from_raw(raw),
+                    "auto_load": bool(raw.get("auto_load")),
+                    "path": path,
+                    "writable": writable,
+                }
+        return {
+            "status": "ok",
+            "panel_files": True,
+            "files": [by_stem[s] for s in sorted(by_stem)],
+        }
+
+    def _cmd_set_panel_file_autoload(self, cmd: dict) -> dict:
+        """Toggle a panel file's auto-load flag (writes the file)."""
+        stem = (cmd.get("stem") or "").strip()
+        path, writable = self._panel_file_path(stem)
+        if not path:
+            return {"status": "error", "message": f"no panel file {stem!r}"}
+        if not writable:
+            return {"status": "error", "message": f"panel file {stem!r} is read-only"}
+        raw = panels.read_file(path) or {}
+        raw["auto_load"] = bool(cmd.get("enabled"))
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(raw, f, indent=2, sort_keys=True)
+            f.write("\n")
+        os.replace(tmp, path)
+        # Reflect it on any loaded placement of the same file.
+        for p in self.panels.values():
+            if p.stem == stem:
+                p.auto_load = bool(cmd.get("enabled"))
+        self._panel_mtimes = panels.snapshot(self._panel_dir_paths())
+        return {"status": "ok", "stem": stem, "auto_load": bool(cmd.get("enabled"))}
+
+    def _cmd_place_panel(self, cmd: dict) -> dict:
+        """Add a placement of a panel file under ``parent_id`` (root by
+        default), then reload so its nodes come up."""
+        stem = (cmd.get("stem") or "").strip()
+        parent_id = cmd.get("parent_id", "")
+        if not stem:
+            return {"status": "error", "message": "stem required"}
+        path, writable = self._panel_file_path(stem)
+        if not path:
+            return {"status": "error", "message": f"no panel file {stem!r}"}
+        parent = self.panels.get(parent_id)
+        if parent is None:
+            return {"status": "error", "message": f"no panel {parent_id!r}"}
+        name = (cmd.get("name") or stem).strip() or stem
+        with self._lock:
+            existing = set(parent.children)
+            base = panels.file_stem(name) or stem
+            local = base
+            n = 2
+            while local in existing:
+                local = f"{base}_{n}"
+                n += 1
+            parent.config.setdefault("panels", []).append(
+                panels.child_ref(local, stem)
+            )
+            # Persist the parent file so the reload finds the new child.
+            if parent.path:
+                parent_now = self._build_panels_from_space().get(parent.id)
+                if parent_now is not None:
+                    parent_now.config.setdefault("panels", []).append(
+                        panels.child_ref(local, stem)
+                    )
+                    panels.write_file(parent.path, parent_now)
+        self._cmd_reload_panels({})
+        return {"status": "ok", "stem": stem, "name": local, "parent_id": parent_id}
 
     def _cmd_reload_panels(self, cmd: dict) -> dict:
         with self._panel_lock:
@@ -1730,14 +1845,16 @@ class PatchBayDaemon:
                         store[new] = store.pop(old)
             self._edit_panels = {id_map.get(p, p) for p in self._edit_panels}
             local = panels.local_of(panel_id)
+            ref = panels.child_ref(local, panel.stem or local)
             op = self.panels.get(old_parent)
             if op is not None:
                 op.config["panels"] = [
-                    s for s in op.config.get("panels", []) if s != local
+                    s for s in op.config.get("panels", [])
+                    if panels.child_name(s) != local
                 ]
             np_ = self.panels.get(new_parent)
-            if np_ is not None and local not in np_.config.setdefault("panels", []):
-                np_.config["panels"].append(local)
+            if np_ is not None and local not in np_.children:
+                np_.config.setdefault("panels", []).append(ref)
         self._install_panels(self._build_panels_from_space())
         self._write_panels()
         self._dirty = True
@@ -4025,6 +4142,7 @@ class PatchBayDaemon:
                     "w": panel.w,
                     "h": panel.h,
                     "anchored": panel.anchored,
+                    "stem": panel.stem,
                     "auto_load": panel.auto_load,
                     "edit_mode": pid in self._edit_panels,
                     "path": panel.path,
@@ -4226,6 +4344,12 @@ class PatchBayDaemon:
                 response = self._cmd_export_panel(cmd)
             elif command == "clone_panel":
                 response = self._cmd_clone_panel(cmd)
+            elif command == "list_panel_files":
+                response = self._cmd_list_panel_files(cmd)
+            elif command == "set_panel_file_autoload":
+                response = self._cmd_set_panel_file_autoload(cmd)
+            elif command == "place_panel":
+                response = self._cmd_place_panel(cmd)
             elif command == "connect_ports":
                 response = self._cmd_connect_ports(cmd)
             elif command == "disconnect_ports":
