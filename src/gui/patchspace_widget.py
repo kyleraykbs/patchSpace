@@ -5415,7 +5415,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         scales with zoom up to a point and then stays legible and out of
         the way."""
         z = max(self.zoom, 1e-6)
-        return min(14.0, 30.0 / z)
+        return min(14.0, 40.0 / z)
 
     def _panel_rect(self, pid):
         """(x, y, w, h) absolute box for a panel: its explicit placement,
@@ -5463,34 +5463,36 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         return rect
 
     def _panel_header_rects(self, pid, rect):
-        """Hit/draw geometry for a panel's floating title row, which sits
-        just above the box (like a group's title): the physics-stop (pin)
-        circle on the left, the title, then the settings/reset circle."""
+        """Hit/draw geometry for a panel's title row, which sits just above
+        the box (like a group's title).  The title is on the left; the
+        action buttons are on the right, the settings/reset button at the
+        very edge with the physics-stop toggle immediately to its left.
+        Buttons are rounded squares that scale with the title font."""
         x, y, w, h = rect
         panel = self.panels[pid]
         font = self._panel_title_font()
         label = panel.get("label") or self._panel_local(pid)
-        tw, th = self._text_size(label, font)
-        d = max(16.0, th * 1.5)
+        _tw, th = self._text_size(label, font)
+        d = max(18.0, th * 1.6)
         gap = max(6.0, font * 0.5)
         top = y - th - gap
-        anchor = (x, top, x + d, top + d)
-        tx = x + d + gap
-        title = (tx, top, tx + tw, top + th)
-        right = tx + tw
+        right_edge = x + w
         reset = None
         settings = None
+        btn_left = right_edge
         if panel.get("readonly"):
-            reset = (right + gap, top, right + gap + d, top + d)
-            right = reset[2]
+            reset = (right_edge - d, top, right_edge, top + d)
+            btn_left = reset[0]
         elif panel.get("writable"):
-            settings = (right + gap, top, right + gap + d, top + d)
-            right = settings[2]
+            settings = (right_edge - d, top, right_edge, top + d)
+            btn_left = settings[0]
+        anchor = (btn_left - gap - d, top, btn_left - gap, top + d)
+        title = (x, top, max(x, anchor[0] - gap), top + th)
         resize = (
             x + w - self.PANEL_TRIANGLE, y + h - self.PANEL_TRIANGLE,
             x + w, y + h,
         )
-        header = (x, top, right, top + d)
+        header = (x, top, right_edge, top + d)
         return {
             "header": header, "resize": resize, "reset": reset,
             "anchor": anchor, "settings": settings, "title": title,
@@ -5546,7 +5548,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             rect = self._panel_rect(pid)
             if rect is None:
                 continue
-            x, y, w, h = rect
+            _x, _y, _w, _h = rect
             geo = self._panel_header_rects(pid, rect)
             r, g, b = self._hex_to_rgb(panel.get("color"))
             font = self._panel_title_font()
@@ -5558,62 +5560,73 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 panel.get("label") or self._panel_local(pid),
                 font, (r, g, b),
             )
-            # Physics-stop (pin) circle to the left of the title: filled
-            # when the panel is pinned, with a pause glyph.
-            ax1, ay1, ax2, ay2 = geo["anchor"]
-            acx, acy = (ax1 + ax2) / 2.0, (ay1 + ay2) / 2.0
-            ar = (ax2 - ax1) / 2.0
-            bcx = max(2.0, ar * 0.55)
-            cr.set_line_width(1.6)
-            if panel.get("anchored"):
-                cr.set_source_rgb(r, g, b)
-                cr.arc(acx, acy, ar, 0, 2 * math.pi)
-                cr.fill()
-                cr.set_source_rgb(0.05, 0.05, 0.06)
-            else:
-                cr.set_source_rgb(0.05, 0.05, 0.06)
-                cr.arc(acx, acy, ar, 0, 2 * math.pi)
-                cr.stroke()
-            bar_h = ar
-            bar_w = max(1.5, ar * 0.28)
-            cr.rectangle(acx - ar * 0.45 - bar_w / 2, acy - bar_h / 2, bar_w, bar_h)
-            cr.rectangle(acx + ar * 0.45 - bar_w / 2, acy - bar_h / 2, bar_w, bar_h)
-            cr.fill()
-            # Settings (writable) / Reset (read-only) circle, right of the
-            # title.
-            circle = geo["settings"] if geo["settings"] is not None else geo["reset"]
-            if circle is not None:
-                cx1, cy1, cx2, cy2 = circle
-                ccx, ccy = (cx1 + cx2) / 2.0, (cy1 + cy2) / 2.0
-                crr = (cx2 - cx1) / 2.0
-                cr.set_source_rgb(0.96, 0.96, 0.96)
-                cr.arc(ccx, ccy, crr, 0, 2 * math.pi)
-                cr.fill()
-                cr.set_source_rgb(0.1, 0.1, 0.12)
-                cr.set_line_width(1.5)
-                if geo["settings"] is not None:
-                    # Three-dot "menu" glyph.
-                    dot = max(1.0, crr * 0.16)
-                    for dy in (-1, 0, 1):
-                        cr.arc(ccx, ccy + dy * crr * 0.5, dot, 0, 2 * math.pi)
-                        cr.fill()
-                else:
-                    # Reset: a circular arrow.
-                    cr.arc(ccx, ccy, crr * 0.55, -1.0, 2.3)
-                    cr.stroke()
-                    a = 2.3
-                    hx, hy = ccx + crr * 0.55 * math.cos(a), ccy + crr * 0.55 * math.sin(a)
-                    cr.move_to(hx - 3, hy - 1)
-                    cr.line_to(hx + 1, hy - 3)
-                    cr.line_to(hx + 1, hy + 2)
-                    cr.close_path()
-                    cr.fill()
+            # Physics-stop toggle, immediately left of the settings/reset
+            # button at the far right.  Same rounded-square outline style
+            # as the group +/- buttons; filled when the panel is pinned.
+            self._draw_panel_button(
+                cr, pal, geo["anchor"], (r, g, b),
+                active=bool(panel.get("anchored")), glyph="pause",
+            )
+            if geo["settings"] is not None:
+                self._draw_panel_button(
+                    cr, pal, geo["settings"], (r, g, b),
+                    active=False, glyph="hamburger",
+                )
+            elif geo["reset"] is not None:
+                self._draw_panel_button(
+                    cr, pal, geo["reset"], (r, g, b),
+                    active=False, glyph="reset",
+                )
             # Resize triangle bottom-right.
             tx1, ty1, tx2, ty2 = geo["resize"]
             cr.set_source_rgba(r, g, b, 0.95)
             cr.move_to(tx2, ty2)
             cr.line_to(tx1, ty2)
             cr.line_to(tx2, ty1)
+            cr.close_path()
+            cr.fill()
+
+    def _draw_panel_button(self, cr, pal, rect, color, active=False,
+                           glyph="hamburger"):
+        """One panel action button: a small rounded square with the same
+        outline style as the group +/- buttons (filled node_bg + coloured
+        border, or filled with the colour when active)."""
+        x1, y1, x2, y2 = rect
+        size = x2 - x1
+        draw_rounded_rect(cr, x1, y1, size, y2 - y1, 3)
+        if active:
+            cr.set_source_rgb(*color)
+            cr.fill()
+        else:
+            cr.set_source_rgb(*pal["node_bg"])
+            cr.fill_preserve()
+            cr.set_source_rgb(*color)
+            cr.set_line_width(1.0)
+            cr.stroke()
+        cr.set_source_rgb(*((0.06, 0.06, 0.07) if active else color))
+        cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+        if glyph == "pause":
+            bar_w = max(1.5, size * 0.12)
+            bar_h = size * 0.42
+            cr.rectangle(cx - size * 0.16 - bar_w / 2, cy - bar_h / 2, bar_w, bar_h)
+            cr.rectangle(cx + size * 0.16 - bar_w / 2, cy - bar_h / 2, bar_w, bar_h)
+            cr.fill()
+        elif glyph == "hamburger":
+            cr.set_line_width(max(1.4, size * 0.10))
+            for dy in (-1, 0, 1):
+                cr.move_to(cx - size * 0.22, cy + dy * size * 0.18)
+                cr.line_to(cx + size * 0.22, cy + dy * size * 0.18)
+            cr.stroke()
+        else:  # reset - a circular arrow
+            cr.set_line_width(max(1.4, size * 0.10))
+            rad = size * 0.22
+            cr.arc(cx, cy, rad, -1.0, 2.3)
+            cr.stroke()
+            hx = cx + rad * math.cos(2.3)
+            hy = cy + rad * math.sin(2.3)
+            cr.move_to(hx - 2, hy - 1)
+            cr.line_to(hx + 1, hy - 2)
+            cr.line_to(hx + 1, hy + 1)
             cr.close_path()
             cr.fill()
 
