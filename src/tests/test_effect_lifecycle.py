@@ -425,3 +425,18 @@ def test_noise_cancel_defaults_to_the_stereo_rnnoise_label():
     assert 'outputs = [ "nc_plugin:Output" ]' in mono_args
 
 
+def test_out_drain_captures_its_target_sink():
+    """The output keepalive must carry ``stream.capture.sink = true``.
+    Without it PipeWire cannot capture a record stream's *sink* target
+    and silently falls back to the default source - measured live as
+    every effect's ``*_out_keepalive`` tapping ``PatchBay Mic`` instead
+    of its own dummy, so the dummy was never actually drained."""
+    node = NoiseCancelNode("n", "nc")
+    node._ensure_drain("nc_out_keepalive", "nc_out")
+
+    drained = [c for c in FakeCli.created_lines if "nc_out_keepalive" in c]
+    assert drained, FakeCli.created_lines
+    command = drained[-1]
+    assert "--record" in command
+    assert "--target nc_out" in command
+    assert "stream.capture.sink = true" in command

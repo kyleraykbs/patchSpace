@@ -271,8 +271,14 @@ class MainWindow(Gtk.ApplicationWindow):
         self._root_overlay.add_overlay(self._disconnected_badge)
         self.set_child(self._root_overlay)
 
-        self._daemon_connected = self.daemon.is_running()
+        self._daemon_connected = self.client.is_connected()
         self._disconnected_badge.set_visible(not self._daemon_connected)
+
+        # Update the badge the instant the client's connection flips
+        # (the client redials on its own), with the periodic poll below
+        # as a fallback.  The callback fires on the client's worker
+        # thread, so marshal it onto the GTK main loop.
+        self.client.on_connection_changed.append(self._on_client_connection_changed)
 
         self.pw_widget.refresh()
         self.ps_widget.refresh()
@@ -512,17 +518,29 @@ class MainWindow(Gtk.ApplicationWindow):
         badge.set_visible(False)
         return badge
 
+    def _on_client_connection_changed(self, connected):
+        """Client worker-thread callback: marshal the state change onto
+        the GTK main loop."""
+        GLib.idle_add(self._apply_connection_state, connected)
+        return False
+
+    def _apply_connection_state(self, connected):
+        if connected == self._daemon_connected:
+            return False
+        self._daemon_connected = connected
+        if self._disconnected_badge is not None:
+            self._disconnected_badge.set_visible(not connected)
+        if connected:
+            # Fresh connection (or a reconnected daemon): pull a snapshot
+            # now instead of waiting for the next poll.
+            self.pw_widget.refresh()
+            self.ps_widget.refresh()
+        return False
+
     def _poll_daemon_connection(self):
-        """Show/hide the "not connected" badge as the daemon's socket comes
-        and goes, and pull a fresh snapshot the moment it (re)connects."""
-        running = self.daemon.is_running()
-        if running != self._daemon_connected:
-            self._daemon_connected = running
-            if self._disconnected_badge is not None:
-                self._disconnected_badge.set_visible(not running)
-            if running:
-                self.pw_widget.refresh()
-                self.ps_widget.refresh()
+        """Fallback to the client's live state in case a state change was
+        missed; the client itself is the thing actively reconnecting."""
+        self._apply_connection_state(self.client.is_connected())
         return True
 
     def _install_loading_css(self):

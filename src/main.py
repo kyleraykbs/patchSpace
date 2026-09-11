@@ -77,7 +77,12 @@ from pwnodes import (
     SplitterNode,
     PATCHBAY_VIRTUAL_SINK_NAME,
     PATCHBAY_VIRTUAL_MIC_NAME,
+    device_profile_name,
+    pick_auto_a2dp_profile,
+    _run_wpctl,
 )
+
+import session_repair
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
@@ -129,6 +134,15 @@ SESSION_CACHE_PATH = os.path.expanduser("~/.cache/patchbay/last_session.json")
 SUPERVISE_INTERVAL_S = 0.5
 RELOAD_DEBOUNCE_S = 0.35
 DEVICE_OBJ_TYPE = "PipeWire:Interface:Device"
+
+# How often to re-read the live default sink/source and put the built-in
+# virtual devices back if something else claimed them.  Promotion used to
+# be one-shot (only when the built-in's id first resolved), so a
+# newly-plugged device or another app could silently take over the
+# default source - apps then recorded a hardware source instead of the
+# processed Mic Line, with everything looking healthy.  Throttled because
+# each check shells out to wpctl.
+DEFAULT_CHECK_INTERVAL_S = 2.0
 
 # How long a staged session load will wait for a single backed/effect
 # node to come all the way up (structural + module + every backing
@@ -323,10 +337,15 @@ class PatchBayDaemon:
         # Builtin hidden virtual devices (see module docstring).
         self.builtin_sink: Optional[VirtualSpeakerNode] = None
         self.builtin_mic: Optional[VirtualMicNode] = None
+        # Device nodes we've already warned about having no live audio
+        # object, so the "device can't be routed" message isn't repeated
+        # every tick (see _ensure_device_profiles).
+        self._warned_unroutable: set = set()
         self._prev_default_sink_id: Optional[int] = None
         self._prev_default_source_id: Optional[int] = None
         self._set_default_sink_id: Optional[int] = None
         self._set_default_source_id: Optional[int] = None
+        self._default_check_at: float = 0.0
 
         self.graph.on_node_created(self._on_node_created)
         self.graph.on_node_removed(self._on_node_removed)
@@ -399,7 +418,42 @@ class PatchBayDaemon:
         stale = self.graph.reap_stale_for_names(markers, owned_sweep=True)
         logger.info("Startup cleanup swept %d stale object(s)", stale)
 
+    @staticmethod
+    def _another_daemon_running(timeout: float = 0.5) -> bool:
+        """Whether another daemon is already serving SOCKET_PATH.
+
+        A successful AF_UNIX connect proves a live listener (the kernel
+        refuses with ECONNREFUSED for a leftover socket file whose owner
+        is gone), so a crashed run's stale socket does not block a fresh
+        start."""
+        if not os.path.exists(SOCKET_PATH):
+            return False
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        probe.settimeout(timeout)
+        try:
+            probe.connect(SOCKET_PATH)
+            return True
+        except OSError:
+            return False
+        finally:
+            probe.close()
+
     def start(self) -> None:
+        # Single-instance guard.  A second daemon would unlink the live
+        # socket in _socket_server and bind its own, leaving the first
+        # running headless while BOTH create their own copies of the
+        # built-in devices and session backings - duplicate PipeWire
+        # objects and a split graph.  Refuse to start if another daemon
+        # is already answering on the socket (a stale socket file from a
+        # crashed run is not a listener, so that still starts normally).
+        if self._another_daemon_running():
+            logger.error(
+                "Another Patch Space daemon is already listening on %s - "
+                "refusing to start a second instance",
+                SOCKET_PATH,
+            )
+            return
+
         self._running = True
 
         # Capture our own log output for the GUI's get_logs console
@@ -605,17 +659,110 @@ class PatchBayDaemon:
                                target.id, exc)
             self._mirror_line_volume(target)
 
+    def _ensure_device_profiles(self) -> None:
+        """Keep Bluetooth device profiles usable, and warn when a
+        configured hardware device can't appear in the graph at all.
+
+        A connected BlueZ device whose profile is ``off`` exports no
+        Audio/Sink or Audio/Source node, so every edge to/from it can
+        never wire and any stream targeting it dies with "Buffer
+        allocation failed" (measured live with a TOZO headset).  When the
+        node didn't pin a profile, pick the best available A2DP one and
+        apply it - and keep re-asserting via the node's normal
+        apply_device_settings() so a reconnect that resets the profile is
+        corrected.  When no profile can be applied, say so once per node,
+        loudly, instead of letting it look like a routing bug."""
+        devices: Dict[Any, dict] = {}
+        for obj in self.graph.all_objects().values():
+            if obj.get("type") == "PipeWire:Interface:Device":
+                devices[obj.get("id")] = obj
+
+        now = time.monotonic()
+        for node in list(self.space.nodes.values()):
+            if not isinstance(node, (DeviceInputNode, DeviceOutputNode)):
+                continue
+            name = getattr(node, "device_name", "")
+            if not name:
+                continue
+            device_id = getattr(node, "live_props", {}).get("device.id")
+            device_obj = devices.get(device_id) if device_id is not None else None
+            profile = device_profile_name(device_obj)
+            resolved = getattr(node, "live_node_id", None) is not None
+
+            if resolved and profile != "off":
+                self._warned_unroutable.discard(node.id)
+                continue
+
+            # Unroutable: the profile is off (or the device has no live
+            # node at all).  If the profile is off, get it back on - with
+            # the pinned profile when one is set, otherwise by picking the
+            # best available A2DP profile.
+            if profile == "off" and now >= getattr(node, "_auto_profile_at", 0.0):
+                node._auto_profile_at = now + 5.0
+                index = node.profile_index
+                pname = node.profile_description
+                if index is None:
+                    picked = pick_auto_a2dp_profile(
+                        device_obj, isinstance(node, DeviceOutputNode)
+                    )
+                    if picked is not None:
+                        index, pname = picked
+                        logger.warning(
+                            "Bluetooth device %r has no active profile - "
+                            "applying %s", name, pname,
+                        )
+                elif index is not None:
+                    logger.info(
+                        "Re-applying pinned profile %s on Bluetooth device %r"
+                        " (it was off)",
+                        pname or index, name,
+                    )
+                if index is not None and _run_wpctl(
+                    "set-profile", device_id, index
+                ):
+                    # Pin auto-picks so the normal tick keeps re-asserting
+                    # them and a saved session remembers the choice.
+                    node.profile_index = index
+                    if pname:
+                        node.profile_description = pname
+                    node._applied_profile = (device_id, index)
+                    continue
+
+            if node.id not in self._warned_unroutable:
+                self._warned_unroutable.add(node.id)
+                logger.warning(
+                    "Hardware device %r has no live audio node%s - edges "
+                    "to/from it can't be wired until it is available",
+                    name,
+                    " (Bluetooth profile is off)" if profile == "off" else "",
+                )
+
     def _assert_defaults(self) -> None:
-        """Re-assert the builtins as default output/input, once per
-        resolved id - a recreated device gets re-promoted on a later
-        tick."""
+        """Keep the builtins as the default output/input.
+
+        A freshly-resolved device is promoted immediately; after that a
+        throttled check re-reads the live default and puts the builtin
+        back if something else stole it.  Promotion used to happen only
+        once per resolved id, so a newly-plugged device or another app
+        could take the default source and apps would silently record a
+        hardware source instead of the processed Mic Line."""
         sink_id, mic_id = self._builtin_resolved_ids()
-        if sink_id is not None and sink_id != self._set_default_sink_id:
-            self._set_default_sink_id = sink_id
+        now = time.monotonic()
+        if now < self._default_check_at:
+            return
+        self._default_check_at = now + DEFAULT_CHECK_INTERVAL_S
+        if sink_id is not None and (
+            sink_id != self._set_default_sink_id
+            or self._read_default_id("@DEFAULT_AUDIO_SINK@") != sink_id
+        ):
             self._set_default("@DEFAULT_AUDIO_SINK@", sink_id)
-        if mic_id is not None and mic_id != self._set_default_source_id:
-            self._set_default_source_id = mic_id
+            self._set_default_sink_id = sink_id
+        if mic_id is not None and (
+            mic_id != self._set_default_source_id
+            or self._read_default_id("@DEFAULT_AUDIO_SOURCE@") != mic_id
+        ):
             self._set_default("@DEFAULT_AUDIO_SOURCE@", mic_id)
+            self._set_default_source_id = mic_id
 
     @staticmethod
     def _set_default(token: str, node_id: int) -> None:
@@ -664,6 +811,7 @@ class PatchBayDaemon:
             self.space.supervise()
             self._assert_defaults()
             self._enforce_volume_locks()
+            self._ensure_device_profiles()
         except Exception:
             logger.exception("supervision tick failed")
         if self._dirty:
@@ -1087,6 +1235,21 @@ class PatchBayDaemon:
         Never raises for a single bad node or edge - each failure is
         collected and the rest of the load proceeds, same
         idempotent-on-partial-overlap spirit as apply_config.py."""
+        # Self-heal the config first: a saved session can carry legacy
+        # switch port names or edges to nodes that no longer exist.  Only
+        # the lossless fixes run here (no group collapsing, no orphan
+        # pruning) - see session_repair.repair.
+        repaired = session_repair.repair(
+            config, known_types=set(NODE_TYPE_REGISTRY), dedupe_groups=False
+        )
+        if repaired.fixes:
+            logger.info(
+                "Session repair applied %d fix(es) before load:", len(repaired.fixes)
+            )
+            for fix in repaired.fixes:
+                logger.info("  - %s", fix)
+        config = repaired.config
+
         nodes_cfg = config.get("nodes", {}) or {}
         edges_cfg = config.get("edges", []) or []
         groups_cfg = config.get("groups", []) or []
@@ -2611,6 +2774,56 @@ class PatchBayDaemon:
         self._running = False
         return {"status": "ok", "message": "Shutting down"}
 
+    def _cmd_validate_session(self, cmd: dict) -> dict:
+        """Validate the current session, and optionally repair it.
+
+        Dry run by default: returns every structural problem found
+        (unknown node types, dangling edges, invalid/legacy ports,
+        duplicate edges/lines, overlapping groups).  With ``apply: true``
+        the repaired config is torn down and rebuilt exactly as
+        ``rebuild`` does, so the live graph matches the fixed document
+        (a plain re-load only adds/updates - it can't drop a node or edge
+        the repair removed).  ``collapse_duplicate_lines: true`` also
+        folds redundant built-in line nodes, keeping the busiest one.
+        """
+        config = self._build_export_config()
+        result = session_repair.repair(
+            config,
+            known_types=set(NODE_TYPE_REGISTRY),
+            collapse_duplicate_lines=bool(cmd.get("collapse_duplicate_lines", False)),
+            drop_orphans=bool(cmd.get("drop_orphans", False)),
+            dedupe_groups=bool(cmd.get("dedupe_groups", False)),
+        )
+        payload = {
+            "status": "ok",
+            "issues": [
+                {
+                    "severity": issue.severity,
+                    "code": issue.code,
+                    "where": issue.where,
+                    "message": issue.message,
+                }
+                for issue in result.issues
+            ],
+            "fixes": result.fixes,
+            "applied": False,
+        }
+        if cmd.get("apply") and result.fixes:
+            fixed = result.config
+            self._teardown_public_graph()
+            with self._lock:
+                self._dirty = True
+
+            def _run():
+                try:
+                    self._load_session(fixed)
+                except Exception:
+                    logger.exception("Background session repair failed")
+
+            threading.Thread(target=_run, daemon=True).start()
+            payload["applied"] = True
+        return payload
+
     # ------------------------------------------------------------------
     # serialization
     # ------------------------------------------------------------------
@@ -2794,6 +3007,8 @@ class PatchBayDaemon:
                 response = self._cmd_rebuild(cmd)
             elif command == "shutdown":
                 response = self._cmd_shutdown(cmd)
+            elif command in ("validate_session", "repair_session"):
+                response = self._cmd_validate_session(cmd)
             elif command == "ping":
                 response = {"status": "ok", "message": "pong"}
             else:
@@ -2808,6 +3023,18 @@ class PatchBayDaemon:
     # ------------------------------------------------------------------
 
     def _socket_server(self) -> None:
+        # Second line of defence for the single-instance guard in start():
+        # if another daemon claimed the socket while we were doing the slow
+        # start-up, do NOT unlink its socket (that would cut the live GUI
+        # off from the real daemon).  Shut this instance down instead.
+        if self._another_daemon_running():
+            logger.error(
+                "Another daemon claimed %s during start-up - shutting this "
+                "instance down",
+                SOCKET_PATH,
+            )
+            self._running = False
+            return
         if os.path.exists(SOCKET_PATH):
             os.unlink(SOCKET_PATH)
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

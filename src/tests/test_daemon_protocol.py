@@ -2,6 +2,7 @@
 so nothing touches a real PipeWire process.  Exercises the same command
 layer and serialization shapes the GUI depends on."""
 
+import socket
 import threading
 
 from main import PatchBayDaemon
@@ -1053,3 +1054,263 @@ def test_install_log_ring_is_idempotent():
             if isinstance(h, _LogRingHandler):
                 root.removeHandler(h)
         main_mod._log_ring_installed = False
+
+
+def test_assert_defaults_reclaims_builtin_when_stolen(monkeypatch):
+    """Default promotion must not be one-shot: if something else takes
+    the default source/sink after the builtin resolved, a later tick
+    must put the builtin back, or apps silently record a hardware source
+    instead of the processed Mic Line."""
+    d = fresh_daemon()
+    calls = []
+    live = {"sink": 99, "source": 99}
+    monkeypatch.setattr(d, "_builtin_resolved_ids", lambda: (11, 22))
+    monkeypatch.setattr(
+        d,
+        "_read_default_id",
+        lambda token: live["sink"] if "SINK" in token else live["source"],
+    )
+    monkeypatch.setattr(
+        d, "_set_default", lambda token, node_id: calls.append((token, node_id))
+    )
+
+    # Builtin isn't default yet -> promote both immediately.
+    d._default_check_at = 0.0
+    d._assert_defaults()
+    assert calls == [
+        ("@DEFAULT_AUDIO_SINK@", 11),
+        ("@DEFAULT_AUDIO_SOURCE@", 22),
+    ]
+
+    # Already the default -> no redundant set-default calls.
+    live["sink"] = 11
+    live["source"] = 22
+    d._default_check_at = 0.0
+    d._assert_defaults()
+    assert len(calls) == 2
+
+    # Something stole them again -> re-promote.
+    live["sink"] = 99
+    live["source"] = 99
+    d._default_check_at = 0.0
+    d._assert_defaults()
+    assert calls[-2:] == [
+        ("@DEFAULT_AUDIO_SINK@", 11),
+        ("@DEFAULT_AUDIO_SOURCE@", 22),
+    ]
+
+
+def test_assert_defaults_is_throttled(monkeypatch):
+    """The live-default re-check shells out to wpctl, so it must not run
+    on every tick."""
+    d = fresh_daemon()
+    calls = []
+    monkeypatch.setattr(d, "_builtin_resolved_ids", lambda: (11, 22))
+    monkeypatch.setattr(d, "_read_default_id", lambda token: 99)
+    monkeypatch.setattr(
+        d, "_set_default", lambda token, node_id: calls.append(token)
+    )
+
+    d._default_check_at = 1e18  # far in the future
+    d._assert_defaults()
+    assert calls == []
+
+
+def test_validate_session_reports_without_mutating(monkeypatch):
+    """The dry-run session validator returns the issue/fix lists and
+    never touches the live graph."""
+    d = fresh_daemon()
+    d.handle_command(
+        {"command": "add_node", "node_type": "regex_input", "node_id": "in1",
+         "config": {}}
+    )
+    d.handle_command(
+        {"command": "add_node", "node_type": "regex_output", "node_id": "out1",
+         "config": {}}
+    )
+    d.handle_command({"command": "add_edge", "from_node": "in1", "to_node": "out1"})
+
+    # Inject a legacy-port edge directly into the space (the add_edge
+    # command would normalize/reject it, so this simulates an old saved
+    # session).
+    d.handle_command(
+        {"command": "add_node", "node_type": "inverse_switcher", "node_id": "tog",
+         "config": {}}
+    )
+    edge = d.space.add_edge("in1", "tog", "a")
+    assert edge in d.space.edges
+
+    before = set(d.space.edges)
+    resp = d.handle_command({"command": "validate_session"})
+    assert resp["status"] == "ok"
+    assert resp["applied"] is False
+    assert any(f.startswith("normalized ports") for f in resp["fixes"])
+    assert set(d.space.edges) == before
+
+
+def test_another_daemon_running_detects_live_listener(monkeypatch, tmp_path):
+    """A live listener on the socket counts; a bare leftover socket file
+    (crashed run) does not."""
+    path = str(tmp_path / "patchbay.sock")
+    monkeypatch.setattr(main_mod, "SOCKET_PATH", path)
+    assert main_mod.PatchBayDaemon._another_daemon_running() is False
+
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(path)
+    srv.listen(1)
+    try:
+        assert main_mod.PatchBayDaemon._another_daemon_running() is True
+    finally:
+        srv.close()
+
+
+def test_start_refuses_when_another_daemon_is_listening(monkeypatch, tmp_path):
+    """A second daemon must not unlink the live socket and start up; it
+    should bail out before touching the graph."""
+    path = str(tmp_path / "patchbay.sock")
+    monkeypatch.setattr(main_mod, "SOCKET_PATH", path)
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(path)
+    srv.listen(1)
+    try:
+        d = fresh_daemon()
+        d.start()
+        assert d._running is False
+        assert d._ticker is None
+        assert d.builtin_sink is None
+    finally:
+        srv.close()
+
+
+def _device_snapshot(profile, enum_profiles):
+    return {
+        "id": 300,
+        "type": "PipeWire:Interface:Device",
+        "info": {"params": {"Profile": [profile], "EnumProfile": enum_profiles}},
+    }
+
+
+def test_ensure_device_profiles_applies_a2dp_when_off(monkeypatch):
+    """A configured Bluetooth sink whose profile is 'off' exports no live
+    node; the daemon should pick and apply an A2DP profile (and pin it so
+    the normal tick keeps re-asserting it)."""
+    from pwnodes import DeviceOutputNode
+
+    d = fresh_daemon()
+    node = DeviceOutputNode("tozo", device_name="bluez_output.XX.1")
+    node.live_props = {"device.id": 300}
+    node.live_node_id = None
+    d.space.add_node(node)
+
+    dev = _device_snapshot(
+        {"index": 0, "name": "off"},
+        [
+            {"index": 0, "name": "off", "available": "yes", "priority": 0},
+            {"index": 131073, "name": "a2dp-sink-sbc", "available": "yes", "priority": 132},
+            {"index": 131076, "name": "a2dp-sink", "available": "yes", "priority": 133},
+        ],
+    )
+    monkeypatch.setattr(d.graph, "all_objects", lambda: {300: dev})
+    calls = []
+    monkeypatch.setattr(
+        main_mod, "_run_wpctl", lambda *a, **k: (calls.append(a), True)[1]
+    )
+
+    d._ensure_device_profiles()
+    assert node.profile_index == 131076
+    assert node.profile_description == "a2dp-sink"
+    assert ("set-profile", 300, 131076) in calls
+
+
+def test_ensure_device_profiles_reasserts_pinned_profile_when_off(monkeypatch):
+    """A profile the user (or auto-pick) pinned must be re-applied if the
+    device flips back to 'off' without its id changing."""
+    from pwnodes import DeviceOutputNode
+
+    d = fresh_daemon()
+    node = DeviceOutputNode(
+        "tozo", device_name="bluez_output.XX.1",
+        profile_index=131076, profile_description="a2dp-sink",
+    )
+    node.live_props = {"device.id": 300}
+    node.live_node_id = None
+    d.space.add_node(node)
+    dev = _device_snapshot(
+        {"index": 0, "name": "off"},
+        [{"index": 0, "name": "off", "available": "yes", "priority": 0}],
+    )
+    monkeypatch.setattr(d.graph, "all_objects", lambda: {300: dev})
+    calls = []
+    monkeypatch.setattr(
+        main_mod, "_run_wpctl", lambda *a, **k: (calls.append(a), True)[1]
+    )
+
+    d._ensure_device_profiles()
+    assert ("set-profile", 300, 131076) in calls
+    assert node.profile_index == 131076
+
+
+def test_ensure_device_profiles_warns_once_when_unroutable(monkeypatch, caplog):
+    import logging
+
+    from pwnodes import DeviceOutputNode
+
+    d = fresh_daemon()
+    node = DeviceOutputNode("tozo", device_name="bluez_output.XX.1")
+    node.live_props = {"device.id": 300}
+    node.live_node_id = None
+    d.space.add_node(node)
+
+    # No suitable profile to pick -> warn, once, rather than retrying the
+    # message every tick (and never pin a bogus profile).
+    dev = _device_snapshot(
+        {"index": 0, "name": "off"},
+        [{"index": 0, "name": "off", "available": "yes", "priority": 0}],
+    )
+    monkeypatch.setattr(d.graph, "all_objects", lambda: {300: dev})
+    monkeypatch.setattr(main_mod, "_run_wpctl", lambda *a, **k: True)
+
+    with caplog.at_level(logging.WARNING):
+        d._ensure_device_profiles()
+        d._ensure_device_profiles()
+
+    warned = [
+        r for r in caplog.records if "has no live audio node" in r.getMessage()
+    ]
+    assert len(warned) == 1
+    assert node.profile_index is None
+
+
+def test_ensure_device_profiles_clears_warning_when_routable(monkeypatch, caplog):
+    import logging
+
+    from pwnodes import DeviceOutputNode
+
+    d = fresh_daemon()
+    node = DeviceOutputNode("tozo", device_name="bluez_output.XX.1")
+    node.live_props = {"device.id": 300}
+    node.live_node_id = None
+    d.space.add_node(node)
+    dev = _device_snapshot(
+        {"index": 0, "name": "off"},
+        [{"index": 0, "name": "off", "available": "yes", "priority": 0}],
+    )
+    monkeypatch.setattr(d.graph, "all_objects", lambda: {300: dev})
+    monkeypatch.setattr(main_mod, "_run_wpctl", lambda *a, **k: True)
+
+    with caplog.at_level(logging.WARNING):
+        d._ensure_device_profiles()
+        # Device comes back with a live node + active profile.
+        node.live_node_id = 99
+        dev["info"]["params"]["Profile"] = [{"index": 131076, "name": "a2dp-sink"}]
+        d._ensure_device_profiles()
+        # ...and goes away again: the warning is allowed to fire again.
+        node.live_node_id = None
+        dev["info"]["params"]["Profile"] = [{"index": 0, "name": "off"}]
+        d._ensure_device_profiles()
+
+    warned = [
+        r for r in caplog.records if "has no live audio node" in r.getMessage()
+    ]
+    assert len(warned) == 2
+

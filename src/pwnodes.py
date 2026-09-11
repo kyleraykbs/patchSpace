@@ -123,17 +123,19 @@ LINK_CONFIRM_TIMEOUT_S = 3.0
 
 
 def _run_wpctl(*args, timeout: float = 2.0) -> bool:
-    """Best-effort `wpctl <args>`, swallowing failures - a value that
-    fails to apply now is retried on a later tick anyway."""
+    """Best-effort `wpctl <args>`.  Returns whether it succeeded; failures
+    are retried on a later tick anyway.  A value that fails to apply now
+    (e.g. a Bluetooth profile switch during transport setup) must not be
+    recorded as applied, so callers that gate on the result can retry."""
     try:
-        subprocess.run(
+        result = subprocess.run(
             ["wpctl", *[str(a) for a in args]],
             capture_output=True,
             text=True,
             timeout=timeout,
             check=False,
         )
-        return True
+        return result.returncode == 0
     except Exception as exc:
         logger.warning("wpctl %s failed: %s", args, exc)
         return False
@@ -163,6 +165,62 @@ def _read_wpctl_volume(node_id) -> Optional[float]:
         return max(0.0, min(1.0, float(match.group(1))))
     except ValueError:
         return None
+
+
+def device_profile_name(device_obj: Optional[dict]) -> Optional[str]:
+    """The currently-active profile name of a pipewire Device snapshot
+    (``info.params.Profile``), or None when it can't be read.  A device
+    stuck on the ``"off"`` profile exports no Audio/Sink or Audio/Source
+    node at all, so nothing can be routed to or from it."""
+    if not device_obj:
+        return None
+    params = device_obj.get("info", {}).get("params", {}) or {}
+    profile = params.get("Profile")
+    if isinstance(profile, list):
+        profile = profile[0] if profile else None
+    if isinstance(profile, dict):
+        return profile.get("name")
+    return None
+
+
+def _profile_available(entry: dict) -> bool:
+    avail = entry.get("available")
+    return avail is True or str(avail).lower() in ("yes", "true")
+
+
+def pick_auto_a2dp_profile(
+    device_obj: Optional[dict], is_output: bool
+) -> Optional[Tuple[int, str]]:
+    """The best available A2DP profile for a Bluetooth device, or None.
+
+    Sinks want ``a2dp-sink*`` (high-quality playback); a source node
+    falls back to ``headset-head-unit`` (the HFP mic) when the device
+    exposes no A2DP source.  Highest ``priority`` wins."""
+    if not device_obj:
+        return None
+    params = device_obj.get("info", {}).get("params", {}) or {}
+    profiles = params.get("EnumProfile") or []
+    if isinstance(profiles, dict):
+        profiles = [profiles]
+    wanted = "a2dp-sink" if is_output else "a2dp-source"
+
+    def candidates(substr: str):
+        return [
+            p for p in profiles
+            if _profile_available(p) and substr in (p.get("name") or "")
+        ]
+
+    cands = candidates(wanted)
+    if not cands and not is_output:
+        cands = candidates("headset-head-unit")
+    if not cands:
+        return None
+    best = max(cands, key=lambda p: p.get("priority", 0))
+    index = best.get("index")
+    name = best.get("name")
+    if index is None or not name:
+        return None
+    return int(index), name
 
 
 def _db_to_linear(db: float) -> float:
@@ -646,16 +704,27 @@ class BackedNode(Node):
     def _ensure_drain(self, name: str, target: str,
                       pw_cli_command=("pw-cli",), settle: float = 0.3) -> Optional[OwnedPwNode]:
         """Output-side mirror of _ensure_feed: a silent pw-cat --record
-        stream permanently draining ``target`` (PipeWire satisfies a
-        record targeting a sink by tapping whatever feeds it).  Same
-        --properties reasoning as _ensure_feed above."""
+        stream permanently draining ``target`` (a null-audio-sink dummy,
+        so its monitor never has zero consumers and it can't be suspended
+        out from under the effect).
+
+        ``stream.capture.sink = true`` is what makes --target a *sink*
+        actually capture that sink's monitor.  Without it PipeWire can't
+        satisfy a record targeting a sink and the stream silently falls
+        back to the default source - measured live as every effect's
+        ``*_out_keepalive`` tapping ``PatchBay Mic`` instead of its own
+        dummy (see VirtualMicNode._spawn_loopback, which relies on the
+        same property).  Same --properties reasoning as _ensure_feed
+        above."""
         existing = self._find(name)
         if existing is not None:
             return existing
         proc = OwnedPwProcess(name, pw_cli_command, settle)
         command = (
             "pw-cat", "--record", "--target", target,
-            "--properties", f'{{ node.name = "{name}" node.description = "{name}" }}',
+            "--properties",
+            f'{{ node.name = "{name}" node.description = "{name}" '
+            "stream.capture.sink = true }",
             "--raw", "--format", "s16", "--rate", "48000", "--channels", "2",
             "/dev/null",
         )
@@ -2530,6 +2599,16 @@ class PatchSpace:
         self._inflight_links: Dict[Tuple[int, int], Tuple[EdgeId, float]] = {}
         self._orphan_disconnects: Set[Tuple[int, int]] = set()
 
+        # Per-pair backoff for links the live graph refuses to confirm.
+        # ``pw-link`` can return success for a link it creates and
+        # immediately drops (a Bluetooth sink that rejects the source's
+        # format, a port that vanishes mid-negotiation), and without this
+        # such a pair was re-issued every LINK_CONFIRM_TIMEOUT_S forever.
+        # A confirmed pair clears its entry; a timed-out one backs off
+        # exponentially (1s -> 30s), and removing the edge forgets it so a
+        # deliberate re-add retries immediately.
+        self._link_gate = Backoff(initial_s=1.0, max_s=30.0)
+
         # Per-(node, stage) repair backoff - see supervise().
         self._repair_gate = repair_gate or Backoff(initial_s=1.0, max_s=30.0)
 
@@ -3302,6 +3381,9 @@ class PatchSpace:
                 except Exception as exc:
                     logger.debug("disconnect %s for %s failed (already gone?): %s",
                                  pair, edge_id, exc)
+                # No longer desired: forget any backoff so a future re-add
+                # of this exact pair is retried immediately.
+                self._link_gate.forget(pair)
             if edge_id not in desired:
                 del self._edge_links[edge_id]
 
@@ -3356,6 +3438,7 @@ class PatchSpace:
             except Exception as exc:
                 logger.debug("orphan disconnect %s failed: %s", pair, exc)
             self._orphan_disconnects.discard(pair)
+            self._link_gate.forget(pair)
             live.discard(pair)
 
         # Reconcile in-flight pairs against the live snapshot: confirmed
@@ -3366,14 +3449,19 @@ class PatchSpace:
         for pair, (edge_id, issued_at) in list(self._inflight_links.items()):
             if pair in live:
                 del self._inflight_links[pair]
+                self._link_gate.record_success(pair)
                 continue
             if now - issued_at >= LINK_CONFIRM_TIMEOUT_S:
+                del self._inflight_links[pair]
+                self._link_gate.record_failure(pair)
                 logger.warning(
                     "Link %s for %s was not confirmed by the live graph "
-                    "within %.1fs - moving on",
-                    pair, edge_id, LINK_CONFIRM_TIMEOUT_S,
+                    "within %.1fs - backing off (next retry in %.1fs)",
+                    pair,
+                    edge_id,
+                    LINK_CONFIRM_TIMEOUT_S,
+                    self._link_gate.next_attempt_in(pair),
                 )
-                del self._inflight_links[pair]
                 continue
             busy_ports.add(pair[0])
             busy_ports.add(pair[1])
@@ -3404,16 +3492,22 @@ class PatchSpace:
                 # connect outstanding - wait for that to settle before
                 # racing another link onto the same port.
                 continue
+            if not self._link_gate.ready(pair):
+                # A previous connect to this pair returned but the link
+                # never showed up; don't re-issue it every pass.
+                continue
             try:
                 graph.connect(*pair)
             except Exception as exc:
                 logger.warning("connect %s for %s failed: %s", pair, edge_id, exc)
+                self._link_gate.record_failure(pair)
                 continue
             logger.info(
                 "Wiring %s -> %s for %s", pair[0], pair[1], edge_id
             )
             if pair in graph.linked_pairs():
                 # Confirmed synchronously - keep going, no need to wait.
+                self._link_gate.record_success(pair)
                 continue
             # A real, asynchronous graph: remember this link and let
             # later pairs in this same pass proceed as long as they
@@ -3457,6 +3551,7 @@ class PatchSpace:
             if entry is None:
                 return
             for pair in entry.pairs:
+                self._link_gate.forget(pair)
                 try:
                     self.graph.disconnect(*pair)
                 except Exception as exc:

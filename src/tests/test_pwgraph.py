@@ -56,6 +56,34 @@ def test_disconnect_success(monkeypatch):
     assert g.disconnect(1, 2) is True
 
 
+def test_connect_timeout_raises_link_error(monkeypatch):
+    """A wedged pw-link must not block the daemon forever: it is bounded
+    and surfaces as a LinkError (which callers already handle)."""
+    import subprocess
+
+    g = PipewireGraph()
+
+    def boom(*a, **k):
+        raise subprocess.TimeoutExpired(cmd=a[0], timeout=1)
+
+    monkeypatch.setattr("pwgraph.subprocess.run", boom)
+    with pytest.raises(LinkError):
+        g.connect(1, 2)
+
+
+def test_disconnect_timeout_raises_link_error(monkeypatch):
+    import subprocess
+
+    g = PipewireGraph()
+
+    def boom(*a, **k):
+        raise subprocess.TimeoutExpired(cmd=a[0], timeout=1)
+
+    monkeypatch.setattr("pwgraph.subprocess.run", boom)
+    with pytest.raises(LinkError):
+        g.disconnect(1, 2)
+
+
 def test_reap_stale_returns_count(monkeypatch):
     """reap_stale_for_names returns how much it cleaned up, and is a
     no-op when nothing is stale."""

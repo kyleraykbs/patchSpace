@@ -75,6 +75,13 @@ class LinkError(GraphMonitorError):
     link/unlink by a cycle, so callers shouldn't have to special-case it."""
 
 
+# A `pw-link` invocation normally returns in well under a second, but a
+# wedged server/graph can make it block indefinitely - and both callers
+# run under the daemon's lock, so one blocked child would freeze the whole
+# daemon.  Bound it.
+LINK_COMMAND_TIMEOUT_S = 5.0
+
+
 def _name_is_backing_of(name: str, marker: str) -> bool:
     """True if ``name`` is exactly ``marker`` or one of its ``_``-suffixed
     siblings (``marker_in``, ``marker_fx_out``, ``marker_in_keepalive``,
@@ -312,11 +319,18 @@ class PipewireGraph:
         """Link two ports.  Idempotent: an existing link is a silent
         no-op; a vanished port (normal churn race) logs quietly and is a
         no-op; only a genuine failure raises LinkError."""
-        result = subprocess.run(
-            [*self._link_command, str(output_port_id), str(input_port_id)],
-            capture_output=True,
-            text=True,
-        )
+        try:
+            result = subprocess.run(
+                [*self._link_command, str(output_port_id), str(input_port_id)],
+                capture_output=True,
+                text=True,
+                timeout=LINK_COMMAND_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise LinkError(
+                f"pw-link {output_port_id} -> {input_port_id} timed out after "
+                f"{LINK_COMMAND_TIMEOUT_S:.0f}s"
+            ) from exc
         if result.returncode == 0:
             return True
         stderr = (result.stderr or "").strip()
@@ -338,11 +352,18 @@ class PipewireGraph:
 
     def disconnect(self, output_port_id: int, input_port_id: int) -> bool:
         """Unlink two ports.  Idempotent."""
-        result = subprocess.run(
-            [*self._unlink_command, str(output_port_id), str(input_port_id)],
-            capture_output=True,
-            text=True,
-        )
+        try:
+            result = subprocess.run(
+                [*self._unlink_command, str(output_port_id), str(input_port_id)],
+                capture_output=True,
+                text=True,
+                timeout=LINK_COMMAND_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise LinkError(
+                f"pw-link -d {output_port_id} -> {input_port_id} timed out after "
+                f"{LINK_COMMAND_TIMEOUT_S:.0f}s"
+            ) from exc
         if result.returncode == 0:
             return True
         stderr = (result.stderr or "").strip()
@@ -643,6 +664,21 @@ class PipewireGraph:
         self._stopping.clear()
         self._thread = threading.Thread(target=self._read_loop, daemon=True)
         self._thread.start()
+        # Drain pw-dump's stderr: it is chatty during graph churn and the
+        # 64 KiB pipe would otherwise fill and block the monitor (the same
+        # failure mode as the pw-cli sessions - see pwproc._start_drain).
+        if self._proc.stderr is not None:
+            threading.Thread(
+                target=self._drain_stderr, args=(self._proc.stderr,), daemon=True
+            ).start()
+
+    @staticmethod
+    def _drain_stderr(pipe) -> None:
+        try:
+            while pipe.read(4096):
+                pass
+        except Exception:
+            pass
 
     def stop(self, timeout: Optional[float] = 5.0) -> None:
         self._stopping.set()

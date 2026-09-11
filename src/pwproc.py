@@ -90,6 +90,11 @@ class OwnedPwNode:
         self._settle = settle
         self._proc: Optional[subprocess.Popen] = None
         self._owns_process = False
+        # Background readers that keep the child's stdout/stderr pipes
+        # empty - see _start_drain.  Without them a chatty pw-cli/pw-cat
+        # blocks on write() once its pipe buffer (64 KiB) fills, freezing
+        # the module it owns ("the audio halts after a while").
+        self._drain_threads: list = []
         # Set the moment the owning process is confirmed up (end of a
         # successful create()) - used by stuck() below, NOT by is_alive/
         # owns_process, which only ever look at the process itself.
@@ -203,6 +208,7 @@ class OwnedPwNode:
                 pass
             return False
 
+        self._start_drain(proc)
         self._proc = proc
         self._owns_process = True
         self._created_at = _time.monotonic()
@@ -255,6 +261,34 @@ class OwnedPwNode:
         self.node_id = None
 
     # -- small helpers ------------------------------------------------------
+
+    def _start_drain(self, proc: subprocess.Popen) -> None:
+        """Keep the child's stdout/stderr pipes empty for its whole life.
+
+        A pw-cli session that loads a module (filter-chain, echo-cancel)
+        or a pw-cat/pw-loopback helper keeps logging to stdout/stderr; the
+        daemon only reads those pipes once, at create time.  Once the pipe
+        buffer fills the child blocks in write(), which freezes the module
+        it owns and stops it answering the ``set-param``/``destroy`` lines
+        we later write to its stdin.  Nothing needs the output past the
+        create-time guards, so a pair of daemon threads just discards it
+        until EOF (process exit / destroy)."""
+        for pipe in (proc.stdout, proc.stderr):
+            if pipe is None:
+                continue
+            thread = threading.Thread(
+                target=self._drain_until_eof, args=(pipe,), daemon=True
+            )
+            thread.start()
+            self._drain_threads.append(thread)
+
+    @staticmethod
+    def _drain_until_eof(pipe) -> None:
+        try:
+            while pipe.read(4096):
+                pass
+        except Exception:
+            pass
 
     @staticmethod
     def _read_stderr(proc: subprocess.Popen, timeout: float) -> str:
@@ -323,6 +357,7 @@ class OwnedPwProcess(OwnedPwNode):
             )
             return False
 
+        self._start_drain(proc)
         self._proc = proc
         self._owns_process = True
         self._created_at = _time.monotonic()

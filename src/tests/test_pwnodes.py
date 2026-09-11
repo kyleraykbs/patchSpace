@@ -32,6 +32,8 @@ from pwnodes import (
     _base_node_name,
     Node,
     LINK_CONFIRM_TIMEOUT_S,
+    device_profile_name,
+    pick_auto_a2dp_profile,
 )
 
 
@@ -518,6 +520,70 @@ def test_unconfirmed_link_times_out_and_pacing_continues():
     )
     space.sync()
     assert (999, 998) not in space._inflight_links
+
+
+def test_unconfirmable_link_backs_off_instead_of_retrying_forever(monkeypatch):
+    """A connect that returns success but never shows up in the live graph
+    (a Bluetooth sink rejecting the source's format) must not be re-issued
+    on every pass forever.  It backs off, then retries once the backoff
+    elapses."""
+    monkeypatch.setattr("pwnodes.LINK_CONFIRM_TIMEOUT_S", 0.0)
+    g = AsyncFakeGraph()
+    g.add_source(10, "app1")
+    g.add_sink(20, "sink1")
+    space = make_space(g)
+    now = [1000.0]
+    space._link_gate = Backoff(
+        initial_s=5.0, max_s=30.0, clock=lambda: now[0]
+    )
+    connects = []
+    orig_connect = g.connect
+
+    def counting_connect(o, i):
+        connects.append((o, i))
+        return orig_connect(o, i)
+
+    g.connect = counting_connect
+    space.mark_graph_loaded()
+    space.add_node(SrcNode("src"))
+    space.add_node(SinkNode("snk"))
+    space.add_edge("src", "snk")
+
+    space.sync()
+    assert len(connects) == 2  # FL + FR issued, both pending/never live
+
+    # Timeout -> backoff recorded, and the next passes must NOT re-issue.
+    space.sync()
+    assert len(connects) == 2
+    space.sync()
+    assert len(connects) == 2
+
+    # Past the backoff, a retry is allowed again.
+    now[0] += 100.0
+    space.sync()
+    assert len(connects) == 4
+
+
+def test_removing_edge_forgets_link_backoff(monkeypatch):
+    """Dropping the edge clears the pair's backoff so a deliberate re-add
+    retries immediately rather than waiting out the old backoff."""
+    monkeypatch.setattr("pwnodes.LINK_CONFIRM_TIMEOUT_S", 0.0)
+    g = AsyncFakeGraph()
+    g.add_source(10, "app1")
+    g.add_sink(20, "sink1")
+    space = make_space(g)
+    space.mark_graph_loaded()
+    space.add_node(SrcNode("src"))
+    space.add_node(SinkNode("snk"))
+    space.add_edge("src", "snk")
+
+    space.sync()
+    space.sync()  # times the pending pair out, records backoff
+    assert space._link_gate._state, "expected a backed-off pair"
+
+    space.remove_edge("src->snk")
+    space.sync()
+    assert space._link_gate._state == {}
 
 
 def test_removing_edge_with_inflight_link_does_not_stall():
@@ -1195,3 +1261,41 @@ def test_handle_node_removed_ignores_reused_node_id():
     )
     assert owned.destroyed is True
     assert owned not in node.backings
+
+
+def _device(params):
+    return {"id": 300, "type": "PipeWire:Interface:Device", "info": {"params": params}}
+
+
+def test_device_profile_name_reads_current_profile():
+    dev = _device({"Profile": [{"index": 0, "name": "off"}]})
+    assert device_profile_name(dev) == "off"
+    assert device_profile_name(None) is None
+    assert device_profile_name({}) is None
+
+
+def test_pick_auto_a2dp_profile_prefers_highest_priority_sink():
+    dev = _device({
+        "Profile": [{"index": 0, "name": "off"}],
+        "EnumProfile": [
+            {"index": 0, "name": "off", "available": "yes", "priority": 0},
+            {"index": 131073, "name": "a2dp-sink-sbc", "available": "yes", "priority": 132},
+            {"index": 131076, "name": "a2dp-sink", "available": "yes", "priority": 133},
+            {"index": 9, "name": "a2dp-sink-hq", "available": "no", "priority": 999},
+        ],
+    })
+    # Sink: best available a2dp-sink, ignoring unavailable/off.
+    assert pick_auto_a2dp_profile(dev, True) == (131076, "a2dp-sink")
+    # No a2dp-source on this device -> no source pick.
+    assert pick_auto_a2dp_profile(dev, False) is None
+
+
+def test_pick_auto_a2dp_profile_source_falls_back_to_headset():
+    dev = _device({
+        "EnumProfile": [
+            {"index": 0, "name": "off", "available": "yes", "priority": 0},
+            {"index": 196865, "name": "headset-head-unit", "available": "yes", "priority": 6},
+        ]
+    })
+    assert pick_auto_a2dp_profile(dev, False) == (196865, "headset-head-unit")
+    assert pick_auto_a2dp_profile(dev, True) is None
