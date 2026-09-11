@@ -201,9 +201,14 @@ glyph), a bottom-right resize triangle, a top-right settings gear (rename/recolo
 `edit_panel`), and a Reset button on read-only panels.
 
 *Physics* is hierarchical (`_hierarchical_step`, `on_layout_tick`): node physics runs
-inside each panel in that panel's local frame (internal edges only), then the panels
-themselves repel each other in the parent frame; nodes never exert forces across a panel
-boundary (cross-panel edges only spring the two panels together).
+inside each panel in that panel's local frame (internal edges only); then, per parent,
+the direct child panels repel each other in the parent's local frame (siblings only -
+running every panel through one flat pass made a child fight its own parent). Nodes never
+exert forces across a panel boundary (cross-panel edges only spring the two panels
+together). Panel placement is *locally* authoritative while physics/drag moves it
+(`_pending_panels`): a poll carries the last flushed placement, so accepting it would
+snap the panel - and, since moving a panel moves its nodes, drag every node back - each
+refresh. It is handed back to the daemon when the daemon echoes exactly what was sent.
 
 *Reparenting:* dragging a node across a boundary sends `move_nodes`; the daemon
 re-qualifies its id, re-homes its edges (ownership is derived from ids) and re-points
@@ -227,7 +232,8 @@ whole selection drags together); right-drag marquees replace the selection. Shif
 left-drag is a modifier marquee (`_marquee_mode`): Shift unions the swept nodes in, Ctrl
 subtracts them, re-derived each update from `_marquee_base`; a Shift/Ctrl *click* (no sweep)
 toggles the node under the pointer. Shift/Ctrl + right-click on a node does the same
-(add/remove) without opening the context menu.
+(add/remove) without opening the context menu, and Shift/Ctrl + right-drag is a modifier
+marquee (Shift adds the swept nodes, Ctrl removes them; a bare right-drag replaces).
 
 **Session load is asynchronous.** `_cmd_load_session` starts a background thread and
 immediately returns `{"status": "ok", "started": true}`. There is **no completion

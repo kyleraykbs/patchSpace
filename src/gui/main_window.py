@@ -676,12 +676,11 @@ class MainWindow(Gtk.ApplicationWindow):
         )
         bar.append(self._ps_anchor_button)
 
-        # Move the selection into a new panel file, so a Nix config
-        # (or anything else) can own and re-derive it.
+        # Create a new panel, optionally moving the current selection into
+        # it (so it stays enabled with nothing selected).
         self._ps_declare_button = Gtk.Button(label="Create Panel\u2026")
-        self._ps_declare_button.set_sensitive(False)
         self._ps_declare_button.set_tooltip_text(
-            "Move the selected nodes into a new panel file"
+            "Create a new panel file (moves the selected nodes into it, if any)"
         )
         self._ps_declare_button.connect(
             "clicked",
@@ -713,7 +712,6 @@ class MainWindow(Gtk.ApplicationWindow):
             self._ps_selection_label.set_label("No selection")
             self._ps_group_button.set_sensitive(False)
             self._ps_anchor_button.set_sensitive(False)
-            self._ps_declare_button.set_sensitive(False)
             self._ps_anchor_button.set_label("Anchor")
             return
         all_anchored = all(

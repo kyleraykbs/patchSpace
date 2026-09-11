@@ -252,11 +252,16 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._marquee_start_world = (0.0, 0.0)
         self._right_drag_moved = False
         self._right_drag_mods = Gdk.ModifierType(0)
+        self._right_marquee_base = set()
         # Panel-file dialogs: last listing, the open dialog, and the
         # "open the panel list once it arrives" handshake.
         self._pending_panel_list = False
         self._panel_files = []
         self._panel_dialog = None
+        # Panels whose local placement is ahead of the daemon (physics /
+        # drag): pid -> (x, y, w, h, anchored).  See
+        # _update_panels_from_daemon.
+        self._pending_panels = {}
         self._right_drag_start_widget = (0.0, 0.0)
         self._right_drag_start_world = (0.0, 0.0)
         # Callbacks fired whenever the selection or anchor set changes,
@@ -462,6 +467,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         fires).  Individual add_node commands never call this - only a
         whole-config import goes through _apply_config/_load_session."""
         now = time.monotonic()
+        # A bulk load/reload makes the daemon's placement authoritative
+        # again; drop any local panel edits we were holding ahead of it.
+        self._pending_panels.clear()
         self._load_started_at = now
         self._load_min_visible_until = now + SESSION_LOAD_OVERLAY_MIN_MS / 1000.0
         self._load_timeout_at = now + SESSION_LOAD_OVERLAY_TIMEOUT_MS / 1000.0
@@ -695,15 +703,40 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     # ---------- daemon state -> local model ----------
 
     def _update_panels_from_daemon(self, daemon_panels):
-        """Refresh the local panel model from a get_nodes poll.  Panel
-        placement is authoritative on the daemon; we keep the local copy
-        while a panel is actively being dragged/resized."""
+        """Refresh the local panel model from a get_nodes poll.
+
+        Placement is *locally* authoritative while the physics or a drag
+        has moved a panel (`_pending_panels`): a poll carries the last
+        placement we flushed, so accepting it would snap the panel (and,
+        because moving a panel moves its nodes, drag every node back)
+        every refresh.  We hand placement back to the daemon once it
+        echoes exactly what we sent.  Label/colour/mode/membership always
+        come from the daemon."""
         live = set()
         for p in daemon_panels:
             pid = p.get("id", "")
             live.add(pid)
             if pid == self.dragging_panel or pid == self.resizing_panel:
                 continue
+            reported = (
+                float(p.get("x", 0.0) or 0.0),
+                float(p.get("y", 0.0) or 0.0),
+                float(p.get("w", 420.0) or 420.0),
+                float(p.get("h", 260.0) or 260.0),
+                bool(p.get("anchored", False)),
+            )
+            pending = self._pending_panels.get(pid)
+            local = self.panels.get(pid)
+            if pending is not None and reported == pending:
+                del self._pending_panels[pid]
+                pending = None
+            if pending is not None and local is not None:
+                x, y, w, h, anchored = (
+                    local["x"], local["y"], local["w"], local["h"],
+                    local.get("anchored", False),
+                )
+            else:
+                x, y, w, h, anchored = reported
             self.panels[pid] = {
                 "id": pid,
                 "parent": p.get("parent", ""),
@@ -712,18 +745,35 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 "mode": p.get("mode", "read-write"),
                 "readonly": bool(p.get("readonly", False)),
                 "writable": bool(p.get("writable", True)),
-                "x": float(p.get("x", 0.0) or 0.0),
-                "y": float(p.get("y", 0.0) or 0.0),
-                "w": float(p.get("w", 420.0) or 420.0),
-                "h": float(p.get("h", 260.0) or 260.0),
-                "anchored": bool(p.get("anchored", False)),
+                "x": x,
+                "y": y,
+                "w": w,
+                "h": h,
+                "anchored": anchored,
                 "path": p.get("path"),
                 "children": list(p.get("children") or []),
             }
         for pid in list(self.panels):
             if pid not in live:
                 del self.panels[pid]
+        for pid in list(self._pending_panels):
+            if pid not in live:
+                del self._pending_panels[pid]
         self._panel_geo_cache.clear()
+
+    def _mark_panel_moved(self, pid):
+        """Remember that a panel's local placement is ahead of the daemon
+        (see _update_panels_from_daemon)."""
+        panel = self.panels.get(pid)
+        if panel is None:
+            return
+        self._pending_panels[pid] = (
+            float(panel["x"]),
+            float(panel["y"]),
+            float(panel["w"]),
+            float(panel["h"]),
+            bool(panel.get("anchored", False)),
+        )
 
     def _panel_absolute(self, panel_id):
         """Absolute (x, y) top-left of a panel, folding ancestor offsets."""
@@ -1134,36 +1184,55 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 self.nodes[nid]["x"] = positions[nid][0] + ox
                 self.nodes[nid]["y"] = positions[nid][1] + oy
 
-        pids = [p for p in self.panels if p]
-        if len(pids) >= 2:
-            positions = {pid: self._panel_absolute(pid) for pid in pids}
+        # Panels repel/spring only against their *siblings*, each group in
+        # its parent's local frame.  Running every panel through one flat
+        # pass made a child panel fight its own parent (and its ancestors'
+        # offsets), which is what pushed nested panels apart endlessly.
+        def panel_of(nid):
+            return nid.rsplit("::", 1)[0] if "::" in nid else ""
+
+        by_parent = {}
+        for pid in self.panels:
+            if pid == "":
+                continue
+            parent = self.panels[pid].get("parent", "")
+            by_parent.setdefault(parent, []).append(pid)
+
+        for parent, pids in by_parent.items():
+            if len(pids) < 2:
+                continue
+            positions = {
+                pid: (self.panels[pid]["x"], self.panels[pid]["y"])
+                for pid in pids
+            }
             sizes = {}
             for pid in pids:
                 rect = self._panel_rect(pid)
                 sizes[pid] = (rect[2], rect[3]) if rect else (420.0, 260.0)
+            kid_set = set(pids)
             edges = []
             for e in self.edges.values():
-                a = e["from_node"].rsplit("::", 1)[0] if "::" in e["from_node"] else ""
-                b = e["to_node"].rsplit("::", 1)[0] if "::" in e["to_node"] else ""
-                if a and b and a != b and a in positions and b in positions:
+                a = panel_of(e["from_node"])
+                b = panel_of(e["to_node"])
+                if a != b and a in kid_set and b in kid_set:
                     edges.append((a, b))
             pinned = {pid for pid in pids if self.panels[pid].get("anchored")}
-            if self.dragging_panel:
+            if self.dragging_panel in kid_set:
                 pinned.add(self.dragging_panel)
             delta = self.force_layout.step(pids, positions, sizes, edges, pinned)
             max_delta = max(max_delta, delta)
             for pid in pids:
                 if self.dragging_panel == pid:
                     continue
-                ax, ay = positions[pid]
-                old_x = self._panel_absolute(pid)
-                dx, dy = ax - old_x[0], ay - old_x[1]
+                nx, ny = positions[pid]
+                dx = nx - self.panels[pid]["x"]
+                dy = ny - self.panels[pid]["y"]
                 if dx or dy:
                     self.panels[pid]["x"] += dx
                     self.panels[pid]["y"] += dy
                     self._translate_panel_local(pid, dx, dy)
-        if pids:
-            self._panel_geo_cache.clear()
+                    self._mark_panel_moved(pid)
+        self._panel_geo_cache.clear()
         return max_delta
 
     # ---------- geometry ----------
@@ -2870,6 +2939,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         if pid is not None:
             panel = self.panels[pid]
             panel["anchored"] = not panel.get("anchored", False)
+            self._mark_panel_moved(pid)
             self.client.send(
                 {"command": "set_panel_layout", "panel_id": pid,
                  "anchored": panel["anchored"]}
@@ -4015,6 +4085,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 panel["w"] = max(140.0, self.resize_orig[0] + dx)
                 panel["h"] = max(90.0, self.resize_orig[1] + dy)
                 self._panel_geo_cache.pop(self.resizing_panel, None)
+                self._mark_panel_moved(self.resizing_panel)
                 self.queue_draw()
             return
         if self.dragging_panel is not None:
@@ -4035,6 +4106,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 if inc != (0.0, 0.0):
                     self._translate_panel_local(self.dragging_panel, inc[0], inc[1])
                     self._drag_panel_applied = desired
+                self._mark_panel_moved(self.dragging_panel)
                 self._panel_geo_cache.clear()
                 self.queue_draw()
             return
@@ -5731,6 +5803,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self._right_drag_mods = gesture.get_current_event_state()
         except Exception:
             self._right_drag_mods = Gdk.ModifierType(0)
+        self._right_marquee_base = set(self.selected_nodes)
         self.select_rect = None
 
     def on_right_drag_update(self, gesture, offset_x, offset_y):
@@ -5743,7 +5816,16 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         ex = sx + offset_x / self.zoom
         ey = sy + offset_y / self.zoom
         self.select_rect = (min(sx, ex), min(sy, ey), max(sx, ex), max(sy, ey))
-        self._set_selection(self._nodes_in_rect(self.select_rect))
+        swept = self._nodes_in_rect(self.select_rect)
+        # Modifier marquee: Shift adds the swept nodes to the selection at
+        # drag start, Ctrl removes them; a bare right-drag replaces.
+        mods = getattr(self, "_right_drag_mods", Gdk.ModifierType(0))
+        if mods & Gdk.ModifierType.SHIFT_MASK:
+            self._set_selection(self._right_marquee_base | swept)
+        elif mods & Gdk.ModifierType.CONTROL_MASK:
+            self._set_selection(self._right_marquee_base - swept)
+        else:
+            self._set_selection(swept)
         # _set_selection only redraws when the set changed; the marquee
         # rectangle itself moves on every update.
         self.queue_draw()
