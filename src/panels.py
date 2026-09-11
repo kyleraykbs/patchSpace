@@ -237,6 +237,18 @@ def list_files(directory: Optional[str]) -> List[str]:
     )
 
 
+def snapshot(directories) -> Dict[str, float]:
+    """{path: mtime} over the panel directories, for change detection."""
+    state: Dict[str, float] = {}
+    for directory in directories:
+        for path in list_files(directory):
+            try:
+                state[path] = os.path.getmtime(path)
+            except OSError:
+                pass
+    return state
+
+
 def placement_from_raw(raw: dict) -> dict:
     p = raw.get("placement")
     if not isinstance(p, dict):

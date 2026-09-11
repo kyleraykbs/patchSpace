@@ -296,7 +296,7 @@ class MainWindow(Gtk.ApplicationWindow):
         """The PatchSpace tab is a side panel (drag-and-drop "add
         node" source, see PatchSpaceGraphWidget.build_add_node_panel)
         next to the ps_widget canvas, which itself carries a hamburger
-        menu (Export/Import/declarative/daemon actions) pinned to its
+        menu (Export/Import/panel/daemon actions) pinned to its
         top-right corner. ps_widget itself is a plain Gtk.DrawingArea with no room for child
         widgets, so the menu button lives in a Gtk.Overlay wrapped
         around it instead of inside it."""
@@ -359,33 +359,33 @@ class MainWindow(Gtk.ApplicationWindow):
         # "Import Last Session" button is gone.  This dialog is the
         # management surface: list files, rename/delete the writable ones,
         # and see which nodes each one defines.
-        declarative_btn = Gtk.Button(label="Panels\u2026")
-        declarative_btn.get_child().set_wrap(False)
-        declarative_btn.set_tooltip_text(
-            "Manage file-backed nodes loaded from the declarative directories"
+        panel_btn = Gtk.Button(label="Panels\u2026")
+        panel_btn.get_child().set_wrap(False)
+        panel_btn.set_tooltip_text(
+            "Manage the file-backed panels loaded from the panel directories"
         )
-        declarative_btn.connect(
+        panel_btn.connect(
             "clicked",
             lambda _b: (
                 popover.popdown(),
-                self.ps_widget.show_declarative_dialog(),
+                self.ps_widget.show_panels_dialog(),
             ),
         )
-        box.append(declarative_btn)
+        box.append(panel_btn)
 
-        reload_declarative_btn = Gtk.Button(label="Reload Panels")
-        reload_declarative_btn.get_child().set_wrap(False)
-        reload_declarative_btn.set_tooltip_text(
-            "Re-read every declarative file now (daemon-side edits will be lost)"
+        reload_panels_btn = Gtk.Button(label="Reload Panels")
+        reload_panels_btn.get_child().set_wrap(False)
+        reload_panels_btn.set_tooltip_text(
+            "Re-read every panel file now (daemon-side edits will be lost)"
         )
-        reload_declarative_btn.connect(
+        reload_panels_btn.connect(
             "clicked",
             lambda _b: (
                 popover.popdown(),
-                self.ps_widget.reload_declarative(),
+                self.ps_widget.reload_panels(),
             ),
         )
-        box.append(reload_declarative_btn)
+        box.append(reload_panels_btn)
 
         box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
 
@@ -676,7 +676,7 @@ class MainWindow(Gtk.ApplicationWindow):
         )
         bar.append(self._ps_anchor_button)
 
-        # Write the selection into a declarative file, so a Nix config
+        # Move the selection into a new panel file, so a Nix config
         # (or anything else) can own and re-derive it.
         self._ps_declare_button = Gtk.Button(label="Create Panel\u2026")
         self._ps_declare_button.set_sensitive(False)
@@ -748,9 +748,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 elif "config" in resp:
                     self.ps_widget.on_export_config(resp["config"])
                 elif "files" in resp and "directories" in resp:
-                    self.ps_widget.on_declarative_files(resp)
-                elif resp.get("declarative_action"):
-                    self.ps_widget.on_declarative_action(resp)
+                    self.ps_widget.on_panels_list(resp)
                 elif "nodes" in resp:
                     self.ps_widget.update_from_daemon(resp)
             except Exception:

@@ -66,6 +66,17 @@
           );
 
           # The headless daemon: socket server + PipeWire graph supervisor.
+          #
+          # Panels (file-backed node containers) are discovered from:
+          #   --panel-dir PATH[:rw|:ro]   repeatable; later dirs shadow
+          #                               earlier ones.  Defaults to
+          #                               $PATCHBAY_PANEL_DIR or
+          #                               ~/.local/share/patchbay/panels.
+          #   --root-panel PATH           root panel / session autosave;
+          #                               defaults to $PATCHBAY_ROOT_PANEL or
+          #                               ~/.cache/patchbay/last_session.json.
+          # Both flags can also be supplied through the environment for a
+          # packaged service.  The wrapper forwards "$@" so they pass through.
           patchbay-daemon = pkgs.writeShellApplication {
             name = "patchbay-daemon";
             runtimeInputs = [

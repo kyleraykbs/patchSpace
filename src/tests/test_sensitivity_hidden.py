@@ -440,13 +440,14 @@ def test_sensitivity_gate_closes_to_silence_by_default():
     assert d2.space.nodes["sens"].range_db == -24.0
 
 
-def test_declaring_sensitivity_gate_moves_hidden_children_live(tmp_path):
-    """A live declarative move must rename a Sensitivity gate's hidden
-    pre/post companions with it, or the gate's signal path breaks."""
-    (tmp_path / "rw").mkdir()
+def test_creating_panel_moves_hidden_children_live(tmp_path):
+    """A live panel move must rename a Sensitivity gate's hidden pre/post
+    companions with it, or the gate's signal path breaks."""
+    pdir = tmp_path / "panels"
+    pdir.mkdir()
     d = PatchBayDaemon(
-        declarative_ro=str(tmp_path / "ro"),
-        declarative_rw=str(tmp_path / "rw"),
+        panel_dirs=[(str(pdir), True)],
+        root_panel_path=str(tmp_path / "root.json"),
     )
     _add(d, "sensitivity_gate", "sens")
 
@@ -459,7 +460,7 @@ def test_declaring_sensitivity_gate_moves_hidden_children_live(tmp_path):
     d.space._edge_links["__internal__:sens:0"] = _DesiredLinks(pairs=set())
 
     export = d.handle_command(
-        {"command": "export_declarative", "name": "kit", "node_ids": ["sens"]}
+        {"command": "create_panel", "name": "kit", "node_ids": ["sens"]}
     )
     assert export["status"] == "ok", export
     assert "__internal__:sens:0" not in d.space._edge_links
@@ -474,14 +475,15 @@ def test_declaring_sensitivity_gate_moves_hidden_children_live(tmp_path):
     assert "kit::sens->__sens_post__kit::sens" in d.space.edges
 
 
-def test_declare_runs_standard_careful_setup_for_moved_nodes(tmp_path):
-    """A declarative move must go through the same per-node setup +
-    careful bring-up as a normal add/load (not just supervise()), so a
-    moved finicky effect can't be left half-configured or half-wired."""
-    (tmp_path / "rw").mkdir()
+def test_create_panel_runs_standard_careful_setup_for_moved_nodes(tmp_path):
+    """A panel move must go through the same per-node setup + careful
+    bring-up as a normal add/load (not just supervise()), so a moved
+    finicky effect can't be left half-configured or half-wired."""
+    pdir = tmp_path / "panels"
+    pdir.mkdir()
     d = PatchBayDaemon(
-        declarative_ro=str(tmp_path / "ro"),
-        declarative_rw=str(tmp_path / "rw"),
+        panel_dirs=[(str(pdir), True)],
+        root_panel_path=str(tmp_path / "root.json"),
     )
     _add(d, "sensitivity_gate", "sens")
 
@@ -489,7 +491,7 @@ def test_declare_runs_standard_careful_setup_for_moved_nodes(tmp_path):
     d._careful_bring_up = lambda n: careful.append(n.id)
 
     export = d.handle_command(
-        {"command": "export_declarative", "name": "kit", "node_ids": ["sens"]}
+        {"command": "create_panel", "name": "kit", "node_ids": ["sens"]}
     )
     assert export["status"] == "ok", export
     assert "kit::sens" in d.space.nodes

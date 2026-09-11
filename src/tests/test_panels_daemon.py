@@ -163,3 +163,42 @@ def test_move_nodes_refused_from_readonly_panel(tmp_path):
     assert resp["moved"] == []
     assert "frozen::x" in resp["refused"]
     assert "frozen::x" in d.space.nodes
+
+
+def test_reset_panel_reverts_subtree_scoped(tmp_path):
+    d, root, pdir = _daemon(tmp_path)
+    frozen = panels.Panel(
+        id="frozen", parent="", label="F", color="#abc", mode="read-only",
+        path=os.path.join(pdir, "frozen.json"), writable=True,
+        config={"nodes": {"x": {"type": "regex_input",
+                                "params": {"x": 10, "y": 10, "pattern": "a"}}},
+                "edges": [], "panels": [], "groups": []},
+    )
+    panels.write_file(os.path.join(pdir, "frozen.json"), frozen)
+    panels.write_file(root, panels.Panel(
+        id="", parent=None, label="root", color="#fff", mode="read-write",
+        writable=True,
+        config={"nodes": {"y": {"type": "regex_output",
+                                "params": {"x": 500, "y": 10, "pattern": "b"}}},
+                "edges": [{"from": "frozen::x", "to": "y"}],
+                "panels": ["frozen"], "groups": []},
+    ))
+    d._install_panels(d._load_panels_tree())
+    d._load_session(d._flatten_panels(d.panels), declarative=True)
+
+    # Runtime edits in the read-only panel.
+    with d._lock:
+        d.space.nodes["frozen::x"].x = 999
+        d.space.nodes["frozen::x"].pattern = "changed"
+    d.handle_command({"command": "add_node", "node_type": "regex_input",
+                      "node_id": "frozen::z", "config": {"pattern": "z"}})
+
+    resp = d._cmd_reset_panel({"panel_id": "frozen"})
+    assert resp["status"] == "ok", resp
+    # Snapshot state restored...
+    assert d.space.nodes["frozen::x"].x == 10
+    assert d.space.nodes["frozen::x"].pattern == "a"
+    assert "frozen::z" not in d.space.nodes
+    # ...while the imperative cross-panel edge survives.
+    assert "frozen::x->y" in d.space.edges
+    assert "y" in d.space.nodes

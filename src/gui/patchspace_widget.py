@@ -251,13 +251,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._marquee_base = set()
         self._marquee_start_world = (0.0, 0.0)
         self._right_drag_moved = False
-        # Declarative-files dialogs: last listing, the open dialog, and
-        # the "open the Declare dialog once the list arrives" handshake.
-        self._pending_declarative_list = False
-        self._declarative_files = []
-        self._declarative_dialog = None
-        self._pending_declare_nodes = None
-        self._pending_declare_open = False
+        # Panel-file dialogs: last listing, the open dialog, and the
+        # "open the panel list once it arrives" handshake.
+        self._pending_panel_list = False
+        self._panel_files = []
+        self._panel_dialog = None
         self._right_drag_start_widget = (0.0, 0.0)
         self._right_drag_start_world = (0.0, 0.0)
         # Callbacks fired whenever the selection or anchor set changes,
@@ -3352,26 +3350,25 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
 
     # ------------------------------------------------------------------
-    # declarative node files
+    # panel files
     # ------------------------------------------------------------------
     #
-    # Declarative files are loaded by the daemon automatically at
-    # start-up and whenever one changes (main.py's _load_startup_sessions
-    # / reload_declarative), so there is no "import" step here.  The GUI
-    # only lists/renames/deletes the writable ones and can export the
-    # current selection into one - declaring a group of nodes so a Nix
-    # config (or any other file owner) can re-derive them.
+    # Panels are loaded by the daemon automatically at start-up and
+    # whenever one changes (main.py's _startup_load_panels /
+    # _cmd_reload_panels), so there is no "import" step here.  The GUI
+    # only lists/deletes the writable ones and can create a new panel
+    # from the current selection.
 
-    def reload_declarative(self):
-        # A declarative reload is a full rebuild of the declarative half;
-        # raise the overlay optimistically.  The daemon's own `loading`
-        # flag can't be seen here because the synchronous command blocks
-        # this connection's get_nodes polls until it finishes.
+    def reload_panels(self):
+        # A panel reload is a full rebuild of the panel half; raise the
+        # overlay optimistically.  The daemon's own `loading` flag can't
+        # be seen here because the synchronous command blocks this
+        # connection's get_nodes polls until it finishes.
         self._begin_load()
         self.client.send({"command": "reload_panels"})
 
-    def show_declarative_dialog(self):
-        self._pending_declarative_list = True
+    def show_panels_dialog(self):
+        self._pending_panel_list = True
         self.client.send({"command": "list_panels"})
 
     def show_create_panel_dialog(self):
@@ -3413,38 +3410,17 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         dialog.connect("response", _on_response)
         dialog.present()
 
-    def on_declarative_files(self, resp):
-        # Cache the listing so the Declare dialog can offer a target
-        # dropdown without another round trip.
-        self._declarative_files = resp.get("files", [])
-        if getattr(self, "_pending_declare_open", False):
-            self._pending_declare_open = False
-            nodes = self._pending_declare_nodes or []
-            self._pending_declare_nodes = None
-            self._show_export_declarative_dialog(nodes)
+    def on_panels_list(self, resp):
+        # Cache the listing so the dialog can render without another
+        # round trip.
+        self._panel_files = resp.get("files", [])
+        if not self._pending_panel_list:
             return
-        if not self._pending_declarative_list:
-            return
-        self._pending_declarative_list = False
-        self._show_declarative_dialog(resp)
+        self._pending_panel_list = False
+        self._show_panels_dialog(resp)
 
-    def on_declarative_action(self, resp):
-        """A reload/export/rename/delete finished.  Surface failures;
-        rebuild the list dialog if it is still open so it reflects the
-        change."""
-        if resp.get("status") == "error":
-            self._show_error_dialog(resp.get("message", "Declarative action failed"))
-        dialog = getattr(self, "_declarative_dialog", None)
-        if dialog is not None:
-            # Rebuild the list in place: drop the stale dialog, then ask
-            # the daemon for the new state (on_declarative_files reopens).
-            dialog.destroy()
-            self._pending_declarative_list = True
-            self.client.send({"command": "list_panels"})
-
-    def _select_declarative_nodes(self, node_ids):
-        """Select the given full-id nodes on the canvas so the user can
-        immediately re-run Declare against the same file."""
+    def _select_panel_nodes(self, node_ids):
+        """Select the given full-id nodes on the canvas."""
         ids = {n for n in node_ids if n in self.nodes}
         if not ids:
             self._show_error_dialog("Those nodes are not on the canvas.")
@@ -3452,7 +3428,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._set_selection(ids)
         self.zoom_to_fit()
 
-    def _declarative_swatch(self, color):
+    def _panel_swatch(self, color):
         area = Gtk.DrawingArea()
         area.set_content_width(16)
         area.set_content_height(16)
@@ -3471,13 +3447,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         area.set_draw_func(draw)
         return area
 
-    def _show_declarative_dialog(self, resp):
+    def _show_panels_dialog(self, resp):
         dialog = Gtk.Dialog(
-            title="Declarative Nodes",
+            title="Panels",
             transient_for=self.get_root(),
             modal=False,
         )
-        self._declarative_dialog = dialog
+        self._panel_dialog = dialog
         dialog.set_default_size(560, 460)
 
         content = dialog.get_content_area()
@@ -3487,18 +3463,23 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         content.set_margin_start(10)
         content.set_margin_end(10)
 
-        dirs = resp.get("directories", {})
+        lines = ["Panel directories:"]
+        for entry in resp.get("directories", []):
+            mode = "read-write" if entry.get("writable") else "read-only"
+            lines.append(
+                "  {} <span alpha='60%'>({})</span>".format(
+                    GLib.markup_escape_text(str(entry.get("path", ""))), mode
+                )
+            )
+        root = resp.get("root")
+        if root:
+            lines.append(
+                "  root: {}".format(GLib.markup_escape_text(str(root)))
+            )
         info = Gtk.Label()
         info.set_xalign(0)
         info.set_wrap(True)
-        ro = dirs.get("readonly") or "(none)"
-        rw = dirs.get("readwrite") or "(none)"
-        info.set_markup(
-            "Read-only: <tt>{}</tt>\nRead-write: <tt>{}</tt>".format(
-                GLib.markup_escape_text(str(ro)),
-                GLib.markup_escape_text(str(rw)),
-            )
-        )
+        info.set_markup("\n".join(lines))
         content.append(info)
 
         scrolled = Gtk.ScrolledWindow()
@@ -3510,16 +3491,16 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
         files = resp.get("files", [])
         if not files:
-            placeholder = Gtk.Label(label="No declarative files found.")
+            placeholder = Gtk.Label(label="No panel files found.")
             placeholder.set_margin_top(12)
             listbox.append(placeholder)
         for entry in files:
-            listbox.append(self._declarative_file_row(entry, dialog))
+            listbox.append(self._panel_row(entry, dialog))
         content.append(scrolled)
 
         select_group_btn = Gtk.Button(label="Select Group\u2026")
         select_group_btn.set_tooltip_text(
-            "Select the nodes of one of the canvas groups (declared or not)"
+            "Select the nodes of one of the canvas groups"
         )
         select_group_btn.connect(
             "clicked", lambda _b, d=dialog: self._prompt_select_group(d)
@@ -3528,8 +3509,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
         dialog.add_button("Reload", Gtk.ResponseType.APPLY)
         dialog.add_button("Close", Gtk.ResponseType.CLOSE)
-        dialog.connect("response", self._on_declarative_dialog_response)
-        dialog.connect("destroy", self._on_declarative_dialog_destroy)
+        dialog.connect("response", self._on_panels_dialog_response)
+        dialog.connect("destroy", self._on_panels_dialog_destroy)
         dialog.show()
 
     def _prompt_select_group(self, parent):
@@ -3558,13 +3539,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             if response == Gtk.ResponseType.APPLY:
                 idx = dropdown.get_selected()
                 if 0 <= idx < len(groups):
-                    self._select_declarative_nodes(groups[idx][1].get("nodes", []))
+                    self._select_panel_nodes(groups[idx][1].get("nodes", []))
             dlg.destroy()
 
         dialog.connect("response", on_response)
         dialog.show()
 
-    def _declarative_file_row(self, entry, dialog):
+    def _panel_row(self, entry, dialog):
         row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         row.set_margin_top(6)
         row.set_margin_bottom(6)
@@ -3572,7 +3553,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         row.set_margin_end(6)
 
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        header.append(self._declarative_swatch(entry.get("color", "#3584e4")))
+        header.append(self._panel_swatch(entry.get("color", "#3584e4")))
         name = Gtk.Label()
         name.set_xalign(0)
         name.set_hexpand(True)
@@ -3580,144 +3561,69 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         name.set_markup(
             "<b>{}</b>  <span size='small' alpha='60%'>{}</span>".format(
                 GLib.markup_escape_text(str(entry.get("label", "?"))),
-                GLib.markup_escape_text(str(entry.get("name", ""))),
+                GLib.markup_escape_text(str(entry.get("id", ""))),
             )
         )
         header.append(name)
 
         select_btn = Gtk.Button(label="Select")
-        select_btn.set_tooltip_text("Select this file's nodes on the canvas")
+        select_btn.set_tooltip_text("Select this panel's nodes on the canvas")
         select_btn.connect(
             "clicked",
-            lambda _b, e=entry: self._select_declarative_nodes(
-                [n["id"] for n in e.get("nodes", [])]
-            ),
+            lambda _b, e=entry: self._select_panel_nodes(e.get("nodes", [])),
         )
         header.append(select_btn)
 
-        if entry.get("writable"):
-            edit_btn = Gtk.Button(label="Edit\u2026")
-            edit_btn.set_tooltip_text("Change this group's name, label and colour")
-            edit_btn.connect(
-                "clicked",
-                lambda _b, e=entry, d=dialog: self._prompt_edit_declarative(e, d),
+        if entry.get("readonly"):
+            reset_btn = Gtk.Button(label="Reset")
+            reset_btn.set_tooltip_text(
+                "Revert this read-only panel's nodes, edges and placement"
             )
-            header.append(edit_btn)
-
-            delete_btn = Gtk.Button(label="Delete")
-            delete_btn.connect(
+            reset_btn.connect(
                 "clicked",
-                lambda _b, e=entry, d=dialog: self._confirm_delete_declarative(e, d),
+                lambda _b, e=entry: self._reset_panel_from_dialog(e),
             )
-            header.append(delete_btn)
-        else:
+            header.append(reset_btn)
             ro_tag = Gtk.Label(label="read-only")
             ro_tag.add_css_class("dim-label")
             header.append(ro_tag)
+        elif entry.get("writable"):
+            delete_btn = Gtk.Button(label="Delete")
+            delete_btn.set_tooltip_text(
+                "Remove this panel and every node it defines"
+            )
+            delete_btn.connect(
+                "clicked",
+                lambda _b, e=entry, d=dialog: self._confirm_delete_panel(e, d),
+            )
+            header.append(delete_btn)
 
         row.append(header)
 
-        if entry.get("error"):
-            detail = Gtk.Label(label=f"Could not read: {entry['error']}")
-            detail.set_xalign(0)
-            detail.add_css_class("dim-label")
-            row.append(detail)
-        else:
-            nodes = entry.get("nodes", [])
-            names = ", ".join(str(n.get("local_id")) for n in nodes[:8])
-            if len(nodes) > 8:
-                names += ", \u2026"
-            detail = Gtk.Label(
-                label=f"{len(nodes)} node(s), {entry.get('edge_count', 0)} "
-                f"edge(s), {entry.get('group_count', 0)} group(s): {names}"
-            )
-            detail.set_xalign(0)
-            detail.set_wrap(True)
-            detail.add_css_class("dim-label")
-            row.append(detail)
+        nodes = entry.get("nodes", [])
+        names = ", ".join(str(n).rsplit("::", 1)[-1] for n in nodes[:8])
+        if len(nodes) > 8:
+            names += ", \u2026"
+        detail = Gtk.Label(
+            label=f"{len(nodes)} node(s), {len(entry.get('children', []))} "
+            f"child panel(s): {names}"
+        )
+        detail.set_xalign(0)
+        detail.set_wrap(True)
+        detail.add_css_class("dim-label")
+        row.append(detail)
         return row
 
-    def _on_declarative_dialog_response(self, dialog, response):
-        if response == Gtk.ResponseType.APPLY:
-            self._pending_declarative_list = True
-            self.client.send({"command": "list_panels"})
-        dialog.destroy()
+    def _reset_panel_from_dialog(self, entry):
+        self._begin_load()
+        self.client.send({"command": "reset_panel", "panel_id": entry.get("id")})
 
-    def _on_declarative_dialog_destroy(self, dialog):
-        if getattr(self, "_declarative_dialog", None) is dialog:
-            self._declarative_dialog = None
-
-    def _prompt_edit_declarative(self, entry, parent):
-        dialog = Gtk.Dialog(
-            title="Edit Declarative Group",
-            transient_for=parent,
-            modal=True,
-        )
-        content = dialog.get_content_area()
-        content.set_spacing(6)
-        content.set_margin_top(10)
-        content.set_margin_bottom(10)
-        content.set_margin_start(10)
-        content.set_margin_end(10)
-        dialog.set_default_size(380, -1)
-
-        name_entry = Gtk.Entry()
-        name_entry.set_text(str(entry.get("stem", "")))
-        name_entry.set_tooltip_text(
-            "The file name (its nodes are prefixed with it).  Changing it "
-            "re-prefixes every node in the file."
-        )
-        content.append(self._labeled_row("Name:", name_entry))
-
-        label_entry = Gtk.Entry()
-        label_entry.set_text(str(entry.get("label", "")))
-        label_entry.set_tooltip_text("The label shown on each node's tag.")
-        content.append(self._labeled_row("Label:", label_entry))
-
-        color_picker = ColorPicker(
-            entry.get("color", self.GROUP_COLORS[0]), presets=self.GROUP_COLORS
-        )
-        color_picker.set_tooltip_text("The tag colour for this group's nodes.")
-        content.append(self._labeled_row("Color:", color_picker))
-
-        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
-        dialog.add_button("Apply", Gtk.ResponseType.APPLY)
-        dialog.set_default_response(Gtk.ResponseType.APPLY)
-        dialog.connect(
-            "response",
-            self._on_edit_declarative_response,
-            entry,
-            name_entry,
-            label_entry,
-            color_picker,
-        )
-        dialog.show()
-
-    def _on_edit_declarative_response(
-        self, dialog, response, entry, name_entry, label_entry, color_picker
-    ):
-        if response == Gtk.ResponseType.APPLY:
-            new_name = name_entry.get_text().strip()
-            label = label_entry.get_text().strip()
-            if new_name and label:
-                self._begin_load()
-                self.client.send(
-                    {
-                        "command": "edit_declarative",
-                        "path": entry.get("path"),
-                        "new_name": new_name,
-                        "label": label,
-                        "color": color_picker.get_hex(),
-                    }
-                )
-        dialog.destroy()
-
-    def _confirm_delete_declarative(self, entry, parent):
+    def _confirm_delete_panel(self, entry, parent):
         confirm = Gtk.AlertDialog()
         confirm.set_modal(True)
-        confirm.set_message(f"Delete {entry.get('name', 'this file')}?")
+        confirm.set_message(f"Delete panel {entry.get('label', entry.get('id'))}?")
         confirm.set_detail(
-            "Every node and edge defined by this file will be removed."
+            "Every node and edge defined by this panel will be removed."
         )
         confirm.set_buttons(["Cancel", "Delete"])
         confirm.set_cancel_button(0)
@@ -3725,12 +3631,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         confirm.choose(
             parent,
             None,
-            lambda d, result, e=entry: self._on_delete_declarative_chosen(
-                d, result, e
-            ),
+            lambda d, result, e=entry: self._on_delete_panel_chosen(d, result, e),
         )
 
-    def _on_delete_declarative_chosen(self, dialog, result, entry):
+    def _on_delete_panel_chosen(self, dialog, result, entry):
         try:
             index = dialog.choose_finish(result)
         except GLib.Error:
@@ -3738,206 +3642,19 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         if index == 1:
             self._begin_load()
             self.client.send(
-                {"command": "delete_declarative", "path": entry.get("path")}
+                {"command": "delete_panel", "panel_id": entry.get("id")}
             )
 
-    @staticmethod
-    def _slugify(text):
-        slug = "".join(
-            c.lower() if c.isalnum() else "-" for c in (text or "").strip()
-        )
-        slug = "-".join(part for part in slug.split("-") if part)
-        return slug or "declared-group"
-
-    def show_export_declarative_dialog(self):
-        """Declare the current selection: create a new declarative group
-        or add/remove the selection from an existing writable one.  The
-        file list is fetched first so the target dropdown is current."""
-        node_ids = [nid for nid in self.selected_nodes if nid in self.nodes]
-        if not node_ids:
-            self._show_error_dialog("Select one or more nodes to declare first.")
-            return
-        self._pending_declare_nodes = node_ids
-        self._pending_declare_open = True
-        self.client.send({"command": "list_panels"})
-
-    def _group_for_selection(self, node_ids):
-        """A canvas group whose members are exactly `node_ids`, or None.
-        Used so declaring a selection defaults to that group's label and
-        colour."""
-        wanted = set(node_ids)
-        if not wanted:
-            return None
-        for group in self.groups.values():
-            if set(group.get("nodes", [])) == wanted:
-                return group
-        return None
-
-    def _show_export_declarative_dialog(self, node_ids):
-        tappable = [f for f in self._declarative_files if f.get("writable")]
-        dialog = Gtk.Dialog(
-            title="Declare Selection",
-            transient_for=self.get_root(),
-            modal=True,
-        )
-        dialog.set_default_size(420, -1)
-        content = dialog.get_content_area()
-        content.set_spacing(6)
-        content.set_margin_top(10)
-        content.set_margin_bottom(10)
-        content.set_margin_start(10)
-        content.set_margin_end(10)
-
-        # If the selection is exactly a canvas group, inherit its
-        # label/colour for a new declarative group - "select the nodes and
-        # click Update" should carry their group properties across.
-        preset = self._group_for_selection(node_ids)
-        preset_label = preset.get("label", "") if preset else ""
-        preset_color = (
-            preset.get("color", "#3584e4") if preset else "#3584e4"
-        )
-
-        summary = Gtk.Label(
-            label=(
-                f"{len(node_ids)} node(s) selected.  The groups they belong "
-                "to (label, colour, membership) are saved with them."
-            )
-        )
-        summary.set_xalign(0)
-        summary.set_wrap(True)
-        summary.add_css_class("dim-label")
-        content.append(summary)
-
-        labels = [f.get("label") or f.get("stem") for f in tappable]
-        labels.append("New group\u2026")
-        dropdown = Gtk.DropDown.new_from_strings(labels)
-        content.append(self._labeled_row("Target:", dropdown))
-
-        select_btn = Gtk.Button(label="Select target's nodes")
-        select_btn.set_tooltip_text(
-            "Select the nodes currently in the chosen group on the canvas"
-        )
-        content.append(select_btn)
-
-        label_entry = Gtk.Entry()
-        label_entry.set_placeholder_text("Group label")
-        label_entry.set_text(preset_label)
-        content.append(self._labeled_row("Label:", label_entry))
-
-        color_picker = ColorPicker(preset_color, presets=self.GROUP_COLORS)
-        content.append(self._labeled_row("Color:", color_picker))
-
-        checkbox = Gtk.CheckButton(
-            label="Also capture edges that connect to non-declarative nodes"
-        )
-        checkbox.set_tooltip_text(
-            "Off (default): only edges wholly inside the selection or "
-            "touching another declarative node are written."
-        )
-        content.append(checkbox)
-
-        def current_target():
-            idx = dropdown.get_selected()
-            return tappable[idx] if idx < len(tappable) else None
-
-        def sync_fields(*_a):
-            target = current_target()
-            select_btn.set_sensitive(target is not None)
-            if target is not None:
-                label_entry.set_text(target.get("label", ""))
-                color_picker.set_hex(target.get("color", "#3584e4"))
-            else:
-                label_entry.set_text(preset_label)
-                color_picker.set_hex(preset_color)
-
-        dropdown.connect("notify::selected", sync_fields)
-
-        def on_select(*_a):
-            target = current_target()
-            if target is not None:
-                self._select_declarative_nodes(
-                    [n["id"] for n in target.get("nodes", [])]
-                )
-
-        select_btn.connect("clicked", on_select)
-
-        # Response ids: 1 add/update, 2 remove, 3 replace/create.
-        update_btn = dialog.add_button("Update", 1)
-        update_btn.set_tooltip_text(
-            "Merge the selection into the target group and (re)write its "
-            "group properties - label, colour and membership."
-        )
-        remove_btn = dialog.add_button("Remove", 2)
-        remove_btn.set_tooltip_text(
-            "Take the selection out of the target group (back to ordinary "
-            "imperative nodes)."
-        )
-        replace_btn = dialog.add_button("Replace file", 3)
-        replace_btn.set_tooltip_text(
-            "Overwrite the target so it contains exactly the selection "
-            "(and its groups)."
-        )
-        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
-        dialog.connect(
-            "response",
-            self._on_export_declarative_response,
-            dropdown,
-            tappable,
-            label_entry,
-            color_picker,
-            checkbox,
-            node_ids,
-        )
-        sync_fields()
-        dialog.show()
-
-    def _on_export_declarative_response(
-        self,
-        dialog,
-        response,
-        dropdown,
-        tappable,
-        label_entry,
-        color_picker,
-        checkbox,
-        node_ids,
-    ):
-        if response == Gtk.ResponseType.CANCEL:
-            dialog.destroy()
-            return
-        idx = dropdown.get_selected()
-        target = tappable[idx] if idx < len(tappable) else None
-        cmd = {
-            "command": "export_declarative",
-            "node_ids": list(node_ids),
-            "include_imperative_edges": checkbox.get_active(),
-        }
-        if target is not None:
-            cmd["path"] = target.get("path")
-            if response == 1:
-                cmd["mode"] = "add"
-            elif response == 2:
-                cmd["mode"] = "remove"
-            else:
-                cmd["mode"] = "replace"
-                cmd["overwrite"] = True
-                cmd["label"] = label_entry.get_text().strip() or target.get("label")
-                cmd["color"] = color_picker.get_hex()
-        else:
-            if response != 3:
-                return  # add/remove need an existing target; leave open
-            label = label_entry.get_text().strip()
-            if not label:
-                return  # need a label for a new group; leave open
-            cmd["mode"] = "create"
-            cmd["name"] = self._slugify(label)
-            cmd["label"] = label
-            cmd["color"] = color_picker.get_hex()
-        # Declaring/add/removing triggers a full declarative reload on the
-        # daemon; show the loading overlay while it runs.
-        self._begin_load()
-        self.client.send(cmd)
+    def _on_panels_dialog_response(self, dialog, response):
+        if response == Gtk.ResponseType.APPLY:
+            self._pending_panel_list = True
+            self.client.send({"command": "list_panels"})
         dialog.destroy()
+
+    def _on_panels_dialog_destroy(self, dialog):
+        if getattr(self, "_panel_dialog", None) is dialog:
+            self._panel_dialog = None
+
 
     def rebuild_graph(self):
         """Tear the daemon's PatchSpace down and rebuild it exactly as it
