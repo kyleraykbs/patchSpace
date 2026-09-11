@@ -1515,7 +1515,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             tw, _th = self._text_size(label, 12)
             return max(
                 self.SPLITTER_MIN_SIZE,
-                min(self.NODE_WIDTH, int(tw) + 24),
+                min(self.NODE_WIDTH, int(tw) + 44),
             )
         if self._is_compact_node(node) and not node.get("label"):
             if node["type"] == "splitter":
@@ -1634,9 +1634,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         blocks = self._header_blocks(node_id, node)
         total = self.HEADER_TOP_PAD
         for i, (text, font_size, _color) in enumerate(blocks):
-            max_width = self.node_width(node_id) - (
-                self.HEADER_ICON_RESERVE if i == 0 else 20
-            )
+            if node["type"] in self._PORT_IN_TYPES | self._PORT_OUT_TYPES:
+                reserve = 20
+            else:
+                reserve = self.HEADER_ICON_RESERVE if i == 0 else 20
+            max_width = self.node_width(node_id) - reserve
             if self._header_block_is_id(node_id, text):
                 # Ellipsized to a single line - see _draw_header.
                 total += self._single_line_height(font_size)
@@ -2602,10 +2604,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         ):
             # The first line (the type label) shares its row with the
             # three-dot menu icon in the top-right corner, so it gets
-            # a narrower width than every line below it.
-            max_width = self.node_width(nid) - (
-                self.HEADER_ICON_RESERVE if i == 0 else 20
-            )
+            # a narrower width than every line below it.  Ports have no
+            # icon/menu, so they keep the full width for their label.
+            if node["type"] in self._PORT_IN_TYPES | self._PORT_OUT_TYPES:
+                reserve = 20
+            else:
+                reserve = self.HEADER_ICON_RESERVE if i == 0 else 20
+            max_width = self.node_width(nid) - reserve
             if self._header_block_is_id(nid, text):
                 draw_text_ellipsized(
                     cr, x + 10, text_y, text, max_width, font_size,
@@ -5831,10 +5836,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     PANEL_IO_BAR_W = 16.0
     PANEL_IO_GAP = 8.0
     PANEL_IO_PORT_H = 44.0
-    PANEL_IO_PORT_GAP = 20.0
+    # Between-port gap: deliberately the same as the bar's overhang past
+    # the top/bottom port, so the spacing reads evenly.
+    PANEL_IO_BAR_PAD = 14.0
+    PANEL_IO_PORT_GAP = PANEL_IO_BAR_PAD
     PANEL_IO_MARGIN = 20.0
-    # The bar extends past the top/bottom port by this much.
-    PANEL_IO_BAR_PAD = 10.0
     # While dragging a node, its panel may grow this far past the size it
     # had at drag start (it never shrinks during the drag).
     PANEL_DRAG_GROW = 280.0
@@ -5981,10 +5987,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     left = min(left, minx - reserve)
                 if port_out:
                     right = max(right, maxx + reserve)
-                n = max(len(port_in), len(port_out))
+                tall = (
+                    port_in if len(port_in) >= len(port_out) else port_out
+                )
+                heights = [self.node_height(nid) for nid, _n in tall]
                 stack_h = (
-                    n * (self.PANEL_IO_PORT_H + self.PANEL_IO_PORT_GAP)
-                    - self.PANEL_IO_PORT_GAP
+                    sum(heights)
+                    + self.PANEL_IO_PORT_GAP * max(0, len(heights) - 1)
                 )
                 center = (top + bottom) / 2.0
                 top = min(top, center - stack_h / 2.0 - self.PANEL_IO_MARGIN)
@@ -6092,8 +6101,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     def _layout_panel_ports(self):
         """Center each panel's port nodes on its edges (vertically stacked
         around the box's middle) and persist any that moved.  Called after
-        polls/layout so ports follow the panel as it grows with content."""
-        slot = self.PANEL_IO_PORT_H + self.PANEL_IO_PORT_GAP
+        polls/layout so ports follow the panel as it grows with content.
+        Stacked by each port's real height with a PANEL_IO_PORT_GAP gap."""
+        gap = self.PANEL_IO_PORT_GAP
         moved = False
         for pid in list(self.panels):
             if pid == "":
@@ -6106,21 +6116,20 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 ports = self._panel_port_nodes(pid, direction)
                 if not ports:
                     continue
-                n = len(ports)
-                start = center_y - (
-                    n * slot - self.PANEL_IO_PORT_GAP
-                ) / 2.0 + (self.PANEL_IO_PORT_H / 2.0)
+                heights = [self.node_height(nid) for nid, _n in ports]
+                total = sum(heights) + gap * (len(ports) - 1)
+                y = center_y - total / 2.0
                 edge = rect[0] if direction == "in" else rect[0] + rect[2]
-                for i, (nid, node) in enumerate(ports):
-                    ny = start + i * slot - self.PANEL_IO_PORT_H / 2.0
+                for (nid, node), h in zip(ports, heights):
                     x = edge - self.node_width(nid) / 2.0
                     if (
                         abs((node.get("x") or 0.0) - x) > 0.5
-                        or abs((node.get("y") or 0.0) - ny) > 0.5
+                        or abs((node.get("y") or 0.0) - y) > 0.5
                     ):
                         node["x"] = x
-                        node["y"] = ny
+                        node["y"] = y
                         moved = True
+                    y += h + gap
         if moved:
             self._mark_layout_dirty()
 
