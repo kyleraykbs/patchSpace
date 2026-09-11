@@ -1191,6 +1191,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # daemon reports each poll.
         self._update_loading_state(daemon_nodes)
 
+        # Keep panel port squares centered on their edges as boxes change.
+        self._layout_panel_ports()
+
         self.queue_draw()
 
     def on_layout_tick(self):
@@ -5814,7 +5817,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     PANEL_MIN_SIDE = 320.0
     # Panel IO: a thin bar straddling each edge, with a "+" at its foot.
     PANEL_IO_BAR_W = 16.0
-    PANEL_IO_GAP = 4.0
+    PANEL_IO_GAP = 8.0
+    PANEL_IO_PORT_H = 44.0
+    PANEL_IO_MARGIN = 20.0
     # While dragging a node, its panel may grow this far past the size it
     # had at drag start (it never shrinks during the drag).
     PANEL_DRAG_GROW = 280.0
@@ -5924,7 +5929,16 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             maxx = gx2 if maxx is None else max(maxx, gx2)
             maxy = gy2 if maxy is None else max(maxy, gy2)
         if minx is None:
-            rect = baseline if baseline is not None else (ax, ay, side, side)
+            base = baseline if baseline is not None else (ax, ay, side, side)
+            port_in = self._panel_port_nodes(pid, "in")
+            port_out = self._panel_port_nodes(pid, "out")
+            if port_in or port_out:
+                reserve = self.NODE_WIDTH / 2.0 + self.PANEL_IO_MARGIN
+                bx, by, bw, bh = base
+                left = bx - (reserve if port_in else 0.0)
+                right = bx + bw + (reserve if port_out else 0.0)
+                base = (left, by, right - left, bh)
+            rect = base
         else:
             # Tight fit around the contents, like a group, with the square
             # minimum centred on the content when it's smaller.
@@ -5942,6 +5956,26 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 top = min(bt, max(top, bt - grow))
                 right = max(br, min(right, br + grow))
                 bottom = max(bb, min(bottom, bb + grow))
+            # Reserve room inside each edge for a port's inner half plus a
+            # margin, so ports (centered on the edge) never overlap nodes.
+            port_in = self._panel_port_nodes(pid, "in")
+            port_out = self._panel_port_nodes(pid, "out")
+            if port_in or port_out:
+                reserve = self.NODE_WIDTH / 2.0 + self.PANEL_IO_MARGIN
+                if port_in:
+                    left = min(left, minx - reserve)
+                if port_out:
+                    right = max(right, maxx + reserve)
+                n = max(len(port_in), len(port_out))
+                stack_h = (
+                    n * (self.PANEL_IO_PORT_H + self.PANEL_IO_GAP)
+                    - self.PANEL_IO_GAP
+                )
+                center = (top + bottom) / 2.0
+                top = min(top, center - stack_h / 2.0 - self.PANEL_IO_MARGIN)
+                bottom = max(
+                    bottom, center + stack_h / 2.0 + self.PANEL_IO_MARGIN
+                )
             if right - left < side:
                 grow = (side - (right - left)) / 2.0
                 left -= grow
@@ -6039,6 +6073,45 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             "out_bar": out_bar, "out_plus": out_plus,
         }
 
+    def _layout_panel_ports(self):
+        """Center each panel's port nodes on its edges (vertically stacked
+        around the box's middle) and persist any that moved.  Called after
+        polls/layout so ports follow the panel as it grows with content."""
+        width = self.NODE_WIDTH
+        slot = self.PANEL_IO_PORT_H + self.PANEL_IO_GAP
+        moved = False
+        for pid in list(self.panels):
+            if pid == "":
+                continue
+            rect = self._panel_rect(pid)
+            if rect is None:
+                continue
+            center_y = rect[1] + rect[3] / 2.0
+            for direction in ("in", "out"):
+                ports = self._panel_port_nodes(pid, direction)
+                if not ports:
+                    continue
+                n = len(ports)
+                start = center_y - (n * slot - self.PANEL_IO_GAP) / 2.0 + (
+                    self.PANEL_IO_PORT_H / 2.0
+                )
+                x = (
+                    rect[0] - width / 2.0
+                    if direction == "in"
+                    else rect[0] + rect[2] - width / 2.0
+                )
+                for i, (nid, node) in enumerate(ports):
+                    ny = start + i * slot - self.PANEL_IO_PORT_H / 2.0
+                    if (
+                        abs((node.get("x") or 0.0) - x) > 0.5
+                        or abs((node.get("y") or 0.0) - ny) > 0.5
+                    ):
+                        node["x"] = x
+                        node["y"] = ny
+                        moved = True
+        if moved:
+            self._mark_layout_dirty()
+
     def find_panel_io_plus_at(self, x, y):
         for pid in self._panel_order_deepest_first():
             if pid == "":
@@ -6100,34 +6173,16 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         rect = self._panel_rect(pid)
         if rect is None:
             return
-        # Labelled port nodes render at the normal node width; center them
-        # on the edge so the bar runs through the middle of each.
+        # Labelled port nodes render at the normal node width; center on the
+        # edge.  _layout_panel_ports re-centers the whole stack on the next
+        # poll (once the daemon reports the new node back).
         width = self.NODE_WIDTH
-        port_h = max(self.SPLITTER_MIN_SIZE, 44.0)
-        gap = 8.0
-        slice_h = port_h + gap
-        ports = self._panel_port_nodes(pid, direction)
-        n = len(ports) + 1
-        center_y = rect[1] + rect[3] / 2.0
-        start = center_y - (n * slice_h - gap) / 2.0 + port_h / 2.0
-
-        def slot_x():
-            if direction == "in":
-                return rect[0] - width / 2.0
-            return rect[0] + rect[2] - width / 2.0
-
-        # Lock + center every port on the bar (existing ones included), so
-        # the stack stays centered as ports are added.
-        layout = {}
-        for i, (nid2, _node2) in enumerate(ports):
-            layout[nid2] = {
-                "x": slot_x(),
-                "y": start + i * slice_h - port_h / 2.0,
-                "anchored": True,
-            }
-        if layout:
-            self.client.send({"command": "set_node_layout", "layout": layout})
-        py = start + len(ports) * slice_h - port_h / 2.0
+        x = (
+            rect[0] - width / 2.0
+            if direction == "in"
+            else rect[0] + rect[2] - width / 2.0
+        )
+        y = rect[1] + rect[3] / 2.0 - self.PANEL_IO_PORT_H / 2.0
         self.client.send(
             {
                 "command": "add_node",
@@ -6135,7 +6190,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 "node_id": nid,
                 "config": {
                     "port_name": name, "label": name, "anchored": True,
-                    "x": slot_x(), "y": py,
+                    "x": x, "y": y,
                 },
             }
         )

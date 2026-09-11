@@ -257,11 +257,13 @@ and `bool_panel_in`/`bool_panel_out` (boolean; `_resolve_boolean` relays them). 
 draws a thin bar straddling its left (inputs) and right (outputs) edges with a `+` at the
 foot (`_panel_io_rects`); the `+` opens a name/type dialog and drops a port node near that
 edge (`_prompt_add_port`/`_add_panel_port`), showing **only its label** (no type/id). Port
-nodes are excluded from the panel's auto-fit and centered on the edge (the bar runs
-through the middle of each), locked `anchored` and always pinned in the physics - no
-unanchor control. Adding one re-centers the others into equal vertical slots. Wire the
-port from outside the panel on its outer side and to internal nodes on its inner side -
-ordinary edges, so LCA edge-ownership already places them in the right file.
+nodes are centered on the edge (the bar runs through the middle of each), locked
+`anchored` and always pinned in the physics - no unanchor control. `_layout_panel_ports`
+re-centers the stack after every poll so ports follow the box as it grows/moves, and the
+panel reserves `NODE_WIDTH/2 + PANEL_IO_MARGIN` inside each port edge (and enough height
+for the stack) so ports never overlap nodes. Wire the port from outside the panel on its
+outer side and to internal nodes on its inner side - ordinary edges, so LCA edge-ownership
+already places them in the right file.
 
 *Panels side view.* A docked, scrollable list of panel files lives on the right (the endchild of an outer `Gtk.Paned`), toggled by a button directly under the top-right
 hamburger (`main_window._panels_toggle` / `_build_panels_view`). Each row shows the
