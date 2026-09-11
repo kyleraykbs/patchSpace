@@ -1256,6 +1256,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             if self.dragging_node in mset:
                 pinned.add(self.dragging_node)
             pinned |= {n for n in self.drag_node_starts if n in mset}
+            # Panel ports are locked to their bar - never apply physics.
+            pinned |= {
+                n for n in mset
+                if self.nodes[n].get("type")
+                in (self._PORT_IN_TYPES | self._PORT_OUT_TYPES)
+            }
             delta = self.force_layout.step(members, positions, sizes, edges, pinned)
             max_delta = max(max_delta, delta)
             for nid in members:
@@ -1356,9 +1362,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         label = node.get("label", "")
         desc = node.get("meta", {}).get("description", "")
         if node["type"] in self._PORT_IN_TYPES | self._PORT_OUT_TYPES:
-            # A panel port is a bare square; its name is drawn on the
-            # panel's IO bar, not on the node.
-            return []
+            # A panel port shows only its label (no type name/id).
+            return [(label, 12, "text")] if label else []
         if self._is_compact_node(node):
             if node["type"] == "splitter":
                 # A splitter shows nothing but its (optional) label - no
@@ -1499,8 +1504,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         logic gate) with no label collapses to a square
         (SPLITTER_MIN_SIZE); every other node - and a labelled compact
         one, which wraps its text - uses the normal node width."""
-        if node["type"] in self._PORT_IN_TYPES | self._PORT_OUT_TYPES:
-            return self.SPLITTER_MIN_SIZE
         if self._is_compact_node(node) and not node.get("label"):
             if node["type"] == "splitter":
                 return self.SPLITTER_MIN_SIZE
@@ -2453,9 +2456,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         cr.stroke()
         cr.set_dash([])
 
-        self._draw_anchor_icon(
-            cr, pal, x, y, node_w, nid in self.anchored_nodes
-        )
+        if node["type"] not in self._PORT_IN_TYPES | self._PORT_OUT_TYPES:
+            self._draw_anchor_icon(
+                cr, pal, x, y, node_w, nid in self.anchored_nodes
+            )
         self._draw_three_dots(cr, x, y, node_w)
 
         self._draw_header(cr, pal, nid, node, x, y)
@@ -2609,6 +2613,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     def find_anchor_icon_at(self, x, y):
         for nid, node in self.nodes.items():
+            if node.get("type") in self._PORT_IN_TYPES | self._PORT_OUT_TYPES:
+                continue
             icx, icy = self._anchor_icon_center(
                 node["x"], node["y"], self.node_width(nid)
             )
@@ -5875,6 +5881,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             node = self.nodes.get(nid)
             if node is None:
                 continue
+            # Panel ports straddle the edge (centered on the IO bar); they
+            # must not push the box outward.
+            if node.get("type") in self._PORT_IN_TYPES | self._PORT_OUT_TYPES:
+                continue
             nx, ny = node["x"], node["y"]
             nr, nb = nx + self.node_width(nid), ny + self.node_height(nid)
             minx = nx if minx is None else min(minx, nx)
@@ -6090,19 +6100,21 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         rect = self._panel_rect(pid)
         if rect is None:
             return
-        size = self.SPLITTER_MIN_SIZE
+        # Labelled port nodes render at the normal node width; center them
+        # on the edge so the bar runs through the middle of each.
+        width = self.NODE_WIDTH
+        port_h = max(self.SPLITTER_MIN_SIZE, 44.0)
         gap = 8.0
-        slice_h = size + gap
+        slice_h = port_h + gap
         ports = self._panel_port_nodes(pid, direction)
         n = len(ports) + 1
         center_y = rect[1] + rect[3] / 2.0
-        start = center_y - (n * slice_h - gap) / 2.0 + size / 2.0
+        start = center_y - (n * slice_h - gap) / 2.0 + port_h / 2.0
 
         def slot_x():
-            pad = self.PANEL_PADDING
             if direction == "in":
-                return rect[0] + pad
-            return rect[0] + rect[2] - size - pad
+                return rect[0] - width / 2.0
+            return rect[0] + rect[2] - width / 2.0
 
         # Lock + center every port on the bar (existing ones included), so
         # the stack stays centered as ports are added.
@@ -6110,12 +6122,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         for i, (nid2, _node2) in enumerate(ports):
             layout[nid2] = {
                 "x": slot_x(),
-                "y": start + i * slice_h - size / 2.0,
+                "y": start + i * slice_h - port_h / 2.0,
                 "anchored": True,
             }
         if layout:
             self.client.send({"command": "set_node_layout", "layout": layout})
-        py = start + len(ports) * slice_h - size / 2.0
+        py = start + len(ports) * slice_h - port_h / 2.0
         self.client.send(
             {
                 "command": "add_node",
@@ -6206,29 +6218,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 cr.fill_preserve()
                 cr.set_source_rgb(r, g, b)
                 cr.stroke()
-            # Port names, just inside the edge next to each port square.
-            cr.set_source_rgb(r, g, b)
-            cr.select_font_face("sans")
-            cr.set_font_size(10)
-            for nid, node in self._panel_port_nodes(pid, "in"):
-                name = node.get("label") or (node.get("meta") or {}).get("port_name") or ""
-                if not name:
-                    continue
-                cr.move_to(
-                    (node.get("x") or 0) + self.node_width(nid) + 4,
-                    (node.get("y") or 0) + self.node_height(nid) / 2 + 3,
-                )
-                cr.show_text(name)
-            for nid, node in self._panel_port_nodes(pid, "out"):
-                name = node.get("label") or (node.get("meta") or {}).get("port_name") or ""
-                if not name:
-                    continue
-                tw, _th = self._text_size(name, 10)
-                cr.move_to(
-                    (node.get("x") or 0) - 4 - tw,
-                    (node.get("y") or 0) + self.node_height(nid) / 2 + 3,
-                )
-                cr.show_text(name)
 
     def _draw_panel_headers(self, cr, pal):
         for pid, panel in self.panels.items():

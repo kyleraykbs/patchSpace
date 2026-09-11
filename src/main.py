@@ -3468,6 +3468,7 @@ class PatchBayDaemon:
                     group["nodes"] = [n for n in group["nodes"] if n != node_id]
             self.space.sync()
             self._dirty = True
+            self._wake_ticker()
             return {"status": "ok"}
 
     def _cmd_rename_node(self, cmd: dict) -> dict:
