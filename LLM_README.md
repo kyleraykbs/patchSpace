@@ -208,7 +208,11 @@ up into the parent panel; `delete_panel` with `keep_nodes`). The box **tightly a
 its contents** in every direction (like a group) with `PANEL_PADDING`: member nodes,
 child panels, and the outlines **and title blocks** of groups owned by the panel (all
 members inside it), so group titles/edges are never clipped. It has a **square minimum
-size** (`PANEL_MIN_SIDE`, centred on the content); there is no manual resize handle.
+size** (`PANEL_MIN_SIDE`, centred on the content); there is no manual resize handle. While
+a node is being dragged, its panel is held at the size it had when the drag began
+(`_panel_drag_baseline`) and may only **grow** toward the node, capped at
+`PANEL_DRAG_GROW` past the baseline - so picking a node up never shrinks the box, nudging
+the edge makes room, and dragging well past the cap takes the node out.
 
 *Physics* is hierarchical (`_hierarchical_step`, `on_layout_tick`): node physics runs
 inside each panel in that panel's local frame (internal edges only). Panel-vs-panel

@@ -315,6 +315,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self.drag_panel_origin = (0.0, 0.0)
         self._drag_panel_applied = (0.0, 0.0)
         self._panel_geo_cache: dict = {}
+        # panel_id -> rect frozen when a node drag began (see _panel_rect);
+        # cleared on drag end.
+        self._panel_drag_baseline: dict = {}
         # Armed by a panel header's +/- button to add/remove the next
         # clicked node from that panel.
         self._panel_pick_mode = None
@@ -3946,6 +3949,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self.dragging_node = None
         self.dragging_panel = None
         self.drag_node_starts = {}
+        self._panel_drag_baseline = {}
         self.hover_target_node = None
         self.panning = False
         self._marquee_mode = None
@@ -4152,6 +4156,17 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             # moves together.
             if nid not in self.selected_nodes:
                 self._set_selection({nid})
+            # Freeze each panel's size for this drag (see _panel_rect): the
+            # box keeps its size on pickup and may only grow toward the
+            # dragged node, so a node can't fall out of its own panel just
+            # because the box shrank under it.
+            self._panel_drag_baseline = {}
+            for pid in self.panels:
+                if pid == "":
+                    continue
+                r = self._panel_rect(pid)
+                if r is not None:
+                    self._panel_drag_baseline[pid] = r
             self.dragging_node = nid
             # Dragging a node that's part of a multi-node selection moves
             # the whole selection together; otherwise just that node.
@@ -4314,6 +4329,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 if node is not None:
                     node["x"] = sx + dx
                     node["y"] = sy + dy
+            # Let the auto-fit boxes follow the node as it nudges the edges.
+            self._panel_geo_cache.clear()
             self.queue_draw()
             return
 
@@ -4510,6 +4527,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         if self.dragging_node is not None:
             dragged = self.dragging_node
             self.dragging_node = None
+            # Drop the drag-time (grown) geometry so the drop target is
+            # computed from the real, settled boxes.
+            self._panel_geo_cache.clear()
             # Persist where the user dropped it.
             self._mark_layout_dirty()
             self._reparent_after_drag(dragged)
@@ -5504,6 +5524,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     # Panels auto-fit their contents in every direction (like groups) with
     # no manual resize; this is the minimum they shrink to, a square.
     PANEL_MIN_SIDE = 320.0
+    # While dragging a node, its panel may grow this far past the size it
+    # had at drag start (it never shrinks during the drag).
+    PANEL_DRAG_GROW = 280.0
 
     @staticmethod
     def _panel_local(pid):
@@ -5549,13 +5572,20 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         ax, ay = self._panel_absolute(pid)
         pad = self.PANEL_PADDING
         side = self.PANEL_MIN_SIDE
-        # Nodes being dragged right now must not count towards a panel's
-        # auto-grown bounds: otherwise the source panel stretches to follow
-        # the cursor and swallows a drop meant for the panel underneath.
+        # While a node is being dragged, the panel is held at the size it
+        # had when the drag started (baseline) and may only *grow* toward
+        # the dragged node, and only up to PANEL_DRAG_GROW past the
+        # baseline.  That's the "pick a node up and the panel keeps its
+        # size; nudge the edge to make room; drag well past it to leave"
+        # behaviour, and it stops the box from shrinking under the node
+        # (which used to drop nodes out of their own panel).
+        baseline = self._panel_drag_baseline.get(pid) if self.dragging_node else None
         dragging = set(self.drag_node_starts) if self.dragging_node else set()
         minx = miny = maxx = maxy = None
         for nid in self._panel_member_nodes(pid):
-            if nid in dragging:
+            # Without a baseline (normal draw) the actively-dragged nodes
+            # don't count, so a panel doesn't stretch to swallow a drop.
+            if baseline is None and nid in dragging:
                 continue
             node = self.nodes.get(nid)
             if node is None:
@@ -5599,7 +5629,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             maxx = gx2 if maxx is None else max(maxx, gx2)
             maxy = gy2 if maxy is None else max(maxy, gy2)
         if minx is None:
-            rect = (ax, ay, side, side)
+            rect = baseline if baseline is not None else (ax, ay, side, side)
         else:
             # Tight fit around the contents, like a group, with the square
             # minimum centred on the content when it's smaller.
@@ -5607,6 +5637,16 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             top = miny - pad
             right = maxx + pad
             bottom = maxy + pad
+            if baseline is not None:
+                # Never shrink below the baseline; expand toward the
+                # dragged node by at most PANEL_DRAG_GROW per side.
+                bl, bt = baseline[0], baseline[1]
+                br, bb = bl + baseline[2], bt + baseline[3]
+                grow = self.PANEL_DRAG_GROW
+                left = min(bl, max(left, bl - grow))
+                top = min(bt, max(top, bt - grow))
+                right = max(br, min(right, br + grow))
+                bottom = max(bb, min(bottom, bb + grow))
             if right - left < side:
                 grow = (side - (right - left)) / 2.0
                 left -= grow
@@ -5633,7 +5673,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         d = max(18.0, th * 1.6)
         # Sit the title/buttons a little further above the box so the row
         # clears the border and the buttons don't crowd the top edge.
-        gap = max(12.0, font * 0.9)
+        gap = max(18.0, font * 1.2)
         top = y - th - gap
         right_edge = x + w
         reset = None
