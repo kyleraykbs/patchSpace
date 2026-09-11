@@ -545,3 +545,20 @@ def test_placements_sync_positions(tmp_path):
     off_o = d._panel_origin(d.panels, other)
     assert abs((rel.x - off_k[0]) - (o.x - off_o[0])) < 1e-6
     assert abs((rel.y - off_k[1]) - (o.y - off_o[1])) < 1e-6
+
+
+def test_remove_panel_placement_keeps_file(tmp_path):
+    d, root, pdir = _daemon(tmp_path)
+    d.panels = d._load_panels_tree()
+    d.handle_command({"command": "add_node", "node_type": "regex_input",
+                      "node_id": "a", "config": {"pattern": ".*"}})
+    d._cmd_create_panel({"name": "kit", "node_ids": ["a"]})
+    other = d._cmd_place_panel({"stem": "kit"})["name"]
+
+    resp = d._cmd_remove_panel_placement({"panel_id": other})
+    assert resp["status"] == "ok", resp
+    assert other not in d.panels
+    assert f"{other}::a" not in d.space.nodes
+    # The file and the other placement survive.
+    assert os.path.isfile(os.path.join(pdir, "kit.json"))
+    assert "kit" in d.panels and "kit::a" in d.space.nodes

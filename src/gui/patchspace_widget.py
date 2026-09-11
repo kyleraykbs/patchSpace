@@ -1801,6 +1801,18 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 return pid
         return None
 
+    def find_panel_close_at(self, x, y):
+        for pid in self._panel_order_deepest_first():
+            if pid == "":
+                continue
+            rect = self._panel_rect(pid)
+            if rect is None:
+                continue
+            r = self._panel_header_rects(pid, rect).get("close")
+            if r is not None and r[0] <= x <= r[2] and r[1] <= y <= r[3]:
+                return pid
+        return None
+
     def find_node_at(self, x, y):
         for nid, node in self._hit_nodes(x, y):
             if node["x"] <= x <= node["x"] + self.node_width(nid) and node["y"] <= y <= node[
@@ -3044,6 +3056,16 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self.queue_draw()
             return
 
+        # Remove this placement (X; keeps the panel file).
+        pid = self.find_panel_close_at(wx, wy)
+        if pid is not None:
+            self._begin_load()
+            self.client.send(
+                {"command": "remove_panel_placement", "panel_id": pid}
+            )
+            self.queue_draw()
+            return
+
         # Panel edit-mode toggle (refresh from file, then persist edits).
         pid = self.find_panel_edit_at(wx, wy)
         if pid is not None:
@@ -4167,6 +4189,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             and self.find_panel_menu_at(wx, wy) is None
             and self.find_panel_delete_at(wx, wy) is None
             and self.find_panel_edit_at(wx, wy) is None
+            and self.find_panel_close_at(wx, wy) is None
         ):
             panel = self.panels[pid]
             self.dragging_panel = pid
@@ -5875,9 +5898,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         top = y - th - gap
         right_edge = x + w
         menu = (right_edge - d, top, right_edge, top + d)
+        close = (menu[0] - gap - d, top, menu[0] - gap, top + d)
         reset = None
         edit = None
-        btn_left = menu[0]
+        btn_left = close[0]
         if panel.get("readonly"):
             reset = (btn_left - gap - d, top, btn_left - gap, top + d)
             btn_left = reset[0]
@@ -5889,7 +5913,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         header = (x, top, right_edge, top + d)
         return {
             "header": header, "reset": reset,
-            "anchor": anchor, "menu": menu, "edit": edit,
+            "anchor": anchor, "menu": menu, "close": close, "edit": edit,
             "title": title,
         }
 
@@ -5997,7 +6021,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     cr, pal, geo["reset"], (r, g, b),
                     active=False, glyph="reset",
                 )
-            # Hamburger menu at the very right of the row.
+            # Remove this placement (X), then the hamburger menu.
+            self._draw_panel_button(
+                cr, pal, geo["close"], (r, g, b),
+                active=False, glyph="close",
+            )
             self._draw_panel_button(
                 cr, pal, geo["menu"], (r, g, b),
                 active=False, glyph="hamburger",
@@ -6048,6 +6076,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             cr.line_to(cx - size * 0.12, cy + size * 0.26)
             cr.line_to(cx + size * 0.12, cy + size * 0.26)
             cr.line_to(cx + size * 0.16, cy - size * 0.18)
+            cr.stroke()
+        elif glyph == "close":
+            cr.set_line_width(max(1.4, size * 0.12))
+            cr.move_to(cx - size * 0.20, cy - size * 0.20)
+            cr.line_to(cx + size * 0.20, cy + size * 0.20)
+            cr.move_to(cx + size * 0.20, cy - size * 0.20)
+            cr.line_to(cx - size * 0.20, cy + size * 0.20)
             cr.stroke()
         elif glyph == "pencil":
             cr.set_line_width(max(1.4, size * 0.10))

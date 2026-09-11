@@ -1771,6 +1771,48 @@ class PatchBayDaemon:
         self._cmd_reload_panels({})
         return {"status": "ok", "stem": stem, "name": local, "parent_id": parent_id}
 
+    def _cmd_remove_panel_placement(self, cmd: dict) -> dict:
+        """Remove this placement (and its nodes) from the workspace, but
+        keep the panel file."""
+        panel_id = cmd.get("panel_id", "")
+        panel = self.panels.get(panel_id)
+        if not panel_id or panel_id == panels.ROOT_ID or panel is None:
+            return {"status": "error", "message": f"no panel {panel_id!r}"}
+        parent_id = panel.parent or ""
+        prefix = panel_id + panels.NAMESPACE_SEP
+        with self._lock:
+            for nid in [
+                n for n in list(self.space.nodes)
+                if n == panel_id or n.startswith(prefix)
+            ]:
+                self.space.remove_node(nid)
+            for pid in [
+                p for p in list(self.panels)
+                if p == panel_id or p.startswith(prefix)
+            ]:
+                self.panels.pop(pid, None)
+            for store in (self._readonly_snapshots, self._panel_snapshots):
+                for pid in [
+                    p for p in list(store)
+                    if p == panel_id or p.startswith(prefix)
+                ]:
+                    store.pop(pid, None)
+            self._edit_panels = {
+                p for p in self._edit_panels
+                if p != panel_id and not p.startswith(prefix)
+            }
+            parent = self.panels.get(parent_id)
+            if parent is not None:
+                local = panels.local_of(panel_id)
+                parent.config["panels"] = [
+                    s for s in parent.config.get("panels", [])
+                    if panels.child_name(s) != local
+                ]
+        self._write_panels()
+        self._dirty = True
+        self._wake_ticker()
+        return {"status": "ok", "panel_id": panel_id}
+
     def _cmd_reload_panels(self, cmd: dict) -> dict:
         with self._panel_lock:
             self._panel_reloading = True
@@ -4484,6 +4526,8 @@ class PatchBayDaemon:
                 response = self._cmd_set_panel_file_autoload(cmd)
             elif command == "place_panel":
                 response = self._cmd_place_panel(cmd)
+            elif command == "remove_panel_placement":
+                response = self._cmd_remove_panel_placement(cmd)
             elif command == "connect_ports":
                 response = self._cmd_connect_ports(cmd)
             elif command == "disconnect_ports":
