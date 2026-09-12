@@ -3168,7 +3168,25 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # Remove this placement (X; keeps the panel file).
         pid = self.find_panel_close_at(wx, wy)
         if pid is not None:
-            self._begin_load()
+            # Drop the placement locally so it disappears immediately, then
+            # tell the daemon.  This is a *light* removal (no panel reload),
+            # so don't raise the bulk-load overlay - that overlay waits on
+            # node readiness and would hang around (and re-hide the graph)
+            # for a poll or the load timeout.
+            prefix = pid + "::"
+            for nid in [
+                n for n in list(self.nodes)
+                if n == pid or n.startswith(prefix)
+            ]:
+                del self.nodes[nid]
+            for eid, edge in list(self.edges.items()):
+                if (
+                    edge["from_node"] not in self.nodes
+                    or edge["to_node"] not in self.nodes
+                ):
+                    del self.edges[eid]
+            self.panels.pop(pid, None)
+            self._panel_geo_cache.clear()
             self.client.send(
                 {"command": "remove_panel_placement", "panel_id": pid}
             )
@@ -4046,7 +4064,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             return
         if index == 0:
             return
-        self._begin_load()
+        # delete_panel is a light daemon-side change (no full reload), so no
+        # bulk-load overlay - the next poll reflects it.
         self.client.send(
             {
                 "command": "delete_panel",
