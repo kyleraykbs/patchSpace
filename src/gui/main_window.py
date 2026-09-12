@@ -387,16 +387,16 @@ class MainWindow(Gtk.ApplicationWindow):
         )
         box.append(reload_panels_btn)
 
-        # Panel-vs-panel physics is paused by default (panels stay exactly
-        # where placed); this opts in.  Mirrors the floating top-right
-        # pause/resume button (see _set_panel_physics).
-        self._physics_check = Gtk.CheckButton(label="Panel Physics")
+        # All physics (node layout and panel repulsion) is paused by
+        # default; this resumes it.  Mirrors the floating top-right
+        # pause/resume button (see _set_physics).
+        self._physics_check = Gtk.CheckButton(label="Physics")
         self._physics_check.set_active(False)
         self._physics_check.set_tooltip_text(
-            "Let panels repel/spring against each other (off: panels stay put)"
+            "Run node/panel physics (off: the graph stays put)"
         )
         self._physics_check.connect(
-            "toggled", lambda b: self._set_panel_physics(b.get_active())
+            "toggled", lambda b: self._set_physics(b.get_active())
         )
         box.append(self._physics_check)
 
@@ -461,14 +461,14 @@ class MainWindow(Gtk.ApplicationWindow):
         self._physics_toggle = Gtk.ToggleButton()
         self._physics_toggle.set_icon_name("media-playback-start-symbolic")
         self._physics_toggle.set_tooltip_text(
-            "Pause/resume panel physics (panels stay put while paused)"
+            "Pause/resume all physics (off: the graph stays put)"
         )
         self._physics_toggle.set_halign(Gtk.Align.END)
         self._physics_toggle.set_valign(Gtk.Align.START)
         self._physics_toggle.set_margin_top(90)
         self._physics_toggle.set_margin_end(8)
         self._physics_toggle.connect(
-            "toggled", lambda b: self._set_panel_physics(b.get_active())
+            "toggled", lambda b: self._set_physics(b.get_active())
         )
         overlay.add_overlay(self._physics_toggle)
 
@@ -594,7 +594,7 @@ class MainWindow(Gtk.ApplicationWindow):
             # Refresh the listing for the side view.
             self.client.send({"command": "list_panel_files"})
 
-    def _set_panel_physics(self, active):
+    def _set_physics(self, active):
         """Single entry point for the physics pause/resume state, kept in
         sync between the hamburger checkbox and the floating button."""
         if getattr(self, "_syncing_physics", False):
@@ -602,7 +602,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._syncing_physics = True
         try:
             active = bool(active)
-            self.ps_widget.set_panel_physics_active(active)
+            self.ps_widget.set_physics_active(active)
             if self._physics_check.get_active() != active:
                 self._physics_check.set_active(active)
             if self._physics_toggle.get_active() != active:
