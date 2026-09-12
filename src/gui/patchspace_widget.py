@@ -5057,6 +5057,21 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         label_entry.set_tooltip_text("The name shown on the node in the canvas.")
         content.append(self._labeled_row("Label:", label_entry))
 
+        # Keep the node id in step with the label: editing the label
+        # re-slugs the id (preserving any panel namespace prefix), so the
+        # two don't drift.  Validation still runs on Apply.
+        def _label_to_id(*_a):
+            text = label_entry.get_text().strip()
+            if not text:
+                return
+            local = "".join(
+                c if (c.isalnum() or c in "-_.") else "_" for c in text
+            ).strip("_") or "node"
+            prefix, sep, _old = node_id.rpartition("::")
+            id_entry.set_text(f"{prefix}::{local}" if sep else local)
+
+        label_entry.connect("changed", _label_to_id)
+
         # Control widget (gate / volume)
         control_widget = None
         min_spin = None
