@@ -453,6 +453,37 @@ A new tunable/serialized attribute usually touches all of these:
 - Prefer a small, targeted regression test for every bug fix — the existing suite is
   fast and mostly regression tests.
 
+### Validate/test cycle (the loop that works well here)
+This is the cycle to follow for basically any change:
+1. **Read the real code first** (grep/read the exact functions) - don't guess at names or
+   behavior. Most regressions came from a wrong assumption about an existing path.
+2. **Reproduce the bug / pin the behavior in a scratch script** before editing: a tiny
+   `PYTHONPATH=. nix develop -c python` script that builds a `PatchBayDaemon()` and drives
+   `handle_command`/`_write_panels` directly. Run it again after the fix to confirm.
+3. **Make the smallest change** that fixes it, in the established style.
+4. **Syntax gate**: `python -m py_compile <changed files>` (from the dev shell).
+5. **Targeted tests first**, then the whole fast suite - both from `src/`:
+   `nix develop -c python -m pytest -q`. Add a regression test for the fix (daemon
+   round-trip / bounds / no-rebuild identity checks are cheap and catch most of these).
+6. **Pure GUI logic** (geometry, rect math, width/height) can't be reached by the daemon
+   suite: exercise it with a small stub object and call the class method directly
+   (`PatchSpaceGraphWidget._some_method(dummy, ...)`), or under broadway. Verify the
+   numbers, not just that it runs.
+7. **Update a test whose contract legitimately changed** (e.g. `set_panel_layout` now
+   moves nodes) instead of deleting it - the rename/adjustment is part of the change.
+8. **Commit focused chunks** with a short why-first message; stage explicit source paths
+   (never `git add -A`). Re-run the suite right before committing.
+9. **Keep a visible todo list.** For anything with more than a couple of steps, write the
+   steps down (the `todowrite`/task list) *before* starting, mark the one you're on
+   `in_progress`, and update it as you go - don't batch completions. The user has
+   explicitly asked for more, smaller todo items: break work into concrete, verifiable
+   units (research X, reproduce Y, fix Z, add test for Z, run suite, commit) rather than
+   one vague item. This is the single best guard against silently dropping a requested
+   sub-task when several arrive at once.
+
+The value is in step 2 + 5: reproduce, fix, regression-test, full suite. It has caught
+several "looks done but isn't" cases (double-moves, sync clobbers, placement drift).
+
 ### Verify like a user
 Tests don't cover live PipeWire behavior. For anything touching real audio/graph,
 **restart daemon + GUI and test with a real session** (or use the broadway smoke

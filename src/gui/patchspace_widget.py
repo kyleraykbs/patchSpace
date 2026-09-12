@@ -1368,8 +1368,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         label = node.get("label", "")
         desc = node.get("meta", {}).get("description", "")
         if node["type"] in self._PORT_IN_TYPES | self._PORT_OUT_TYPES:
-            # A panel port shows only its label (no type name/id).
-            return [(label, 12, "text")] if label else []
+            # A panel port shows its label, then its optional description.
+            blocks = []
+            if label:
+                blocks.append((label, 12, "text"))
+            if desc:
+                blocks.append((desc, 9, "subtext"))
+            return blocks
         if self._is_compact_node(node):
             if node["type"] == "splitter":
                 # A splitter shows nothing but its (optional) label - no
@@ -1511,14 +1516,17 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         (SPLITTER_MIN_SIZE); every other node - and a labelled compact
         one, which wraps its text - uses the normal node width."""
         if node["type"] in self._PORT_IN_TYPES | self._PORT_OUT_TYPES:
-            # Ports size to their label, capped at the normal node width.
+            # Ports size to their label/description, capped at the normal
+            # node width.
             label = node.get("label") or ""
-            if not label:
+            desc = (node.get("meta") or {}).get("description") or ""
+            if not label and not desc:
                 return self.SPLITTER_MIN_SIZE
-            tw, _th = self._text_size(label, 12)
+            lw, _lh = self._text_size(label, 12)
+            dw, _dh = self._text_size(desc, 9)
             return max(
                 self.SPLITTER_MIN_SIZE,
-                min(self.NODE_WIDTH, int(tw) + 34),
+                min(self.NODE_WIDTH, int(max(lw, dw)) + 34),
             )
         if self._is_compact_node(node) and not node.get("label"):
             if node["type"] == "splitter":
@@ -6079,11 +6087,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     _PORT_OUT_TYPES = frozenset({"panel_out", "bool_panel_out"})
 
     def _panel_port_nodes(self, pid, direction):
-        """[(nid, node)] for a panel's input (direction "in") or output
-        ("out") port nodes, top-to-bottom."""
+        """[(nid, node)] for a panel's *own* input (direction "in") or
+        output ("out") port nodes, top-to-bottom.  Descendant panels'
+        ports are excluded - each belongs to its own panel's bar."""
         types = self._PORT_IN_TYPES if direction == "in" else self._PORT_OUT_TYPES
         found = []
         for nid in self._panel_member_nodes(pid):
+            if self._panel_of_node(nid) != pid:
+                continue
             node = self.nodes.get(nid)
             if node is not None and node.get("type") in types:
                 found.append((nid, node))
