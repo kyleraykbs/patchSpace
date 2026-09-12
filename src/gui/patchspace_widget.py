@@ -2458,6 +2458,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         border_color = theme_color(
             self, color_name_for_node_type(node["type"]), pal["node_border"]
         )
+        # Panel ports visually take on their panel's colour (not stored on
+        # the node - purely cosmetic).
+        port_color = None
+        if node["type"] in self._PORT_IN_TYPES | self._PORT_OUT_TYPES:
+            panel = self.panels.get(self._panel_of_node(nid))
+            if panel is not None:
+                port_color = self._hex_to_rgb(panel.get("color", "#3584e4"))
+                border_color = port_color
 
         draw_rounded_rect(cr, x, y, node_w, node_h, 8)
         cr.set_source_rgb(*pal["node_bg"])
@@ -2490,7 +2498,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             )
             self._draw_three_dots(cr, x, y, node_w)
 
-        self._draw_header(cr, pal, nid, node, x, y)
+        self._draw_header(cr, pal, nid, node, x, y, color=port_color)
 
         if spec.control == "volume":
             if is_mute_node(nid):
@@ -2600,7 +2608,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     pal["subtext"],
                 )
 
-    def _draw_header(self, cr, pal, nid, node, x, y):
+    def _draw_header(self, cr, pal, nid, node, x, y, color=None):
         """Draw every _header_blocks() line, stacked top to bottom by each
         block's own measured height.  A label or description wraps (so
         it's always fully readable); the node id is a long opaque token
@@ -2622,16 +2630,17 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             else:
                 reserve = self.HEADER_ICON_RESERVE if i == 0 else 20
             max_width = self.node_width(nid) - reserve
+            text_rgb = color if color is not None else pal[color_key]
             if self._header_block_is_id(nid, text):
                 draw_text_ellipsized(
                     cr, x + 10, text_y, text, max_width, font_size,
-                    pal[color_key],
+                    text_rgb,
                 )
                 block_h = self._single_line_height(font_size)
             else:
                 block_h = draw_text_wrapped(
                     cr, x + 10, text_y, text, max_width, font_size,
-                    pal[color_key],
+                    text_rgb,
                 )
             text_y += block_h + self.HEADER_BLOCK_GAP
 
