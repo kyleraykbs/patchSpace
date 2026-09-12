@@ -2036,7 +2036,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         return None
 
     def find_settings_gear_at(self, x, y):
-        """The yellow settings cog beside a node's anchor badge - returns
+        """The green settings cog beside a node's anchor badge - returns
         the node whose Settings dialog should open when it's clicked.
         Only nodes with spec.settings (extra controls beyond the generic
         ID/label rows) and not panel ports draw one."""
@@ -2551,7 +2551,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
         # A node whose Settings dialog has more than the generic
         # ID/label rows (Echo Cancel's module options, Noise Cancel's
-        # method/dials) gets a small yellow gear badge in the header's
+        # method/dials) gets a small green gear badge in the header's
         # top-right corner, just left of the anchor badge, so it's obvious
         # there's something worth opening the menu for.  Panel ports have a
         # description row but never show the badge.
@@ -2711,20 +2711,20 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     @staticmethod
     def _settings_cog_center(x, y, width):
-        """Centre of the yellow settings cog, immediately left of the
+        """Centre of the green settings cog, immediately left of the
         node's anchor badge in the header's top-right corner."""
         return (x + width - 52, y + 18)
 
     def _draw_settings_gear(self, cr, pal, x, y, width):
-        """Small yellow cog beside the node's anchor badge marking "this
+        """Small green cog beside the node's anchor badge marking "this
         node's Settings menu has important extra controls" - and the
         click target that opens it (find_settings_gear_at).  Drawn as a
         solid disc with notches (a proper little gear), NOT a thin ring
         with radial spokes."""
         cx, cy = self._settings_cog_center(x, y, width)
         cr.save()
-        amber = (0.90, 0.72, 0.22)
-        cr.set_source_rgb(*amber)
+        green = (0.18, 0.76, 0.49)  # Adwaita success green (#2ec27e)
+        cr.set_source_rgb(*green)
         cr.arc(cx, cy, 8, 0, 2 * math.pi)
         cr.fill()
         # Notch teeth out of the rim by punching node-bg-coloured dots
@@ -2736,7 +2736,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 cx + math.cos(a) * 6.0, cy + math.sin(a) * 6.0, 2.4, 0, 2 * math.pi
             )
             cr.fill()
-        cr.set_source_rgb(*amber)
+        cr.set_source_rgb(*green)
         cr.arc(cx, cy, 2.2, 0, 2 * math.pi)
         cr.fill()
         cr.restore()
