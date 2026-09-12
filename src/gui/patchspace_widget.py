@@ -1649,6 +1649,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 reserve = 20
             else:
                 reserve = self.HEADER_ICON_RESERVE if i == 0 else 20
+                if i == 0 and spec_for(node["type"]).settings:
+                    reserve += 22  # room for the settings cog too
             max_width = self.node_width(node_id) - reserve
             if self._header_block_is_id(node_id, text):
                 # Ellipsized to a single line - see _draw_header.
@@ -2034,15 +2036,18 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         return None
 
     def find_settings_gear_at(self, x, y):
-        """The settings badge in a node's bottom-right corner - returns
+        """The yellow settings cog beside a node's anchor badge - returns
         the node whose Settings dialog should open when it's clicked.
-        Only nodes with spec.settings (extra controls beyond the
-        generic ID/label rows) draw one, so nothing to hit otherwise."""
+        Only nodes with spec.settings (extra controls beyond the generic
+        ID/label rows) and not panel ports draw one."""
         for nid, node in self._hit_nodes(x, y):
+            if node.get("type") in self._PORT_IN_TYPES | self._PORT_OUT_TYPES:
+                continue
             if not spec_for(node["type"]).settings:
                 continue
-            node_h = self.node_height(nid)
-            gx, gy = node["x"] + self.NODE_WIDTH - 20, node["y"] + node_h - 20
+            gx, gy = self._settings_cog_center(
+                node["x"], node["y"], self.node_width(nid)
+            )
             if gx - 12 <= x <= gx + 12 and gy - 12 <= y <= gy + 12:
                 return nid
         return None
@@ -2546,14 +2551,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
         # A node whose Settings dialog has more than the generic
         # ID/label rows (Echo Cancel's module options, Noise Cancel's
-        # method/dials) gets a small gear badge in its bottom-right
-        # corner, so it's obvious there's something worth opening the
-        # menu for - the whole point of the badge is that otherwise
-        # those dials are invisible until someone happens to right-
-        # click. Clicking the badge opens Settings directly (see
-        # find_settings_gear_at/on_click).
-        if spec.settings:
-            self._draw_settings_gear(cr, pal, x, y, node_h)
+        # method/dials) gets a small yellow gear badge in the header's
+        # top-right corner, just left of the anchor badge, so it's obvious
+        # there's something worth opening the menu for.  Panel ports have a
+        # description row but never show the badge.
+        if spec.settings and node["type"] not in (
+            self._PORT_IN_TYPES | self._PORT_OUT_TYPES
+        ):
+            self._draw_settings_gear(cr, pal, x, y, node_w)
 
         multi_input = len(node["inputs"]) > 1
         for i in range(len(node["inputs"])):
@@ -2622,13 +2627,16 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self._header_blocks(nid, node)
         ):
             # The first line (the type label) shares its row with the
-            # three-dot menu icon in the top-right corner, so it gets
-            # a narrower width than every line below it.  Ports have no
-            # icon/menu, so they keep the full width for their label.
+            # anchor/three-dot/settings badges in the top-right corner, so
+            # it gets a narrower width than every line below it.  Ports
+            # have no badges, so they keep the full width for their label.
             if node["type"] in self._PORT_IN_TYPES | self._PORT_OUT_TYPES:
                 reserve = 20
             else:
-                reserve = self.HEADER_ICON_RESERVE if i == 0 else 20
+                base = self.HEADER_ICON_RESERVE if i == 0 else 20
+                if i == 0 and spec_for(node["type"]).settings:
+                    base += 22  # room for the settings cog too
+                reserve = base
             max_width = self.node_width(nid) - reserve
             text_rgb = color if color is not None else pal[color_key]
             if self._header_block_is_id(nid, text):
@@ -2701,17 +2709,21 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             cr.set_source_rgb(0.7, 0.7, 0.7)
             cr.fill()
 
-    def _draw_settings_gear(self, cr, pal, x, y, node_h):
-        """Small cog in the node's bottom-right corner marking "this
+    @staticmethod
+    def _settings_cog_center(x, y, width):
+        """Centre of the yellow settings cog, immediately left of the
+        node's anchor badge in the header's top-right corner."""
+        return (x + width - 52, y + 18)
+
+    def _draw_settings_gear(self, cr, pal, x, y, width):
+        """Small yellow cog beside the node's anchor badge marking "this
         node's Settings menu has important extra controls" - and the
-        click target that opens it (find_settings_gear_at). Drawn as a
+        click target that opens it (find_settings_gear_at).  Drawn as a
         solid disc with notches (a proper little gear), NOT a thin ring
-        with radial spokes - the spokes read as a stray yellow line
-        across the node body."""
-        cx = x + self.NODE_WIDTH - 20
-        cy = y + node_h - 20
+        with radial spokes."""
+        cx, cy = self._settings_cog_center(x, y, width)
         cr.save()
-        amber = (0.88, 0.70, 0.30)
+        amber = (0.90, 0.72, 0.22)
         cr.set_source_rgb(*amber)
         cr.arc(cx, cy, 8, 0, 2 * math.pi)
         cr.fill()
