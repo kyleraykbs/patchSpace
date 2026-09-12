@@ -277,8 +277,12 @@ panel's colour/label with Select and an X to remove that panel (delete moved her
 the title row).
 
 *Physics* is hierarchical (`_hierarchical_step`, `on_layout_tick`): node physics runs
-inside each panel in that panel's local frame (internal edges only). Panel-vs-panel
-physics (siblings repelling/springing in the parent frame) is **paused by default**
+inside each panel in that panel's local frame (internal edges only). Node physics and the
+auto-fit both use a panel's **direct** nodes (`_panel_direct_nodes`), not its subtree -
+using the subtree double-integrated descendants (two force steps in two origin frames,
+which drifted them and grew the parent box without bound) and double-counted them in the
+box. Panel-vs-panel physics (siblings repelling/springing in the parent
+frame) is **paused by default**
 (`panel_physics_active = False`) and opted into from the hamburger menu ("Panel Physics");
 until then panels stay exactly where placed. When on, per parent,
 the direct child panels repel each other in the parent's local frame (siblings only -

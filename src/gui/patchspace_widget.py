@@ -857,6 +857,24 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 out.append(nid)
         return out
 
+    def _panel_direct_nodes(self, panel_id):
+        """A panel's *own* nodes only - descendants belong to their own
+        panel.  The subtree variant (`_panel_member_nodes`) double-counts
+        once a panel has sub-panels, which drifts nodes (two physics
+        integrations in two origin frames) and grows the box without
+        bound.  Use this for both node physics and auto-fit bounds."""
+        prefix = panel_id + "::" if panel_id else ""
+        out = []
+        for nid in self.nodes:
+            if panel_id:
+                if not nid.startswith(prefix):
+                    continue
+            elif "::" in nid:
+                continue
+            if self._panel_of_node(nid) == panel_id:
+                out.append(nid)
+        return out
+
     def _translate_panel_local(self, panel_id, dx, dy):
         """Shift a panel's subtree's *nodes* in the local model.
 
@@ -1240,7 +1258,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         two panels together instead."""
         max_delta = 0.0
         for pid in [""] + [p for p in self.panels if p]:
-            members = self._panel_member_nodes(pid)
+            members = self._panel_direct_nodes(pid)
             if len(members) < 2:
                 continue
             ox, oy = self._panel_absolute(pid) if pid else (0.0, 0.0)
@@ -5965,7 +5983,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         return min(14.0, 40.0 / z)
 
     def _panel_rect(self, pid):
-        """(x, y, w, h) absolute box for a panel: it auto-fits its member
+        """(x, y, w, h) absolute box for a panel: it auto-fits its *direct*
         nodes and child panels with padding on every side, like a group,
         with a square minimum size and no manual resize."""
         cached = self._panel_geo_cache.get(pid)
@@ -5987,7 +6005,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         baseline = self._panel_drag_baseline.get(pid) if self.dragging_node else None
         dragging = set(self.drag_node_starts) if self.dragging_node else set()
         minx = miny = maxx = maxy = None
-        for nid in self._panel_member_nodes(pid):
+        for nid in self._panel_direct_nodes(pid):
             # Without a baseline (normal draw) the actively-dragged nodes
             # don't count, so a panel doesn't stretch to swallow a drop.
             if baseline is None and nid in dragging:
@@ -6147,9 +6165,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         ports are excluded - each belongs to its own panel's bar."""
         types = self._PORT_IN_TYPES if direction == "in" else self._PORT_OUT_TYPES
         found = []
-        for nid in self._panel_member_nodes(pid):
-            if self._panel_of_node(nid) != pid:
-                continue
+        for nid in self._panel_direct_nodes(pid):
             node = self.nodes.get(nid)
             if node is not None and node.get("type") in types:
                 found.append((nid, node))
