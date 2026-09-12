@@ -1511,27 +1511,52 @@ class PatchBayDaemon:
         return stem or f"panel_{int(time.time() * 1000)}"
 
     def _cmd_create_panel(self, cmd: dict) -> dict:
-        """Create a new top-level panel (a file) and move the selection
-        into it.  This is the panel form of the old "Declare" action."""
+        """Create a new panel (a file) and move the selection into it.
+
+        When ``parent_id`` names a panel (the selection's own panel), the
+        new panel is nested inside it; otherwise it is created at the
+        root.  This is the panel form of the old "Declare" action."""
         name = (cmd.get("name") or "").strip()
         if not name:
             return {"status": "error", "message": "name required"}
         stem = self._panel_slug(name)
-        if stem in self.panels:
-            return {"status": "error", "message": f"panel {stem!r} already exists"}
+        parent_id = cmd.get("parent_id", "") or panels.ROOT_ID
+        parent = self.panels.get(parent_id)
+        if parent is None:
+            if parent_id != panels.ROOT_ID:
+                return {"status": "error", "message": f"no panel {parent_id!r}"}
+            # A daemon that hasn't loaded a root file yet still needs one to
+            # own top-level children.
+            parent = panels.Panel(
+                id=panels.ROOT_ID, parent=None, label="root",
+                color=panels.DEFAULT_COLOR, mode=panels.MODE_RW,
+                path=self.root_panel_path, writable=True,
+                config={"nodes": {}, "edges": [], "panels": [], "groups": []},
+            )
+            self.panels[panels.ROOT_ID] = parent
+        # A unique local name among the parent's children.
+        local = stem
+        n = 2
+        while local in parent.children:
+            local = f"{stem}_{n}"
+            n += 1
+        new_panel_id = panels.make_id(parent_id, local)
+        if new_panel_id in self.panels:
+            return {"status": "error", "message": f"panel {new_panel_id!r} exists"}
         target_dir = next(
             (d for d, w in self.panel_dirs if d and w), None
         )
         if target_dir is None:
             return {"status": "error", "message": "no writable panel directory"}
-        path = os.path.join(target_dir, stem + panels.PANEL_SUFFIX)
+        path = os.path.join(target_dir, local + panels.PANEL_SUFFIX)
         node_ids = list(cmd.get("node_ids") or [])
         moved: List[str] = []
+        px, py = self._panel_origin(self.panels, parent_id)
         with self._lock:
             for nid in node_ids:
                 if nid not in self.space.nodes:
                     continue
-                new_id = panels.make_id(stem, panels.local_of(nid))
+                new_id = panels.make_id(new_panel_id, panels.local_of(nid))
                 if new_id in self.space.nodes:
                     continue
                 try:
@@ -1540,21 +1565,20 @@ class PatchBayDaemon:
                 except (KeyError, ValueError) as exc:
                     logger.warning("create_panel move %r failed: %s", nid, exc)
             mode = panels.MODE_RO if cmd.get("readonly") else panels.MODE_RW
-            self.panels[stem] = panels.Panel(
-                id=stem, parent=panels.ROOT_ID,
+            self.panels[new_panel_id] = panels.Panel(
+                id=new_panel_id, parent=parent_id,
                 label=cmd.get("label") or name,
                 color=cmd.get("color") or panels.DEFAULT_COLOR,
-                mode=mode, path=path, writable=True, stem=stem,
-                x=float(cmd.get("x", 0.0) or 0.0),
-                y=float(cmd.get("y", 0.0) or 0.0),
+                mode=mode, path=path, writable=True, stem=local,
+                x=float(cmd.get("x", 0.0) or 0.0) - px,
+                y=float(cmd.get("y", 0.0) or 0.0) - py,
                 w=max(panels.MIN_W, float(cmd.get("w", panels.DEFAULT_W) or 0.0)),
                 h=max(panels.MIN_H, float(cmd.get("h", panels.DEFAULT_H) or 0.0)),
                 config={"nodes": {}, "edges": [], "panels": [], "groups": []},
             )
-            root = self.panels.get(panels.ROOT_ID)
-            if root is not None and stem not in root.children:
-                root.config.setdefault("panels", []).append(
-                    panels.child_ref(stem, stem)
+            if local not in parent.children:
+                parent.config.setdefault("panels", []).append(
+                    panels.child_ref(local, local)
                 )
         self._standardize_nodes(moved)
         # Refresh the in-memory tree from live state so list_panels (and a
@@ -1563,7 +1587,10 @@ class PatchBayDaemon:
         self._write_panels()
         self._dirty = True
         self._wake_ticker()
-        return {"status": "ok", "panel_id": stem, "moved": moved, "path": path}
+        return {
+            "status": "ok", "panel_id": new_panel_id,
+            "moved": moved, "path": path,
+        }
 
     def _cmd_delete_panel(self, cmd: dict) -> dict:
         """Delete a panel file.

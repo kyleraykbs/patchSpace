@@ -687,3 +687,31 @@ def test_edit_mode_params_sync_across_placements(tmp_path):
     assert d.space.nodes[f"{other}::a"].pattern == "edited"
     raw = json.load(open(os.path.join(pdir, "kit.json")))
     assert raw["config"]["nodes"]["a"]["params"]["pattern"] == "edited"
+
+
+def test_create_panel_nests_into_given_parent(tmp_path):
+    d, root, pdir = _daemon(tmp_path)
+    d.panels = d._load_panels_tree()
+    d.handle_command({"command": "add_node", "node_type": "regex_input",
+                      "node_id": "a", "config": {"pattern": ".*"}})
+    assert d._cmd_create_panel({"name": "kit", "node_ids": ["a"]})["status"] == "ok"
+    d.handle_command({"command": "add_node", "node_type": "regex_output",
+                      "node_id": "kit::b", "config": {"pattern": ".*", "x": 5, "y": 6}})
+
+    resp = d._cmd_create_panel(
+        {"name": "sub", "node_ids": ["kit::b"], "parent_id": "kit",
+         "x": 5, "y": 6}
+    )
+    assert resp["status"] == "ok", resp
+    assert resp["panel_id"] == "kit::sub"
+    assert "kit::sub::b" in d.space.nodes
+    assert d.panels["kit::sub"].parent == "kit"
+    assert "sub" in d.panels["kit"].children
+    assert "sub" not in d.panels[panels.ROOT_ID].children
+    # Placement is parent-relative (kit is at the origin here).
+    assert (d.panels["kit::sub"].x, d.panels["kit::sub"].y) == (5.0, 6.0)
+
+    d._write_panels()
+    tree = d._load_panels_tree()
+    assert "kit::sub" in tree
+    assert "b" in tree["kit::sub"].nodes

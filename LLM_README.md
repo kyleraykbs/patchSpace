@@ -214,7 +214,8 @@ nodes, child panels, and the outlines **and title blocks** of groups owned by th
 minimum size** (`PANEL_MIN_SIDE`, centred on the content); there is no manual resize
 handle. Each node living in a non-root panel also gets a tiny panel-coloured chip at its
 bottom-left corner (root-level nodes get none), drawn in `on_draw` from
-`_panel_of_node`/the panel's colour. While
+`_panel_of_node`/the panel's colour. A **nested panel** gets the same chip in its *parent*
+panel's colour (top-level panels get none). While
 a node is being dragged, its panel is held at the size it had when the drag began
 (`_panel_drag_baseline`) and may only **grow** toward the node, capped at
 `PANEL_DRAG_GROW` past the baseline - so picking a node up never shrinks the box, nudging
@@ -283,7 +284,9 @@ using the subtree double-integrated descendants (two force steps in two origin f
 which drifted them and grew the parent box without bound) and double-counted them in the
 box. Panel-vs-panel physics (siblings repelling/springing in the parent
 frame) is **paused by default**
-(`panel_physics_active = False`) and opted into from the hamburger menu ("Panel Physics");
+(`panel_physics_active = False`) and opted into from the hamburger menu ("Panel Physics")
+or the floating pause/resume button under the panels toggle at the top-right (the two stay
+in sync via `_set_panel_physics`);
 until then panels stay exactly where placed. When on, per parent,
 the direct child panels repel each other in the parent's local frame (siblings only -
 running every panel through one flat pass made a child fight its own parent). Panels use
@@ -320,8 +323,10 @@ and a node could never be dragged out. Groups land in the panel that is the LCA 
 their members.
 
 *Creating a panel* (`Create Panel…`): with a selection, the new panel is fitted around
-the selected nodes' bounds; with none, a square opens in the middle of the viewport. The
-daemon takes the placement (`x/y/w/h`) in `create_panel`.
+the selected nodes' bounds and **nested into the panel those nodes live in** (the GUI sends
+their panel as `parent_id`, or root for a mixed/none selection); with none, a square opens
+in the middle of the viewport. The daemon takes the placement (`x/y/w/h`, converted to
+parent-relative) in `create_panel`.
 
 Commands: `list_panels`, `reload_panels`, `create_panel`, `delete_panel`, `edit_panel`,
 `export_panel`, `clone_panel`, `list_panel_files`, `set_panel_file_autoload`,

@@ -2414,6 +2414,31 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             draw_rounded_rect(cr, px, py, side, side, 2.5)
             cr.stroke()
 
+        # A nested panel shows which panel it's in with the same tiny chip,
+        # in the *parent* panel's colour, at its bottom-left corner
+        # (top-level panels get none, like root-level nodes).
+        for pid in self.panels:
+            if pid == "":
+                continue
+            parent = self.panels[pid].get("parent", "")
+            if not parent:
+                continue
+            ppanel = self.panels.get(parent)
+            rect = self._panel_rect(pid)
+            if ppanel is None or rect is None:
+                continue
+            r, g, b = self._hex_to_rgb(ppanel.get("color", "#3584e4"))
+            side = 9.0
+            px = rect[0]
+            py = rect[1] + rect[3] + 3
+            draw_rounded_rect(cr, px, py, side, side, 2.5)
+            cr.set_source_rgb(r, g, b)
+            cr.fill()
+            cr.set_source_rgba(0.0, 0.0, 0.0, 0.35)
+            cr.set_line_width(1.0)
+            draw_rounded_rect(cr, px, py, side, side, 2.5)
+            cr.stroke()
+
         # Highlight the current marquee selection, then the rubber-band
         # rectangle itself, above the nodes so both stay visible.
         for nid in self.selected_nodes:
@@ -3734,13 +3759,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                         self.client.send(
                             {"command": "set_node_layout", "layout": layout}
                         )
-                    self._begin_load()
                     self.client.send(
                         {
                             "command": "create_panel",
                             "name": name,
                             "node_ids": node_ids,
                             "readonly": readonly.get_active(),
+                            "parent_id": self._selection_panel(),
                             "x": x,
                             "y": y,
                             "w": w,
@@ -3751,6 +3776,17 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
         dialog.connect("response", _on_response)
         dialog.present()
+
+    def _selection_panel(self):
+        """The panel the current selection lives in (their LCA), or the root
+        when there is no selection.  A new panel is nested here."""
+        ids = [n for n in self.selected_nodes if n in self.nodes]
+        if not ids:
+            return ""
+        owner = self._panel_of_node(ids[0])
+        for nid in ids[1:]:
+            owner = self._panel_lca(owner, self._panel_of_node(nid))
+        return owner
 
     def _new_panel_placement(self):
         """(x, y, w, h) for a new top-level panel: fitted around the
