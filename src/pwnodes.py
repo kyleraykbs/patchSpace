@@ -1095,12 +1095,12 @@ class BooleanInvertNode(Node):
 
 
 class BooleanLogicNode(Node):
-    """Shared base for the two-input boolean logic gates (AND / OR).
+    """Shared base for the two-input boolean logic gates (AND / OR / XOR).
 
     Pure control-plane plumbing like the splitter and inverter - no
     audio, no PipeWire object, just a value derived from its boolean
     inputs.  An unwired input contributes nothing, so a gate with a
-    single input wired passes that value through (AND/OR with one
+    single input wired passes that value through (AND/OR/XOR with one
     operand); with nothing wired it emits no value and anything
     downstream keeps its own default."""
 
@@ -1125,6 +1125,17 @@ class BooleanOrNode(BooleanLogicNode):
 
     def combine(self, values: List[bool]) -> bool:
         return any(values)
+
+
+class BooleanXorNode(BooleanLogicNode):
+    """Boolean XOR: true when an odd number of wired inputs are true.
+
+    With the usual two wired inputs that's "exactly one is true"; a
+    single wired input passes through unchanged (odd parity), matching
+    the AND/OR single-operand behaviour."""
+
+    def combine(self, values: List[bool]) -> bool:
+        return sum(1 for v in values if v) % 2 == 1
 
 
 class WarpInNode(TransparentNode):

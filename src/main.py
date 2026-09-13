@@ -50,6 +50,7 @@ from pwnodes import (
     BooleanInvertNode,
     BooleanAndNode,
     BooleanOrNode,
+    BooleanXorNode,
     WarpInNode,
     WarpOutNode,
     BooleanWarpInNode,
@@ -223,6 +224,7 @@ NODE_TYPE_REGISTRY: Dict[str, type] = {
     "boolean_invert": BooleanInvertNode,
     "boolean_and": BooleanAndNode,
     "boolean_or": BooleanOrNode,
+    "boolean_xor": BooleanXorNode,
     "warp_in": WarpInNode,
     "warp_out": WarpOutNode,
     "bool_warp_in": BooleanWarpInNode,
@@ -3417,7 +3419,7 @@ class PatchBayDaemon:
             return cls(node_id)
         if cls is BooleanInvertNode:
             return cls(node_id)
-        if cls in (BooleanAndNode, BooleanOrNode):
+        if cls in (BooleanAndNode, BooleanOrNode, BooleanXorNode):
             return cls(node_id)
         if cls in (WarpInNode, WarpOutNode, BooleanWarpInNode, BooleanWarpOutNode):
             return cls(node_id, g("warp_name", ""))

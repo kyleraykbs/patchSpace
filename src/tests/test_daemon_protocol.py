@@ -1032,6 +1032,7 @@ def test_boolean_nodes_registry_specs_and_output_control():
         BooleanInvertNode,
         BooleanAndNode,
         BooleanOrNode,
+        BooleanXorNode,
     )
     from gui import node_specs as ns
 
@@ -1040,9 +1041,13 @@ def test_boolean_nodes_registry_specs_and_output_control():
     assert main_mod.NODE_TYPE_REGISTRY["boolean_invert"] is BooleanInvertNode
     assert main_mod.NODE_TYPE_REGISTRY["boolean_and"] is BooleanAndNode
     assert main_mod.NODE_TYPE_REGISTRY["boolean_or"] is BooleanOrNode
+    assert main_mod.NODE_TYPE_REGISTRY["boolean_xor"] is BooleanXorNode
     assert ns.spec_for("boolean_and").inputs == ["a", "b"]
     assert ns.spec_for("boolean_and").boolean_inputs == {"a", "b"}
     assert ns.spec_for("boolean_or").boolean_outputs == {"out"}
+    assert ns.spec_for("boolean_xor").inputs == ["a", "b"]
+    assert ns.spec_for("boolean_xor").boolean_inputs == {"a", "b"}
+    assert ns.spec_for("boolean_xor").boolean_outputs == {"out"}
     assert ns.spec_for("boolean_switch").inputs == []
     assert ns.spec_for("boolean_switch").boolean_outputs == {"out"}
     assert ns.spec_for("gate").boolean_inputs == {"ctrl"}
@@ -1060,6 +1065,7 @@ def test_boolean_nodes_registry_specs_and_output_control():
     assert ("Invert", "boolean_invert") in ns.ADD_NODE_MENU_ITEMS
     assert ("AND", "boolean_and") in ns.ADD_NODE_MENU_ITEMS
     assert ("OR", "boolean_or") in ns.ADD_NODE_MENU_ITEMS
+    assert ("XOR", "boolean_xor") in ns.ADD_NODE_MENU_ITEMS
 
     d = fresh_daemon()
     d.space.mark_graph_loaded()

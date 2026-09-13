@@ -266,6 +266,14 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
         boolean_outputs=["out"],
         socket_labels=False,
     ),
+    "boolean_xor": NodeSpec(
+        "XOR",
+        ["a", "b"],
+        ["out"],
+        boolean_inputs=["a", "b"],
+        boolean_outputs=["out"],
+        socket_labels=False,
+    ),
     # Warps: named logical aliases. A Warp In publishes whatever is
     # plugged into it under `warp_name`; a Warp Out resolves to the
     # matching publisher(s). Audio warps mix multiple publishers;
@@ -608,6 +616,7 @@ NODE_DESCRIPTIONS: Dict[str, str] = {
     "boolean_invert": "Inverts a boolean signal (NOT).",
     "boolean_and": "True only when every wired input is true.",
     "boolean_or": "True when any wired input is true.",
+    "boolean_xor": "True when exactly one wired input is true (odd parity).",
     "warp_in": "Publishes whatever is plugged into it under a name, so a "
     "Warp Out elsewhere can pull it in.",
     "warp_out": "Pulls in everything published under a name (mixes multiple "
@@ -766,6 +775,7 @@ ADD_NODE_CATEGORIES = [
             ("Invert", "boolean_invert"),
             ("AND", "boolean_and"),
             ("OR", "boolean_or"),
+            ("XOR", "boolean_xor"),
             ("Bool Splitter", "boolean_splitter"),
         ],
     ),
@@ -872,6 +882,7 @@ NODE_TYPE_ICONS: Dict[str, str] = {
     "boolean_invert": "action-unavailable-symbolic",
     "boolean_and": "checkbox-checked-symbolic",
     "boolean_or": "list-add-symbolic",
+    "boolean_xor": "checkbox-mixed-symbolic",
     "warp_in": "insert-link-symbolic",
     "warp_out": "insert-link-symbolic",
     "bool_warp_in": "insert-link-symbolic",
@@ -935,6 +946,7 @@ CLASS_NAME_TO_TYPE = {
     "BooleanInvertNode": "boolean_invert",
     "BooleanAndNode": "boolean_and",
     "BooleanOrNode": "boolean_or",
+    "BooleanXorNode": "boolean_xor",
     "WarpInNode": "warp_in",
     "WarpOutNode": "warp_out",
     "BooleanWarpInNode": "bool_warp_in",

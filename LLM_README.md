@@ -140,9 +140,10 @@ Threads: a tick thread runs `PatchSpace.supervise()` every `SUPERVISE_INTERVAL_S
 
 Boolean control-plane nodes (gray ports, never a PipeWire link): `BooleanSourceNode`
 (On/Off), `BooleanSplitterNode`, `BooleanInvertNode` ("Invert"), `BooleanAndNode`
-(`boolean_and`), `BooleanOrNode` (`boolean_or`), and the boolean warps. `_resolve_boolean*`
-evaluates them; AND/OR ignore unwired inputs (one wired input passes through) and emit
-nothing when fully unwired. A driven gate/switcher's on/off indicator renders read-only
+(`boolean_and`), `BooleanOrNode` (`boolean_or`), `BooleanXorNode` (`boolean_xor`), and the
+boolean warps. `_resolve_boolean*` evaluates them; AND/OR/XOR ignore unwired inputs (one
+wired input passes through; XOR is odd parity, i.e. exactly one of two) and emit nothing
+when fully unwired. A driven gate/switcher's on/off indicator renders read-only
 white from the daemon's `bool_driven`/`bool_state`. If a poll reports `bool_state=None`
 while the ctrl signal is still wired (a bool-warp publisher briefly re-created by a panel
 sync), the GUI holds the last resolved value rather than flashing back to the node's

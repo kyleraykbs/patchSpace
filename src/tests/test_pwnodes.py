@@ -20,6 +20,7 @@ from pwnodes import (
     BooleanInvertNode,
     BooleanAndNode,
     BooleanOrNode,
+    BooleanXorNode,
     WarpInNode,
     WarpOutNode,
     BooleanWarpInNode,
@@ -1128,6 +1129,31 @@ def test_boolean_and_or_gates_combine_two_inputs():
     assert states() == (False, False)  # 0 AND 0 | 0 OR 0
     space.nodes["s1"].output = 1
     assert states() == (False, True)  # 1 AND 0 | 1 OR 0
+
+
+def test_boolean_xor_gate_is_true_on_exactly_one_input():
+    g = FakeGraph()
+    space = make_space(g)
+    space.mark_graph_loaded()
+    space.add_node(BooleanSourceNode("s1", output=1))
+    space.add_node(BooleanSourceNode("s2", output=1))
+    space.add_node(BooleanXorNode("xor"))
+    space.add_node(GateNode("gate", enabled=False))
+    space.add_edge("s1", "xor", "a")
+    space.add_edge("s2", "xor", "b")
+    space.add_edge("xor", "gate", "ctrl")
+
+    def state():
+        space._refresh_boolean_states()
+        return space.nodes["gate"].gate_open()
+
+    assert state() is False  # 1 XOR 1
+    space.nodes["s1"].output = 0
+    assert state() is True   # 0 XOR 1
+    space.nodes["s2"].output = 0
+    assert state() is False  # 0 XOR 0
+    space.nodes["s1"].output = 1
+    assert state() is True   # 1 XOR 0
 
 
 def test_boolean_logic_single_input_passes_through_and_empty_emits_nothing():

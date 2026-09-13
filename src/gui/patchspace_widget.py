@@ -1547,7 +1547,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     # None needs the full type-label + node-id header, so with a label
     # they show only the label and with none they collapse to a square.
     _COMPACT_NODE_TYPES = frozenset(
-        {"splitter", "boolean_and", "boolean_or", "boolean_invert",
+        {"splitter", "boolean_and", "boolean_or", "boolean_xor",
+         "boolean_invert",
          "panel_in", "panel_out", "bool_panel_in", "bool_panel_out"}
     )
 
