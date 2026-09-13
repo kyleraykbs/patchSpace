@@ -234,20 +234,27 @@ a node is being dragged, its panel is held at the size it had when the drag bega
 the edge makes room, and dragging well past the cap takes the node out.
 
 *Wire routing.* Edges are drawn in `on_draw`, which first runs `_route_all_wires` (before
-the panel boxes, since panels grow around their wires). If the straight socket-to-socket
-line is clear, the usual smooth bezier is used (`draw_bezier_link`). Otherwise the edge is
-routed by `gui/wire_router.py`: an A* over a coarse grid of the endpoints' bounding box,
-with a turn penalty, avoiding every visible node rect **and every panel box**, each
-inflated by `PAD`. Obstacle sets are asymmetric on purpose:
+the panel boxes, since panels grow around their wires). The smooth **sigmoid bezier is
+always preferred**: `_wire_points` samples the exact cubic `draw_bezier_link` would stroke
+(`_bezier_points`) and, if every sampled segment clears the obstacles below, draws it. Only
+a curve that would clip something is routed by `gui/wire_router.py`: an A* over a coarse
+grid of the endpoints' bounding box, with a turn penalty, avoiding every visible node rect
+**and every panel box**, each inflated by `PAD`. Obstacle sets are asymmetric on purpose:
 - The **endpoint nodes are obstacles too** (so a wire can't loop back through its own
   node) with a `clear_rects` corridor punched out at each socket, plus a short straight
-  `STUB` out of the socket before it may turn - the "plugged in" look.
+  `STUB` out of the socket before it may turn - the "plugged in" look. The stub is clamped
+  to the midpoint when the endpoints are closer than `2*STUB`, and skipped entirely when
+  the target sits level-or-behind the socket, so a fixed stub can never overshoot.
 - A panel holding either endpoint is skipped (a wire must leave/enter its own panel);
   routing always uses the content-only `_panel_rect_base`, so growing a panel to enclose
   its wires can't feed back into the next frame's route.
 - Edges are routed **in order**, and each finished wire is laid down as a thin keep-out
   strip (`polyline_rects`, `SPACING`) so later wires keep visible clearance from it
-  (straight beziers contribute their straight segment).
+  (beziers contribute their sampled curve). If the strips crowd a route out, the router
+  retries ignoring other wires rather than dropping to an overlapping bezier.
+- A routed wire is **cached and reused** (`_route_cache`/`_route_still_valid`) while it
+  still starts/ends on the sockets, stays square, and clears the current obstacles - this
+  is what stops interacting wires that never converge from flip-flopping every frame.
 The result is a strictly axis-aligned polyline (`orthogonalize` inserts L-elbows,
 `simplify` drops collinear points); `render_utils.draw_square_path` strokes it as a square
 run with rounded corners (cubic with both controls at the vertex; cairo has no arc-to).

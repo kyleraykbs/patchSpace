@@ -334,6 +334,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._wire_routes: dict = {}
         self._wire_bounds: dict = {}
         self._wire_panel_cache: dict = {}
+        # eid -> last committed route, reused while it stays clear (see
+        # _route_still_valid) so interacting wires don't flip between
+        # near-equal detours every frame.
+        self._route_cache: dict = {}
         # panel_id -> rect frozen when a node drag began (see _panel_rect);
         # cleared on drag end.
         self._panel_drag_baseline: dict = {}
@@ -1827,6 +1831,29 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         x1, y1, x2, y2 = rect
         return x1 <= x <= x2 and y1 <= y <= y2
 
+    @staticmethod
+    def _bezier_points(x1, y1, x2, y2, steps=14):
+        """Sample the same cubic `draw_bezier_link` strokes, so the
+        clear-path test measures the curve actually drawn, not its chord."""
+        dx = max(40.0, abs(x2 - x1) * 0.5)
+        p0x, p0y = x1, y1
+        p1x, p1y = x1 + dx, y1
+        p2x, p2y = x2 - dx, y2
+        p3x, p3y = x2, y2
+        pts = []
+        for i in range(steps + 1):
+            t = i / steps
+            mt = 1.0 - t
+            a = mt * mt * mt
+            b = 3.0 * mt * mt * t
+            c = 3.0 * mt * t * t
+            d = t * t * t
+            pts.append((
+                a * p0x + b * p1x + c * p2x + d * p3x,
+                a * p0y + b * p1y + c * p2y + d * p3y,
+            ))
+        return pts
+
     def _wire_points(self, edge, x1, y1, x2, y2, wire_rects, wire_panels,
                      extra_obstacles=()):
         """A square route (rounded at draw time) from socket to socket that
@@ -1859,37 +1886,94 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             rx1, ry1, rx2, ry2 = rect
             return (rx1 + pad, ry1 + pad, rx2 - pad, ry2 - pad)
 
-        # Direct-line test.  Other nodes/panels count at full clearance; the
-        # endpoints are shrunk so the socket on their border doesn't count,
-        # while a straight line that cuts back through their body does (that
-        # is the self-intersection this guards against).
+        # Other nodes/panels count at full clearance; the endpoints are
+        # shrunk so the socket on their border doesn't count, while a curve
+        # that cuts back through their body does.
         direct = (
             [_expand(r, WIRE_PAD) for r in other_nodes]
             + [_expand(r, WIRE_PAD) for r in panels]
             + [_shrink(r, WIRE_PAD + 4) for r in own]
             + extra
         )
-        if not segment_blocked(x1, y1, x2, y2, direct, pad=0.0):
+
+        # Prefer the smooth (sigmoid) bezier whenever the *actual curve* -
+        # not just the straight chord between sockets - clears everything.
+        # A bulge that clips a node (or the wire's own node when the target
+        # is behind the socket) therefore still gets a square route.
+        curve = self._bezier_points(x1, y1, x2, y2)
+        if not any(
+            segment_blocked(ax, ay, bx, by, direct, pad=0.0)
+            for (ax, ay), (bx, by) in zip(curve, curve[1:])
+        ):
             return None
 
         # Route around everything, but punch a corridor out of each socket so
         # the wire can still leave/enter its own (now-blocking) node.  Both
         # ends get a short straight stub (output faces right, input faces
-        # left) so the wire visibly plugs in before it may turn.
+        # left) so the wire visibly plugs in before it may turn - clamped so
+        # a constant-length stub can never overshoot the other endpoint.  If
+        # the target is level-or-behind the socket there is no room for a
+        # stub, so the wire just heads to the point.
         obstacles = other_nodes + own + panels + extra
         corr = WIRE_CELL * 1.5
-        sox, soy = x1 + WIRE_STUB, y1
-        six, siy = x2 - WIRE_STUB, y2
+        dx = x2 - x1
+        if dx >= 2 * WIRE_STUB:
+            sox, six = x1 + WIRE_STUB, x2 - WIRE_STUB
+        elif dx > 0:
+            sox = six = x1 + dx / 2.0
+        else:
+            sox, six = x1, x2
         clear = [
-            (x1 - WIRE_CELL, y1 - corr, sox + WIRE_CELL, y1 + corr),
-            (six - WIRE_CELL, y2 - corr, x2 + WIRE_CELL, y2 + corr),
+            (min(x1, sox) - WIRE_CELL, y1 - corr,
+             max(x1, sox) + WIRE_CELL, y1 + corr),
+            (min(x2, six) - WIRE_CELL, y2 - corr,
+             max(x2, six) + WIRE_CELL, y2 + corr),
         ]
-        core = route_wire(
-            sox, soy, six, siy, obstacles, clear_rects=clear
-        )
+        core = route_wire(sox, y1, six, y2, obstacles, clear_rects=clear)
+        if not core:
+            # Crowded out by other wires: retry ignoring them so we still get
+            # a square route rather than an overlapping bezier.
+            core = route_wire(
+                sox, y1, six, y2, other_nodes + own + panels,
+                clear_rects=clear,
+            )
         if not core:
             return None
         return [(x1, y1)] + list(core) + [(x2, y2)]
+
+    def _route_still_valid(self, points, edge, x1, y1, x2, y2,
+                           wire_rects, base_panels, extra):
+        """Whether a cached route can be reused: it still starts/ends on the
+        current sockets, is square, and clears the current obstacles.  Reuse
+        is what stops a wire from flip-flopping between two near-equal
+        detours on successive frames when several wires interact."""
+        if not points or len(points) < 2:
+            return False
+        if (abs(points[0][0] - x1) > 0.5 or abs(points[0][1] - y1) > 0.5
+                or abs(points[-1][0] - x2) > 0.5
+                or abs(points[-1][1] - y2) > 0.5):
+            return False
+        skip = {edge["from_node"], edge["to_node"]}
+        obs = [
+            (r[0] - WIRE_PAD, r[1] - WIRE_PAD, r[2] + WIRE_PAD, r[3] + WIRE_PAD)
+            for nid, r in wire_rects.items() if nid not in skip
+        ]
+        for _pid, rect in base_panels:
+            if self._contains_point(rect, x1, y1) or self._contains_point(
+                rect, x2, y2
+            ):
+                continue
+            obs.append(
+                (rect[0] - WIRE_PAD, rect[1] - WIRE_PAD,
+                 rect[2] + WIRE_PAD, rect[3] + WIRE_PAD)
+            )
+        obs.extend(extra)
+        for (ax, ay), (bx, by) in zip(points, points[1:]):
+            if abs(ax - bx) > 0.5 and abs(ay - by) > 0.5:
+                return False
+            if segment_blocked(ax, ay, bx, by, obs, pad=0.0):
+                return False
+        return True
 
     def _route_all_wires(self):
         """Route every edge once per frame, in edge order.
@@ -1922,6 +2006,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 rx, ry, rw, rh = rect
                 base_panels.append((pid, (rx, ry, rx + rw, ry + rh)))
         wire_obstacles = []
+        cache = {}
         for eid, edge in self.edges.items():
             if self.detaching_edge and self.detaching_edge[0] == eid:
                 continue
@@ -1933,10 +2018,19 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             ):
                 continue
             out_x, out_y, in_x, in_y = self._edge_endpoints(edge)
-            points = self._wire_points(
-                edge, out_x, out_y, in_x, in_y, wire_rects, base_panels,
-                extra_obstacles=wire_obstacles,
-            )
+            points = self._route_cache.get(eid)
+            if points is not None and self._route_still_valid(
+                points, edge, out_x, out_y, in_x, in_y,
+                wire_rects, base_panels, wire_obstacles,
+            ):
+                reuse = True
+            else:
+                points = self._wire_points(
+                    edge, out_x, out_y, in_x, in_y, wire_rects, base_panels,
+                    extra_obstacles=wire_obstacles,
+                )
+                reuse = False
+            cache[eid] = points
             self._wire_routes[eid] = points
             path_pts = points or [(out_x, out_y), (in_x, in_y)]
             wire_obstacles.extend(wire_polyline_rects(path_pts))
@@ -1957,6 +2051,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     min(box[0], new[0]), min(box[1], new[1]),
                     max(box[2], new[2]), max(box[3], new[3]),
                 )
+        self._route_cache = cache
 
     def _hit_nodes(self, x=None, y=None):
         """Nodes in hit-test order: top-most (last drawn) first.
