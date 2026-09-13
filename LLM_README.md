@@ -308,7 +308,11 @@ loads (`_hit_nodes` skips it). A heavy node (Echo Cancel, ...) is added to the c
 immediately as an optimistic **placeholder** (`_add_placeholder_node`, called from
 `_on_add_node`/`add_node_at`): the daemon holds its `add_node` reply until the module has
 actually spawned, so a poll can't reveal it before then and otherwise nothing would appear
-until it was ready. A brand-new node also animates in on creation: it scales up from
+until it was ready. The placeholder is registered in `_placeholder_since` so an early poll
+(one arriving before the daemon has created the node) does **not** cull it - culling it
+would first drop its position and its `_user_created_nodes`/anchoring, then make it
+reappear at the daemon's default spot. It is only culled once confirmed or after a
+timeout. A brand-new node also animates in on creation: it scales up from
 nothing about its centre with an ease-out-back "pop" (`_ease_out_back`) over
 `NODE_MATERIALIZE_MS`. `_anim_tick` (a 16ms `GLib` timeout) owns the pop - it starts it the
 first time it sees a *revealed* node so a slow load's scale-up isn't over before the node

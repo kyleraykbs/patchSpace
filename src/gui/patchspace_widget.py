@@ -212,6 +212,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # then the poll that drops the node).
         self._ghosts: list = []
         self._ghosted: set = set()
+        # Optimistically-added nodes waiting for the daemon to report them
+        # (heavy nodes take seconds to spawn).  A poll that arrives before
+        # the daemon has created the node must NOT cull the placeholder, or
+        # the node later reappears at the daemon's default position - see
+        # the deletion loop in update_from_daemon.
+        self._placeholder_since: dict = {}
         GLib.timeout_add(ANIM_TICK_MS, self._anim_tick)
         # Per-frame geometry cache for group nesting (the enclosed-group
         # walk is O(groups^2) and was recomputed many times inside one
@@ -983,6 +989,15 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
         for nid in list(self.nodes.keys()):
             if nid not in daemon_nodes:
+                # An optimistically-added placeholder the daemon hasn't
+                # reported yet (heavy nodes take seconds to spawn): keep it
+                # (with its position/anchoring) until the daemon confirms
+                # or a timeout gives up.
+                since = self._placeholder_since.get(nid)
+                if since is not None:
+                    if time.monotonic() - since < 30.0:
+                        continue
+                    del self._placeholder_since[nid]
                 # Leave a fading outline behind (the node is really gone
                 # from the model immediately, so nothing hit-tests it).
                 self._start_node_ghost(nid)
@@ -1082,6 +1097,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     self.anchored_nodes.add(nid)
             else:
                 node = self.nodes[nid]
+                # Daemon confirmed the node: it is no longer a waiting
+                # placeholder (so it culls normally from here on).
+                self._placeholder_since.pop(nid, None)
                 # Update all fields except volume if this node is being dragged
                 node["type"] = ntype
                 node["inputs"] = spec.inputs
@@ -7879,6 +7897,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # User-created nodes are pinned by default (same rule the poll's
         # new-node path applies; the placeholder pre-empts that branch).
         self.anchored_nodes.add(node_id)
+        self._placeholder_since[node_id] = time.monotonic()
         self._mark_layout_dirty()
         self.queue_draw()
 
