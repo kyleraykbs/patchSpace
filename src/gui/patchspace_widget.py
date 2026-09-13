@@ -6089,6 +6089,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             if cr_rect is None:
                 continue
             cx, cy, cw, ch = cr_rect
+            # The child's *box* right/bottom, remembered before the title
+            # fold below shifts `cy` upward - otherwise `cy + ch` would
+            # under-count the bottom by the title gap.
+            right = cx + cw
+            bottom = cy + ch
             # A child panel's title row (title + action buttons) floats
             # *above* its box, just like a group's title - fold it into the
             # parent's content bounds so the master panel grows to enclose
@@ -6100,8 +6105,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             # parent's bounds - otherwise the ports poke out of the master
             # panel.
             pad = self.PANEL_IO_BAR_PAD
-            right = cx + cw
-            bottom = cy + ch
             for cnid in self._panel_direct_nodes(child):
                 cnode = self.nodes.get(cnid)
                 if cnode is None or cnode.get("type") not in (
