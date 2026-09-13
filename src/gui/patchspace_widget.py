@@ -2093,6 +2093,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # keep_blocked so a socket corridor can't punch through them.
         static = other_nodes + own + panels
         obstacles = static + extra
+        # Endpoint node boxes excluded: the socket sits on their border, so a
+        # socket-adjacent smoothing check must not treat its own node as a
+        # blocker (it would reject every short first/last blend).
+        smooth_obstacles = other_nodes + panels + extra
         corr = WIRE_CELL * 1.5
         clear = [
             (x1 - WIRE_CELL, y1 - corr, x1 + WIRE_CELL, y1 + corr),
@@ -2117,11 +2121,15 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             src_stub = dst_stub = True
         if not (src_stub or dst_stub):
             # The route already leaves/enters horizontally: no stub needed.
-            return self._sigmoid_short_segments(
-                self._snap_to_grid(
-                    self._simplify_orthogonal(list(core), obstacles), obstacles
+            return self._round_short_ends(
+                self._sigmoid_short_segments(
+                    self._snap_to_grid(
+                        self._simplify_orthogonal(list(core), obstacles),
+                        obstacles,
+                    ),
+                    obstacles,
                 ),
-                obstacles,
+                smooth_obstacles,
             )
 
         # Stick out only where the route doesn't already head outward.  The
@@ -2155,12 +2163,77 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             path.insert(0, (x1, y1))
         if dst_stub:
             path.append((x2, y2))
-        return self._sigmoid_short_segments(
-            self._snap_to_grid(
-                self._simplify_orthogonal(path, obstacles), obstacles
+        return self._round_short_ends(
+            self._sigmoid_short_segments(
+                self._snap_to_grid(
+                    self._simplify_orthogonal(path, obstacles), obstacles
+                ),
+                obstacles,
             ),
-            obstacles,
+            smooth_obstacles,
         )
+
+    @staticmethod
+    def _sample_cubic(p0, p1, p2, p3, steps=12):
+        pts = []
+        for i in range(steps + 1):
+            t = i / steps
+            mt = 1.0 - t
+            w0 = mt * mt * mt
+            w1 = 3 * mt * mt * t
+            w2 = 3 * mt * t * t
+            w3 = t * t * t
+            pts.append((
+                w0 * p0[0] + w1 * p1[0] + w2 * p2[0] + w3 * p3[0],
+                w0 * p0[1] + w1 * p1[1] + w2 * p2[1] + w3 * p3[1],
+            ))
+        return pts
+
+    def _round_short_ends(self, path, obstacles, min_len=WIRE_GRID_STEP):
+        """Blend a short socket-adjacent segment into a rounded curve.
+
+        When two sockets are nearly aligned the orthogonal route can only
+        give one end a sub-grid step; that tiny straight reads as a kink.
+        This replaces the corner next to a short first/last segment with a
+        single smooth curve into the socket (checked for clearance)."""
+        pts = list(path)
+        if len(pts) < 3:
+            return pts
+
+        def _clear(a, b):
+            return not segment_blocked(
+                a[0], a[1], b[0], b[1], obstacles, pad=WIRE_PAD
+            )
+
+        # Last segment (into the target socket).
+        if math.hypot(pts[-1][0] - pts[-2][0],
+                      pts[-1][1] - pts[-2][1]) < min_len:
+            q, c, s = pts[-3], pts[-2], pts[-1]
+            pen = math.hypot(c[0] - q[0], c[1] - q[1])
+            if pen > 1e-6:
+                s_len = min(min_len, pen)
+                ux, uy = (c[0] - q[0]) / pen, (c[1] - q[1]) / pen
+                start = (c[0] - ux * s_len, c[1] - uy * s_len)
+                curve = self._sample_cubic(start, c, c, s)
+                if all(_clear(curve[k], curve[k + 1])
+                       for k in range(len(curve) - 1)):
+                    pts = pts[:-2] + [start] + curve[1:]
+
+        # First segment (out of the source socket).
+        if len(pts) >= 3 and math.hypot(
+            pts[1][0] - pts[0][0], pts[1][1] - pts[0][1]
+        ) < min_len:
+            s, c, q = pts[0], pts[1], pts[2]
+            out = math.hypot(q[0] - c[0], q[1] - c[1])
+            if out > 1e-6:
+                s_len = min(min_len, out)
+                ux, uy = (q[0] - c[0]) / out, (q[1] - c[1]) / out
+                end = (c[0] + ux * s_len, c[1] + uy * s_len)
+                curve = self._sample_cubic(s, c, c, end)
+                if all(_clear(curve[k], curve[k + 1])
+                       for k in range(len(curve) - 1)):
+                    pts = [s] + curve[1:] + pts[2:]
+        return pts
 
     def _route_still_valid(self, points, edge, x1, y1, x2, y2,
                            wire_rects, base_panels):

@@ -290,8 +290,12 @@ the corners, keeping socket segments exact and rejecting the snap if it would hi
 obstacle. A perpendicular jog shorter than the grid step that *has* to be there (a stubby
 vertical step between two horizontal runs, rarely the reverse) is then blended into a
 smooth sigmoid by `_sigmoid_short_segments` (cubic with controls at the corners, sampled;
-only when the curve clears the obstacles), so there is no hard little kink. The router is
-pure geometry (no GTK) and unit-tested in `tests/test_wire_router.py`.
+only when the curve clears the obstacles), so there is no hard little kink. A short
+*socket-adjacent* first/last step gets the same treatment from `_round_short_ends` (a
+single rounded curve into the socket), checked against obstacles with the two endpoint
+nodes excluded - their sockets sit on the border, so including them would reject every
+blend. The router is pure geometry (no GTK) and unit-tested in
+`tests/test_wire_router.py`.
 
 *Node appearance.* A node the daemon hasn't finished bringing up (`ready` false) draws at
 `NODE_LOADING_ALPHA` (0.45) and fades to full once ready. A brand-new node also animates in
