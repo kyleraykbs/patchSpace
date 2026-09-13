@@ -181,7 +181,7 @@ def route(
         node = came[node]
     cells.append((node[0], node[1]))
     cells.reverse()
-    # Return grid-centre points (not the exact start/end) so callers can
-    # connect the sockets themselves without an off-grid backtrack.
-    points = [(minx + i * cell, miny + j * cell) for i, j in cells]
+    points = [(sx, sy)]
+    points += [(minx + i * cell, miny + j * cell) for i, j in cells[1:-1]]
+    points.append((ex, ey))
     return simplify(points)

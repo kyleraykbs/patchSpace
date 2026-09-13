@@ -215,32 +215,6 @@ def draw_bezier_link(cr, x1, y1, x2, y2):
     cr.stroke()
 
 
-def draw_smooth_path(cr, points, iterations=3):
-    """Stroke a polyline as a smooth curve by Chaikin corner-cutting.
-
-    The routed wire detours are orthogonal, which reads as rigid; a few
-    rounds of Chaikin replace each corner with a gentle arc.  The result
-    stays inside the polyline's convex hull, so it can't bulge back into
-    a node the route was avoiding, and it keeps the endpoints exact."""
-    if not points:
-        return
-    pts = list(points)
-    if len(pts) > 2:
-        for _ in range(max(1, iterations)):
-            smoothed = [pts[0]]
-            for i in range(len(pts) - 1):
-                x0, y0 = pts[i]
-                x1, y1 = pts[i + 1]
-                smoothed.append((0.75 * x0 + 0.25 * x1, 0.75 * y0 + 0.25 * y1))
-                smoothed.append((0.25 * x0 + 0.75 * x1, 0.25 * y0 + 0.75 * y1))
-            smoothed.append(pts[-1])
-            pts = smoothed
-    cr.move_to(pts[0][0], pts[0][1])
-    for x, y in pts[1:]:
-        cr.line_to(x, y)
-    cr.stroke()
-
-
 def draw_grid_background(cr, pal, pan_x, pan_y, zoom, width, height, spacing=40):
     """Subtle line grid drawn in world space, so it pans and zooms
     with the graph like a node editor's canvas instead of staying

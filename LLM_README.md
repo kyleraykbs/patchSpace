@@ -235,16 +235,6 @@ a node is being dragged, its panel is held at the size it had when the drag bega
 `PANEL_DRAG_GROW` past the baseline - so picking a node up never shrinks the box, nudging
 the edge makes room, and dragging well past the cap takes the node out.
 
-*Wire routing.* Edges are drawn in `on_draw` via `_wire_points`: if the straight socket-to-
-socket path is clear it uses the usual smooth bezier (`draw_bezier_link`); if it would cut
-through another node it instead asks `gui/wire_router.py` (an A* over a coarse grid of the
-endpoints' bounding box, obstacles = the other visible node rects inflated by `PAD`, with a
-turn penalty) for a short orthogonal detour. The detour is then Chaikin-smoothed
-(`render_utils.draw_smooth_path`) so it flows like a natural bent wire instead of reading as
-rigid right angles; Chaikin stays within the polyline's convex hull, so smoothing can't push
-the wire back into a node it routed around. The router is pure geometry (no GTK) and
-unit-tested in `tests/test_wire_router.py`.
-
 *Edit mode.* A panel's parameter values (volumes, switches, effect knobs) are **not**
 written back to its file by default - the daemon serves the committed file values from
 `_panel_snapshots` (only layout stays live), so runtime tweaks are ephemeral until you
@@ -328,10 +318,7 @@ each box's half-extent projected onto the edge, so connected panels settle edge-
 around their bounding boxes. There is **no** global centre pull (it beat `1/d^2` repulsion
 past ~600px, so distant panels crept toward each other) and repulsion is **short-range**
 (cutoff ~ one box), so nearby panels visibly push apart but don't drift together or fling
-apart without bound; the rectangle-aware `_resolve_overlaps` pass handles the rest, and
-`ForceLayout.overlap_padding` makes that pass separate rectangles to a visible gap rather
-than merely to touching - 14px for nodes (so nodes don't stack on each other) and 30px for
-panels (so their boxes keep clearance). The
+apart without bound; the rectangle-aware `_resolve_overlaps` pass handles the rest. The
 layout re-arms whenever the
 node/edge/panel set changes, so it also runs right after a panel is created or loaded
 (not only after a node is dragged). Nodes never exert forces across a panel boundary
