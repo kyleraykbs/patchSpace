@@ -1273,6 +1273,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     continue
                 if ndata.get("ready", True) and ndata.get("health") != "starting":
                     self._revealed.add(nid)
+                    # Start the materialize pop when the node actually
+                    # becomes visible, not when it first appeared in a poll
+                    # (else a slow load's pop finishes before it is revealed,
+                    # leaving only the fade).
+                    self._node_born.setdefault(nid, time.monotonic())
+                    self._node_alpha.setdefault(nid, 0.0)
                     newly = True
             if newly:
                 self.zoom_to_fit()
@@ -2122,8 +2128,15 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             core = route_wire(x1, y1, x2, y2, static, clear_rects=clear)
 
         def _outward(points, idx, sx, sy, direction):
+            # Only counts as an outward exit if it actually runs a
+            # reasonable distance sideways; a few-px sideways hop (or a
+            # vertical start hugging the node edge) must still get a stub,
+            # so a wire never dives straight up/down into a port.
             px, py = points[idx]
-            return abs(py - sy) < 0.5 and (px - sx) * direction > 0
+            return (
+                abs(py - sy) < 0.5
+                and (px - sx) * direction >= WIRE_GRID_STEP
+            )
 
         if core:
             src_stub = len(core) >= 2 and not _outward(core, 1, x1, y1, 1.0)
@@ -3165,9 +3178,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     @staticmethod
     def _ease_out_back(t):
-        """Pop: 0 -> 1 with a small overshoot past 1 near the end."""
+        """Pop: 0 -> 1 with a noticeable overshoot past 1 near the end."""
         t = max(0.0, min(1.0, t))
-        c1 = 1.70158
+        c1 = 2.2
         c3 = c1 + 1.0
         u = t - 1.0
         return 1.0 + c3 * u * u * u + c1 * u * u

@@ -52,8 +52,8 @@ LAYOUT_SETTLE_EPSILON = 0.05
 # loading draws at NODE_LOADING_ALPHA and fades to full when the daemon
 # reports it ready; a brand-new node scales up from nothing with a
 # slight overshoot ("pop") over NODE_MATERIALIZE_MS.
-NODE_MATERIALIZE_MS = 260
-NODE_FADE_MS = 220
+NODE_MATERIALIZE_MS = 360
+NODE_FADE_MS = 260
 NODE_LOADING_ALPHA = 0.45
 ANIM_TICK_MS = 16
 
