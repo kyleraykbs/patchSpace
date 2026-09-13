@@ -1200,14 +1200,21 @@ class PanelOutNode(TransparentNode):
 
 class BoolPanelInNode(Node):
     """Boolean counterpart of PanelInNode: a boolean enters from outside
-    on "in" and is republished internally on "out"."""
+    on "in" and is republished internally on "out".
+
+    ``default_state`` is what the port emits when its external input is
+    absent (the panel used standalone with nothing plumbed into this
+    input); ``None`` means "no default" (downstream falls back to its own
+    default, as before)."""
 
     BOOLEAN_INPUT = "in"
 
-    def __init__(self, node_id, port_name: str = "", description: str = ""):
+    def __init__(self, node_id, port_name: str = "", description: str = "",
+                 default_state: Optional[bool] = None):
         super().__init__(node_id)
         self.port_name = port_name
         self.description = description
+        self.default_state = default_state
 
     def port_kind(self, port: str, direction: str) -> str:
         return "boolean"
@@ -3063,8 +3070,13 @@ class PatchSpace:
             values = self._resolve_boolean_inputs(node_id, seen)
             return node.combine(values) if values else None
         if isinstance(node, (BoolPanelInNode, BoolPanelOutNode)):
-            # Panel boolean ports just relay their input.
-            return self._resolve_boolean_input(node_id, seen)
+            # Panel boolean ports relay their input.  A panel *input* with
+            # nothing wired from outside falls back to its configured
+            # default state (if any) rather than emitting nothing.
+            value = self._resolve_boolean_input(node_id, seen)
+            if value is None and isinstance(node, BoolPanelInNode):
+                return getattr(node, "default_state", None)
+            return value
         if isinstance(node, BooleanWarpOutNode):
             name = getattr(node, "warp_name", "")
             if not name:

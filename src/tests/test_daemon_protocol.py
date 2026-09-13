@@ -1158,6 +1158,36 @@ def test_gui_holds_driven_bool_state_through_unresolved_poll():
     assert resolve_bool_state_from_poll(None, True, None) is None
 
 
+def test_bool_panel_input_default_state_is_settable_and_drives():
+    d = fresh_daemon()
+    d.space.mark_graph_loaded()
+    assert d.handle_command(
+        {"command": "add_node", "node_type": "bool_panel_in",
+         "node_id": "pin", "config": {}}
+    )["status"] == "ok"
+    assert d.handle_command(
+        {"command": "add_node", "node_type": "gate", "node_id": "g",
+         "config": {}}
+    )["status"] == "ok"
+    assert d.handle_command(
+        {"command": "add_edge", "from_node": "pin", "to_node": "g",
+         "to_port": "ctrl"}
+    )["status"] == "ok"
+    # Default off (None): the gate isn't driven.
+    nodes = d.handle_command({"command": "get_nodes"})["nodes"]
+    assert nodes["g"]["bool_driven"] is False
+    # Setting the panel input's default state drives it with nothing wired
+    # from outside.
+    assert d.handle_command(
+        {"command": "set_node_property", "node_id": "pin",
+         "property": "default_state", "value": True}
+    )["status"] == "ok"
+    nodes = d.handle_command({"command": "get_nodes"})["nodes"]
+    assert nodes["pin"]["default_state"] is True
+    assert nodes["g"]["bool_driven"] is True
+    assert nodes["g"]["bool_state"] is True
+
+
 def test_warp_nodes_registry_specs_and_name_roundtrip():
     from pwnodes import (
         WarpInNode,

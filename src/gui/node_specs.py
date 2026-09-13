@@ -304,7 +304,10 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
         ["out"],
         boolean_inputs=["in"],
         boolean_outputs=["out"],
-        settings=[("description", "Description:", "text")],
+        settings=[
+            ("description", "Description:", "text"),
+            ("default_state", "Default state (when unconnected):", "bool"),
+        ],
     ),
     "bool_panel_out": NodeSpec(
         "Bool Panel Out",

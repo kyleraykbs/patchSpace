@@ -24,6 +24,7 @@ from pwnodes import (
     WarpOutNode,
     BooleanWarpInNode,
     BooleanWarpOutNode,
+    BoolPanelInNode,
     NoiseCancelNode,
     SplitterNode,
     VolumeProcessNode,
@@ -1218,6 +1219,35 @@ def test_boolean_warp_uses_first_publisher_and_separate_namespace():
     # same name (separate namespaces).
     space.add_node(WarpOutNode("awo", "m"))
     assert space._resolve_warp_audio(space.nodes["awo"], set()) == []
+
+
+def test_bool_panel_input_default_state_drives_when_unwired():
+    g = FakeGraph()
+    space = make_space(g)
+    space.mark_graph_loaded()
+    space.add_node(BoolPanelInNode("pin", default_state=True))
+    space.add_node(GateNode("gate", enabled=False))
+    space.add_edge("pin", "gate", "ctrl")
+    space.sync()
+    # Nothing wired into the panel input -> its configured default drives
+    # the gate (which would otherwise stay at its own stored default).
+    assert space.nodes["gate"].bool_driven is True
+    assert space.nodes["gate"].bool_state is True
+
+    # An external source wired in wins over the default.
+    space.add_node(BooleanSourceNode("src", output=0))
+    space.add_edge("src", "pin", "in")
+    space.sync()
+    assert space.nodes["gate"].bool_state is False
+
+    # With no default and nothing wired, the port emits nothing (the gate
+    # falls back to its own default and is not "driven").
+    space.add_node(BoolPanelInNode("pin2"))
+    space.add_node(GateNode("gate2", enabled=True))
+    space.add_edge("pin2", "gate2", "ctrl")
+    space.sync()
+    assert space.nodes["gate2"].bool_driven is False
+    assert space.nodes["gate2"].bool_state is None
 
 
 def test_audio_warp_cycle_resolves_safely():

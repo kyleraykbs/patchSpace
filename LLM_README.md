@@ -147,10 +147,7 @@ white from the daemon's `bool_driven`/`bool_state`. If a poll reports `bool_stat
 while the ctrl signal is still wired (a bool-warp publisher briefly re-created by a panel
 sync), the GUI holds the last resolved value rather than flashing back to the node's
 stored default (`gui/bool_state.py:resolve_bool_state_from_poll`); it clears once ctrl is
-genuinely disconnected. That stored default (a gate's `enabled`, a switcher's `output`)
-is editable both from the inline fallback button and from the node's **Settings** dialog
-(`show_settings_dialog`'s `fallback_onoff` branch), which sends `set_gate` /
-`set_node_property "output"`.
+genuinely disconnected.
 
 **Effect sandwich (central idea):** every effect is
 ```
@@ -278,7 +275,10 @@ sized to the label (capped at `NODE_WIDTH`). Port nodes are centered on the edge
 runs through the middle of each), locked `anchored` and always pinned in the physics - no
 unanchor control, no three-dots badge (right-click for the menu). Ports can be dragged
 **vertically only** to reorder the stack (clamped to the box); the settings dialog has a
-`description` row. The bar extends
+`description` row, and a `bool_panel_in` also has a **Default state** checkbox (reachable
+via right-click → Settings; ports show no gear badge) - the value it emits when nothing is
+wired into its external input (`BoolPanelInNode.default_state`; `None` = emit nothing, so
+downstream keeps its own default). The bar extends
 `PANEL_IO_BAR_PAD` past the top/bottom port. `_layout_panel_ports` re-centers the stack
 after every poll so ports follow the box as it grows/moves, and the panel reserves
 `NODE_WIDTH/2 + PANEL_IO_MARGIN` inside each port edge (and enough height for the stack) so

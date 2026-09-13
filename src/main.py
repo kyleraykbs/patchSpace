@@ -324,6 +324,7 @@ _SERIAL_ATTRS = (
     "ladspa_dir",
     "warp_name",
     "port_name",
+    "default_state",
     "plugin_uri",
     "decay_time",
     "room_size",
@@ -3889,6 +3890,7 @@ class PatchBayDaemon:
                 "port_type",
                 "warp_name",
                 "port_name",
+                "default_state",
             ):
                 if hasattr(node, prop):
                     setattr(node, prop, value)
