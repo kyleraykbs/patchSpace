@@ -60,6 +60,7 @@ from render_utils import (
 from force_layout import ForceLayout
 from wire_router import (
     CELL as WIRE_CELL,
+    MIN_STUB as WIRE_MIN_STUB,
     PAD as WIRE_PAD,
     SPACING as WIRE_SPACING,
     STUB as WIRE_STUB,
@@ -1940,17 +1941,28 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             # The route already leaves/enters horizontally: no stub needed.
             return list(core)
 
-        # Stick out only where the route doesn't already head outward, and
-        # clamp the length so it can't shoot past the other socket.
+        # Stick out only where the route doesn't already head outward.  The
+        # stub has an absolute minimum length (so the first segment always
+        # clears the node by WIRE_MIN_STUB) and is clamped so it can't shoot
+        # past the other socket.
         span = abs(x2 - x1)
-        slen = min(WIRE_STUB, max(6.0, span * 0.5))
+        slen = min(WIRE_STUB, max(WIRE_MIN_STUB, span * 0.5))
+        if src_stub and dst_stub:
+            slen = min(slen, span / 2.0)
         start = (x1 + slen, y1) if src_stub else (x1, y1)
         end = (x2 - slen, y2) if dst_stub else (x2, y2)
+        # Clear only around the *stubbed* endpoints: the region behind them
+        # (back over the stub, toward the node) stays blocked, so the next
+        # segment can't fold back and overlap the line already drawn.
+        clear2 = [
+            (start[0] - WIRE_CELL, y1 - corr, start[0] + WIRE_CELL, y1 + corr),
+            (end[0] - WIRE_CELL, y2 - corr, end[0] + WIRE_CELL, y2 + corr),
+        ]
         core = route_wire(start[0], start[1], end[0], end[1], obstacles,
-                          clear_rects=clear)
+                          clear_rects=clear2)
         if not core:
             core = route_wire(start[0], start[1], end[0], end[1], static,
-                              clear_rects=clear)
+                              clear_rects=clear2)
         if not core:
             return None
         path = list(core)

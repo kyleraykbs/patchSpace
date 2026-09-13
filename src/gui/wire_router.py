@@ -30,8 +30,10 @@ TURN_COST = 0.6
 # obstacles by PAD, so parallel wires end up about SPACING + PAD apart.
 SPACING = 20.0
 # How far a wire runs straight out of a socket before it may turn (the
-# little horizontal stub that makes a connection read as plugged in).
+# little horizontal stub that makes a connection read as plugged in), and
+# the absolute minimum that stub may be shortened to.
 STUB = 18.0
+MIN_STUB = 14.0
 
 _DIRS = ((1, 0), (-1, 0), (0, 1), (0, -1))
 

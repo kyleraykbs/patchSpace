@@ -245,8 +245,11 @@ grid of the endpoints' bounding box, with a turn penalty, avoiding every visible
   straight `STUB` where the route doesn't *already* head outward (output = right, input =
   left): `_wire_points` routes socket-to-socket first, and if the first/last segment
   already leaves/enters horizontally that way no stub is added; otherwise it re-routes
-  from a stubbed point, clamped so it can't shoot past the other socket - the "plugged in"
-  look without overshoot.
+  from a stubbed point. The stub has an **absolute minimum** (`MIN_STUB`) so the first
+  segment always clears the origin node, and is clamped so it can't shoot past the other
+  socket. The re-route clears only around the *stubbed* endpoints, leaving the region back
+  over the stub blocked, so the next segment can't fold back and overlap the line already
+  drawn - the "plugged in" look without overshoot or self-overlap.
 - A panel holding either endpoint is skipped (a wire must leave/enter its own panel);
   routing always uses the content-only `_panel_rect_base`, so growing a panel to enclose
   its wires can't feed back into the next frame's route.
