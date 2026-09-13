@@ -615,8 +615,10 @@ class MainWindow(Gtk.ApplicationWindow):
         box.append(cols)
 
         self._panels_list_box = Gtk.ListBox()
+        self._panels_list_box.add_css_class("panels-list")
         self._panels_list_box.set_selection_mode(Gtk.SelectionMode.NONE)
         scrolled = Gtk.ScrolledWindow()
+        scrolled.add_css_class("panels-list-scroll")
         scrolled.set_vexpand(True)
         scrolled.set_hexpand(True)
         scrolled.set_child(self._panels_list_box)
@@ -1080,6 +1082,14 @@ class MainWindow(Gtk.ApplicationWindow):
                 ".side-panel-fill {"
                 f"  background-color: {alt_hex};"
                 "  padding: 8px; }"
+                # The panel-file list is a darker "card" inside the lighter
+                # side panel; round its corners.
+                ".panels-list {"
+                f"  background-color: {bg_hex};"
+                "  border-radius: 10px;"
+                "  padding: 4px; }"
+                ".panels-list-scroll { background: transparent; }"
+                ".panels-list > row { background: transparent; }"
                 ".mouse-help {"
                 "  background-color: rgba(0, 0, 0, 0.38);"
                 "  border-radius: 8px; padding: 6px 9px; }"
