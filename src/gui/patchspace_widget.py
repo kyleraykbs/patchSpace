@@ -2184,12 +2184,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
         # Stick out only where the route doesn't already head outward.  The
         # stub has an absolute minimum length (so the first segment always
-        # clears the node by WIRE_MIN_STUB) and is clamped so it can't shoot
-        # past the other socket.
+        # clears the node by WIRE_MIN_STUB).  Deliberately NOT clamped to
+        # half the span: when the two sockets are near-vertically aligned
+        # that clamp collapsed the stub to zero and the wire left the node
+        # straight down.  A little over/under-shoot on the horizontal is
+        # preferable to no sideways exit at all.
         span = abs(x2 - x1)
         slen = min(WIRE_STUB, max(WIRE_MIN_STUB, span * 0.5))
-        if src_stub and dst_stub:
-            slen = min(slen, span / 2.0)
         start = (x1 + slen, y1) if src_stub else (x1, y1)
         end = (x2 - slen, y2) if dst_stub else (x2, y2)
         # Clear only *outward* of each stubbed endpoint: the region behind
