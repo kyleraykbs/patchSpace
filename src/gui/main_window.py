@@ -31,6 +31,7 @@ from constants import (
     ADD_NODE_PANEL_WIDTH,
     ADD_NODE_PANEL_MIN_WIDTH,
     ADD_NODE_PANEL_MAX_WIDTH,
+    TRANSPARENT_CANVAS,
 )
 from socket_client import PatchBayClient
 from daemon_control import DaemonManager
@@ -241,6 +242,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self.set_title("Patch Space")
         self.set_default_size(1200, 800)
         self._install_translucency_css()
+        if TRANSPARENT_CANVAS:
+            self.add_css_class("translucent-canvas")
 
         # Explicit titlebar with the program name (the default CSD title
         # also shows it, but this makes the name unambiguous and matches
@@ -999,14 +1002,35 @@ class MainWindow(Gtk.ApplicationWindow):
         return True
 
     def _install_translucency_css(self):
-        """CSS for the small bottom-left mouse-controls legend.
+        """Grid-only transparency + the bottom-left mouse-controls legend.
 
-        (Named for the removed canvas-transparency experiment; see
-        ``_build_mouse_help``.  The canvases are opaque on purpose - GTK's
-        client-side decorations plus a tiling compositor's border background
-        fill make a see-through canvas leak at the window edges.)"""
+        Only the canvases are see-through: their backgrounds are painted at
+        partial alpha and the window surface plus the immediate canvas
+        containers are transparent.  Everything around the grid - the
+        headerbar, tab bar, toolbars, side panels, console and the window's
+        CSD edges (shadow/rounded corners removed) - is forced opaque via
+        ``.opaque-chrome`` so the rest of the window stays filled.  Needs the
+        compositor not to fill a border background behind the window (niri:
+        ``draw-border-with-background false`` for this app-id)."""
         css = Gtk.CssProvider()
         css.load_from_data(
+            b"window.translucent-canvas {"
+            b"  background-color: transparent;"
+            b"  background-image: none;"
+            b"  box-shadow: none;"
+            b"  border-radius: 0; }"
+            b"window.translucent-canvas .csd,"
+            b"window.translucent-canvas headerbar,"
+            b"window.translucent-canvas notebook > header {"
+            b"  background-color: @window_bg_color;"
+            b"  box-shadow: none;"
+            b"  border-radius: 0; }"
+            b"window.translucent-canvas notebook > stack,"
+            b"window.translucent-canvas paned,"
+            b"window.translucent-canvas overlay {"
+            b"  background-color: transparent; }"
+            b"window.translucent-canvas .opaque-chrome {"
+            b"  background-color: @window_bg_color; }"
             b".mouse-help {"
             b"  background-color: rgba(0, 0, 0, 0.38);"
             b"  border-radius: 8px; padding: 6px 9px; }"

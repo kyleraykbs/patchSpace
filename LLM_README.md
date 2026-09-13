@@ -302,13 +302,26 @@ endpoint nodes excluded - their sockets sit on the border, so including them wou
 every blend. The router is pure geometry (no GTK) and unit-tested in
 `tests/test_wire_router.py`.
 
-*Canvas chrome.* Both graph canvases paint an **opaque** theme background. (A see-through
-canvas was tried and removed: GTK's client-side decorations plus a tiling compositor's
-border *background fill* - niri's `draw-border-with-background` - make a transparent
-client area leak at the window edges, and there is no app-side way to disable that fill.)
-A non-interactive bottom-left legend (`_build_mouse_help`) shows the mouse controls - a
-little mouse glyph per row with the left button highlighted for "Pick / pan", the middle
-for "Pan", the right for "Select".
+*Canvas chrome.* The grid background is see-through by default: both `PatchSpaceGraphWidget`
+and `PipeWireGraphWidget` paint their background at `CANVAS_BG_ALPHA` (0.80) while the
+window surface and the immediate canvas containers are transparent, and
+`main_window._install_translucency_css` forces the rest opaque via `.opaque-chrome`
+(headerbar, tab bar, toolbars, side panels, console) with the CSD shadow/rounded corners
+removed - so only the grid shows what's behind the window and the edges stay filled. This
+requires the compositor not to fill a border background behind the window; on niri add:
+
+```kdl
+window-rule {
+    match app-id="org.patchspace"
+    draw-border-with-background false
+    background-effect { xray true; blur true; }
+}
+```
+
+Set `PATCHBAY_TRANSPARENT_CANVAS=0` to force the opaque background. A non-interactive
+bottom-left legend (`_build_mouse_help`) shows the mouse controls - a little mouse glyph
+per row with the left button highlighted for "Pick / pan", the middle for "Pan", the right
+for "Select".
 
 *Node appearance.* A node the daemon hasn't finished bringing up (`ready` false) draws at
 `NODE_LOADING_ALPHA` (0.45) and fades to full once ready, and is not a hit target while it

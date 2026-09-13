@@ -19,7 +19,7 @@ from main_window import MainWindow
 
 class PatchBayApp(Gtk.Application):
     def __init__(self):
-        super().__init__(application_id="org.example.patchbay")
+        super().__init__(application_id="org.patchspace")
         # User-facing program name (window titlebar / task switcher).
         GLib.set_application_name("Patch Space")
         self.window = None
