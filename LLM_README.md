@@ -303,12 +303,18 @@ every blend. The router is pure geometry (no GTK) and unit-tested in
 `tests/test_wire_router.py`.
 
 *Node appearance.* A node the daemon hasn't finished bringing up (`ready` false) draws at
-`NODE_LOADING_ALPHA` (0.45) and fades to full once ready. A brand-new node also animates in
-on creation: it scales up from nothing about its centre with an ease-out-back "pop"
-(`_ease_out_back`) over `NODE_MATERIALIZE_MS`. `_anim_tick` (a 16ms `GLib` timeout) drives
-per-node alpha/scale and repaints while anything is animating; the draw path wraps an
-animating node in a cairo group and `paint_with_alpha` so the whole node (text included)
-fades/scales uniformly. Only the `DrawingArea`'s own node rendering uses this - the raw
+`NODE_LOADING_ALPHA` (0.45) and fades to full once ready, and is not a hit target while it
+loads (`_hit_nodes` skips it). A heavy node (Echo Cancel, ...) is added to the canvas
+immediately as an optimistic **placeholder** (`_add_placeholder_node`, called from
+`_on_add_node`/`add_node_at`): the daemon holds its `add_node` reply until the module has
+actually spawned, so a poll can't reveal it before then and otherwise nothing would appear
+until it was ready. A brand-new node also animates in on creation: it scales up from
+nothing about its centre with an ease-out-back "pop" (`_ease_out_back`) over
+`NODE_MATERIALIZE_MS`. `_anim_tick` (a 16ms `GLib` timeout) owns the pop - it starts it the
+first time it sees a *revealed* node so a slow load's scale-up isn't over before the node
+is drawn - and repaints while anything is animating; the draw path wraps an animating node
+in a cairo group and `paint_with_alpha` so the whole node (text included) fades/scales
+uniformly. Only the `DrawingArea`'s own node rendering uses this - the raw
 PipeWire tab is untouched.
 
 *Edit mode.* A panel's parameter values (volumes, switches, effect knobs) are **not**

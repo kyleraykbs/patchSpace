@@ -2437,11 +2437,17 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         every node, top-first."""
         if x is not None and y is not None:
             for nid, node in reversed(self.nodes.items()):
+                if not node.get("ready", True):
+                    # Still loading: drawn translucent and not a hit target.
+                    continue
                 if node["x"] <= x <= node["x"] + self.node_width(nid) and node[
                     "y"
                 ] <= y <= node["y"] + self.node_height(nid):
                     return iter(((nid, node),))
-        return reversed(self.nodes.items())
+        return iter(
+            (nid, node) for nid, node in reversed(self.nodes.items())
+            if node.get("ready", True)
+        )
 
     # ---------- panel hit tests ----------
 
@@ -7741,6 +7747,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # Remember this as user-spawned so update_from_daemon anchors it
         # by default (loaded/builtin nodes are not anchored).
         self._user_created_nodes.add(node_id)
+        view_w = self.get_width() or 800
+        view_h = self.get_height() or 600
+        cx, cy = self.to_world(view_w / 2.0, view_h / 2.0)
+        self._add_placeholder_node(
+            real_type, node_id, config,
+            cx - self.NODE_WIDTH / 2.0, cy - self.NODE_HEIGHT / 2.0,
+        )
         self.client.send(
             {
                 "command": "add_node",
@@ -7752,6 +7765,53 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         popover.popdown()
         GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
 
+    def _add_placeholder_node(self, real_type, node_id, config, px, py):
+        """Show a node the instant the user adds it, translucent and
+        non-interactable, until the daemon reports it ``ready``.
+
+        The daemon holds its ``add_node`` reply until a heavy node (Echo
+        Cancel, ...) has actually spawned, so a ``get_nodes`` poll can't
+        reveal the node before then - without this optimistic placeholder
+        nothing at all appears until it is ready."""
+        if node_id in self.nodes:
+            return
+        ntype = normalize_node_type(real_type)
+        spec = spec_for(ntype)
+        self.nodes[node_id] = {
+            "type": ntype,
+            "x": float(px),
+            "y": float(py),
+            "inputs": spec.inputs,
+            "outputs": spec.outputs,
+            "meta": dict(config),
+            "label": config.get("label", ""),
+            "enabled": True,
+            "output": 0,
+            "bool_driven": False,
+            "bool_state": None,
+            "volume": 1.0,
+            "wet_dry": 0.3,
+            "level": 25.0,
+            "sensitivity": 0.0,
+            "gain": 0.5,
+            "device_volume": 1.0,
+            "device_name": "",
+            "app_name": "",
+            "connected": False,
+            "is_bluetooth": False,
+            "selection_label": "",
+            "ready": False,
+            "health": "starting",
+            "profile_index": None,
+            "codec_label": "",
+            "volume_locked": True,
+            "force_default": True,
+            "placeholder": True,
+        }
+        self._node_h_cache.pop(node_id, None)
+        self._node_w_cache.pop(node_id, None)
+        self.queue_draw()
+
     def add_node_at(self, node_type, wx, wy):
         """Add a node of `node_type`, remembering (wx, wy) - world
         coordinates - as where it should land once the daemon reports
@@ -7762,9 +7822,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         half_w = (
             self.SPLITTER_MIN_SIZE if real_type == "splitter" else self.NODE_WIDTH
         ) / 2
-        self._pending_positions[node_id] = (
-            wx - half_w,
-            wy - self.NODE_HEIGHT / 2,
+        self._add_placeholder_node(
+            real_type, node_id, config,
+            wx - half_w, wy - self.NODE_HEIGHT / 2,
         )
         self.client.send(
             {
