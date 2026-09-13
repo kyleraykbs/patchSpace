@@ -28,6 +28,12 @@ DAEMON_POLL_MS = 500
 # output is bursty and there's no point polling it as hard as the graph.
 LOG_POLL_MS = 800
 
+# How often the right-hand panels side view re-reads the panel-file list
+# while it is open, so files created/edited/deleted outside the current
+# GUI action still show up. Cheap (a directory scan + small JSON reads on
+# the daemon) and only sent while the view is actually visible.
+PANELS_VIEW_REFRESH_MS = 2000
+
 # Session loads (main.py's _cmd_load_session runs in a background thread
 # and stages nodes one at a time) drive a transparent loading-wheel
 # overlay + auto-opened log console in the GUI. The overlay is kept up

@@ -285,11 +285,14 @@ them in the right file.
 
 *Panels side view.* A docked, scrollable list of panel files lives on the right (the endchild of an outer `Gtk.Paned`), toggled by a button directly under the top-right
 hamburger (`main_window._panels_toggle` / `_build_panels_view`). A column-header row labels
-the controls; each row shows the panel's colour dot, label, a dim "N nodes · M child
-panels" line (`_panel_detail_text`, fed by `list_panel_files`), then an **Auto**-load
+the controls; each row shows the panel's colour dot, label, two dim count lines (nodes
+above panels, from `list_panel_files`'s `node_count`/`children`), then an **Auto**-load
 checkbox, an **Add** (place) button and a **Del** button. Del confirms, then sends
-`delete_panel_file` (which removes the file and every placement's subtree) and re-lists.
-The old standalone "Panels… dialog" (and its Select/Group/Delete surface) has been removed.
+`delete_panel_file` (which removes the file and every placement's subtree). The list
+re-reads on every toggle and on a `PANELS_VIEW_REFRESH_MS` timer while visible, and
+`process_responses` refreshes it the moment a panel-file action (delete / auto-load /
+create / clone) completes. The old standalone "Panels… dialog" (and its Select/Group/
+Delete surface) has been removed.
 
 *Physics* is hierarchical (`_hierarchical_step`, `on_layout_tick`): node physics runs
 inside each panel in that panel's local frame (internal edges only). Node physics and the

@@ -26,6 +26,7 @@ from constants import (
     POLL_RESPONSES_MS,
     LOG_POLL_MS,
     DAEMON_POLL_MS,
+    PANELS_VIEW_REFRESH_MS,
     ADD_NODE_PANEL_WIDTH,
     ADD_NODE_PANEL_MIN_WIDTH,
     ADD_NODE_PANEL_MAX_WIDTH,
@@ -291,6 +292,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
         GLib.timeout_add(DAEMON_POLL_MS, self._poll_daemon_connection)
         GLib.timeout_add(POLL_RESPONSES_MS, self.process_responses)
+        GLib.timeout_add(PANELS_VIEW_REFRESH_MS, self._poll_panels_view)
         # Heartbeat + optional hang watchdog - see _arm_hang_watchdog.
         _heartbeat_time[0] = time.monotonic()
         GLib.timeout_add(200, _heartbeat)
@@ -603,8 +605,20 @@ class MainWindow(Gtk.ApplicationWindow):
     def _on_panels_toggled(self, button):
         self.panels_view.set_visible(button.get_active())
         if button.get_active():
-            # Refresh the listing for the side view.
-            self.client.send({"command": "list_panel_files"})
+            self._refresh_panels_view()
+
+    def _refresh_panels_view(self):
+        """Ask the daemon for a fresh panel-file listing (side view only)."""
+        self.client.send({"command": "list_panel_files"})
+
+    def _poll_panels_view(self):
+        """Periodically re-read the panel-file list while the side view is
+        open, so files that change outside the current GUI action (or an
+        action whose reply we don't otherwise see) show up on their own.
+        Returns True to keep the GLib timeout alive."""
+        if hasattr(self, "panels_view") and self.panels_view.get_visible():
+            self._refresh_panels_view()
+        return True
 
     def _set_physics(self, active):
         """Single entry point for the physics pause/resume state, kept in
@@ -658,7 +672,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 )
             )
             row.append(dot)
-            # Name over a dim "N nodes · M child panels" line.
+            # Name over the dim counts (nodes above panels).
             text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
             text.set_hexpand(True)
             name = Gtk.Label(label=str(entry.get("label") or entry.get("stem", "?")))
@@ -666,15 +680,27 @@ class MainWindow(Gtk.ApplicationWindow):
             name.set_hexpand(True)
             name.set_ellipsize(Pango.EllipsizeMode.END)
             text.append(name)
-            detail = Gtk.Label(label=self._panel_detail_text(entry))
-            detail.set_xalign(0)
-            detail.set_ellipsize(Pango.EllipsizeMode.END)
-            detail.add_css_class("dim-label")
+            # Counts stacked, nodes above panels (not side by side).
+            nodes = int(entry.get("node_count", 0) or 0)
             children = [str(c) for c in (entry.get("children") or [])]
-            detail.set_tooltip_text(
-                "Child panels: " + ", ".join(children) if children else None
-            )
-            text.append(detail)
+            for line, tip in (
+                (
+                    f"{nodes} {'node' if nodes == 1 else 'nodes'}",
+                    "Nodes defined by this panel file",
+                ),
+                (
+                    f"{len(children)} "
+                    f"{'panel' if len(children) == 1 else 'panels'}",
+                    "Sub-panels: " + ", ".join(children) if children
+                    else "No sub-panels",
+                ),
+            ):
+                lab = Gtk.Label(label=line)
+                lab.set_xalign(0)
+                lab.set_ellipsize(Pango.EllipsizeMode.END)
+                lab.add_css_class("dim-label")
+                lab.set_tooltip_text(tip)
+                text.append(lab)
             row.append(text)
             auto = Gtk.CheckButton()
             auto.set_size_request(self._PANEL_BTN_W, -1)
@@ -731,14 +757,6 @@ class MainWindow(Gtk.ApplicationWindow):
             row.add_controller(drag_source)
             self._panels_list_box.append(row)
 
-    @staticmethod
-    def _panel_detail_text(entry):
-        nodes = int(entry.get("node_count", 0) or 0)
-        kids = len(entry.get("children") or [])
-        node_word = "node" if nodes == 1 else "nodes"
-        kid_word = "child panel" if kids == 1 else "child panels"
-        return f"{nodes} {node_word} \u00b7 {kids} {kid_word}"
-
     def _confirm_delete_panel_file(self, entry):
         """Confirm, then delete a panel *file* (and every placement of it)."""
         label = entry.get("label") or entry.get("stem")
@@ -768,9 +786,9 @@ class MainWindow(Gtk.ApplicationWindow):
         self.client.send(
             {"command": "delete_panel_file", "stem": entry.get("stem")}
         )
-        # Commands are handled in order, so this refreshes the list once the
-        # delete has landed.
-        self.client.send({"command": "list_panel_files"})
+        # The listing is refreshed when the daemon's reply lands (see
+        # process_responses) - and by the periodic side-view poll - so the
+        # row disappears even if this reply is delayed.
 
     def _build_loading_overlay(self):
         """A translucent full-canvas sheet with a centered Gtk.Spinner,
@@ -1045,6 +1063,16 @@ class MainWindow(Gtk.ApplicationWindow):
                     self._update_panels_view(resp)
                 elif "payload" in resp and "panel_id" in resp:
                     self.ps_widget.on_panel_export(resp)
+                elif "stem" in resp and (
+                    "removed" in resp or "auto_load" in resp
+                ):
+                    # A panel-*file* action completed (delete, auto-load):
+                    # re-read the listing so the side view updates now
+                    # rather than at the next periodic refresh.
+                    self._refresh_panels_view()
+                elif "panel_id" in resp:
+                    # create_panel / clone_panel landed - a new file exists.
+                    self._refresh_panels_view()
                 elif "nodes" in resp:
                     self.ps_widget.update_from_daemon(resp)
             except Exception:
