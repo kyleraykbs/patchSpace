@@ -6063,10 +6063,31 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             if cr_rect is None:
                 continue
             cx, cy, cw, ch = cr_rect
+            # A child's IO ports straddle its edge and are excluded from its
+            # own auto-fit, so fold them (plus the bar overhang) into the
+            # parent's bounds - otherwise the ports poke out of the master
+            # panel.
+            pad = self.PANEL_IO_BAR_PAD
+            right = cx + cw
+            bottom = cy + ch
+            for cnid in self._panel_direct_nodes(child):
+                cnode = self.nodes.get(cnid)
+                if cnode is None or cnode.get("type") not in (
+                    self._PORT_IN_TYPES | self._PORT_OUT_TYPES
+                ):
+                    continue
+                cx = min(cx, cnode["x"] - pad)
+                cy = min(cy, cnode["y"] - pad)
+                right = max(
+                    right, cnode["x"] + self.node_width(cnid) + pad
+                )
+                bottom = max(
+                    bottom, cnode["y"] + self.node_height(cnid) + pad
+                )
             minx = cx if minx is None else min(minx, cx)
             miny = cy if miny is None else min(miny, cy)
-            maxx = cx + cw if maxx is None else max(maxx, cx + cw)
-            maxy = cy + ch if maxy is None else max(maxy, cy + ch)
+            maxx = right if maxx is None else max(maxx, right)
+            maxy = bottom if maxy is None else max(maxy, bottom)
         # Groups owned by this panel (all members inside it) contribute
         # their outline *and* the title block above it, so the panel box
         # leaves room for a group's title and edges instead of clipping
