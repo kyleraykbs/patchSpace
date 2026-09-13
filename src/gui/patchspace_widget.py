@@ -255,6 +255,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._marquee_start_world = (0.0, 0.0)
         self._right_drag_moved = False
         self._right_drag_mods = Gdk.ModifierType(0)
+        self._right_drag_cancelled = False
         self._right_marquee_base = set()
         # Panel-file dialogs: last listing, the open dialog, and the
         # "open the panel list once it arrives" handshake.
@@ -6847,11 +6848,27 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self.queue_draw()
 
     def on_right_drag_begin(self, gesture, start_x, start_y):
+        # A right press *during* a left node-drag cancels that drag: snap the
+        # dragged node(s) back to where they were picked up and swallow the
+        # click (no marquee, no menu).
+        cancelled = False
+        if self.dragging_node is not None and self.drag_node_starts:
+            for nid, (sx, sy) in self.drag_node_starts.items():
+                node = self.nodes.get(nid)
+                if node is not None:
+                    node["x"] = sx
+                    node["y"] = sy
+            cancelled = True
         # A right press often follows (or is chorded during) a left
         # drag; force any lingering left drag to release so its grab
         # can't fight the marquee/menu.
         self._drag_gesture.reset()
         self._reset_drag_state()
+        self._right_drag_cancelled = cancelled
+        if cancelled:
+            self._panel_geo_cache.clear()
+            self.queue_draw()
+            return
         self._right_drag_start_widget = (start_x, start_y)
         self._right_drag_start_world = self.to_world(start_x, start_y)
         self._right_drag_moved = False
@@ -6863,6 +6880,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self.select_rect = None
 
     def on_right_drag_update(self, gesture, offset_x, offset_y):
+        if getattr(self, "_right_drag_cancelled", False):
+            return
         # Small dead-zone so a click with a pixel of jitter still opens
         # the menu instead of drawing a 1x1 selection box.
         if offset_x * offset_x + offset_y * offset_y < 25.0:
@@ -6887,6 +6906,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self.queue_draw()
 
     def on_right_drag_end(self, gesture, offset_x, offset_y):
+        if getattr(self, "_right_drag_cancelled", False):
+            self._right_drag_cancelled = False
+            self.select_rect = None
+            self.queue_draw()
+            return
         moved = self._right_drag_moved
         self._right_drag_moved = False
         self.select_rect = None
@@ -6913,6 +6937,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._open_context_menu(x, y)
 
     def on_right_drag_cancel(self, gesture, sequence):
+        self._right_drag_cancelled = False
         self._right_drag_moved = False
         self.select_rect = None
         self.queue_draw()
