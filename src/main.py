@@ -1570,6 +1570,10 @@ class PatchBayDaemon:
                 label=cmd.get("label") or name,
                 color=cmd.get("color") or panels.DEFAULT_COLOR,
                 mode=mode, path=path, writable=True, stem=local,
+                # New panels start pinned/paused so the layout doesn't shove
+                # them around the moment they're created (the panel header's
+                # physics toggle re-arms them).
+                anchored=True,
                 x=float(cmd.get("x", 0.0) or 0.0) - px,
                 y=float(cmd.get("y", 0.0) or 0.0) - py,
                 w=max(panels.MIN_W, float(cmd.get("w", panels.DEFAULT_W) or 0.0)),
@@ -1737,6 +1741,8 @@ class PatchBayDaemon:
             mode=panels.MODE_RW, x=src.x + 40.0, y=src.y + 40.0,
             w=src.w, h=src.h, path=path, writable=True,
             auto_load=src.auto_load,
+            # A fresh clone starts pinned/paused like a newly created panel.
+            anchored=True,
             config={
                 "nodes": dict(live.config.get("nodes") or {}),
                 "edges": list(live.config.get("edges") or []),
@@ -1844,7 +1850,8 @@ class PatchBayDaemon:
             "y": float(cmd.get("y", 0.0) or 0.0),
             "w": max(panels.MIN_W, float(cmd.get("w", panels.DEFAULT_W) or 0.0)),
             "h": max(panels.MIN_H, float(cmd.get("h", panels.DEFAULT_H) or 0.0)),
-            "anchored": bool(cmd.get("anchored", False)),
+            # Pinned/paused by default so a freshly placed panel holds still.
+            "anchored": bool(cmd.get("anchored", True)),
         }
         with self._lock:
             existing = set(parent.children)

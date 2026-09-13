@@ -313,7 +313,11 @@ node/edge/panel set changes, so it also runs right after a panel is created or l
 authoritative while physics/drag moves it (`_pending_panels`): a poll carries the last
 flushed placement, so accepting it would snap the panel - and, since moving a panel moves
 its nodes, drag every node back - each refresh. It is handed back to the daemon when the
-daemon echoes exactly what was sent.
+daemon echoes exactly what was sent. Newly created, cloned and placed panels start
+**pinned/paused** (`anchored=True`) so the re-armed layout can't shove a fresh panel
+around; `_panel_is_paused` (self or any ancestor anchored) makes a paused panel skip
+physics entirely - both its own nodes and the panel-vs-panel pass - and the panel header's
+physics-stop toggle unpins it.
 
 *Reparenting:* dragging a node across a boundary sends `move_nodes`; the daemon
 re-qualifies its id, re-homes its edges (ownership is derived from ids) and re-points

@@ -849,6 +849,21 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             guard += 1
         return x, y
 
+    def _panel_is_paused(self, panel_id):
+        """Whether `panel_id` is pinned/paused: True if it, or any ancestor,
+        carries the panel header's physics-stop flag (`anchored`).  A paused
+        panel is skipped entirely by physics - its own nodes and the panel
+        itself hold still - which is what makes the per-panel pause button
+        (and the paused-by-default state of a new panel) meaningful."""
+        pid = panel_id
+        guard = 0
+        while pid and pid in self.panels and guard < 64:
+            if self.panels[pid].get("anchored"):
+                return True
+            pid = self.panels[pid].get("parent", "")
+            guard += 1
+        return False
+
     def _panel_member_nodes(self, panel_id):
         prefix = panel_id + "::" if panel_id else ""
         out = []
@@ -1275,6 +1290,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             return 0.0
         max_delta = 0.0
         for pid in [""] + [p for p in self.panels if p]:
+            if self._panel_is_paused(pid):
+                # This panel is pinned/paused (its header toggle, or an
+                # ancestor's): leave its nodes exactly where they are.
+                continue
             members = self._panel_direct_nodes(pid)
             if len(members) < 2:
                 continue
@@ -1347,7 +1366,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 b = panel_of(e["to_node"])
                 if a != b and a in kid_set and b in kid_set:
                     edges.append((a, b))
-            pinned = {pid for pid in pids if self.panels[pid].get("anchored")}
+            pinned = {pid for pid in pids if self._panel_is_paused(pid)}
             if self.dragging_panel in kid_set:
                 pinned.add(self.dragging_panel)
             delta = self.panel_force_layout.step(pids, positions, sizes, edges, pinned)

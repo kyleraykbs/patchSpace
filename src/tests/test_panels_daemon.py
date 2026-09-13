@@ -194,8 +194,10 @@ def test_create_panel_honours_placement(tmp_path):
     panel = d.panels["kit"]
     assert (panel.x, panel.y, panel.w, panel.h) == (10.0, 20.0, 333.0, 222.0)
     raw = json.load(open(os.path.join(pdir, "kit.json")))
+    # New panels default to pinned/paused (physics off for them), so the
+    # placement records anchored True even though the caller didn't ask.
     assert raw["placement"] == {
-        "x": 10.0, "y": 20.0, "w": 333.0, "h": 222.0, "anchored": False,
+        "x": 10.0, "y": 20.0, "w": 333.0, "h": 222.0, "anchored": True,
     }
 
 
@@ -343,6 +345,8 @@ def test_clone_panel_creates_a_new_live_panel(tmp_path):
     stem = resp["panel_id"]
     assert os.path.isfile(os.path.join(pdir, stem + ".json"))
     assert stem in d.panels
+    # A fresh clone starts pinned/paused, like a newly created panel.
+    assert d.panels[stem].anchored is True
     # The clone's node is live and namespaced under the new panel.
     assert f"{stem}::a" in d.space.nodes
     assert "kit::a" in d.space.nodes
@@ -480,6 +484,8 @@ def test_place_panel_adds_a_second_placement(tmp_path):
     assert name != "kit"
     assert name in d.panels
     assert d.panels[name].stem == "kit"
+    # A fresh placement starts pinned/paused, like a newly created panel.
+    assert d.panels[name].anchored is True
     # Both placements have their own live nodes from the shared file.
     assert "kit::a" in d.space.nodes
     assert f"{name}::a" in d.space.nodes
