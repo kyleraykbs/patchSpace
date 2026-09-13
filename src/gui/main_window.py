@@ -10,6 +10,7 @@ whichever tab it belongs to.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import signal
 import sys
@@ -238,6 +239,9 @@ class MainWindow(Gtk.ApplicationWindow):
         super().__init__(application=app)
         self.set_title("Patch Space")
         self.set_default_size(1200, 800)
+        # See the compositor/desktop through the PatchSpace grid.
+        self.add_css_class("translucent-canvas")
+        self._install_translucency_css()
 
         # Explicit titlebar with the program name (the default CSD title
         # also shows it, but this makes the name unambiguous and matches
@@ -462,6 +466,9 @@ class MainWindow(Gtk.ApplicationWindow):
             "toggled", lambda b: self._set_physics(b.get_active())
         )
         overlay.add_overlay(self._physics_toggle)
+
+        # Bottom-left mouse-controls cheat sheet.
+        overlay.add_overlay(self._build_mouse_help())
 
         # Floating delete button for the current selection, pinned to the
         # canvas's bottom-right and shown only while something is selected.
@@ -838,6 +845,81 @@ class MainWindow(Gtk.ApplicationWindow):
         # process_responses) - and by the periodic side-view poll - so the
         # row disappears even if this reply is delayed.
 
+    def _build_mouse_help(self):
+        """A small bottom-left legend of the canvas mouse controls: left =
+        pick/pan, middle = pan, right = select.  Purely informational (not a
+        hit target)."""
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        box.add_css_class("mouse-help")
+        box.set_halign(Gtk.Align.START)
+        box.set_valign(Gtk.Align.END)
+        box.set_margin_start(10)
+        box.set_margin_bottom(10)
+        box.set_can_target(False)
+        for button, text in (
+            ("left", "Pick / pan"),
+            ("middle", "Pan"),
+            ("right", "Select"),
+        ):
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            row.append(self._mouse_icon(button))
+            label = Gtk.Label(label=text)
+            label.set_xalign(0)
+            row.append(label)
+            box.append(row)
+        return box
+
+    def _mouse_icon(self, button):
+        """A tiny mouse with `button` ('left'|'middle'|'right') highlighted."""
+        area = Gtk.DrawingArea()
+        area.set_content_width(18)
+        area.set_content_height(26)
+        area.set_valign(Gtk.Align.CENTER)
+        area.set_draw_func(
+            lambda _a, cr, w, h: self._draw_mouse_icon(cr, w, h, button)
+        )
+        return area
+
+    @staticmethod
+    def _draw_mouse_icon(cr, w, h, button):
+        x, y = 2.0, 1.5
+        bw, bh = w - 4.0, h - 3.0
+        r = bw / 2.0
+        cx = x + bw / 2.0
+        btn_h = bh * 0.42
+
+        def body_path():
+            cr.move_to(x, y + r)
+            cr.arc(cx, y + r, r, math.pi, 2.0 * math.pi)
+            cr.line_to(x + bw, y + bh - r)
+            cr.arc(cx, y + bh - r, r, 0.0, math.pi)
+            cr.close_path()
+
+        # Button fill, clipped to the body.
+        cr.save()
+        body_path()
+        cr.clip()
+        cr.set_source_rgba(0.30, 0.72, 1.0, 0.85)
+        if button == "left":
+            cr.rectangle(x, y, bw / 2.0, btn_h)
+        elif button == "right":
+            cr.rectangle(cx, y, bw / 2.0, btn_h)
+        else:
+            cr.rectangle(cx - 2.5, y, 5.0, btn_h * 0.8)
+        cr.fill()
+        cr.restore()
+
+        # Outline + button divider lines.
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.85)
+        cr.set_line_width(1.3)
+        body_path()
+        cr.stroke()
+        cr.move_to(x, y + btn_h)
+        cr.line_to(x + bw, y + btn_h)
+        cr.move_to(cx, y)
+        cr.line_to(cx, y + btn_h)
+        cr.stroke()
+
     def _build_loading_overlay(self):
         """A translucent full-canvas sheet with a centered Gtk.Spinner,
         hidden until a session load starts.  Gtk.Overlay overlay children
@@ -914,6 +996,32 @@ class MainWindow(Gtk.ApplicationWindow):
         missed; the client itself is the thing actively reconnecting."""
         self._apply_connection_state(self.client.is_connected())
         return True
+
+    def _install_translucency_css(self):
+        """Make the window shell and the page containers transparent so the
+        PatchSpace canvas (which clears to alpha 0 in on_draw) shows the
+        compositor/desktop behind it.  Scoped to ``.translucent-canvas`` so
+        only this window is affected; widgets that carry their own theme
+        background (tabs header, buttons, the raw PipeWire canvas) stay
+        opaque."""
+        css = Gtk.CssProvider()
+        css.load_from_data(
+            b"window.translucent-canvas,"
+            b"window.translucent-canvas notebook,"
+            b"window.translucent-canvas notebook > stack,"
+            b"window.translucent-canvas paned,"
+            b"window.translucent-canvas overlay {"
+            b"  background-color: transparent; }"
+            b".mouse-help {"
+            b"  background-color: rgba(0, 0, 0, 0.38);"
+            b"  border-radius: 8px; padding: 6px 9px; }"
+            b".mouse-help label { color: #ffffff; font-size: 11px; }"
+        )
+        display = Gdk.Display.get_default()
+        if display is not None:
+            Gtk.StyleContext.add_provider_for_display(
+                display, css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+            )
 
     def _install_loading_css(self):
         # GTK4 has no per-widget background-color setter; a display-wide

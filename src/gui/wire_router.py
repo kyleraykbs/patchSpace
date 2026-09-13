@@ -32,11 +32,13 @@ TURN_COST = 1.2
 SPACING = 20.0
 # How far a wire runs straight out of a socket before it may turn (the
 # little horizontal stub that makes a connection read as plugged in), and
-# the absolute minimum that stub may be shortened to.  Kept >= 2 x the
-# render corner radius (render_utils.CORNER_RADIUS) so every bend fits a
-# constant-radius curve.
-STUB = 30.0
-MIN_STUB = 28.0
+# the absolute minimum that stub may be shortened to.  Kept comfortably
+# longer than 2 x the render corner radius (render_utils.CORNER_RADIUS) so
+# a clear straight sideways run is visible before the bend - otherwise the
+# rounded corner starts at the socket and the wire looks like it leaves
+# straight up/down.
+STUB = 44.0
+MIN_STUB = 40.0
 
 _DIRS = ((1, 0), (-1, 0), (0, 1), (0, -1))
 

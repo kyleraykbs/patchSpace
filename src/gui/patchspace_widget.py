@@ -22,6 +22,7 @@ if/elif chains here.
 
 from __future__ import annotations
 
+import cairo
 import json
 import logging
 import math
@@ -3040,8 +3041,15 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # wires running inside them, so their boxes must know the routes.
         self._route_all_wires()
         pal = theme_palette(self)
-        cr.set_source_rgb(*pal["bg"])
+        # Transparent canvas: clear to alpha 0 instead of painting an opaque
+        # background, so the compositor can show whatever is behind the
+        # window through the grid (the window/page are made transparent in
+        # main_window's CSS).
+        cr.save()
+        cr.set_operator(cairo.OPERATOR_CLEAR)
+        cr.set_source_rgba(0, 0, 0, 0)
         cr.paint()
+        cr.restore()
 
         cr.save()
         self.apply_view_transform(cr)
