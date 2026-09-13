@@ -219,7 +219,8 @@ a new file and reloads so the copy is live), and `Copy as JSON` / `Save to File\
 read-only panels too). Delete asks whether to also delete the panel's nodes or keep them
 (moved up into the parent panel; `delete_panel` with `keep_nodes`). The box **tightly
 auto-fits its contents** in every direction (like a group) with `PANEL_PADDING`: member
-nodes, child panels, and the outlines **and title blocks** of groups owned by the panel
+nodes, child panels (their boxes, their floating title rows, and their straddling IO
+ports), and the outlines **and title blocks** of groups owned by the panel
 (all members inside it), so group titles/edges are never clipped. It has a **square
 minimum size** (`PANEL_MIN_SIDE`, centred on the content); there is no manual resize
 handle. Each node living in a non-root panel also gets a tiny panel-coloured chip at its

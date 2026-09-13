@@ -6089,6 +6089,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             if cr_rect is None:
                 continue
             cx, cy, cw, ch = cr_rect
+            # A child panel's title row (title + action buttons) floats
+            # *above* its box, just like a group's title - fold it into the
+            # parent's content bounds so the master panel grows to enclose
+            # it instead of letting the title poke out of the top edge.
+            child_hdr = self._panel_header_rects(child, cr_rect)
+            cy = min(cy, child_hdr["header"][1])
             # A child's IO ports straddle its edge and are excluded from its
             # own auto-fit, so fold them (plus the bar overhang) into the
             # parent's bounds - otherwise the ports poke out of the master
