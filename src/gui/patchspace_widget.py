@@ -7810,6 +7810,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         }
         self._node_h_cache.pop(node_id, None)
         self._node_w_cache.pop(node_id, None)
+        # User-created nodes are pinned by default (same rule the poll's
+        # new-node path applies; the placeholder pre-empts that branch).
+        self.anchored_nodes.add(node_id)
+        self._mark_layout_dirty()
         self.queue_draw()
 
     def add_node_at(self, node_type, wx, wy):
