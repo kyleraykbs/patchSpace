@@ -54,7 +54,7 @@ from render_utils import (
     draw_text_wrapped,
     wrapped_text_height,
     draw_bezier_link,
-    draw_rounded_path,
+    draw_smooth_path,
     draw_grid_background,
 )
 from force_layout import ForceLayout
@@ -367,6 +367,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             flow_k=0.0,
             repulsion_cutoff=650,
             size_aware_springs=True,
+            overlap_padding=30.0,
         )
         self.layout_awake = True
         self._settle_ticks = 0
@@ -2473,7 +2474,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 edge, out_x, out_y, in_x, in_y, wire_rects
             )
             if points:
-                draw_rounded_path(cr, points)
+                draw_smooth_path(cr, points)
             else:
                 draw_bezier_link(cr, out_x, out_y, in_x, in_y)
 

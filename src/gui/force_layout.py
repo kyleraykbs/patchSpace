@@ -28,6 +28,7 @@ class ForceLayout:
         flow_k=0.025,
         repulsion_cutoff=1200.0,
         size_aware_springs=False,
+        overlap_padding=14.0,
     ):
         self.repulsion = repulsion
         self.spring_length = spring_length
@@ -47,6 +48,10 @@ class ForceLayout:
         # projected onto the edge direction, so large boxes (panels) spring
         # to sit edge-to-edge instead of overlapping at a fixed distance.
         self.size_aware_springs = size_aware_springs
+        # Minimum gap the overlap-resolution pass leaves between two
+        # rectangles (see _resolve_overlaps).  Nodes use a small value;
+        # panels use a larger one so their boxes don't touch.
+        self.overlap_padding = overlap_padding
         self.velocities: dict = {}
 
     def _ensure(self, node_id):
@@ -205,6 +210,7 @@ class ForceLayout:
         together, which pure force integration doesn't guarantee (see
         module docstring)."""
         max_shift = 0.0
+        pad = self.overlap_padding
         cell_size = max((w for w, _ in sizes.values()), default=200) * 1.5
         corners = {nid: positions[nid] for nid in ids}
         grid = self._build_grid(ids, corners, cell_size)
@@ -215,10 +221,10 @@ class ForceLayout:
             bx, by = positions[b]
             bw, bh = sizes.get(b, (160, 80))
 
-            overlap_x = min(ax + aw, bx + bw) - max(ax, bx)
-            overlap_y = min(ay + ah, by + by + bh - by) - max(ay, by)
-            # (kept the y computation simple below instead)
-            overlap_y = min(ay + ah, by + bh) - max(ay, by)
+            # Inflate the overlap by `pad` so the correction separates the
+            # rectangles to a visible gap, not just to touching.
+            overlap_x = min(ax + aw, bx + bw) - max(ax, bx) + pad
+            overlap_y = min(ay + ah, by + bh) - max(ay, by) + pad
             if overlap_x <= 0 or overlap_y <= 0:
                 continue
 
@@ -231,14 +237,14 @@ class ForceLayout:
             # diagonally across the canvas for a mostly-horizontal
             # overlap (or vice versa).
             if overlap_x < overlap_y:
-                push = overlap_x / 2.0 + 1.0
+                push = overlap_x / 2.0
                 a_dir, b_dir = (-1, 1) if ax < bx else (1, -1)
                 if not a_pinned:
                     positions[a] = (ax + a_dir * push, ay)
                 if not b_pinned:
                     positions[b] = (bx + b_dir * push, by)
             else:
-                push = overlap_y / 2.0 + 1.0
+                push = overlap_y / 2.0
                 a_dir, b_dir = (-1, 1) if ay < by else (1, -1)
                 if not a_pinned:
                     positions[a] = (ax, ay + a_dir * push)

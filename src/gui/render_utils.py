@@ -215,34 +215,29 @@ def draw_bezier_link(cr, x1, y1, x2, y2):
     cr.stroke()
 
 
-def draw_rounded_path(cr, points, radius=12.0):
-    """Stroke a polyline with its corners rounded off (inward), so an
-    orthogonal wire route reads as a natural bent wire rather than a
-    circuit trace.  ``points`` should already be simplified (no duplicate
-    or collinear midpoints)."""
+def draw_smooth_path(cr, points, iterations=3):
+    """Stroke a polyline as a smooth curve by Chaikin corner-cutting.
+
+    The routed wire detours are orthogonal, which reads as rigid; a few
+    rounds of Chaikin replace each corner with a gentle arc.  The result
+    stays inside the polyline's convex hull, so it can't bulge back into
+    a node the route was avoiding, and it keeps the endpoints exact."""
     if not points:
         return
-    if len(points) == 1:
-        return
-    cr.move_to(points[0][0], points[0][1])
-    for i in range(1, len(points) - 1):
-        px, py = points[i - 1]
-        cx, cy = points[i]
-        nx, ny = points[i + 1]
-        inx, iny = cx - px, cy - py
-        outx, outy = nx - cx, ny - cy
-        lin = math.hypot(inx, iny) or 1.0
-        lout = math.hypot(outx, outy) or 1.0
-        r = min(radius, lin / 2.0, lout / 2.0)
-        entry_x = cx - inx / lin * r
-        entry_y = cy - iny / lin * r
-        exit_x = cx + outx / lout * r
-        exit_y = cy + outy / lout * r
-        cr.line_to(entry_x, entry_y)
-        # Corner as both cubic controls approximates a quadratic arc that
-        # stays inside the right-angle bend.
-        cr.curve_to(cx, cy, cx, cy, exit_x, exit_y)
-    cr.line_to(points[-1][0], points[-1][1])
+    pts = list(points)
+    if len(pts) > 2:
+        for _ in range(max(1, iterations)):
+            smoothed = [pts[0]]
+            for i in range(len(pts) - 1):
+                x0, y0 = pts[i]
+                x1, y1 = pts[i + 1]
+                smoothed.append((0.75 * x0 + 0.25 * x1, 0.75 * y0 + 0.25 * y1))
+                smoothed.append((0.25 * x0 + 0.75 * x1, 0.25 * y0 + 0.75 * y1))
+            smoothed.append(pts[-1])
+            pts = smoothed
+    cr.move_to(pts[0][0], pts[0][1])
+    for x, y in pts[1:]:
+        cr.line_to(x, y)
     cr.stroke()
 
 
