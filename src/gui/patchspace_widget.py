@@ -45,6 +45,7 @@ from constants import (
     NODE_MATERIALIZE_MS,
     NODE_FADE_MS,
     NODE_LOADING_ALPHA,
+    NODE_DELETE_MS,
     ANIM_TICK_MS,
     ZOOM_MIN,
     ZOOM_MAX,
@@ -206,6 +207,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # Nodes the ticker has already started animating, so a node's pop
         # begins exactly once - when it first becomes visible.
         self._anim_seen: set = set()
+        # Deleted nodes linger as a fading outline: [{x,y,w,h,t0}] plus the
+        # ids already ghosted so a delete isn't double-started (user action
+        # then the poll that drops the node).
+        self._ghosts: list = []
+        self._ghosted: set = set()
         GLib.timeout_add(ANIM_TICK_MS, self._anim_tick)
         # Per-frame geometry cache for group nesting (the enclosed-group
         # walk is O(groups^2) and was recomputed many times inside one
@@ -977,6 +983,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
         for nid in list(self.nodes.keys()):
             if nid not in daemon_nodes:
+                # Leave a fading outline behind (the node is really gone
+                # from the model immediately, so nothing hit-tests it).
+                self._start_node_ghost(nid)
                 del self.nodes[nid]
                 self._pending_effect_slider.pop(nid, None)
                 for key in [k for k in self._pending_bool if k[0] == nid]:
@@ -3091,6 +3100,25 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             cr.paint_with_alpha(max(alpha, 0.0))
             cr.restore()
 
+        # Deleted nodes fade out as a translucent outline.
+        if self._ghosts:
+            now_g = time.monotonic()
+            dur = NODE_DELETE_MS / 1000.0
+            border = pal.get("node_border", (0.36, 0.36, 0.39))
+            for g in self._ghosts:
+                t = (now_g - g["t0"]) / dur if dur > 0 else 1.0
+                a = max(0.0, 1.0 - min(1.0, t))
+                if a <= 0.0:
+                    continue
+                cr.save()
+                draw_rounded_rect(cr, g["x"], g["y"], g["w"], g["h"], 8)
+                cr.set_source_rgba(*border, a * 0.5)
+                cr.fill_preserve()
+                cr.set_source_rgba(*border, a * 0.9)
+                cr.set_line_width(2.0)
+                cr.stroke()
+                cr.restore()
+
         # A tiny panel-colour chip at each node's bottom-left corner while
         # the node lives in a non-root panel (root-level nodes get none).
         for nid, node in self.nodes.items():
@@ -3196,6 +3224,27 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         t = max(0.0, min(1.0, t))
         return t * t * (3.0 - 2.0 * t)
 
+    def _start_node_ghost(self, nid):
+        """Remember a just-deleted node's box so it can fade as an outline.
+
+        The node itself is removed from the model right away (so it is not
+        hit-tested, wired, laid out, ...); only this snapshot lives on for
+        the delete animation."""
+        if nid in self._ghosted:
+            return
+        node = self.nodes.get(nid)
+        if node is None:
+            return
+        self._ghosted.add(nid)
+        self._ghosts.append({
+            "id": nid,
+            "x": node["x"],
+            "y": node["y"],
+            "w": self.node_width(nid),
+            "h": self.node_height(nid),
+            "t0": time.monotonic(),
+        })
+
     def _node_scale(self, nid):
         born = self._node_born.get(nid)
         if born is None:
@@ -3248,6 +3297,15 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             born = self._node_born.get(nid)
             if born is not None and now - born < mat:
                 active = True
+        # Advance/expire delete ghosts.
+        if self._ghosts:
+            dur = NODE_DELETE_MS / 1000.0
+            self._ghosts = [
+                g for g in self._ghosts
+                if dur > 0 and now - g["t0"] < dur
+            ]
+            self._ghosted = {g["id"] for g in self._ghosts}
+            active = True
         if active:
             self.queue_draw()
         return True
@@ -5593,6 +5651,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     def _on_delete_node(self, button, node_id, popover):
         popover.popdown()
+        self._start_node_ghost(node_id)
         self.client.send({"command": "remove_node", "node_id": node_id})
         GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
 
@@ -5629,6 +5688,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             return
         for nid in node_ids:
             if nid in self.nodes:
+                self._start_node_ghost(nid)
                 self.client.send({"command": "remove_node", "node_id": nid})
         self._set_selection(())
         GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
@@ -7750,10 +7810,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         view_w = self.get_width() or 800
         view_h = self.get_height() or 600
         cx, cy = self.to_world(view_w / 2.0, view_h / 2.0)
-        self._add_placeholder_node(
-            real_type, node_id, config,
-            cx - self.NODE_WIDTH / 2.0, cy - self.NODE_HEIGHT / 2.0,
-        )
+        self._add_placeholder_node(real_type, node_id, config, cx, cy)
         self.client.send(
             {
                 "command": "add_node",
@@ -7765,22 +7822,27 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         popover.popdown()
         GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
 
-    def _add_placeholder_node(self, real_type, node_id, config, px, py):
+    def _add_placeholder_node(self, real_type, node_id, config, cx, cy):
         """Show a node the instant the user adds it, translucent and
         non-interactable, until the daemon reports it ``ready``.
 
-        The daemon holds its ``add_node`` reply until a heavy node (Echo
-        Cancel, ...) has actually spawned, so a ``get_nodes`` poll can't
-        reveal the node before then - without this optimistic placeholder
-        nothing at all appears until it is ready."""
+        ``(cx, cy)`` is the world point the node should be centred on (the
+        drop point, or the view centre for a menu add) - the real node size
+        is used, so a tall node (Echo Cancel) lands under the cursor rather
+        than offset by a guessed height.
+
+        The daemon holds its ``add_node`` reply until a heavy node has
+        actually spawned, so a ``get_nodes`` poll can't reveal the node
+        before then - without this optimistic placeholder nothing at all
+        appears until it is ready."""
         if node_id in self.nodes:
             return
         ntype = normalize_node_type(real_type)
         spec = spec_for(ntype)
         self.nodes[node_id] = {
             "type": ntype,
-            "x": float(px),
-            "y": float(py),
+            "x": float(cx),
+            "y": float(cy),
             "inputs": spec.inputs,
             "outputs": spec.outputs,
             "meta": dict(config),
@@ -7810,6 +7872,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         }
         self._node_h_cache.pop(node_id, None)
         self._node_w_cache.pop(node_id, None)
+        # Centre on the requested point using the node's real size once the
+        # spec/label are known.
+        self.nodes[node_id]["x"] = cx - self.node_width(node_id) / 2.0
+        self.nodes[node_id]["y"] = cy - self.node_height(node_id) / 2.0
         # User-created nodes are pinned by default (same rule the poll's
         # new-node path applies; the placeholder pre-empts that branch).
         self.anchored_nodes.add(node_id)
@@ -7823,13 +7889,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         the add-node side panel's drop handler."""
         real_type, node_id, config = self._build_add_node_command(node_type)
         self._user_created_nodes.add(node_id)
-        half_w = (
-            self.SPLITTER_MIN_SIZE if real_type == "splitter" else self.NODE_WIDTH
-        ) / 2
-        self._add_placeholder_node(
-            real_type, node_id, config,
-            wx - half_w, wy - self.NODE_HEIGHT / 2,
-        )
+        self._add_placeholder_node(real_type, node_id, config, wx, wy)
         self.client.send(
             {
                 "command": "add_node",

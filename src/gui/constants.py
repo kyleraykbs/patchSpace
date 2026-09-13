@@ -55,6 +55,9 @@ LAYOUT_SETTLE_EPSILON = 0.05
 NODE_MATERIALIZE_MS = 360
 NODE_FADE_MS = 260
 NODE_LOADING_ALPHA = 0.45
+# How long a deleted node lingers as a translucent outline before it is
+# gone (see PatchSpaceGraphWidget._ghosts).
+NODE_DELETE_MS = 320
 ANIM_TICK_MS = 16
 
 # How long to wait after the node layout changes (drag end, anchor

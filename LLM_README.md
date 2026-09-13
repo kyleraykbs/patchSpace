@@ -314,8 +314,13 @@ nothing about its centre with an ease-out-back "pop" (`_ease_out_back`) over
 first time it sees a *revealed* node so a slow load's scale-up isn't over before the node
 is drawn - and repaints while anything is animating; the draw path wraps an animating node
 in a cairo group and `paint_with_alpha` so the whole node (text included) fades/scales
-uniformly. Only the `DrawingArea`'s own node rendering uses this - the raw
-PipeWire tab is untouched.
+uniformly. The placeholder is centred on the drop/click point using the node's real
+dimensions (a tall Echo Cancel node isn't offset by a guessed height). Deleting a node
+leaves a **fading outline ghost** (`_start_node_ghost` -> `_ghosts`): the node is removed
+from the model immediately (so it is not hit-tested, wired or laid out), and only a
+snapshot box fades over `NODE_DELETE_MS`, started at the user action and de-duplicated so
+the poll that finally drops the node doesn't start a second one. Only the `DrawingArea`'s
+own node rendering uses this - the raw PipeWire tab is untouched.
 
 *Edit mode.* A panel's parameter values (volumes, switches, effect knobs) are **not**
 written back to its file by default - the daemon serves the committed file values from
