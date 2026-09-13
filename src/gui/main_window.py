@@ -510,7 +510,15 @@ class MainWindow(Gtk.ApplicationWindow):
         self.log_console = LogConsole()
         canvas_area = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         canvas_area.append(overlay)
-        canvas_area.append(self._build_patchspace_toolbar())
+        # Wrap the toolbar in a full-width opaque strip: the toolbar itself
+        # carries margins, and with the window surface transparent those
+        # margins would otherwise be 100% see-through (the "padding area").
+        toolbar_strip = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        toolbar_strip.add_css_class("opaque-chrome")
+        toolbar = self._build_patchspace_toolbar()
+        toolbar.set_hexpand(True)
+        toolbar_strip.append(toolbar)
+        canvas_area.append(toolbar_strip)
         canvas_area.append(self.log_console)
         # Load progress (start/stop) drives the overlay + console
         # auto-open/collapse; see _on_loading_changed.
@@ -1041,6 +1049,10 @@ class MainWindow(Gtk.ApplicationWindow):
                 "window.translucent-canvas paned,"
                 "window.translucent-canvas overlay {"
                 "  background-color: transparent; }"
+                # No notebook padding/border: it would be a transparent gap
+                # around the page (the "padding area") at the window edges.
+                "window.translucent-canvas notebook {"
+                "  padding: 0; border-width: 0; }"
                 "window.translucent-canvas .opaque-chrome {"
                 f"  background-color: {bg_hex}; }}"
                 ".mouse-help {"

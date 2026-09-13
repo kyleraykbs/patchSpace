@@ -7110,11 +7110,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             cr.save()
             draw_rounded_rect(cr, x, y, w, h, 12)
             cr.clip()
-            # Opaque backing first (like nodes): without it a panel interior
-            # is just 10% tint over the canvas, so with a translucent canvas
-            # the panel reads as see-through as the empty grid.  The tint is
-            # only for the colour-coding look, on top of the solid card.
-            cr.set_source_rgb(*pal["node_bg"])
+            # Backing at the *canvas* opacity (not fully opaque), so a panel
+            # is exactly as see-through as the grid behind it - like the
+            # nodes - and the colour tint on top is only for colour-coding.
+            backing = max(0.0, min(1.0, constants.CANVAS_BG_ALPHA))
+            if backing < 1.0:
+                cr.set_source_rgba(*pal["node_bg"], backing)
+            else:
+                cr.set_source_rgb(*pal["node_bg"])
             cr.rectangle(x, y, w, h)
             cr.fill()
             cr.set_source_rgba(r, g, b, 0.10)
@@ -7160,9 +7163,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             for key in ("in_bar", "out_bar"):
                 bx1, by1, bx2, by2 = io[key]
                 draw_rounded_rect(cr, bx1, by1, bx2 - bx1, by2 - by1, 4)
-                # Opaque backing so the strip occludes the translucent
-                # canvas, then the colour wash on top.
-                cr.set_source_rgb(*pal["node_bg"])
+                # Same opacity as the panel body, then the colour wash.
+                backing = max(0.0, min(1.0, constants.CANVAS_BG_ALPHA))
+                if backing < 1.0:
+                    cr.set_source_rgba(*pal["node_bg"], backing)
+                else:
+                    cr.set_source_rgb(*pal["node_bg"])
                 cr.fill_preserve()
                 cr.set_source_rgba(r, g, b, 0.30)
                 cr.fill_preserve()
