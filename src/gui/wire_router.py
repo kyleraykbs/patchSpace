@@ -21,8 +21,8 @@ Rect = Tuple[float, float, float, float]
 CELL = 36.0
 PAD = 12.0
 # How far outside the two endpoints the search grid extends, so there is
-# room to route around a node sitting directly between them.
-MARGIN = 220.0
+# room to route around a node (or another wire) sitting between them.
+MARGIN = 320.0
 # Extra A* cost for changing direction, so paths come out as straight as
 # possible (few long runs) instead of a many-cornered staircase.
 TURN_COST = 1.2
@@ -143,21 +143,25 @@ def route(
     sx: float, sy: float, ex: float, ey: float,
     obstacles: Iterable[Rect],
     clear_rects: Iterable[Rect] = (),
+    keep_blocked: Iterable[Rect] = (),
     cell: float = CELL,
     pad: float = PAD,
     margin: float = MARGIN,
 ) -> Optional[List[Point]]:
     """A short orthogonal path from (sx,sy) to (ex,ey) avoiding `obstacles`,
-    or None if no route was found (caller falls back to a straight bezier).
+    or None if no route was found (caller falls back to a straight line).
 
     ``clear_rects`` are holes punched in the blocked grid: corridors that
     let a wire exit its own node's socket even though that node is one of
-    the obstacles.
+    the obstacles.  ``keep_blocked`` rects are applied *after* the holes, so
+    they stay obstacles even inside a corridor (used for other wires, which
+    must never be punched through by a socket hole).
 
     Returns world-space points; callers may append the exact socket
     endpoints around the result."""
     clear_rects = list(clear_rects)
     obstacles = list(obstacles)
+    keep_blocked = list(keep_blocked)
     base_minx = min(sx, ex) - margin
     base_miny = min(sy, ey) - margin
     # Orient the grid so the start point lands exactly on a cell centre.
@@ -199,6 +203,19 @@ def route(
         for i in range(i1, i2 + 1):
             for j in range(j1, j2 + 1):
                 blocked.discard((i, j))
+
+    # Re-block anything that must survive the holes above (other wires).
+    for ox1, oy1, ox2, oy2 in keep_blocked:
+        ox1 -= pad
+        oy1 -= pad
+        ox2 += pad
+        oy2 += pad
+        i1, j1 = cell_of(ox1, oy1)
+        i2, j2 = cell_of(ox2, oy2)
+        for i in range(i1, i2 + 1):
+            for j in range(j1, j2 + 1):
+                if ox1 <= minx + i * cell <= ox2 and oy1 <= miny + j * cell <= oy2:
+                    blocked.add((i, j))
 
     start = cell_of(sx, sy)
     goal = cell_of(ex, ey)

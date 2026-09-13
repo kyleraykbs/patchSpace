@@ -241,7 +241,9 @@ a coarse grid of the endpoints' bounding box (`gui/wire_router.py`), with a turn
 avoiding every visible node rect **and every panel box**, each inflated by `PAD`;
 `draw_square_path` rounds the bends at draw time. Obstacle sets are asymmetric on purpose:
 - The **endpoint nodes are obstacles too** (so a wire can't loop back through its own
-  node) with a `clear_rects` corridor punched out at each socket. A socket only gets a
+  node) with a `clear_rects` corridor punched out at each socket. Other wires are passed
+  as `keep_blocked` (applied *after* the holes), so a socket corridor can't punch through
+  them - a wire routes around an existing one rather than along it. A socket only gets a
   straight `STUB` where the route doesn't *already* head outward (output = right, input =
   left): `_wire_points` routes socket-to-socket first, and if the first/last segment
   already leaves/enters horizontally that way no stub is added; otherwise it re-routes
@@ -267,7 +269,10 @@ avoiding every visible node rect **and every panel box**, each inflated by `PAD`
 The result is a strictly axis-aligned polyline (`orthogonalize` inserts L-elbows,
 `simplify` drops collinear points). `_simplify_orthogonal` then greedily collapses the A*
 staircase into as few straight runs/L-elbows as a clear two-segment path allows (longest
-skip first), so there are no redundant points or pointless extra bends.
+skip first, preferring the elbow that continues the incoming direction), so there are no
+redundant points or pointless extra bends. It never changes the first/last segment's
+orientation, so a merge can't make the wire dive straight into a socket; `MARGIN` gives
+A* room to take a wider detour around an obstacle instead of clipping it.
 `render_utils.draw_square_path` strokes it with a **constant** `CORNER_RADIUS` (14): each
 bend is a cubic with both controls at the vertex, and the radius is only shortened when a
 segment is too short to fit it (the router keeps stubs/bends at least `2*radius` long via

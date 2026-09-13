@@ -1865,6 +1865,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             else:
                 dxin = 1.0
             horizontal_first = abs(dxin) > 1e-6
+            first_h = abs(path[0][1] - path[1][1]) < 1e-6
+            last_h = abs(path[-2][1] - path[-1][1]) < 1e-6
             for j in range(n - 1, i + 1, -1):
                 a, b = path[i], path[j]
                 if abs(a[1] - b[1]) < 1e-6 or abs(a[0] - b[0]) < 1e-6:
@@ -1874,6 +1876,17 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     v = [a, (a[0], b[1]), b]
                     candidates = [h, v] if horizontal_first else [v, h]
                 for cand in candidates:
+                    # Never change how the wire leaves/enters a socket: keep
+                    # the first/last segment's orientation (the horizontal
+                    # stubs), or a merge could dive straight into the node.
+                    if i == 0:
+                        a0, a1 = cand[0], cand[1]
+                        if (abs(a0[1] - a1[1]) < 1e-6) != first_h:
+                            continue
+                    if j == n - 1:
+                        b0, b1 = cand[-2], cand[-1]
+                        if (abs(b0[1] - b1[1]) < 1e-6) != last_h:
+                            continue
                     if all(_clear(cand[k], cand[k + 1])
                            for k in range(len(cand) - 1)):
                         out.extend(cand[1:])
@@ -1912,16 +1925,18 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         extra = list(extra_obstacles)
 
         # Route around everything, with a corridor out of each socket so the
-        # wire can leave/enter its own (now-blocking) node.
-        obstacles = other_nodes + own + panels + extra
+        # wire can leave/enter its own (now-blocking) node.  Other wires are
+        # keep_blocked so a socket corridor can't punch through them.
         static = other_nodes + own + panels
+        obstacles = static + extra
         corr = WIRE_CELL * 1.5
         clear = [
             (x1 - WIRE_CELL, y1 - corr, x1 + WIRE_CELL, y1 + corr),
             (x2 - WIRE_CELL, y2 - corr, x2 + WIRE_CELL, y2 + corr),
         ]
 
-        core = route_wire(x1, y1, x2, y2, obstacles, clear_rects=clear)
+        core = route_wire(x1, y1, x2, y2, static, clear_rects=clear,
+                          keep_blocked=extra)
         if not core:
             core = route_wire(x1, y1, x2, y2, static, clear_rects=clear)
 
@@ -1957,8 +1972,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             (start[0], y1 - corr, start[0] + WIRE_CELL, y1 + corr),
             (end[0] - WIRE_CELL, y2 - corr, end[0], y2 + corr),
         ]
-        core = route_wire(start[0], start[1], end[0], end[1], obstacles,
-                          clear_rects=clear2)
+        core = route_wire(start[0], start[1], end[0], end[1], static,
+                          clear_rects=clear2, keep_blocked=extra)
         if not core:
             core = route_wire(start[0], start[1], end[0], end[1], static,
                               clear_rects=clear2)
