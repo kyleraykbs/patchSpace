@@ -1720,11 +1720,33 @@ class PatchBayDaemon:
         except OSError as exc:
             logger.warning("Could not delete panel file %r: %s", path, exc)
             return {"status": "error", "message": f"could not delete {path}: {exc}"}
+        self._prune_empty_panel_dirs(os.path.dirname(path))
         self._install_panels(self._build_panels_from_space())
         self._write_panels()
         self._dirty = True
         self._wake_ticker()
         return {"status": "ok", "stem": stem, "removed": sorted(placements)}
+
+    def _prune_empty_panel_dirs(self, start: str) -> None:
+        """Remove now-empty sub-folders left after deleting a panel file,
+        walking up but never past a configured panel directory."""
+        start = os.path.abspath(start)
+        bases = [
+            os.path.abspath(d) for d, _w in self.panel_dirs if d
+        ]
+        cur = start
+        while True:
+            base = next(
+                (b for b in bases if cur == b or cur.startswith(b + os.sep)),
+                None,
+            )
+            if base is None or cur == base:
+                return
+            try:
+                os.rmdir(cur)
+            except OSError:
+                return
+            cur = os.path.dirname(cur)
 
     def _cmd_edit_panel(self, cmd: dict) -> dict:
         """Change a writable panel's display label and/or colour."""
@@ -1836,9 +1858,9 @@ class PatchBayDaemon:
         for directory, writable in self.panel_dirs:
             if not directory:
                 continue
-            candidate = os.path.join(directory, stem + panels.PANEL_SUFFIX)
-            if os.path.isfile(candidate):
-                found = (candidate, writable)
+            for path in panels.list_files(directory):
+                if panels.file_stem(path) == stem:
+                    found = (path, writable)
         return found if found else (None, False)
 
     def _cmd_list_panel_files(self, cmd: dict) -> dict:
@@ -1856,6 +1878,7 @@ class PatchBayDaemon:
                     panels.child_name(c)
                     for c in (config.get("panels") or [])
                 ]
+                rel = os.path.relpath(path, directory)
                 by_stem[stem] = {
                     "stem": stem,
                     "label": raw.get("label") or stem,
@@ -1863,6 +1886,9 @@ class PatchBayDaemon:
                     "mode": panels.mode_from_raw(raw),
                     "auto_load": bool(raw.get("auto_load")),
                     "path": path,
+                    # Sub-folder relative to the panel directory ("" for a
+                    # top-level file); the side view groups rows by it.
+                    "folder": os.path.dirname(rel),
                     "writable": writable,
                     "node_count": len(config.get("nodes") or {}),
                     "children": children,

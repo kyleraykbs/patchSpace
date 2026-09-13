@@ -528,6 +528,37 @@ def test_delete_panel_file_refuses_readonly(tmp_path):
     assert os.path.exists(os.path.join(pdir, "kit.json"))
 
 
+def test_panel_files_in_folders_are_listed_and_deleted(tmp_path):
+    d, root, pdir = _daemon(tmp_path)
+    d.panels = d._load_panels_tree()
+    sub = os.path.join(pdir, "fx")
+    os.makedirs(sub)
+    kit = panels.Panel(
+        id="kit", parent="", label="Kit", color="#112233",
+        mode="read-write", path=os.path.join(sub, "kit.json"), writable=True,
+        config={"nodes": {"a": {"type": "regex_input",
+                                "params": {"x": 0, "y": 0, "pattern": ".*"}}},
+                "edges": [], "panels": [], "groups": []},
+    )
+    panels.write_file(os.path.join(sub, "kit.json"), kit)
+
+    listing = d._cmd_list_panel_files({})
+    entry = next(f for f in listing["files"] if f["stem"] == "kit")
+    assert entry["folder"] == "fx"
+    assert entry["node_count"] == 1
+    # Lookup is recursive, so a nested file can still be placed/deleted by
+    # stem.
+    path, writable = d._panel_file_path("kit")
+    assert path == os.path.join(sub, "kit.json") and writable
+
+    resp = d._cmd_delete_panel_file({"stem": "kit"})
+    assert resp["status"] == "ok", resp
+    assert not os.path.exists(os.path.join(sub, "kit.json"))
+    # The now-empty sub-folder is pruned.
+    assert not os.path.exists(sub)
+    assert os.path.isdir(pdir)
+
+
 def test_list_panel_files_and_autoload_toggle(tmp_path):
     d, root, pdir = _daemon(tmp_path)
     d.panels = d._load_panels_tree()

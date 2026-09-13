@@ -295,13 +295,19 @@ def read_file(path: str) -> Optional[dict]:
 
 
 def list_files(directory: Optional[str]) -> List[str]:
+    """Every panel file under `directory`, recursively.
+
+    Panel files may live in sub-folders (the side view groups them), so
+    the scan walks the tree; hidden directories are skipped."""
     if not directory or not os.path.isdir(directory):
         return []
-    return sorted(
-        os.path.join(directory, name)
-        for name in os.listdir(directory)
-        if name.endswith(PANEL_SUFFIX) and not name.endswith(".tmp")
-    )
+    found = []
+    for root, dirs, names in os.walk(directory):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        for name in names:
+            if name.endswith(PANEL_SUFFIX) and not name.endswith(".tmp"):
+                found.append(os.path.join(root, name))
+    return sorted(found)
 
 
 def snapshot(directories) -> Dict[str, float]:

@@ -285,14 +285,18 @@ them in the right file.
 
 *Panels side view.* A docked, scrollable list of panel files lives on the right (the endchild of an outer `Gtk.Paned`), toggled by a button directly under the top-right
 hamburger (`main_window._panels_toggle` / `_build_panels_view`). A column-header row labels
-the controls; each row shows the panel's colour dot, label, two dim count lines (nodes
-above panels, from `list_panel_files`'s `node_count`/`children`), then an **Auto**-load
-checkbox, an **Add** (place) button and a **Del** button. Del confirms, then sends
-`delete_panel_file` (which removes the file and every placement's subtree). The list
-re-reads on every toggle and on a `PANELS_VIEW_REFRESH_MS` timer while visible, and
-`process_responses` refreshes it the moment a panel-file action (delete / auto-load /
-create / clone) completes. The old standalone "Panels… dialog" (and its Select/Group/
-Delete surface) has been removed.
+the controls; each row shows the panel's colour dot, a word-wrapping (WORD_CHAR) label,
+two dim count lines (nodes above panels, from `list_panel_files`'s `node_count`/`children`),
+then an **Auto**-load checkbox, an **Add** (place) button and a **Del** button. Files may
+live in sub-folders (`panels.list_files` is recursive; `list_panel_files` reports each
+file's `folder`); the view groups rows under dim folder headers when any exist, and
+`delete_panel_file` prunes folders it empties. Del confirms, then sends `delete_panel_file`
+(which removes the file and every placement's subtree). The list re-reads on every toggle
+and on a `PANELS_VIEW_REFRESH_MS` timer while visible, and `process_responses` refreshes it
+the moment a panel-file action (delete / auto-load / create / clone) completes;
+`_update_panels_view` skips rebuilding when the listing signature is unchanged, so the
+periodic refresh can't destroy the button under the pointer mid-click. The old standalone
+"Panels… dialog" (and its Select/Group/Delete surface) has been removed.
 
 *Physics* is hierarchical (`_hierarchical_step`, `on_layout_tick`): node physics runs
 inside each panel in that panel's local frame (internal edges only). Node physics and the

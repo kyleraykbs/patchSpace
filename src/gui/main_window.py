@@ -641,121 +641,166 @@ class MainWindow(Gtk.ApplicationWindow):
             self._syncing_physics = False
 
     def _update_panels_view(self, resp):
-        """Rebuild the side-view rows from a list_panel_files reply: one
-        row per panel *file*, with an auto-load checkbox and a Place
-        action."""
+        """Rebuild the side-view rows from a list_panel_files reply: one row
+        per panel *file*, grouped under its folder, with an auto-load
+        checkbox, a Place button and a Delete button.
+
+        Skipped when the listing is unchanged: the periodic refresh calls
+        this every PANELS_VIEW_REFRESH_MS, and rebuilding the rows each time
+        destroys the button under the pointer mid-click - which is what made
+        Delete look like it did nothing."""
         if not hasattr(self, "_panels_list_box"):
             return
+        files = resp.get("files", [])
+        sig = tuple(
+            (
+                e.get("stem"),
+                e.get("folder", ""),
+                e.get("label"),
+                e.get("color"),
+                bool(e.get("auto_load")),
+                bool(e.get("writable")),
+                int(e.get("node_count", 0) or 0),
+                tuple(e.get("children") or []),
+            )
+            for e in files
+        )
+        if getattr(self, "_panels_view_sig", None) == sig:
+            return
+        self._panels_view_sig = sig
         while True:
             child = self._panels_list_box.get_first_child()
             if child is None:
                 break
             self._panels_list_box.remove(child)
-        files = resp.get("files", [])
         if not files:
             placeholder = Gtk.Label(label="No panel files")
             placeholder.set_margin_top(12)
             placeholder.add_css_class("dim-label")
             self._panels_list_box.append(placeholder)
             return
+        groups: dict = {}
         for entry in files:
-            writable = bool(entry.get("writable"))
-            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-            row.set_margin_top(3)
-            row.set_margin_bottom(3)
-            dot = Gtk.Label()
-            dot.set_size_request(self._PANEL_DOT_W, -1)
-            dot.set_halign(Gtk.Align.CENTER)
-            dot.set_markup(
-                "<span foreground='{}'>\u25cf</span>".format(
-                    GLib.markup_escape_text(str(entry.get("color", "#3584e4")))
+            groups.setdefault(str(entry.get("folder") or ""), []).append(entry)
+        show_folders = any(folder for folder in groups)
+        for folder in sorted(groups):
+            if show_folders:
+                head = Gtk.Label(label=folder or "Panels")
+                head.set_xalign(0)
+                head.add_css_class("dim-label")
+                head.set_margin_top(6)
+                head.set_margin_start(2)
+                head.set_tooltip_text(
+                    f"Folder: {folder}" if folder else "Top-level panel files"
                 )
+                self._panels_list_box.append(head)
+            for entry in groups[folder]:
+                self._panels_list_box.append(self._build_panel_row(entry))
+
+    def _build_panel_row(self, entry):
+        writable = bool(entry.get("writable"))
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        row.set_margin_top(3)
+        row.set_margin_bottom(3)
+        dot = Gtk.Label()
+        dot.set_size_request(self._PANEL_DOT_W, -1)
+        dot.set_halign(Gtk.Align.CENTER)
+        dot.set_valign(Gtk.Align.START)
+        dot.set_markup(
+            "<span foreground='{}'>\u25cf</span>".format(
+                GLib.markup_escape_text(str(entry.get("color", "#3584e4")))
             )
-            row.append(dot)
-            # Name over the dim counts (nodes above panels).
-            text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-            text.set_hexpand(True)
-            name = Gtk.Label(label=str(entry.get("label") or entry.get("stem", "?")))
-            name.set_xalign(0)
-            name.set_hexpand(True)
-            name.set_ellipsize(Pango.EllipsizeMode.END)
-            text.append(name)
-            # Counts stacked, nodes above panels (not side by side).
-            nodes = int(entry.get("node_count", 0) or 0)
-            children = [str(c) for c in (entry.get("children") or [])]
-            for line, tip in (
-                (
-                    f"{nodes} {'node' if nodes == 1 else 'nodes'}",
-                    "Nodes defined by this panel file",
-                ),
-                (
-                    f"{len(children)} "
-                    f"{'panel' if len(children) == 1 else 'panels'}",
-                    "Sub-panels: " + ", ".join(children) if children
-                    else "No sub-panels",
-                ),
-            ):
-                lab = Gtk.Label(label=line)
-                lab.set_xalign(0)
-                lab.set_ellipsize(Pango.EllipsizeMode.END)
-                lab.add_css_class("dim-label")
-                lab.set_tooltip_text(tip)
-                text.append(lab)
-            row.append(text)
-            auto = Gtk.CheckButton()
-            auto.set_size_request(self._PANEL_BTN_W, -1)
-            auto.set_active(bool(entry.get("auto_load")))
-            auto.set_sensitive(writable)
-            auto.set_tooltip_text(
-                "Load this panel at startup" if writable
-                else "This panel file is read-only"
-            )
-            auto.connect(
-                "toggled",
-                lambda b, e=entry: self.client.send(
-                    {
-                        "command": "set_panel_file_autoload",
-                        "stem": e.get("stem"),
-                        "enabled": b.get_active(),
-                    }
-                ),
-            )
-            row.append(auto)
-            place = Gtk.Button.new_from_icon_name("list-add-symbolic")
-            place.add_css_class("flat")
-            place.set_size_request(self._PANEL_BTN_W, -1)
-            place.set_tooltip_text("Add a placement of this panel to the canvas")
-            place.connect(
-                "clicked",
-                lambda _b, e=entry: self.ps_widget.place_panel_at_view_center(
-                    e.get("stem")
-                ),
-            )
-            row.append(place)
-            delete = Gtk.Button.new_from_icon_name("user-trash-symbolic")
-            delete.add_css_class("flat")
-            delete.set_size_request(self._PANEL_BTN_W, -1)
-            delete.set_sensitive(writable)
-            delete.set_tooltip_text(
-                "Delete this panel file and all its placements" if writable
-                else "This panel file is read-only"
-            )
-            delete.connect(
-                "clicked",
-                lambda _b, e=entry: self._confirm_delete_panel_file(e),
-            )
-            row.append(delete)
-            # Drag the row onto the canvas to place it where dropped.
-            drag_source = Gtk.DragSource.new()
-            drag_source.set_actions(Gdk.DragAction.COPY)
-            drag_source.connect(
-                "prepare",
-                lambda _s, _x, _y, e=entry: Gdk.ContentProvider.new_for_value(
-                    GObject.Value(GObject.TYPE_STRING, "panel:" + str(e.get("stem")))
-                ),
-            )
-            row.add_controller(drag_source)
-            self._panels_list_box.append(row)
+        )
+        row.append(dot)
+        # Name over the dim counts (nodes above panels).  The name wraps
+        # (WORD_CHAR) instead of ellipsizing so long names stay readable.
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        text.set_hexpand(True)
+        name = Gtk.Label(label=str(entry.get("label") or entry.get("stem", "?")))
+        name.set_xalign(0)
+        name.set_hexpand(True)
+        name.set_wrap(True)
+        name.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        text.append(name)
+        # Counts stacked, nodes above panels (not side by side).
+        nodes = int(entry.get("node_count", 0) or 0)
+        children = [str(c) for c in (entry.get("children") or [])]
+        for line, tip in (
+            (
+                f"{nodes} {'node' if nodes == 1 else 'nodes'}",
+                "Nodes defined by this panel file",
+            ),
+            (
+                f"{len(children)} "
+                f"{'panel' if len(children) == 1 else 'panels'}",
+                "Sub-panels: " + ", ".join(children) if children
+                else "No sub-panels",
+            ),
+        ):
+            lab = Gtk.Label(label=line)
+            lab.set_xalign(0)
+            lab.set_ellipsize(Pango.EllipsizeMode.END)
+            lab.add_css_class("dim-label")
+            lab.set_tooltip_text(tip)
+            text.append(lab)
+        row.append(text)
+        auto = Gtk.CheckButton()
+        auto.set_size_request(self._PANEL_BTN_W, -1)
+        auto.set_valign(Gtk.Align.START)
+        auto.set_active(bool(entry.get("auto_load")))
+        auto.set_sensitive(writable)
+        auto.set_tooltip_text(
+            "Load this panel at startup" if writable
+            else "This panel file is read-only"
+        )
+        auto.connect(
+            "toggled",
+            lambda b, e=entry: self.client.send(
+                {
+                    "command": "set_panel_file_autoload",
+                    "stem": e.get("stem"),
+                    "enabled": b.get_active(),
+                }
+            ),
+        )
+        row.append(auto)
+        place = Gtk.Button.new_from_icon_name("list-add-symbolic")
+        place.add_css_class("flat")
+        place.set_size_request(self._PANEL_BTN_W, -1)
+        place.set_valign(Gtk.Align.START)
+        place.set_tooltip_text("Add a placement of this panel to the canvas")
+        place.connect(
+            "clicked",
+            lambda _b, e=entry: self.ps_widget.place_panel_at_view_center(
+                e.get("stem")
+            ),
+        )
+        row.append(place)
+        delete = Gtk.Button.new_from_icon_name("user-trash-symbolic")
+        delete.add_css_class("flat")
+        delete.set_size_request(self._PANEL_BTN_W, -1)
+        delete.set_valign(Gtk.Align.START)
+        delete.set_sensitive(writable)
+        delete.set_tooltip_text(
+            "Delete this panel file and all its placements" if writable
+            else "This panel file is read-only"
+        )
+        delete.connect(
+            "clicked",
+            lambda _b, e=entry: self._confirm_delete_panel_file(e),
+        )
+        row.append(delete)
+        # Drag the row onto the canvas to place it where dropped.
+        drag_source = Gtk.DragSource.new()
+        drag_source.set_actions(Gdk.DragAction.COPY)
+        drag_source.connect(
+            "prepare",
+            lambda _s, _x, _y, e=entry: Gdk.ContentProvider.new_for_value(
+                GObject.Value(GObject.TYPE_STRING, "panel:" + str(e.get("stem")))
+            ),
+        )
+        row.add_controller(drag_source)
+        return row
 
     def _confirm_delete_panel_file(self, entry):
         """Confirm, then delete a panel *file* (and every placement of it)."""
