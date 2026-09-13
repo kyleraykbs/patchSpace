@@ -215,6 +215,37 @@ def draw_bezier_link(cr, x1, y1, x2, y2):
     cr.stroke()
 
 
+def draw_rounded_path(cr, points, radius=12.0):
+    """Stroke a polyline with its corners rounded off (inward), so an
+    orthogonal wire route reads as a natural bent wire rather than a
+    circuit trace.  ``points`` should already be simplified (no duplicate
+    or collinear midpoints)."""
+    if not points:
+        return
+    if len(points) == 1:
+        return
+    cr.move_to(points[0][0], points[0][1])
+    for i in range(1, len(points) - 1):
+        px, py = points[i - 1]
+        cx, cy = points[i]
+        nx, ny = points[i + 1]
+        inx, iny = cx - px, cy - py
+        outx, outy = nx - cx, ny - cy
+        lin = math.hypot(inx, iny) or 1.0
+        lout = math.hypot(outx, outy) or 1.0
+        r = min(radius, lin / 2.0, lout / 2.0)
+        entry_x = cx - inx / lin * r
+        entry_y = cy - iny / lin * r
+        exit_x = cx + outx / lout * r
+        exit_y = cy + outy / lout * r
+        cr.line_to(entry_x, entry_y)
+        # Corner as both cubic controls approximates a quadratic arc that
+        # stays inside the right-angle bend.
+        cr.curve_to(cx, cy, cx, cy, exit_x, exit_y)
+    cr.line_to(points[-1][0], points[-1][1])
+    cr.stroke()
+
+
 def draw_grid_background(cr, pal, pan_x, pan_y, zoom, width, height, spacing=40):
     """Subtle line grid drawn in world space, so it pans and zooms
     with the graph like a node editor's canvas instead of staying

@@ -1,0 +1,187 @@
+"""Orthogonal wire routing that steers edges around node rectangles.
+
+Pure geometry (no GTK) so it can be unit-tested directly.  The graph
+canvas uses it from PatchSpaceGraphWidget.on_draw: an edge is drawn as a
+plain bezier when the straight path is clear, and only when that path
+would cut through a node does ``route`` compute a short orthogonal detour
+around the obstacles.
+"""
+
+from __future__ import annotations
+
+import heapq
+import math
+from typing import Iterable, List, Optional, Sequence, Tuple
+
+Point = Tuple[float, float]
+Rect = Tuple[float, float, float, float]
+
+# Grid pitch (world units) and how far obstacles are inflated so a wire
+# keeps visible clearance from a node's border.
+CELL = 36.0
+PAD = 12.0
+# How far outside the two endpoints the search grid extends, so there is
+# room to route around a node sitting directly between them.
+MARGIN = 220.0
+# Extra A* cost for changing direction, so paths prefer straight runs.
+TURN_COST = 0.6
+
+_DIRS = ((1, 0), (-1, 0), (0, 1), (0, -1))
+
+
+def _segment_hits_rect(
+    x1: float, y1: float, x2: float, y2: float,
+    rx1: float, ry1: float, rx2: float, ry2: float,
+) -> bool:
+    """Whether segment (x1,y1)-(x2,y2) intersects the axis-aligned rect."""
+    dx = x2 - x1
+    dy = y2 - y1
+    t0, t1 = 0.0, 1.0
+    # Liang-Barsky: clip the segment against the four slab boundaries.
+    for p, q in (
+        (-dx, x1 - rx1), (dx, rx2 - x1), (-dy, y1 - ry1), (dy, ry2 - y1),
+    ):
+        if p == 0.0:
+            if q < 0.0:
+                return False
+            continue
+        r = q / p
+        if p < 0.0:
+            if r > t1:
+                return False
+            if r > t0:
+                t0 = r
+        else:
+            if r < t0:
+                return False
+            if r < t1:
+                t1 = r
+    return True
+
+
+def segment_blocked(
+    x1: float, y1: float, x2: float, y2: float,
+    rects: Iterable[Rect], pad: float = PAD,
+) -> bool:
+    """Whether the straight segment passes through any (inflated) rect."""
+    for rx1, ry1, rx2, ry2 in rects:
+        if _segment_hits_rect(
+            x1, y1, x2, y2, rx1 - pad, ry1 - pad, rx2 + pad, ry2 + pad
+        ):
+            return True
+    return False
+
+
+def simplify(points: Sequence[Point]) -> List[Point]:
+    """Drop near-duplicate and collinear midpoints from a polyline."""
+    out: List[Point] = []
+    for p in points:
+        if out and math.hypot(p[0] - out[-1][0], p[1] - out[-1][1]) < 0.5:
+            continue
+        out.append(p)
+    if len(out) < 3:
+        return out
+    simplified = [out[0]]
+    for i in range(1, len(out) - 1):
+        ax, ay = simplified[-1]
+        bx, by = out[i]
+        cx, cy = out[i + 1]
+        cross = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+        if abs(cross) > 1e-6:
+            simplified.append(out[i])
+    simplified.append(out[-1])
+    return simplified
+
+
+def route(
+    sx: float, sy: float, ex: float, ey: float,
+    obstacles: Iterable[Rect],
+    cell: float = CELL,
+    pad: float = PAD,
+    margin: float = MARGIN,
+) -> Optional[List[Point]]:
+    """A short orthogonal path from (sx,sy) to (ex,ey) avoiding `obstacles`,
+    or None if no route was found (caller falls back to a straight bezier).
+
+    Returns world-space points; callers may append the exact socket
+    endpoints around the result."""
+    obstacles = list(obstacles)
+    minx = min(sx, ex) - margin
+    miny = min(sy, ey) - margin
+    maxx = max(sx, ex) + margin
+    maxy = max(sy, ey) + margin
+    cols = int(math.ceil((maxx - minx) / cell)) + 1
+    rows = int(math.ceil((maxy - miny) / cell)) + 1
+    if cols < 2 or rows < 2:
+        return None
+
+    def cell_of(x: float, y: float):
+        return (
+            min(cols - 1, max(0, int((x - minx) / cell))),
+            min(rows - 1, max(0, int((y - miny) / cell))),
+        )
+
+    blocked = set()
+    for ox1, oy1, ox2, oy2 in obstacles:
+        ox1 -= pad
+        oy1 -= pad
+        ox2 += pad
+        oy2 += pad
+        i1, j1 = cell_of(ox1, oy1)
+        i2, j2 = cell_of(ox2, oy2)
+        for i in range(i1, i2 + 1):
+            for j in range(j1, j2 + 1):
+                if ox1 <= minx + i * cell <= ox2 and oy1 <= miny + j * cell <= oy2:
+                    blocked.add((i, j))
+
+    start = cell_of(sx, sy)
+    goal = cell_of(ex, ey)
+    blocked.discard(start)
+    blocked.discard(goal)
+    if start == goal:
+        return [(sx, sy), (ex, ey)]
+
+    def heuristic(i: int, j: int) -> float:
+        return abs(i - goal[0]) + abs(j - goal[1])
+
+    # A* over (cell, incoming direction) so turns can be penalised.
+    best = {(start[0], start[1], -1): 0.0}
+    came = {}
+    heap = [(heuristic(*start), 0.0, start[0], start[1], -1)]
+    found = None
+    while heap:
+        f, g, i, j, direction = heapq.heappop(heap)
+        if (i, j) == goal:
+            found = (i, j, direction)
+            break
+        if g > best.get((i, j, direction), math.inf) + 1e-9:
+            continue
+        for nd, (dx, dy) in enumerate(_DIRS):
+            ni, nj = i + dx, j + dy
+            if not (0 <= ni < cols and 0 <= nj < rows):
+                continue
+            if (ni, nj) in blocked:
+                continue
+            turn = 0.0 if direction in (-1, nd) else TURN_COST
+            ng = g + 1.0 + turn
+            key = (ni, nj, nd)
+            if ng < best.get(key, math.inf) - 1e-9:
+                best[key] = ng
+                came[key] = (i, j, direction)
+                heapq.heappush(
+                    heap, (ng + heuristic(ni, nj), ng, ni, nj, nd)
+                )
+    if found is None:
+        return None
+
+    cells = []
+    node = found
+    while node in came:
+        cells.append((node[0], node[1]))
+        node = came[node]
+    cells.append((node[0], node[1]))
+    cells.reverse()
+    # Return grid-centre points (not the exact start/end) so callers can
+    # connect the sockets themselves without an off-grid backtrack.
+    points = [(minx + i * cell, miny + j * cell) for i, j in cells]
+    return simplify(points)

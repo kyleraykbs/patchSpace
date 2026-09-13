@@ -235,6 +235,14 @@ a node is being dragged, its panel is held at the size it had when the drag bega
 `PANEL_DRAG_GROW` past the baseline - so picking a node up never shrinks the box, nudging
 the edge makes room, and dragging well past the cap takes the node out.
 
+*Wire routing.* Edges are drawn in `on_draw` via `_wire_points`: if the straight socket-to-
+socket path is clear it uses the usual smooth bezier (`draw_bezier_link`); if it would cut
+through another node it instead asks `gui/wire_router.py` (an A* over a coarse grid of the
+endpoints' bounding box, obstacles = the other visible node rects inflated by `PAD`, with a
+turn penalty) for a short orthogonal detour. The detour is stroked with rounded corners
+(`draw_rounded_path`), so wires still look like natural bent wires rather than a circuit
+trace. The router is pure geometry (no GTK) and unit-tested in `tests/test_wire_router.py`.
+
 *Edit mode.* A panel's parameter values (volumes, switches, effect knobs) are **not**
 written back to its file by default - the daemon serves the committed file values from
 `_panel_snapshots` (only layout stays live), so runtime tweaks are ephemeral until you
