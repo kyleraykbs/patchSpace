@@ -2304,7 +2304,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             if rect is not None:
                 rx, ry, rw, rh = rect
                 base_panels.append((pid, (rx, ry, rx + rw, ry + rh)))
-        wire_obstacles = []
+        strips = []
         cache = {}
         for eid, edge in self.edges.items():
             if self.detaching_edge and self.detaching_edge[0] == eid:
@@ -2317,6 +2317,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             ):
                 continue
             out_x, out_y, in_x, in_y = self._edge_endpoints(edge)
+            # Wires that don't lead to the same place (share neither
+            # endpoint) keep clear of each other; wires that do (same source
+            # or same destination) are allowed to overlap/bundle, so they
+            # don't push each other apart.  This also lets two wires off one
+            # socket share space instead of blocking each other.
+            fn, tn = edge["from_node"], edge["to_node"]
+            extra = [r for f, t, r in strips if f != fn and t != tn]
             points = self._route_cache.get(eid)
             if points is not None and self._route_still_valid(
                 points, edge, out_x, out_y, in_x, in_y,
@@ -2326,13 +2333,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             else:
                 points = self._wire_points(
                     edge, out_x, out_y, in_x, in_y, wire_rects, base_panels,
-                    extra_obstacles=wire_obstacles,
+                    extra_obstacles=extra,
                 )
                 reuse = False
             cache[eid] = points
             self._wire_routes[eid] = points
             path_pts = points or [(out_x, out_y), (in_x, in_y)]
-            wire_obstacles.extend(wire_polyline_rects(path_pts))
+            for r in wire_polyline_rects(path_pts):
+                strips.append((fn, tn, r))
             owner = self._panel_lca(
                 self._panel_of_node(edge["from_node"]),
                 self._panel_of_node(edge["to_node"]),

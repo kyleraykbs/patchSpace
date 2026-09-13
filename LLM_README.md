@@ -256,9 +256,11 @@ avoiding every visible node rect **and every panel box**, each inflated by `PAD`
   routing always uses the content-only `_panel_rect_base`, so growing a panel to enclose
   its wires can't feed back into the next frame's route.
 - Edges are routed **in order**, and each finished wire is laid down as a thin keep-out
-  strip (`polyline_rects`, `SPACING`) so later wires keep visible clearance from it. If the
-  strips crowd a route out, the router retries ignoring other wires rather than dropping to
-  a straight L.
+  strip (`polyline_rects`, `SPACING`) so later wires keep visible clearance from it - but
+  only from wires that **don't lead to the same place**. Two wires sharing a source or a
+  destination (`from_node`/`to_node`) skip each other's strips, so they may overlap/bundle
+  (and two wires off one socket don't block each other). If the strips crowd a route out,
+  the router retries ignoring other wires rather than dropping to a straight L.
 - A routed wire is **cached and reused** (`_route_cache`/`_route_still_valid`) while it
   still starts/ends on the sockets, stays square, and clears the *static* obstacles (nodes
   and panels) - it deliberately does **not** test other wires. If each wire re-routed in
