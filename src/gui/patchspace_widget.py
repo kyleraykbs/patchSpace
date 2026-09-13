@@ -1371,7 +1371,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             positions = {}
             sizes = {}
             for pid in pids:
-                r = self._panel_rect(pid)
+                # Physics uses the content-only box: if it reacted to the
+                # wire-expanded _panel_rect, panel motion -> node motion ->
+                # new wire bounds -> bigger panel -> motion would never
+                # converge.
+                r = self._panel_rect_base(pid)
                 if r is None:
                     positions[pid] = (0.0, 0.0)
                     sizes[pid] = (420.0, 260.0)
@@ -1393,7 +1397,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             for pid in pids:
                 if self.dragging_panel == pid:
                     continue
-                r_old = self._panel_rect(pid)
+                r_old = self._panel_rect_base(pid)
                 ox = (r_old[0] - pax) if r_old else 0.0
                 oy = (r_old[1] - pay) if r_old else 0.0
                 nx, ny = positions[pid]
@@ -1942,11 +1946,17 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         return [(x1, y1)] + list(core) + [(x2, y2)]
 
     def _route_still_valid(self, points, edge, x1, y1, x2, y2,
-                           wire_rects, base_panels, extra):
+                           wire_rects, base_panels):
         """Whether a cached route can be reused: it still starts/ends on the
-        current sockets, is square, and clears the current obstacles.  Reuse
-        is what stops a wire from flip-flopping between two near-equal
-        detours on successive frames when several wires interact."""
+        current sockets, is square, and clears the *static* obstacles (nodes
+        and panels).
+
+        Deliberately does NOT test other wires: if each wire re-routed in
+        response to its neighbours' new keep-out strips, a pair (or trio) of
+        wires can alternate between detours forever.  Wire-vs-wire spacing
+        is applied only when a wire is (re)routed - when adding a new wire it
+        goes around the established ones, but established wires don't chase
+        it - which converges."""
         if not points or len(points) < 2:
             return False
         if (abs(points[0][0] - x1) > 0.5 or abs(points[0][1] - y1) > 0.5
@@ -1967,7 +1977,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 (rect[0] - WIRE_PAD, rect[1] - WIRE_PAD,
                  rect[2] + WIRE_PAD, rect[3] + WIRE_PAD)
             )
-        obs.extend(extra)
         for (ax, ay), (bx, by) in zip(points, points[1:]):
             if abs(ax - bx) > 0.5 and abs(ay - by) > 0.5:
                 return False
@@ -2021,7 +2030,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             points = self._route_cache.get(eid)
             if points is not None and self._route_still_valid(
                 points, edge, out_x, out_y, in_x, in_y,
-                wire_rects, base_panels, wire_obstacles,
+                wire_rects, base_panels,
             ):
                 reuse = True
             else:
@@ -4637,7 +4646,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             for pid in self.panels:
                 if pid == "":
                     continue
-                r = self._panel_rect(pid)
+                r = self._panel_rect_base(pid)
                 if r is not None:
                     self._panel_drag_baseline[pid] = r
             self.dragging_node = nid
@@ -6399,7 +6408,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         for pid in list(self.panels):
             if pid == "":
                 continue
-            rect = self._panel_rect(pid)
+            # Content-only box: ports must not chase the wire-expanded rect
+            # (that would move their sockets, changing the wires, changing
+            # the box - a feedback loop that never settles).
+            rect = self._panel_rect_base(pid)
             if rect is None:
                 continue
             center_y = rect[1] + rect[3] / 2.0
@@ -6431,7 +6443,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             rect = self._panel_rect(pid)
             if rect is None:
                 continue
-            io = self._panel_io_rects(pid, rect)
+            io = self._panel_io_rects(pid, self._panel_rect_base(pid))
             for direction, key in (("in", "in_plus"), ("out", "out_plus")):
                 x1, y1, x2, y2 = io[key]
                 if x1 - 2 <= x <= x2 + 2 and y1 - 2 <= y <= y2 + 2:
@@ -6578,7 +6590,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 cr.show_text(text)
                 cr.restore()
             # IO bars straddling the left (inputs) and right (outputs) edges.
-            io = self._panel_io_rects(pid, rect)
+            io = self._panel_io_rects(pid, self._panel_rect_base(pid))
             cr.set_line_width(1.2)
             for key in ("in_bar", "out_bar"):
                 bx1, by1, bx2, by2 = io[key]
@@ -6636,7 +6648,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 active=False, glyph="hamburger",
             )
             # IO "+" buttons at the foot of each edge bar.
-            io = self._panel_io_rects(pid, rect)
+            io = self._panel_io_rects(pid, self._panel_rect_base(pid))
             self._draw_panel_button(
                 cr, pal, io["in_plus"], (r, g, b), active=False, glyph="plus",
             )

@@ -253,14 +253,22 @@ grid of the endpoints' bounding box, with a turn penalty, avoiding every visible
   (beziers contribute their sampled curve). If the strips crowd a route out, the router
   retries ignoring other wires rather than dropping to an overlapping bezier.
 - A routed wire is **cached and reused** (`_route_cache`/`_route_still_valid`) while it
-  still starts/ends on the sockets, stays square, and clears the current obstacles - this
-  is what stops interacting wires that never converge from flip-flopping every frame.
+  still starts/ends on the sockets, stays square, and clears the *static* obstacles (nodes
+  and panels) - it deliberately does **not** test other wires. If each wire re-routed in
+  response to its neighbours' new strips, a pair/trio could alternate between detours
+  forever (the observed "cycles between 3 states"); wire-vs-wire spacing is applied only
+  when a wire is (re)routed, so established wires never chase a newcomer and the whole
+  thing converges.
 The result is a strictly axis-aligned polyline (`orthogonalize` inserts L-elbows,
 `simplify` drops collinear points); `render_utils.draw_square_path` strokes it as a square
 run with rounded corners (cubic with both controls at the vertex; cairo has no arc-to).
 `_wire_bounds` records where each panel's *owned* wires (LCA owner) run, and `_panel_rect`
-grows the content box to enclose them (`_panel_rect_base` is the un-grown auto-fit). The
-router is pure geometry (no GTK) and unit-tested in `tests/test_wire_router.py`.
+grows the content box to enclose them. Only that drawn box grows: **physics and port
+layout use `_panel_rect_base`** (content-only), because if panel motion or port positions
+reacted to the wire-expanded rect the loop *panel moves -> nodes move -> new wire bounds
+-> bigger panel -> panel moves* would never settle. IO bars/plus/port hit-tests also use
+the base rect so ports stay on the content edge. The router is pure geometry (no GTK) and
+unit-tested in `tests/test_wire_router.py`.
 
 *Edit mode.* A panel's parameter values (volumes, switches, effect knobs) are **not**
 written back to its file by default - the daemon serves the committed file values from
