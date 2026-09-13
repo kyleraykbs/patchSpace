@@ -11,7 +11,6 @@ port of the original widget onto the shared helpers.
 
 from __future__ import annotations
 
-import cairo
 import math
 import random
 
@@ -28,6 +27,8 @@ from constants import (
     LAYOUT_SETTLE_EPSILON,
     POST_MUTATION_REFRESH_MS,
     GRAPH_CANVAS_MIN_SIZE,
+    TRANSPARENT_CANVAS,
+    CANVAS_BG_ALPHA,
 )
 from render_utils import (
     theme_palette,
@@ -236,12 +237,13 @@ class PipeWireGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     def on_draw(self, area, cr, w, h):
         pal = theme_palette(self)
-        # Transparent canvas, matching the PatchSpace grid: clear to alpha 0
-        # so the compositor shows through the grid (the window/page are
-        # transparent; app chrome is kept opaque via .opaque-chrome).
+        # Semi-transparent canvas, matching the PatchSpace grid, but only
+        # when opted in (see TRANSPARENT_CANVAS).
         cr.save()
-        cr.set_operator(cairo.OPERATOR_CLEAR)
-        cr.set_source_rgba(0, 0, 0, 0)
+        if TRANSPARENT_CANVAS:
+            cr.set_source_rgba(*pal["bg"], CANVAS_BG_ALPHA)
+        else:
+            cr.set_source_rgb(*pal["bg"])
         cr.paint()
         cr.restore()
 

@@ -48,6 +48,16 @@ LAYOUT_TICK_MS = 33
 LAYOUT_SETTLE_TICKS = 20
 LAYOUT_SETTLE_EPSILON = 0.05
 
+# Opacity of the two graph canvases' background.  < 1 lets a little of what
+# is behind the window show through (kitty-style).  Off by default: many
+# tiling compositors draw a border *background fill* behind the window
+# (niri's draw-border-with-background), which then washes out any
+# transparent client area, so see-through is opt-in.
+TRANSPARENT_CANVAS = os.environ.get(
+    "PATCHBAY_TRANSPARENT_CANVAS", ""
+).strip().lower() in ("1", "true", "yes", "on")
+CANVAS_BG_ALPHA = 0.86
+
 # Node appearance animation (PatchSpace).  A node that hasn't finished
 # loading draws at NODE_LOADING_ALPHA and fades to full when the daemon
 # reports it ready; a brand-new node scales up from nothing with a

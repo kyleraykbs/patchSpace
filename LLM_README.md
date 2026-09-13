@@ -302,17 +302,17 @@ endpoint nodes excluded - their sockets sit on the border, so including them wou
 every blend. The router is pure geometry (no GTK) and unit-tested in
 `tests/test_wire_router.py`.
 
-*Canvas chrome.* Both graph canvases (`PatchSpaceGraphWidget` and `PipeWireGraphWidget`)
-clear their background to alpha 0 in `on_draw`, and
-`main_window._install_translucency_css` makes **only their ancestor containers** (window
-surface, `notebook > stack`, `paned`, `overlay`) transparent - the app chrome (toolbars,
-side panels, console) carries `.opaque-chrome` so it stays painted with the theme
-background. So only the grid's background is see-through; everything else is untouched. A
+*Canvas chrome.* See-through canvas is **opt-in** (`PATCHBAY_TRANSPARENT_CANVAS=1`),
+because many tiling compositors draw a border *background fill* behind the window (niri's
+`draw-border-with-background`) that washes out a transparent client area. When enabled,
+both `PatchSpaceGraphWidget` and `PipeWireGraphWidget` paint their background with
+`CANVAS_BG_ALPHA` (0.86, kitty-style partial alpha - not alpha 0) and
+`main_window._install_translucency_css` makes only the canvas ancestors transparent while
+`.opaque-chrome` keeps the toolbars/side panels/console/headerbar painted. By default the
+canvas paints the opaque theme background and nothing about the window changes. A
 non-interactive bottom-left legend (`_build_mouse_help`) shows the mouse controls - a
 little mouse glyph per row with the left button highlighted for "Pick / pan", the middle
-for "Pan", the right for "Select". (On a tiling compositor that draws a border behind the
-window, that border shows through the grid; disable it for this app via a window rule,
-e.g. niri `draw-border-with-background false`.)
+for "Pan", the right for "Select".
 
 *Node appearance.* A node the daemon hasn't finished bringing up (`ready` false) draws at
 `NODE_LOADING_ALPHA` (0.45) and fades to full once ready, and is not a hit target while it

@@ -31,6 +31,7 @@ from constants import (
     ADD_NODE_PANEL_WIDTH,
     ADD_NODE_PANEL_MIN_WIDTH,
     ADD_NODE_PANEL_MAX_WIDTH,
+    TRANSPARENT_CANVAS,
 )
 from socket_client import PatchBayClient
 from daemon_control import DaemonManager
@@ -240,14 +241,20 @@ class MainWindow(Gtk.ApplicationWindow):
         super().__init__(application=app)
         self.set_title("Patch Space")
         self.set_default_size(1200, 800)
-        # See the compositor/desktop through the PatchSpace grid.
-        self.add_css_class("translucent-canvas")
+        # See the compositor/desktop through the PatchSpace grid.  Opt-in:
+        # tiling compositors that fill a border background (niri) wash the
+        # whole transparent client area out otherwise.  The CSS is installed
+        # unconditionally (it also styles .mouse-help / .opaque-chrome); only
+        # the class that activates the transparent selectors is conditional.
         self._install_translucency_css()
+        if TRANSPARENT_CANVAS:
+            self.add_css_class("translucent-canvas")
 
         # Explicit titlebar with the program name (the default CSD title
         # also shows it, but this makes the name unambiguous and matches
         # the libadwaita look).
         header = Adw.HeaderBar()
+        header.add_css_class("opaque-chrome")
         title_label = Gtk.Label(label="Patch Space")
         title_label.add_css_class("title")
         header.set_title_widget(title_label)
@@ -1010,7 +1017,17 @@ class MainWindow(Gtk.ApplicationWindow):
         except the grid area is untouched."""
         css = Gtk.CssProvider()
         css.load_from_data(
-            b"window.translucent-canvas,"
+            b"window.translucent-canvas {"
+            b"  background-color: transparent;"
+            b"  background-image: none;"
+            b"  box-shadow: none;"
+            b"  border-radius: 0; }"
+            b"window.translucent-canvas .csd,"
+            b"window.translucent-canvas headerbar,"
+            b"window.translucent-canvas notebook > header {"
+            b"  background-color: @window_bg_color;"
+            b"  box-shadow: none;"
+            b"  border-radius: 0; }"
             b"window.translucent-canvas notebook > stack,"
             b"window.translucent-canvas paned,"
             b"window.translucent-canvas overlay {"

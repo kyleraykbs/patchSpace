@@ -22,7 +22,6 @@ if/elif chains here.
 
 from __future__ import annotations
 
-import cairo
 import json
 import logging
 import math
@@ -43,6 +42,8 @@ from constants import (
     GRAPH_CANVAS_MIN_SIZE,
     SESSION_LOAD_OVERLAY_MIN_MS,
     SESSION_LOAD_OVERLAY_TIMEOUT_MS,
+    TRANSPARENT_CANVAS,
+    CANVAS_BG_ALPHA,
     NODE_MATERIALIZE_MS,
     NODE_FADE_MS,
     NODE_LOADING_ALPHA,
@@ -3041,13 +3042,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # wires running inside them, so their boxes must know the routes.
         self._route_all_wires()
         pal = theme_palette(self)
-        # Transparent canvas: clear to alpha 0 instead of painting an opaque
-        # background, so the compositor can show whatever is behind the
-        # window through the grid (the window/page are made transparent in
-        # main_window's CSS).
+        # Semi-transparent canvas only when opted in (see TRANSPARENT_CANVAS);
+        # otherwise paint the opaque theme background as before.
         cr.save()
-        cr.set_operator(cairo.OPERATOR_CLEAR)
-        cr.set_source_rgba(0, 0, 0, 0)
+        if TRANSPARENT_CANVAS:
+            cr.set_source_rgba(*pal["bg"], CANVAS_BG_ALPHA)
+        else:
+            cr.set_source_rgb(*pal["bg"])
         cr.paint()
         cr.restore()
 
