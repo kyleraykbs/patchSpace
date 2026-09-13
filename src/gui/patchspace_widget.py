@@ -4993,9 +4993,22 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         min_spin = None
         max_spin = None
 
-        if spec.control == "gate":
-            control_widget = Gtk.CheckButton(label="Enabled")
-            control_widget.set_active(node.get("enabled", True))
+        if spec.control == "fallback_onoff":
+            # Gate / Switcher: the state used when nothing is wired into
+            # the boolean "ctrl" input (the inline fallback button's value),
+            # now editable here too.
+            is_gate = node["type"] == "gate"
+            control_widget = Gtk.CheckButton(
+                label="Enabled by default" if is_gate else "On by default"
+            )
+            if is_gate:
+                control_widget.set_active(bool(node.get("enabled", True)))
+            else:
+                control_widget.set_active(bool(node.get("output", 0)))
+            control_widget.set_tooltip_text(
+                "The state this node falls back to when nothing is wired "
+                "into its boolean control input."
+            )
             content.append(control_widget)
 
         elif spec.control == "volume":
@@ -5249,13 +5262,20 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 node["label"] = new_label
                 self._send_property(node_id, "label", new_label)
 
-            # Gate or Volume
-            if spec.control == "gate":
+            # Gate / Switcher fallback default (the state used with nothing
+            # wired into "ctrl").
+            if spec.control == "fallback_onoff":
                 if control_widget is not None:
-                    new_en = control_widget.get_active()
-                    if new_en != node.get("enabled", True):
-                        node["enabled"] = new_en
-                        self._send_set_gate(node_id, new_en)
+                    new_state = control_widget.get_active()
+                    if node["type"] == "gate":
+                        if new_state != node.get("enabled", True):
+                            node["enabled"] = new_state
+                            self._send_set_gate(node_id, new_state)
+                    else:
+                        new_out = 1 if new_state else 0
+                        if new_out != node.get("output", 0):
+                            node["output"] = new_out
+                            self._send_switcher_output(node_id, new_out)
 
             elif spec.control == "volume":
                 if control_widget is not None:

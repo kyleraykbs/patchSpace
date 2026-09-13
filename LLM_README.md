@@ -147,7 +147,10 @@ white from the daemon's `bool_driven`/`bool_state`. If a poll reports `bool_stat
 while the ctrl signal is still wired (a bool-warp publisher briefly re-created by a panel
 sync), the GUI holds the last resolved value rather than flashing back to the node's
 stored default (`gui/bool_state.py:resolve_bool_state_from_poll`); it clears once ctrl is
-genuinely disconnected.
+genuinely disconnected. That stored default (a gate's `enabled`, a switcher's `output`)
+is editable both from the inline fallback button and from the node's **Settings** dialog
+(`show_settings_dialog`'s `fallback_onoff` branch), which sends `set_gate` /
+`set_node_property "output"`.
 
 **Effect sandwich (central idea):** every effect is
 ```
