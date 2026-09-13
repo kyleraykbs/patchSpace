@@ -1011,30 +1011,43 @@ class MainWindow(Gtk.ApplicationWindow):
         CSD edges (shadow/rounded corners removed) - is forced opaque via
         ``.opaque-chrome`` so the rest of the window stays filled.  Needs the
         compositor not to fill a border background behind the window (niri:
-        ``draw-border-with-background false`` for this app-id)."""
+        ``draw-border-with-background false`` for this app-id).
+
+        The opaque color is written literally (not ``@window_bg_color``):
+        this is a plain ``Gtk.Application`` window, so libadwaita's named
+        colors aren't loaded and the named-color rule would be dropped,
+        leaving the chrome transparent."""
+        from render_utils import theme_palette
+
+        r, g, b = theme_palette(self).get("bg", (0.1, 0.1, 0.1))
+        bg_hex = "#%02x%02x%02x" % (
+            int(round(r * 255)), int(round(g * 255)), int(round(b * 255))
+        )
         css = Gtk.CssProvider()
         css.load_from_data(
-            b"window.translucent-canvas {"
-            b"  background-color: transparent;"
-            b"  background-image: none;"
-            b"  box-shadow: none;"
-            b"  border-radius: 0; }"
-            b"window.translucent-canvas .csd,"
-            b"window.translucent-canvas headerbar,"
-            b"window.translucent-canvas notebook > header {"
-            b"  background-color: @window_bg_color;"
-            b"  box-shadow: none;"
-            b"  border-radius: 0; }"
-            b"window.translucent-canvas notebook > stack,"
-            b"window.translucent-canvas paned,"
-            b"window.translucent-canvas overlay {"
-            b"  background-color: transparent; }"
-            b"window.translucent-canvas .opaque-chrome {"
-            b"  background-color: @window_bg_color; }"
-            b".mouse-help {"
-            b"  background-color: rgba(0, 0, 0, 0.38);"
-            b"  border-radius: 8px; padding: 6px 9px; }"
-            b".mouse-help label { color: #ffffff; font-size: 11px; }"
+            (
+                "window.translucent-canvas {"
+                "  background-color: transparent;"
+                "  background-image: none;"
+                "  box-shadow: none;"
+                "  border-radius: 0; }"
+                "window.translucent-canvas .csd,"
+                "window.translucent-canvas headerbar,"
+                "window.translucent-canvas notebook > header {"
+                f"  background-color: {bg_hex};"
+                "  box-shadow: none;"
+                "  border-radius: 0; }"
+                "window.translucent-canvas notebook > stack,"
+                "window.translucent-canvas paned,"
+                "window.translucent-canvas overlay {"
+                "  background-color: transparent; }"
+                "window.translucent-canvas .opaque-chrome {"
+                f"  background-color: {bg_hex}; }}"
+                ".mouse-help {"
+                "  background-color: rgba(0, 0, 0, 0.38);"
+                "  border-radius: 8px; padding: 6px 9px; }"
+                ".mouse-help label { color: #ffffff; font-size: 11px; }"
+            ).encode()
         )
         display = Gdk.Display.get_default()
         if display is not None:
