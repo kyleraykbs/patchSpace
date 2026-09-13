@@ -262,8 +262,8 @@ rows are **draggable onto the canvas** (dropped over a panel it nests there, els
 *Auto-load.* `auto_load` (default **false**, top-level in the file, a checkbox in the
 right side view) controls whether a standalone panel placement is spawned at the root on
 start-up; a nested sub-panel is always loaded as a dependency of its parent regardless of
-its own flag. `list_panel_files`/`set_panel_file_autoload` drive the side view;
-`list_panels`/`get_nodes` report per-placement `stem`/`auto_load`.
+its own flag. `list_panel_files`/`set_panel_file_autoload`/`delete_panel_file` drive the
+side view; `list_panels`/`get_nodes` report per-placement `stem`/`auto_load`.
 
 *Panel ports (IO).* A panel can expose inputs/outputs as lightweight **pass-through proxy
 nodes** placed at its edges: `panel_in`/`panel_out` (audio, `TransparentNode` subclasses)
@@ -284,9 +284,12 @@ internal nodes on its inner side - ordinary edges, so LCA edge-ownership already
 them in the right file.
 
 *Panels side view.* A docked, scrollable list of panel files lives on the right (the endchild of an outer `Gtk.Paned`), toggled by a button directly under the top-right
-hamburger (`main_window._panels_toggle` / `_build_panels_view`). Each row shows the
-panel's colour/label with Select and an X to remove that panel (delete moved here from
-the title row).
+hamburger (`main_window._panels_toggle` / `_build_panels_view`). A column-header row labels
+the controls; each row shows the panel's colour dot, label, a dim "N nodes · M child
+panels" line (`_panel_detail_text`, fed by `list_panel_files`), then an **Auto**-load
+checkbox, an **Add** (place) button and a **Del** button. Del confirms, then sends
+`delete_panel_file` (which removes the file and every placement's subtree) and re-lists.
+The old standalone "Panels… dialog" (and its Select/Group/Delete surface) has been removed.
 
 *Physics* is hierarchical (`_hierarchical_step`, `on_layout_tick`): node physics runs
 inside each panel in that panel's local frame (internal edges only). Node physics and the

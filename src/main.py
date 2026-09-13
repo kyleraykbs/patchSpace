@@ -1669,6 +1669,63 @@ class PatchBayDaemon:
         self._wake_ticker()
         return {"status": "ok", "panel_id": panel_id, "kept_nodes": keep_nodes}
 
+    def _cmd_delete_panel_file(self, cmd: dict) -> dict:
+        """Delete a panel *file* (the backend) from the side view.
+
+        Unlike ``delete_panel`` (one placement, with a keep-nodes choice),
+        this removes the file itself, so every loaded placement of it goes
+        too - along with each placement's subtree (nested child panels)."""
+        stem = (cmd.get("stem") or "").strip()
+        if not stem:
+            return {"status": "error", "message": "stem required"}
+        path, writable = self._panel_file_path(stem)
+        if not path:
+            return {"status": "error", "message": f"no panel file {stem!r}"}
+        if not writable:
+            return {"status": "error", "message": f"panel file {stem!r} is read-only"}
+        placements = [
+            pid for pid, panel in self.panels.items()
+            if pid != panels.ROOT_ID and panel.stem == stem
+        ]
+        with self._lock:
+            # A placement's subtree includes its nested child panels; gather
+            # every doomed panel id before mutating anything.
+            doomed = set()
+            for pid in placements:
+                prefix = pid + panels.NAMESPACE_SEP
+                for p in self.panels:
+                    if p == pid or p.startswith(prefix):
+                        doomed.add(p)
+            for pid in doomed:
+                prefix = pid + panels.NAMESPACE_SEP
+                for nid in [
+                    n for n in self.space.nodes
+                    if n == pid or n.startswith(prefix)
+                ]:
+                    self.space.remove_node(nid)
+            for pid in placements:
+                parent = self.panels.get(self.panels[pid].parent or "")
+                if parent is None:
+                    continue
+                local = panels.local_of(pid)
+                parent.config["panels"] = [
+                    s for s in parent.config.get("panels", [])
+                    if panels.child_name(s) != local
+                ]
+            for pid in doomed:
+                self.panels.pop(pid, None)
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+        except OSError as exc:
+            logger.warning("Could not delete panel file %r: %s", path, exc)
+            return {"status": "error", "message": f"could not delete {path}: {exc}"}
+        self._install_panels(self._build_panels_from_space())
+        self._write_panels()
+        self._dirty = True
+        self._wake_ticker()
+        return {"status": "ok", "stem": stem, "removed": sorted(placements)}
+
     def _cmd_edit_panel(self, cmd: dict) -> dict:
         """Change a writable panel's display label and/or colour."""
         panel_id = cmd.get("panel_id", "")
@@ -1794,6 +1851,11 @@ class PatchBayDaemon:
             for path in panels.list_files(directory):
                 stem = panels.file_stem(path)
                 raw = panels.read_file(path) or {}
+                config = panels.config_from_raw(raw)
+                children = [
+                    panels.child_name(c)
+                    for c in (config.get("panels") or [])
+                ]
                 by_stem[stem] = {
                     "stem": stem,
                     "label": raw.get("label") or stem,
@@ -1802,6 +1864,8 @@ class PatchBayDaemon:
                     "auto_load": bool(raw.get("auto_load")),
                     "path": path,
                     "writable": writable,
+                    "node_count": len(config.get("nodes") or {}),
+                    "children": children,
                 }
         return {
             "status": "ok",
@@ -4679,6 +4743,8 @@ class PatchBayDaemon:
                 response = self._cmd_create_panel(cmd)
             elif command == "delete_panel":
                 response = self._cmd_delete_panel(cmd)
+            elif command == "delete_panel_file":
+                response = self._cmd_delete_panel_file(cmd)
             elif command == "edit_panel":
                 response = self._cmd_edit_panel(cmd)
             elif command == "export_panel":

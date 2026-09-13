@@ -258,11 +258,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._right_drag_mods = Gdk.ModifierType(0)
         self._right_drag_cancelled = False
         self._right_marquee_base = set()
-        # Panel-file dialogs: last listing, the open dialog, and the
-        # "open the panel list once it arrives" handshake.
-        self._pending_panel_list = False
-        self._panel_files = []
-        self._panel_dialog = None
         # (panel_id, "copy"|"save") while waiting for an export_panel reply.
         self._pending_panel_export = None
         # Panels whose local placement is ahead of the daemon (physics /
@@ -3755,10 +3750,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._begin_load()
         self.client.send({"command": "reload_panels"})
 
-    def show_panels_dialog(self):
-        self._pending_panel_list = True
-        self.client.send({"command": "list_panels"})
-
     def show_create_panel_dialog(self):
         """Prompt for a name/mode and move the current selection (if any)
         into a new panel file.  With a selection the panel is sized and
@@ -3921,214 +3912,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         dialog.connect("response", _on_response)
         dialog.present()
 
-    def on_panels_list(self, resp):
-        # Cache the listing so the dialog can render without another
-        # round trip.
-        self._panel_files = resp.get("files", [])
-        if not self._pending_panel_list:
-            return
-        self._pending_panel_list = False
-        self._show_panels_dialog(resp)
-
-    def _select_panel_nodes(self, node_ids):
-        """Select the given full-id nodes on the canvas."""
-        ids = {n for n in node_ids if n in self.nodes}
-        if not ids:
-            self._show_error_dialog("Those nodes are not on the canvas.")
-            return
-        self._set_selection(ids)
-        self.zoom_to_fit()
-
-    def _panel_swatch(self, color):
-        area = Gtk.DrawingArea()
-        area.set_content_width(16)
-        area.set_content_height(16)
-        area.set_valign(Gtk.Align.CENTER)
-
-        def draw(_area, cr, w, h):
-            r, g, b = self._hex_to_rgb(color)
-            cr.set_source_rgb(r, g, b)
-            cr.arc(w / 2.0, h / 2.0, min(w, h) / 2.0 - 1, 0, 2 * math.pi)
-            cr.fill()
-            cr.set_source_rgb(0.1, 0.1, 0.1)
-            cr.set_line_width(1.0)
-            cr.arc(w / 2.0, h / 2.0, min(w, h) / 2.0 - 1, 0, 2 * math.pi)
-            cr.stroke()
-
-        area.set_draw_func(draw)
-        return area
-
-    def _show_panels_dialog(self, resp):
-        dialog = Gtk.Dialog(
-            title="Panels",
-            transient_for=self.get_root(),
-            modal=False,
-        )
-        self._panel_dialog = dialog
-        dialog.set_default_size(560, 460)
-
-        content = dialog.get_content_area()
-        content.set_spacing(6)
-        content.set_margin_top(10)
-        content.set_margin_bottom(10)
-        content.set_margin_start(10)
-        content.set_margin_end(10)
-
-        lines = ["Panel directories:"]
-        for entry in resp.get("directories", []):
-            mode = "read-write" if entry.get("writable") else "read-only"
-            lines.append(
-                "  {} <span alpha='60%'>({})</span>".format(
-                    GLib.markup_escape_text(str(entry.get("path", ""))), mode
-                )
-            )
-        root = resp.get("root")
-        if root:
-            lines.append(
-                "  root: {}".format(GLib.markup_escape_text(str(root)))
-            )
-        info = Gtk.Label()
-        info.set_xalign(0)
-        info.set_wrap(True)
-        info.set_markup("\n".join(lines))
-        content.append(info)
-
-        scrolled = Gtk.ScrolledWindow()
-        scrolled.set_vexpand(True)
-        scrolled.set_hexpand(True)
-        listbox = Gtk.ListBox()
-        listbox.set_selection_mode(Gtk.SelectionMode.NONE)
-        scrolled.set_child(listbox)
-
-        files = resp.get("files", [])
-        if not files:
-            placeholder = Gtk.Label(label="No panel files found.")
-            placeholder.set_margin_top(12)
-            listbox.append(placeholder)
-        for entry in files:
-            listbox.append(self._panel_row(entry, dialog))
-        content.append(scrolled)
-
-        select_group_btn = Gtk.Button(label="Select Group\u2026")
-        select_group_btn.set_tooltip_text(
-            "Select the nodes of one of the canvas groups"
-        )
-        select_group_btn.connect(
-            "clicked", lambda _b, d=dialog: self._prompt_select_group(d)
-        )
-        content.append(select_group_btn)
-
-        dialog.add_button("Reload", Gtk.ResponseType.APPLY)
-        dialog.add_button("Close", Gtk.ResponseType.CLOSE)
-        dialog.connect("response", self._on_panels_dialog_response)
-        dialog.connect("destroy", self._on_panels_dialog_destroy)
-        dialog.show()
-
-    def _prompt_select_group(self, parent):
-        groups = list(self.groups.items())
-        if not groups:
-            self._show_error_dialog("There are no groups on the canvas.")
-            return
-        dialog = Gtk.Dialog(
-            title="Select Group", transient_for=parent, modal=True
-        )
-        content = dialog.get_content_area()
-        content.set_spacing(6)
-        content.set_margin_top(10)
-        content.set_margin_bottom(10)
-        content.set_margin_start(10)
-        content.set_margin_end(10)
-        dropdown = Gtk.DropDown.new_from_strings(
-            [g.get("label", gid) for gid, g in groups]
-        )
-        content.append(self._labeled_row("Group:", dropdown))
-        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
-        dialog.add_button("Select", Gtk.ResponseType.APPLY)
-        dialog.set_default_response(Gtk.ResponseType.APPLY)
-
-        def on_response(dlg, response):
-            if response == Gtk.ResponseType.APPLY:
-                idx = dropdown.get_selected()
-                if 0 <= idx < len(groups):
-                    self._select_panel_nodes(groups[idx][1].get("nodes", []))
-            dlg.destroy()
-
-        dialog.connect("response", on_response)
-        dialog.show()
-
-    def _panel_row(self, entry, dialog):
-        row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        row.set_margin_top(6)
-        row.set_margin_bottom(6)
-        row.set_margin_start(6)
-        row.set_margin_end(6)
-
-        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        header.append(self._panel_swatch(entry.get("color", "#3584e4")))
-        name = Gtk.Label()
-        name.set_xalign(0)
-        name.set_hexpand(True)
-        name.set_ellipsize(Pango.EllipsizeMode.END)
-        name.set_markup(
-            "<b>{}</b>  <span size='small' alpha='60%'>{}</span>".format(
-                GLib.markup_escape_text(str(entry.get("label", "?"))),
-                GLib.markup_escape_text(str(entry.get("id", ""))),
-            )
-        )
-        header.append(name)
-
-        select_btn = Gtk.Button(label="Select")
-        select_btn.set_tooltip_text("Select this panel's nodes on the canvas")
-        select_btn.connect(
-            "clicked",
-            lambda _b, e=entry: self._select_panel_nodes(e.get("nodes", [])),
-        )
-        header.append(select_btn)
-
-        if entry.get("readonly"):
-            reset_btn = Gtk.Button(label="Reset")
-            reset_btn.set_tooltip_text(
-                "Revert this read-only panel's nodes, edges and placement"
-            )
-            reset_btn.connect(
-                "clicked",
-                lambda _b, e=entry: self._reset_panel_from_dialog(e),
-            )
-            header.append(reset_btn)
-            ro_tag = Gtk.Label(label="read-only")
-            ro_tag.add_css_class("dim-label")
-            header.append(ro_tag)
-        elif entry.get("writable"):
-            delete_btn = Gtk.Button(label="Delete")
-            delete_btn.set_tooltip_text(
-                "Remove this panel and every node it defines"
-            )
-            delete_btn.connect(
-                "clicked",
-                lambda _b, e=entry, d=dialog: self._confirm_delete_panel(e, d),
-            )
-            header.append(delete_btn)
-
-        row.append(header)
-
-        nodes = entry.get("nodes", [])
-        names = ", ".join(str(n).rsplit("::", 1)[-1] for n in nodes[:8])
-        if len(nodes) > 8:
-            names += ", \u2026"
-        detail = Gtk.Label(
-            label=f"{len(nodes)} node(s), {len(entry.get('children', []))} "
-            f"child panel(s): {names}"
-        )
-        detail.set_xalign(0)
-        detail.set_wrap(True)
-        detail.add_css_class("dim-label")
-        row.append(detail)
-        return row
-
-    def _reset_panel_from_dialog(self, entry):
-        self._begin_load()
-        self.client.send({"command": "reset_panel", "panel_id": entry.get("id")})
-
     def confirm_delete_panel_with_nodes(self, panel_id):
         """Ask whether to delete a panel's nodes too or move them up to the
         parent panel, then send the delete."""
@@ -4172,9 +3955,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             }
         )
 
-    def _confirm_delete_panel(self, entry, parent):
-        self.confirm_delete_panel_with_nodes(entry.get("id"))
-
     def _show_panel_menu(self, panel_id, x, y):
         """The panel hamburger dropdown: settings (writable), duplicate,
         and copy/save the panel's current state as JSON."""
@@ -4201,6 +3981,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
         add("Copy as JSON", lambda: self._export_panel(panel_id, "copy"))
         add("Save to File\u2026", lambda: self._export_panel(panel_id, "save"))
+        if panel.get("writable") and not panel.get("readonly"):
+            box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+            add(
+                "Delete\u2026",
+                lambda: self.confirm_delete_panel_with_nodes(panel_id),
+            )
 
         popover.set_child(box)
         self.popup_context_menu(popover, x, y)
@@ -4284,17 +4070,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         save_file(
             self.get_root(), "Save Panel", name + ".json", on_path
         )
-
-    def _on_panels_dialog_response(self, dialog, response):
-        if response == Gtk.ResponseType.APPLY:
-            self._pending_panel_list = True
-            self.client.send({"command": "list_panels"})
-        dialog.destroy()
-
-    def _on_panels_dialog_destroy(self, dialog):
-        if getattr(self, "_panel_dialog", None) is dialog:
-            self._panel_dialog = None
-
 
     def rebuild_graph(self):
         """Tear the daemon's PatchSpace down and rebuild it exactly as it

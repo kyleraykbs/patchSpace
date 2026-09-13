@@ -493,6 +493,41 @@ def test_place_panel_adds_a_second_placement(tmp_path):
     assert d.panels[name].path == d.panels["kit"].path
 
 
+def test_delete_panel_file_removes_file_and_placements(tmp_path):
+    d, root, pdir = _daemon(tmp_path)
+    d.panels = d._load_panels_tree()
+    d.handle_command({"command": "add_node", "node_type": "regex_input",
+                      "node_id": "a", "config": {"pattern": ".*"}})
+    assert d._cmd_create_panel({"name": "kit", "node_ids": ["a"]})["status"] == "ok"
+    other = d._cmd_place_panel({"stem": "kit"})["name"]
+    assert "kit::a" in d.space.nodes
+    assert f"{other}::a" in d.space.nodes
+
+    # The side-view listing carries the per-file node/child counts.
+    listing = d._cmd_list_panel_files({})
+    entry = next(f for f in listing["files"] if f["stem"] == "kit")
+    assert entry["node_count"] == 1
+    assert entry["children"] == []
+
+    resp = d._cmd_delete_panel_file({"stem": "kit"})
+    assert resp["status"] == "ok", resp
+    assert not os.path.exists(os.path.join(pdir, "kit.json"))
+    assert "kit" not in d.panels and other not in d.panels
+    assert "kit::a" not in d.space.nodes
+    assert f"{other}::a" not in d.space.nodes
+
+
+def test_delete_panel_file_refuses_readonly(tmp_path):
+    d, root, pdir = _daemon(tmp_path)
+    d.panels = d._load_panels_tree()
+    assert d._cmd_create_panel({"name": "kit"})["status"] == "ok"
+    # The file's directory is read-only from the daemon's point of view.
+    d.panel_dirs = [(pdir, False)]
+    resp = d._cmd_delete_panel_file({"stem": "kit"})
+    assert resp["status"] == "error"
+    assert os.path.exists(os.path.join(pdir, "kit.json"))
+
+
 def test_list_panel_files_and_autoload_toggle(tmp_path):
     d, root, pdir = _daemon(tmp_path)
     d.panels = d._load_panels_tree()
