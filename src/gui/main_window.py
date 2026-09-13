@@ -88,6 +88,7 @@ class LogConsole(Gtk.Box):
 
     def __init__(self):
         super().__init__(orientation=Gtk.Orientation.VERTICAL)
+        self.add_css_class("opaque-chrome")
         self.client = PatchBayClient()
         self._active = False
         self._since = 0
@@ -558,6 +559,7 @@ class MainWindow(Gtk.ApplicationWindow):
     def _build_panels_view(self):
         """A docked, scrollable list of the panel files on the right."""
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        box.add_css_class("opaque-chrome")
         box.set_size_request(240, -1)
         box.set_margin_top(6)
         box.set_margin_bottom(6)
@@ -998,20 +1000,23 @@ class MainWindow(Gtk.ApplicationWindow):
         return True
 
     def _install_translucency_css(self):
-        """Make the window shell and the page containers transparent so the
-        PatchSpace canvas (which clears to alpha 0 in on_draw) shows the
-        compositor/desktop behind it.  Scoped to ``.translucent-canvas`` so
-        only this window is affected; widgets that carry their own theme
-        background (tabs header, buttons, the raw PipeWire canvas) stay
-        opaque."""
+        """See-through *canvas background only*.
+
+        The two graph canvases clear to alpha 0 in their ``on_draw``, and
+        this makes just their ancestor containers (and the window surface)
+        transparent so the compositor can show what's behind the grid.  The
+        app chrome is explicitly painted opaque again via
+        ``.opaque-chrome`` (toolbars, side panels, console), so everything
+        except the grid area is untouched."""
         css = Gtk.CssProvider()
         css.load_from_data(
             b"window.translucent-canvas,"
-            b"window.translucent-canvas notebook,"
             b"window.translucent-canvas notebook > stack,"
             b"window.translucent-canvas paned,"
             b"window.translucent-canvas overlay {"
             b"  background-color: transparent; }"
+            b"window.translucent-canvas .opaque-chrome {"
+            b"  background-color: @window_bg_color; }"
             b".mouse-help {"
             b"  background-color: rgba(0, 0, 0, 0.38);"
             b"  border-radius: 8px; padding: 6px 9px; }"
@@ -1083,6 +1088,7 @@ class MainWindow(Gtk.ApplicationWindow):
         explaining what it does.  (Rebuild lives in the top-right
         hamburger menu now - see _build_patchspace_page.)"""
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        bar.add_css_class("opaque-chrome")
         bar.set_margin_top(4)
         bar.set_margin_bottom(4)
         bar.set_margin_start(8)
