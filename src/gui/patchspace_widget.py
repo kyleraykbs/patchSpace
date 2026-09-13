@@ -57,6 +57,7 @@ from render_utils import (
     draw_text_unbounded,
     draw_text_wrapped,
     wrapped_text_height,
+    draw_bezier_link,
     draw_square_path,
     draw_grid_background,
 )
@@ -3020,7 +3021,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 cx, cy = self.drag_current_xy
                 cr.set_source_rgb(*pal["pending_link"])
                 cr.set_line_width(2)
-                draw_square_path(cr, [(sx, sy), (cx, sy), (cx, cy)])
+                # Rubber band while dragging a new connection: a smooth
+                # sigmoid curve (square routing would look terrible mid-
+                # gesture, and the final wire is re-routed on release).
+                draw_bezier_link(cr, sx, sy, cx, cy)
 
         cr.restore()
 
