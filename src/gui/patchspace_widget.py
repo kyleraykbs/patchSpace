@@ -23,6 +23,7 @@ if/elif chains here.
 from __future__ import annotations
 
 import json
+import constants
 import logging
 import math
 import random
@@ -42,8 +43,6 @@ from constants import (
     GRAPH_CANVAS_MIN_SIZE,
     SESSION_LOAD_OVERLAY_MIN_MS,
     SESSION_LOAD_OVERLAY_TIMEOUT_MS,
-    TRANSPARENT_CANVAS,
-    CANVAS_BG_ALPHA,
     NODE_MATERIALIZE_MS,
     NODE_FADE_MS,
     NODE_LOADING_ALPHA,
@@ -3042,12 +3041,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # wires running inside them, so their boxes must know the routes.
         self._route_all_wires()
         pal = theme_palette(self)
-        # Grid background: partial alpha so a little of what's behind the
-        # window shows through (only the grid - the window edges/chrome are
-        # kept opaque; see constants.TRANSPARENT_CANVAS).
+        # Grid background.  Fully opaque by default; --canvas-opacity < 1
+        # paints it at that alpha so the desktop shows through the grid only
+        # (panels/nodes are opaque, see _draw_panel_boxes).
         cr.save()
-        if TRANSPARENT_CANVAS:
-            cr.set_source_rgba(*pal["bg"], CANVAS_BG_ALPHA)
+        alpha = constants.CANVAS_BG_ALPHA
+        if alpha < 1.0:
+            cr.set_source_rgba(*pal["bg"], max(0.0, alpha))
         else:
             cr.set_source_rgb(*pal["bg"])
         cr.paint()
@@ -7110,6 +7110,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             cr.save()
             draw_rounded_rect(cr, x, y, w, h, 12)
             cr.clip()
+            # Opaque backing first (like nodes): without it a panel interior
+            # is just 10% tint over the canvas, so with a translucent canvas
+            # the panel reads as see-through as the empty grid.  The tint is
+            # only for the colour-coding look, on top of the solid card.
+            cr.set_source_rgb(*pal["node_bg"])
+            cr.rectangle(x, y, w, h)
+            cr.fill()
             cr.set_source_rgba(r, g, b, 0.10)
             cr.rectangle(x, y, w, h)
             cr.fill()
@@ -7153,6 +7160,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             for key in ("in_bar", "out_bar"):
                 bx1, by1, bx2, by2 = io[key]
                 draw_rounded_rect(cr, bx1, by1, bx2 - bx1, by2 - by1, 4)
+                # Opaque backing so the strip occludes the translucent
+                # canvas, then the colour wash on top.
+                cr.set_source_rgb(*pal["node_bg"])
+                cr.fill_preserve()
                 cr.set_source_rgba(r, g, b, 0.30)
                 cr.fill_preserve()
                 cr.set_source_rgb(r, g, b)

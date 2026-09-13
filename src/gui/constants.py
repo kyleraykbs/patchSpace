@@ -48,19 +48,17 @@ LAYOUT_TICK_MS = 33
 LAYOUT_SETTLE_TICKS = 20
 LAYOUT_SETTLE_EPSILON = 0.05
 
-# Grid-background transparency.  The two graph canvases paint their
-# background at CANVAS_BG_ALPHA while the window surface and the immediate
-# canvas containers are transparent, so only the *grid* shows what's behind
-# the window - the app chrome (headerbar, toolbars, side panels, console)
-# is forced opaque via ``.opaque-chrome`` and the CSD shadow/rounded corners
-# are removed, so the window's edges stay filled.  This needs the compositor
-# not to fill a border background behind the window (niri:
-# ``draw-border-with-background false`` for app-id org.patchspace);
-# set PATCHBAY_TRANSPARENT_CANVAS=0 to force it off.
-TRANSPARENT_CANVAS = os.environ.get(
-    "PATCHBAY_TRANSPARENT_CANVAS", "1"
-).strip().lower() not in ("0", "false", "no", "off")
-CANVAS_BG_ALPHA = 0.80
+# Canvas background opacity, 0..1.  1.0 = fully opaque (default); < 1 paints
+# the graph background at that alpha so the desktop shows faintly through the
+# grid only.  Set from the ``--canvas-opacity`` command-line option
+# (patchbay_gui.py).  When < 1 the window surface and the immediate canvas
+# containers are made transparent, the app chrome (headerbar, toolbars, side
+# panels, console) is forced opaque via ``.opaque-chrome`` and the CSD
+# shadow/rounded corners are removed - so only the grid is see-through and
+# the window edges stay filled.  Needs the compositor not to fill a border
+# background behind the window (niri: ``draw-border-with-background false``
+# for app-id org.patchspace).
+CANVAS_BG_ALPHA = 1.0
 
 # Node appearance animation (PatchSpace).  A node that hasn't finished
 # loading draws at NODE_LOADING_ALPHA and fades to full when the daemon

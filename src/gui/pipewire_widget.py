@@ -11,6 +11,7 @@ port of the original widget onto the shared helpers.
 
 from __future__ import annotations
 
+import constants
 import math
 import random
 
@@ -27,8 +28,6 @@ from constants import (
     LAYOUT_SETTLE_EPSILON,
     POST_MUTATION_REFRESH_MS,
     GRAPH_CANVAS_MIN_SIZE,
-    TRANSPARENT_CANVAS,
-    CANVAS_BG_ALPHA,
 )
 from render_utils import (
     theme_palette,
@@ -237,10 +236,12 @@ class PipeWireGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     def on_draw(self, area, cr, w, h):
         pal = theme_palette(self)
-        # Grid background, matching the PatchSpace canvas (partial alpha).
+        # Opaque by default; --canvas-opacity < 1 makes only the grid
+        # see-through (matching the PatchSpace canvas).
         cr.save()
-        if TRANSPARENT_CANVAS:
-            cr.set_source_rgba(*pal["bg"], CANVAS_BG_ALPHA)
+        alpha = constants.CANVAS_BG_ALPHA
+        if alpha < 1.0:
+            cr.set_source_rgba(*pal["bg"], max(0.0, alpha))
         else:
             cr.set_source_rgb(*pal["bg"])
         cr.paint()

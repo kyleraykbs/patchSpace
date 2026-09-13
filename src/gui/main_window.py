@@ -9,6 +9,7 @@ whichever tab it belongs to.
 
 from __future__ import annotations
 
+import constants
 import logging
 import math
 import os
@@ -31,7 +32,6 @@ from constants import (
     ADD_NODE_PANEL_WIDTH,
     ADD_NODE_PANEL_MIN_WIDTH,
     ADD_NODE_PANEL_MAX_WIDTH,
-    TRANSPARENT_CANVAS,
 )
 from socket_client import PatchBayClient
 from daemon_control import DaemonManager
@@ -242,7 +242,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.set_title("Patch Space")
         self.set_default_size(1200, 800)
         self._install_translucency_css()
-        if TRANSPARENT_CANVAS:
+        if constants.CANVAS_BG_ALPHA < 1.0:
             self.add_css_class("translucent-canvas")
 
         # Explicit titlebar with the program name (the default CSD title
