@@ -255,23 +255,18 @@ grid of the endpoints' bounding box, with a turn penalty, avoiding every visible
   (beziers contribute their sampled curve). If the strips crowd a route out, the router
   retries ignoring other wires rather than dropping to an overlapping bezier.
 - A routed wire is **cached and reused** (`_route_cache`/`_route_still_valid`) while it
-  still starts/ends on the sockets and clears the *static* obstacles (nodes and panels) -
-  it deliberately does **not** test other wires. If each wire re-routed in
+  still starts/ends on the sockets, stays square, and clears the *static* obstacles (nodes
+  and panels) - it deliberately does **not** test other wires. If each wire re-routed in
   response to its neighbours' new strips, a pair/trio could alternate between detours
   forever (the observed "cycles between 3 states"); wire-vs-wire spacing is applied only
   when a wire is (re)routed, so established wires never chase a newcomer and the whole
   thing converges.
 The result is a strictly axis-aligned polyline (`orthogonalize` inserts L-elbows,
-`simplify` drops collinear points). Then `_sigmoid_simplify` **replaces runs of points with
-a sigmoid** wherever it can: longest run first, it builds a cubic whose control points
-follow the run's first and last segment directions, samples it, and accepts it only if it
-clears the same obstacles (nodes, panels, other wires); otherwise it keeps the orthogonal
-points. The returned dense polyline is drawn by `render_utils.draw_square_path`, which
-strokes it as a "squared" wire whose bends are blended over a generous `radius` (default
-30, clamped to half the shorter adjoining segment) by a cubic with both controls at the
-vertex - on the router's ~one-cell segments this consumes each segment, so consecutive
-bends join into continuous sigmoid-like curves instead of hard right angles (cairo has no
-arc-to).
+`simplify` drops collinear points); `render_utils.draw_square_path` strokes it as a
+"squared" wire whose bends are blended over a generous `radius` (default 30, clamped to
+half the shorter adjoining segment) by a cubic with both controls at the vertex - on the
+router's ~one-cell segments this consumes each segment, so consecutive bends join into
+continuous sigmoid-like curves instead of hard right angles (cairo has no arc-to).
 `_wire_bounds` records where each panel's *owned* wires (LCA owner) run, and `_panel_rect`
 grows the content box to enclose them. Only that drawn box grows: **physics and port
 layout use `_panel_rect_base`** (content-only), because if panel motion or port positions
