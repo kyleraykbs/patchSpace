@@ -142,7 +142,12 @@ Boolean control-plane nodes (gray ports, never a PipeWire link): `BooleanSourceN
 (On/Off), `BooleanSplitterNode`, `BooleanInvertNode` ("Invert"), `BooleanAndNode`
 (`boolean_and`), `BooleanOrNode` (`boolean_or`), and the boolean warps. `_resolve_boolean*`
 evaluates them; AND/OR ignore unwired inputs (one wired input passes through) and emit
-nothing when fully unwired.
+nothing when fully unwired. A driven gate/switcher's on/off indicator renders read-only
+white from the daemon's `bool_driven`/`bool_state`. If a poll reports `bool_state=None`
+while the ctrl signal is still wired (a bool-warp publisher briefly re-created by a panel
+sync), the GUI holds the last resolved value rather than flashing back to the node's
+stored default (`gui/bool_state.py:resolve_bool_state_from_poll`); it clears once ctrl is
+genuinely disconnected.
 
 **Effect sandwich (central idea):** every effect is
 ```

@@ -76,6 +76,7 @@ from node_specs import (
 )
 from portal_file_dialog import open_file, save_file
 from color_picker import ColorPicker
+from bool_state import resolve_bool_state_from_poll
 
 logger = logging.getLogger(__name__)
 
@@ -894,6 +895,15 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     def update_from_daemon(self, data):
         daemon_nodes = data.get("nodes", {})
         daemon_edges = data.get("edges", {})
+        # Which gates/switchers have a boolean control signal wired into
+        # their "ctrl" input.  Computed up front (not after the node loop)
+        # so the per-node update below can tell "wired but the daemon
+        # hasn't resolved it yet" from "not wired at all".
+        ctrl_connected = {
+            edata.get("to_node")
+            for edata in daemon_edges.values()
+            if edata.get("to_port") == "ctrl"
+        }
         self._update_panels_from_daemon(data.get("panels", []))
         # The daemon auto-loads the saved session on start-up; show the
         # same loading overlay the GUI would for an import it triggered,
@@ -1029,7 +1039,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 if output is not None:
                     node["output"] = output
                 node["bool_driven"] = ndata.get("bool_driven", False)
-                node["bool_state"] = ndata.get("bool_state")
+                # See resolve_bool_state_from_poll: hold the last resolved
+                # value through a transient unresolved poll.
+                node["bool_state"] = resolve_bool_state_from_poll(
+                    ndata.get("bool_state"),
+                    nid in ctrl_connected,
+                    node.get("bool_state"),
+                )
                 node["device_name"] = ndata.get("device_name", "")
                 node["app_name"] = ndata.get("app_name", "")
                 node["connected"] = ndata.get("connected", False)
@@ -1124,11 +1140,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # Which bool-controlled nodes currently have a boolean control
         # edge wired into their "ctrl" input.  Drives the fallback
         # on/off button, which is hidden the moment ctrl is connected.
-        ctrl_connected = {
-            e["to_node"]
-            for e in self.edges.values()
-            if e.get("to_port") == "ctrl"
-        }
         for nid, node in self.nodes.items():
             node["ctrl_connected"] = nid in ctrl_connected
 
@@ -2580,7 +2591,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             # ctrl edge can appear a poll before the daemon reports the
             # resolved value, so fall back to the stored default until it
             # arrives rather than flashing "Off".
-            driven = bool(node.get("ctrl_connected"))
+            driven = bool(node.get("bool_driven")) or bool(
+                node.get("ctrl_connected")
+            )
             state = node.get("bool_state")
             if node["type"] == "gate":
                 stored = 1 if node.get("enabled", True) else 0

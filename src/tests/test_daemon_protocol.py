@@ -1140,6 +1140,24 @@ def test_boolean_nodes_registry_specs_and_output_control():
     )
 
 
+def test_gui_holds_driven_bool_state_through_unresolved_poll():
+    """A driven gate/switcher must not flash its stored default when a
+    poll reports bool_state=None while the ctrl signal is still wired
+    (e.g. a bool-warp publisher briefly re-created by a panel sync)."""
+    from gui.bool_state import resolve_bool_state_from_poll
+
+    # Wired, previously resolved True: a None poll keeps True.
+    assert resolve_bool_state_from_poll(None, True, True) is True
+    assert resolve_bool_state_from_poll(None, True, False) is False
+    # A genuine value from the daemon always wins.
+    assert resolve_bool_state_from_poll(False, True, True) is False
+    assert resolve_bool_state_from_poll(True, True, False) is True
+    # Nothing wired: None clears the held value (no stick).
+    assert resolve_bool_state_from_poll(None, False, True) is None
+    # Wired but never resolved yet: stays None (draws the stored default).
+    assert resolve_bool_state_from_poll(None, True, None) is None
+
+
 def test_warp_nodes_registry_specs_and_name_roundtrip():
     from pwnodes import (
         WarpInNode,
