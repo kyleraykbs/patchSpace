@@ -203,6 +203,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._node_born: dict = {}
         self._node_alpha: dict = {}
         self._node_fade: dict = {}
+        # Nodes the ticker has already started animating, so a node's pop
+        # begins exactly once - when it first becomes visible.
+        self._anim_seen: set = set()
         GLib.timeout_add(ANIM_TICK_MS, self._anim_tick)
         # Per-frame geometry cache for group nesting (the enclosed-group
         # walk is O(groups^2) and was recomputed many times inside one
@@ -984,6 +987,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 self._node_born.pop(nid, None)
                 self._node_alpha.pop(nid, None)
                 self._node_fade.pop(nid, None)
+                self._anim_seen.discard(nid)
 
         for nid, ndata in daemon_nodes.items():
             ntype = normalize_node_type(ndata.get("type"))
@@ -1067,10 +1071,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     anchored = bool(ndata.get("anchored", False))
                 if anchored:
                     self.anchored_nodes.add(nid)
-                # New node: start the materialize pop and fade it up from
-                # nothing (see _anim_tick / _draw_node).
-                self._node_born[nid] = time.monotonic()
-                self._node_alpha[nid] = 0.0
             else:
                 node = self.nodes[nid]
                 # Update all fields except volume if this node is being dragged
@@ -1273,12 +1273,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     continue
                 if ndata.get("ready", True) and ndata.get("health") != "starting":
                     self._revealed.add(nid)
-                    # Start the materialize pop when the node actually
-                    # becomes visible, not when it first appeared in a poll
-                    # (else a slow load's pop finishes before it is revealed,
-                    # leaving only the fade).
-                    self._node_born.setdefault(nid, time.monotonic())
-                    self._node_alpha.setdefault(nid, 0.0)
                     newly = True
             if newly:
                 self.zoom_to_fit()
@@ -3065,6 +3059,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         for nid, node in self.nodes.items():
             if not self._node_revealed(nid):
                 continue
+            if nid not in self._anim_seen:
+                # First frame this node is visible: start the pop now so it
+                # scales up from nothing even if the ticker hasn't run yet.
+                self._anim_seen.add(nid)
+                self._node_born[nid] = time.monotonic()
+                self._node_alpha.setdefault(nid, 0.0)
             scale = self._node_scale(nid)
             alpha = self._node_alpha.get(nid, 1.0)
             if scale >= 0.999 and alpha >= 0.999:
@@ -3212,6 +3212,16 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         fade = NODE_FADE_MS / 1000.0
         active = False
         for nid, node in self.nodes.items():
+            # The pop starts the first time the ticker sees the node visible,
+            # rather than whenever it first appeared in a poll: a slow load
+            # can add the node long before it is shown, and the animation
+            # would otherwise be over before its first frame.
+            if nid not in self._anim_seen:
+                if not self._node_revealed(nid):
+                    continue
+                self._anim_seen.add(nid)
+                self._node_born[nid] = now
+                self._node_alpha.setdefault(nid, 0.0)
             target = 1.0 if node.get("ready", True) else NODE_LOADING_ALPHA
             st = self._node_fade.get(nid)
             if st is None or st["target"] != target:
