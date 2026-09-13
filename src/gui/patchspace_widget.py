@@ -54,9 +54,14 @@ from render_utils import (
     draw_text_wrapped,
     wrapped_text_height,
     draw_bezier_link,
+    draw_square_path,
     draw_grid_background,
 )
 from force_layout import ForceLayout
+from wire_router import (
+    route as route_wire,
+    segment_blocked,
+)
 from view_mixin import GraphViewMixin
 from node_specs import (
     ADD_NODE_MENU_ITEMS,
@@ -1805,6 +1810,41 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         )
         return out_x, out_y, in_x, in_y
 
+    @staticmethod
+    def _contains_point(rect, x, y):
+        x1, y1, x2, y2 = rect
+        return x1 <= x <= x2 and y1 <= y <= y2
+
+    def _wire_points(self, edge, x1, y1, x2, y2, wire_rects, wire_panels):
+        """A square route (rounded at draw time) from socket to socket that
+        steers clear of other nodes *and* panels, or None when the straight
+        socket-to-socket line is already clear - in which case the caller
+        draws the usual bezier.
+
+        ``wire_rects`` is {nid: (x,y,w,h)} and ``wire_panels`` a list of
+        (pid, (x,y,w,h)); both are built once per frame (see on_draw).
+        Panels holding either endpoint are ignored (a wire has to be able
+        to leave/enter its own panel)."""
+        skip = {edge["from_node"], edge["to_node"]}
+        from_n, to_n = edge["from_node"], edge["to_node"]
+        obstacles = [r for nid, r in wire_rects.items() if nid not in skip]
+        for _pid, rect in wire_panels:
+            if self._contains_point(rect, x1, y1) or self._contains_point(
+                rect, x2, y2
+            ):
+                continue
+            obstacles.append(rect)
+        if not obstacles:
+            return None
+        if not segment_blocked(x1, y1, x2, y2, obstacles):
+            return None
+        # Route socket-to-socket; orthogonalize gives the wire a horizontal
+        # stub out of each side-facing socket.
+        core = route_wire(x1, y1, x2, y2, obstacles)
+        if not core:
+            return None
+        return list(core)
+
     def _hit_nodes(self, x=None, y=None):
         """Nodes in hit-test order: top-most (last drawn) first.
 
@@ -2404,6 +2444,26 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
         cr.set_source_rgb(*pal["link"])
         cr.set_line_width(2)
+        # Rectangles for wire routing, built once per frame: an edge that
+        # would cut through a node or another panel is drawn as a rounded
+        # square detour, the rest keep the usual smooth bezier.
+        wire_rects = {
+            nid: (
+                node["x"], node["y"],
+                node["x"] + self.node_width(nid),
+                node["y"] + self.node_height(nid),
+            )
+            for nid, node in self.nodes.items()
+            if self._node_revealed(nid)
+        }
+        wire_panels = []
+        for pid in self.panels:
+            if not pid:
+                continue
+            rect = self._panel_rect(pid)
+            if rect is not None:
+                rx, ry, rw, rh = rect
+                wire_panels.append((pid, (rx, ry, rx + rw, ry + rh)))
         for eid, edge in self.edges.items():
             if self.detaching_edge and self.detaching_edge[0] == eid:
                 continue
@@ -2425,7 +2485,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             cr.set_source_rgb(
                 *(pal["boolean_port"] if is_bool else pal["link"])
             )
-            draw_bezier_link(cr, out_x, out_y, in_x, in_y)
+            points = self._wire_points(
+                edge, out_x, out_y, in_x, in_y, wire_rects, wire_panels
+            )
+            if points:
+                draw_square_path(cr, points)
+            else:
+                draw_bezier_link(cr, out_x, out_y, in_x, in_y)
 
         for nid, node in self.nodes.items():
             if not self._node_revealed(nid):

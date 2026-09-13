@@ -215,6 +215,37 @@ def draw_bezier_link(cr, x1, y1, x2, y2):
     cr.stroke()
 
 
+def draw_square_path(cr, points, radius=9.0):
+    """Stroke an axis-aligned polyline with rounded corners.
+
+    The wire router (gui/wire_router.py) returns right-angled detours
+    around nodes/panels; this rounds each bend by ``radius`` (clamped to
+    half the shorter adjoining segment) so the run reads as a bent wire,
+    not rigid PCB traces.  Cairo has no arc-to, so a corner is two short
+    line segments joined by a cubic whose control points both sit at the
+    vertex - a clean quadratic-like fillet."""
+    pts = list(points)
+    if len(pts) < 2:
+        return
+    cr.move_to(*pts[0])
+    for i in range(1, len(pts) - 1):
+        ax, ay = pts[i - 1]
+        vx, vy = pts[i]
+        bx, by = pts[i + 1]
+        inx, iny = vx - ax, vy - ay
+        outx, outy = bx - vx, by - vy
+        lin = math.hypot(inx, iny)
+        lout = math.hypot(outx, outy)
+        if lin < 1e-6 or lout < 1e-6:
+            cr.line_to(vx, vy)
+            continue
+        r = min(radius, lin / 2.0, lout / 2.0)
+        cr.line_to(vx - inx / lin * r, vy - iny / lin * r)
+        cr.curve_to(vx, vy, vx, vy, vx + outx / lout * r, vy + outy / lout * r)
+    cr.line_to(*pts[-1])
+    cr.stroke()
+
+
 def draw_grid_background(cr, pal, pan_x, pan_y, zoom, width, height, spacing=40):
     """Subtle line grid drawn in world space, so it pans and zooms
     with the graph like a node editor's canvas instead of staying

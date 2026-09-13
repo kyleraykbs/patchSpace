@@ -72,6 +72,28 @@ def segment_blocked(
     return False
 
 
+def orthogonalize(points: Sequence[Point]) -> List[Point]:
+    """Insert L-elbows so every segment is axis-aligned ("square" routing).
+
+    Only the segments into/out of the exact socket endpoints are ever
+    diagonal (the A* grid points already differ on one axis), so this is
+    cheap.  Wires leave and enter horizontally, matching the side-facing
+    sockets."""
+    pts = list(points)
+    if len(pts) < 2:
+        return pts
+    out = [pts[0]]
+    for k in range(1, len(pts)):
+        px, py = pts[k]
+        lx, ly = out[-1]
+        if abs(px - lx) > 1e-6 and abs(py - ly) > 1e-6:
+            # Last hop: turn into a horizontal approach; otherwise run
+            # horizontally out of the previous point first.
+            out.append((lx, py) if k == len(pts) - 1 else (px, ly))
+        out.append((px, py))
+    return out
+
+
 def simplify(points: Sequence[Point]) -> List[Point]:
     """Drop near-duplicate and collinear midpoints from a polyline."""
     out: List[Point] = []
@@ -106,8 +128,13 @@ def route(
     Returns world-space points; callers may append the exact socket
     endpoints around the result."""
     obstacles = list(obstacles)
-    minx = min(sx, ex) - margin
-    miny = min(sy, ey) - margin
+    base_minx = min(sx, ex) - margin
+    base_miny = min(sy, ey) - margin
+    # Orient the grid so the start point lands exactly on a cell centre.
+    # Otherwise the first cell centre can sit a fraction of a cell behind
+    # the socket and the wire leaves with a tiny backward jog.
+    minx = sx - round((sx - base_minx) / cell) * cell
+    miny = sy - round((sy - base_miny) / cell) * cell
     maxx = max(sx, ex) + margin
     maxy = max(sy, ey) + margin
     cols = int(math.ceil((maxx - minx) / cell)) + 1
@@ -184,4 +211,4 @@ def route(
     points = [(sx, sy)]
     points += [(minx + i * cell, miny + j * cell) for i, j in cells[1:-1]]
     points.append((ex, ey))
-    return simplify(points)
+    return simplify(orthogonalize(points))

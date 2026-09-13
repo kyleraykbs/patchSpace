@@ -233,6 +233,20 @@ a node is being dragged, its panel is held at the size it had when the drag bega
 `PANEL_DRAG_GROW` past the baseline - so picking a node up never shrinks the box, nudging
 the edge makes room, and dragging well past the cap takes the node out.
 
+*Wire routing.* Edges are drawn in `on_draw` via `_wire_points`. If the straight socket-to-
+socket line is clear the usual smooth bezier is used (`draw_bezier_link`). If it would cut
+through another **node or panel**, the edge instead asks `gui/wire_router.py` (an A* over a
+coarse grid of the endpoints' bounding box; obstacles = every other visible node rect and
+every panel box, each inflated by `PAD`, with a turn penalty) for a short **orthogonal
+detour**, and `render_utils.draw_square_path` strokes it as a square run with rounded
+corners (radius clamped to half the shorter adjoining segment; cairo has no arc-to, so a
+corner is two short segments joined by a cubic whose control points both sit at the
+vertex). The panel holding either endpoint is excluded from the obstacles (a wire must be
+able to leave its own panel); panels are passed as `(x1,y1,x2,y2)` just like node rects.
+`wire_router.orthogonalize` inserts L-elbows so every segment is axis-aligned, then
+`simplify` drops near-duplicate/collinear points. The router is pure geometry (no GTK) and
+unit-tested in `tests/test_wire_router.py`.
+
 *Edit mode.* A panel's parameter values (volumes, switches, effect knobs) are **not**
 written back to its file by default - the daemon serves the committed file values from
 `_panel_snapshots` (only layout stays live), so runtime tweaks are ephemeral until you
@@ -512,13 +526,27 @@ This is the cycle to follow for basically any change:
    moves nodes) instead of deleting it - the rename/adjustment is part of the change.
 8. **Commit focused chunks** with a short why-first message; stage explicit source paths
    (never `git add -A`). Re-run the suite right before committing.
-9. **Keep a visible todo list.** For anything with more than a couple of steps, write the
-   steps down (the `todowrite`/task list) *before* starting, mark the one you're on
-   `in_progress`, and update it as you go - don't batch completions. The user has
-   explicitly asked for more, smaller todo items: break work into concrete, verifiable
-   units (research X, reproduce Y, fix Z, add test for Z, run suite, commit) rather than
-   one vague item. This is the single best guard against silently dropping a requested
-   sub-task when several arrive at once.
+9. **Keep a visible todo list — actively.** Use the task/`todowrite` tool for *every*
+   request that is more than a single trivial edit. This is not bookkeeping to do at the
+   end; it is the working plan, and the user expects it to be live:
+   - **Open it before writing code.** Write the concrete steps down first (research X,
+     reproduce Y, fix Z, add test for Z, run the suite, commit). Prefer several small,
+     verifiable items over one vague one — the user has explicitly asked for more,
+     smaller todos.
+   - **Keep exactly one item `in_progress`.** Mark it when you actually start (not when
+     you plan to), and mark it `completed` only when the work is genuinely done *and*
+     verified (tests run), never on intent.
+   - **Update as you go — don't batch.** The moment a step finishes, mark it and set the
+     next one `in_progress`, in the same turn as the work.
+   - **Add items the work uncovers.** If you discover a follow-up (a test to adjust, a
+     second call site, a manual GUI smoke), append a new todo rather than silently doing
+     it or dropping it.
+   - **Record blockers.** If you can't finish an item, leave it `in_progress` and add a
+     todo naming the blocker; don't mark it complete to make the list look clean.
+   - **Verify before the final item.** The last todos should always be "run the fast
+     suite" and "commit focused chunk" (unless the user said not to commit).
+   This is the single best guard against silently dropping a requested sub-task when
+   several arrive at once.
 
 The value is in step 2 + 5: reproduce, fix, regression-test, full suite. It has caught
 several "looks done but isn't" cases (double-moves, sync clobbers, placement drift).
