@@ -251,7 +251,11 @@ avoiding every visible node rect **and every panel box**, each inflated by `PAD`
   segment always clears the origin node, and is clamped so it can't shoot past the other
   socket. The re-route clears only around the *stubbed* endpoints, leaving the region back
   over the stub blocked, so the next segment can't fold back and overlap the line already
-  drawn - the "plugged in" look without overshoot or self-overlap.
+  drawn - the "plugged in" look without overshoot or self-overlap. Two fallbacks bypass the
+  router entirely - the "everything blocked" last resort in `_wire_points` and the
+  detaching/unrevealed edge in `on_draw` - and both use `_stubbed_fallback`, an orthogonal
+  Z that still exits each socket sideways by at least `WIRE_MIN_STUB` (a bare L degenerated
+  to a straight vertical line when ports were stacked).
 - A panel holding either endpoint is skipped (a wire must leave/enter its own panel);
   routing always uses the content-only `_panel_rect_base`, so growing a panel to enclose
   its wires can't feed back into the next frame's route.

@@ -2105,6 +2105,33 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             i += 1
         return out
 
+    @staticmethod
+    def _stubbed_fallback(x1, y1, x2, y2, slen=None):
+        """A last-resort orthogonal path that still leaves/enters each socket
+        horizontally by at least WIRE_MIN_STUB.
+
+        Used when the router can't find a path, and for an edge whose node is
+        mid-animation/detach.  A bare two-segment L degenerates to a straight
+        vertical line when the ports are stacked (x1 ~= x2), which reads as a
+        wire "going straight up/down" - this Z always shows a sideways stub.
+        Obstacle-unaware on purpose (there is no route to be aware of)."""
+        if slen is None:
+            slen = WIRE_MIN_STUB
+        mid_x = (x1 + x2) / 2.0
+        ex1 = x1 + max(slen, mid_x - x1)
+        ex2 = x2 - max(slen, x2 - mid_x)
+        if abs(y1 - y2) < 1e-6:
+            # Same row: the two stubs join with a horizontal run.
+            return [(x1, y1), (ex1, y1), (ex2, y2), (x2, y2)]
+        # Step across on a mid row so the middle segment is horizontal (not
+        # a diagonal), keeping the whole path orthogonal even when the stubs
+        # cross (near-vertical ports).
+        mid_y = (y1 + y2) / 2.0
+        return [
+            (x1, y1), (ex1, y1), (ex1, mid_y),
+            (ex2, mid_y), (ex2, y2), (x2, y2),
+        ]
+
     def _wire_points(self, edge, x1, y1, x2, y2, wire_rects, wire_panels,
                      extra_obstacles=()):
         """A square route (rounded at draw time) from socket to socket that
@@ -2207,9 +2234,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             core = route_wire(start[0], start[1], end[0], end[1], static,
                               clear_rects=clear2)
         if not core:
-            # Last resort (everything blocked): a plain square L.  Still
-            # orthogonal, so the caller never needs a bezier fallback.
-            return [(x1, y1), (x2, y1), (x2, y2)]
+            # Last resort (everything blocked): an obstacle-unaware Z that
+            # still exits each socket horizontally by at least WIRE_MIN_STUB,
+            # so even stacked/vertical ports don't get a bare vertical line.
+            return self._stubbed_fallback(x1, y1, x2, y2)
         path = list(core)
         if src_stub:
             path.insert(0, (x1, y1))
@@ -3095,9 +3123,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 draw_square_path(cr, points)
             else:
                 # Skipped by _route_all_wires (detaching/unrevealed): a
-                # plain square L keeps the no-bezier invariant.
+                # stubbed Z keeps the no-bezier invariant and still exits
+                # each socket sideways.
                 draw_square_path(
-                    cr, [(out_x, out_y), (in_x, out_y), (in_x, in_y)]
+                    cr,
+                    self._stubbed_fallback(out_x, out_y, in_x, in_y),
                 )
 
         for nid, node in self.nodes.items():
