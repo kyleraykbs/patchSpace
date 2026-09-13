@@ -569,7 +569,6 @@ class MainWindow(Gtk.ApplicationWindow):
     def _build_panels_view(self):
         """A docked, scrollable list of the panel files on the right."""
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        box.add_css_class("opaque-chrome")
         box.add_css_class("side-panel-fill")
         box.set_size_request(240, -1)
         # Padding comes from CSS (.side-panel-fill) so it is *inside* the
@@ -1025,15 +1024,20 @@ class MainWindow(Gtk.ApplicationWindow):
         this is a plain ``Gtk.Application`` window, so libadwaita's named
         colors aren't loaded and the named-color rule would be dropped,
         leaving the chrome transparent."""
-        from render_utils import theme_palette
+        from render_utils import theme_palette, theme_color
 
         r, g, b = theme_palette(self).get("bg", (0.1, 0.1, 0.1))
         bg_hex = "#%02x%02x%02x" % (
             int(round(r * 255)), int(round(g * 255)), int(round(b * 255))
         )
-        # Slightly brighter background for the left/right side panels, so
-        # they read as distinct from the canvas/window like GTK's alt bg.
-        alt = tuple(min(1.0, c + 0.05) for c in (r, g, b))
+        # Side-panel "alt" background: the GTK headerbar/sidebar colour (the
+        # brighter one Firefox uses for its titlebar/active tab), falling
+        # back to the window bg lightened a little if the theme lacks it.
+        alt = theme_color(self, "headerbar_bg_color", None)
+        if alt is None:
+            alt = theme_color(self, "sidebar_bg_color", None)
+        if alt is None:
+            alt = tuple(min(1.0, c + 0.05) for c in (r, g, b))
         alt_hex = "#%02x%02x%02x" % (
             int(round(alt[0] * 255)),
             int(round(alt[1] * 255)),

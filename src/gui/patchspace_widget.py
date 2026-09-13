@@ -8085,7 +8085,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         that width is ever too narrow for a long label.
         """
         panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        panel.add_css_class("opaque-chrome")
         panel.add_css_class("side-panel-fill")
         panel.set_size_request(ADD_NODE_PANEL_MIN_WIDTH, -1)
         panel.set_hexpand(True)

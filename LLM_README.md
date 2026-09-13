@@ -316,7 +316,9 @@ are removed. Panels and their IO strips draw their `node_bg` backing at the **sa
 `CANVAS_BG_ALPHA`** before the colour tint, so a panel is exactly as see-through as the
 grid behind it (just tinted); nodes are fully opaque. The toolbar is wrapped in a
 full-width opaque strip and the notebook padding/border is zeroed so the padding around
-the grid isn't left transparent.
+the grid isn't left transparent. The two side panels use `.side-panel-fill`, painted with
+the theme's `headerbar_bg_color` (the brighter "titlebar/active tab" colour Firefox uses),
+falling back to a lightened window bg.
 See-through needs the compositor not to fill a border background behind the window; on
 niri add:
 
