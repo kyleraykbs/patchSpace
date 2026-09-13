@@ -8056,12 +8056,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         """
         panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         panel.add_css_class("opaque-chrome")
+        panel.add_css_class("side-panel-fill")
         panel.set_size_request(ADD_NODE_PANEL_MIN_WIDTH, -1)
         panel.set_hexpand(True)
-        panel.set_margin_top(10)
-        panel.set_margin_bottom(10)
-        panel.set_margin_start(10)
-        panel.set_margin_end(10)
+        # Padding is CSS (.side-panel-fill), inside the opaque background;
+        # GTK margins would leave a transparent gap at the window edge.
         panel.set_vexpand(True)
 
         title = Gtk.Label(label="Add Node")

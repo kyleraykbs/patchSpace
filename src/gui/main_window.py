@@ -570,11 +570,11 @@ class MainWindow(Gtk.ApplicationWindow):
         """A docked, scrollable list of the panel files on the right."""
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         box.add_css_class("opaque-chrome")
+        box.add_css_class("side-panel-fill")
         box.set_size_request(240, -1)
-        box.set_margin_top(6)
-        box.set_margin_bottom(6)
-        box.set_margin_start(6)
-        box.set_margin_end(6)
+        # Padding comes from CSS (.side-panel-fill) so it is *inside* the
+        # opaque background - GTK margins would sit outside it and leave a
+        # transparent gap at the window edge.
 
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         title = Gtk.Label(label="Panels")
@@ -1055,6 +1055,13 @@ class MainWindow(Gtk.ApplicationWindow):
                 "  padding: 0; border-width: 0; }"
                 "window.translucent-canvas .opaque-chrome {"
                 f"  background-color: {bg_hex}; }}"
+                # The side panels: the background must cover their padding,
+                # so the padding is CSS (inside the background) rather than a
+                # GTK margin (which would sit outside and show as a
+                # transparent strip at the window edge).
+                ".side-panel-fill {"
+                f"  background-color: {bg_hex};"
+                "  padding: 8px; }"
                 ".mouse-help {"
                 "  background-color: rgba(0, 0, 0, 0.38);"
                 "  border-radius: 8px; padding: 6px 9px; }"
