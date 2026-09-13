@@ -26,8 +26,9 @@ MARGIN = 220.0
 # Extra A* cost for changing direction, so paths prefer straight runs.
 TURN_COST = 0.6
 # Half-thickness of the keep-out strips laid around already-routed wires so
-# a new wire keeps visible clearance from them.
-SPACING = 8.0
+# a new wire keeps visible clearance from them.  The router also inflates
+# obstacles by PAD, so parallel wires end up about SPACING + PAD apart.
+SPACING = 20.0
 # How far a wire runs straight out of a socket before it may turn (the
 # little horizontal stub that makes a connection read as plugged in).
 STUB = 18.0

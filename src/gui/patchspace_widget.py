@@ -1858,6 +1858,73 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             ))
         return pts
 
+    @staticmethod
+    def _sample_cubic(p0, p1, p2, p3, steps=14):
+        pts = []
+        for i in range(steps + 1):
+            t = i / steps
+            mt = 1.0 - t
+            a = mt * mt * mt
+            b = 3.0 * mt * mt * t
+            c = 3.0 * mt * t * t
+            d = t * t * t
+            pts.append((
+                a * p0[0] + b * p1[0] + c * p2[0] + d * p3[0],
+                a * p0[1] + b * p1[1] + c * p2[1] + d * p3[1],
+            ))
+        return pts
+
+    @staticmethod
+    def _path_blocked(path, obstacles):
+        return any(
+            segment_blocked(ax, ay, bx, by, obstacles, pad=0.0)
+            for (ax, ay), (bx, by) in zip(path, path[1:])
+        )
+
+    def _sigmoid_simplify(self, path, obstacles):
+        """Replace runs of the orthogonal route with a smooth sigmoid
+        (cubic whose tangents follow the run's first/last segments) as long
+        as the curve clears everything in `obstacles` (nodes, panels and
+        other wires).  Longest run first, so a staircase collapses to one
+        flowing S where there is room; the check falls back to the original
+        points where there isn't.  Returns a dense polyline (the sampled
+        curves), drawn by draw_square_path like any other route."""
+        if len(path) < 3:
+            return list(path)
+        out = [path[0]]
+        i = 0
+        n = len(path)
+        while i < n - 1:
+            accepted = None
+            for j in range(n - 1, i + 1, -1):
+                p0, p3 = path[i], path[j]
+                dx = p3[0] - p0[0]
+                dy = p3[1] - p0[1]
+                dist = math.hypot(dx, dy)
+                if dist < 1.0:
+                    continue
+                o0 = (path[i + 1][0] - p0[0], path[i + 1][1] - p0[1])
+                o1 = (p3[0] - path[j - 1][0], p3[1] - path[j - 1][1])
+                l0 = math.hypot(*o0) or 1.0
+                l1 = math.hypot(*o1) or 1.0
+                k = dist / 3.0
+                p1 = (p0[0] + o0[0] / l0 * k, p0[1] + o0[1] / l0 * k)
+                p2 = (p3[0] - o1[0] / l1 * k, p3[1] - o1[1] / l1 * k)
+                curve = self._sample_cubic(
+                    p0, p1, p2, p3, steps=max(8, int(dist / 18))
+                )
+                if not self._path_blocked(curve, obstacles):
+                    accepted = (j, curve)
+                    break
+            if accepted is None:
+                out.append(path[i + 1])
+                i += 1
+            else:
+                j, curve = accepted
+                out.extend(curve[1:])
+                i = j
+        return out
+
     def _wire_points(self, edge, x1, y1, x2, y2, wire_rects, wire_panels,
                      extra_obstacles=()):
         """A square route (rounded at draw time) from socket to socket that
@@ -1938,7 +2005,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             src_stub = dst_stub = True
         if not (src_stub or dst_stub):
             # The route already leaves/enters horizontally: no stub needed.
-            return list(core)
+            return self._sigmoid_simplify(list(core), direct)
 
         # Stick out only where the route doesn't already head outward, and
         # clamp the length so it can't shoot past the other socket.
@@ -1958,7 +2025,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             path.insert(0, (x1, y1))
         if dst_stub:
             path.append((x2, y2))
-        return path
+        return self._sigmoid_simplify(path, direct)
 
     def _route_still_valid(self, points, edge, x1, y1, x2, y2,
                            wire_rects, base_panels):
@@ -1993,8 +2060,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                  rect[2] + WIRE_PAD, rect[3] + WIRE_PAD)
             )
         for (ax, ay), (bx, by) in zip(points, points[1:]):
-            if abs(ax - bx) > 0.5 and abs(ay - by) > 0.5:
-                return False
+            # Sigmoid-smoothed sections are diagonal on purpose, so there is
+            # no squareness requirement here - only clearance.
             if segment_blocked(ax, ay, bx, by, obs, pad=0.0):
                 return False
         return True
