@@ -1031,6 +1031,14 @@ class MainWindow(Gtk.ApplicationWindow):
         bg_hex = "#%02x%02x%02x" % (
             int(round(r * 255)), int(round(g * 255)), int(round(b * 255))
         )
+        # Slightly brighter background for the left/right side panels, so
+        # they read as distinct from the canvas/window like GTK's alt bg.
+        alt = tuple(min(1.0, c + 0.05) for c in (r, g, b))
+        alt_hex = "#%02x%02x%02x" % (
+            int(round(alt[0] * 255)),
+            int(round(alt[1] * 255)),
+            int(round(alt[2] * 255)),
+        )
         css = Gtk.CssProvider()
         css.load_from_data(
             (
@@ -1066,7 +1074,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 # GTK margin (which would sit outside and show as a
                 # transparent strip at the window edge).
                 ".side-panel-fill {"
-                f"  background-color: {bg_hex};"
+                f"  background-color: {alt_hex};"
                 "  padding: 8px; }"
                 ".mouse-help {"
                 "  background-color: rgba(0, 0, 0, 0.38);"
