@@ -59,6 +59,11 @@ from render_utils import (
 )
 from force_layout import ForceLayout
 from wire_router import (
+    CELL as WIRE_CELL,
+    PAD as WIRE_PAD,
+    SPACING as WIRE_SPACING,
+    STUB as WIRE_STUB,
+    polyline_rects as wire_polyline_rects,
     route as route_wire,
     segment_blocked,
 )
@@ -322,6 +327,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self.drag_panel_origin = (0.0, 0.0)
         self._drag_panel_applied = (0.0, 0.0)
         self._panel_geo_cache: dict = {}
+        # Wire routing, rebuilt once per frame in on_draw: the routed
+        # polyline per edge, the keep-out bounds its wire adds to the
+        # owning panel (so panels grow to enclose their wires), and the
+        # expanded panel rects derived from those bounds.
+        self._wire_routes: dict = {}
+        self._wire_bounds: dict = {}
+        self._wire_panel_cache: dict = {}
         # panel_id -> rect frozen when a node drag began (see _panel_rect);
         # cleared on drag end.
         self._panel_drag_baseline: dict = {}
@@ -1815,35 +1827,136 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         x1, y1, x2, y2 = rect
         return x1 <= x <= x2 and y1 <= y <= y2
 
-    def _wire_points(self, edge, x1, y1, x2, y2, wire_rects, wire_panels):
+    def _wire_points(self, edge, x1, y1, x2, y2, wire_rects, wire_panels,
+                     extra_obstacles=()):
         """A square route (rounded at draw time) from socket to socket that
-        steers clear of other nodes *and* panels, or None when the straight
-        socket-to-socket line is already clear - in which case the caller
-        draws the usual bezier.
+        steers clear of other nodes, panels, other wires, *and its own
+        endpoints' bodies*, or None when the straight socket-to-socket line is
+        already clear - in which case the caller draws the usual bezier.
 
-        ``wire_rects`` is {nid: (x,y,w,h)} and ``wire_panels`` a list of
-        (pid, (x,y,w,h)); both are built once per frame (see on_draw).
-        Panels holding either endpoint are ignored (a wire has to be able
-        to leave/enter its own panel)."""
+        ``wire_rects`` is {nid: (x1,y1,x2,y2)} and ``wire_panels`` a list of
+        (pid, (x1,y1,x2,y2)); both are built once per frame (see on_draw).
+        ``extra_obstacles`` are keep-out rects from already-routed wires.
+        Panels holding either endpoint are ignored (a wire has to be able to
+        leave/enter its own panel)."""
         skip = {edge["from_node"], edge["to_node"]}
-        from_n, to_n = edge["from_node"], edge["to_node"]
-        obstacles = [r for nid, r in wire_rects.items() if nid not in skip]
+        own = [r for nid, r in wire_rects.items() if nid in skip]
+        other_nodes = [r for nid, r in wire_rects.items() if nid not in skip]
+        panels = []
         for _pid, rect in wire_panels:
             if self._contains_point(rect, x1, y1) or self._contains_point(
                 rect, x2, y2
             ):
                 continue
-            obstacles.append(rect)
-        if not obstacles:
+            panels.append(rect)
+        extra = list(extra_obstacles)
+
+        def _expand(rect, pad):
+            rx1, ry1, rx2, ry2 = rect
+            return (rx1 - pad, ry1 - pad, rx2 + pad, ry2 + pad)
+
+        def _shrink(rect, pad):
+            rx1, ry1, rx2, ry2 = rect
+            return (rx1 + pad, ry1 + pad, rx2 - pad, ry2 - pad)
+
+        # Direct-line test.  Other nodes/panels count at full clearance; the
+        # endpoints are shrunk so the socket on their border doesn't count,
+        # while a straight line that cuts back through their body does (that
+        # is the self-intersection this guards against).
+        direct = (
+            [_expand(r, WIRE_PAD) for r in other_nodes]
+            + [_expand(r, WIRE_PAD) for r in panels]
+            + [_shrink(r, WIRE_PAD + 4) for r in own]
+            + extra
+        )
+        if not segment_blocked(x1, y1, x2, y2, direct, pad=0.0):
             return None
-        if not segment_blocked(x1, y1, x2, y2, obstacles):
-            return None
-        # Route socket-to-socket; orthogonalize gives the wire a horizontal
-        # stub out of each side-facing socket.
-        core = route_wire(x1, y1, x2, y2, obstacles)
+
+        # Route around everything, but punch a corridor out of each socket so
+        # the wire can still leave/enter its own (now-blocking) node.  Both
+        # ends get a short straight stub (output faces right, input faces
+        # left) so the wire visibly plugs in before it may turn.
+        obstacles = other_nodes + own + panels + extra
+        corr = WIRE_CELL * 1.5
+        sox, soy = x1 + WIRE_STUB, y1
+        six, siy = x2 - WIRE_STUB, y2
+        clear = [
+            (x1 - WIRE_CELL, y1 - corr, sox + WIRE_CELL, y1 + corr),
+            (six - WIRE_CELL, y2 - corr, x2 + WIRE_CELL, y2 + corr),
+        ]
+        core = route_wire(
+            sox, soy, six, siy, obstacles, clear_rects=clear
+        )
         if not core:
             return None
-        return list(core)
+        return [(x1, y1)] + list(core) + [(x2, y2)]
+
+    def _route_all_wires(self):
+        """Route every edge once per frame, in edge order.
+
+        Obstacles are node/panel boxes (see _wire_points) *plus the wires
+        already routed*, each laid down as a thin keep-out strip so the next
+        wire keeps its distance.  Panel obstacles use the content-only
+        ``_panel_rect_base`` so growing a panel to enclose its wires can't
+        feed back into the routing (which would make panels creep outward
+        every frame).  ``_wire_bounds`` records where each panel's own wires
+        go so ``_panel_rect`` can grow to contain them."""
+        self._wire_routes = {}
+        self._wire_bounds = {}
+        self._wire_panel_cache = {}
+        wire_rects = {
+            nid: (
+                node["x"], node["y"],
+                node["x"] + self.node_width(nid),
+                node["y"] + self.node_height(nid),
+            )
+            for nid, node in self.nodes.items()
+            if self._node_revealed(nid)
+        }
+        base_panels = []
+        for pid in self.panels:
+            if not pid:
+                continue
+            rect = self._panel_rect_base(pid)
+            if rect is not None:
+                rx, ry, rw, rh = rect
+                base_panels.append((pid, (rx, ry, rx + rw, ry + rh)))
+        wire_obstacles = []
+        for eid, edge in self.edges.items():
+            if self.detaching_edge and self.detaching_edge[0] == eid:
+                continue
+            if edge["from_node"] not in self.nodes or edge["to_node"] not in self.nodes:
+                continue
+            if not (
+                self._node_revealed(edge["from_node"])
+                and self._node_revealed(edge["to_node"])
+            ):
+                continue
+            out_x, out_y, in_x, in_y = self._edge_endpoints(edge)
+            points = self._wire_points(
+                edge, out_x, out_y, in_x, in_y, wire_rects, base_panels,
+                extra_obstacles=wire_obstacles,
+            )
+            self._wire_routes[eid] = points
+            path_pts = points or [(out_x, out_y), (in_x, in_y)]
+            wire_obstacles.extend(wire_polyline_rects(path_pts))
+            owner = self._panel_lca(
+                self._panel_of_node(edge["from_node"]),
+                self._panel_of_node(edge["to_node"]),
+            )
+            if not owner:
+                continue
+            xs = [p[0] for p in path_pts]
+            ys = [p[1] for p in path_pts]
+            box = self._wire_bounds.get(owner)
+            new = (min(xs), min(ys), max(xs), max(ys))
+            if box is None:
+                self._wire_bounds[owner] = new
+            else:
+                self._wire_bounds[owner] = (
+                    min(box[0], new[0]), min(box[1], new[1]),
+                    max(box[2], new[2]), max(box[3], new[3]),
+                )
 
     def _hit_nodes(self, x=None, y=None):
         """Nodes in hit-test order: top-most (last drawn) first.
@@ -2426,6 +2539,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # Group nesting geometry is stable for the duration of one frame;
         # clear the per-frame cache here (see _group_geo_cache).
         self._group_geo_cache.clear()
+        # Route wires before drawing anything: panels grow to enclose the
+        # wires running inside them, so their boxes must know the routes.
+        self._route_all_wires()
         pal = theme_palette(self)
         cr.set_source_rgb(*pal["bg"])
         cr.paint()
@@ -2444,26 +2560,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
         cr.set_source_rgb(*pal["link"])
         cr.set_line_width(2)
-        # Rectangles for wire routing, built once per frame: an edge that
-        # would cut through a node or another panel is drawn as a rounded
-        # square detour, the rest keep the usual smooth bezier.
-        wire_rects = {
-            nid: (
-                node["x"], node["y"],
-                node["x"] + self.node_width(nid),
-                node["y"] + self.node_height(nid),
-            )
-            for nid, node in self.nodes.items()
-            if self._node_revealed(nid)
-        }
-        wire_panels = []
-        for pid in self.panels:
-            if not pid:
-                continue
-            rect = self._panel_rect(pid)
-            if rect is not None:
-                rx, ry, rw, rh = rect
-                wire_panels.append((pid, (rx, ry, rx + rw, ry + rh)))
+        # Routes were computed in _route_all_wires() before panels were
+        # drawn (so their boxes could grow around them).
         for eid, edge in self.edges.items():
             if self.detaching_edge and self.detaching_edge[0] == eid:
                 continue
@@ -2485,9 +2583,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             cr.set_source_rgb(
                 *(pal["boolean_port"] if is_bool else pal["link"])
             )
-            points = self._wire_points(
-                edge, out_x, out_y, in_x, in_y, wire_rects, wire_panels
-            )
+            points = self._wire_routes.get(eid)
             if points:
                 draw_square_path(cr, points)
             else:
@@ -5908,10 +6004,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         z = max(self.zoom, 1e-6)
         return min(14.0, 40.0 / z)
 
-    def _panel_rect(self, pid):
-        """(x, y, w, h) absolute box for a panel: it auto-fits its *direct*
-        nodes and child panels with padding on every side, like a group,
-        with a square minimum size and no manual resize."""
+    def _panel_rect_base(self, pid):
+        """(x, y, w, h) absolute box for a panel from its contents only
+        (nodes, child panels, ports, groups) - the auto-fit before routed
+        wires are folded in.  See _panel_rect for the expanded box."""
         cached = self._panel_geo_cache.get(pid)
         if cached is not None:
             return cached
@@ -5950,7 +6046,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             maxx = nr if maxx is None else max(maxx, nr)
             maxy = nb if maxy is None else max(maxy, nb)
         for child in panel.get("children", []):
-            cr_rect = self._panel_rect(child)
+            cr_rect = self._panel_rect_base(child)
             if cr_rect is None:
                 continue
             cx, cy, cw, ch = cr_rect
@@ -6072,6 +6168,40 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 bottom += grow
             rect = (left, top, right - left, bottom - top)
         self._panel_geo_cache[pid] = rect
+        return rect
+
+    def _panel_rect(self, pid):
+        """The panel's drawn box: its content auto-fit (_panel_rect_base)
+        grown to enclose the wires routed *inside* it this frame
+        (``_wire_bounds``, set in on_draw) so a detour never spills out of
+        its panel.  Falls back to the base rect when there are no wires."""
+        cached = self._wire_panel_cache.get(pid)
+        if cached is not None:
+            return cached
+        base = self._panel_rect_base(pid)
+        if base is None:
+            return None
+        bounds = self._wire_bounds.get(pid)
+        if bounds is None:
+            rect = base
+        else:
+            bx1, by1, bx2, by2 = bounds
+            pad = WIRE_PAD + 4
+            x1 = min(base[0], bx1 - pad)
+            y1 = min(base[1], by1 - pad)
+            x2 = max(base[0] + base[2], bx2 + pad)
+            y2 = max(base[1] + base[3], by2 + pad)
+            side = self.PANEL_MIN_SIDE
+            if x2 - x1 < side:
+                grow = (side - (x2 - x1)) / 2.0
+                x1 -= grow
+                x2 += grow
+            if y2 - y1 < side:
+                grow = (side - (y2 - y1)) / 2.0
+                y1 -= grow
+                y2 += grow
+            rect = (x1, y1, x2 - x1, y2 - y1)
+        self._wire_panel_cache[pid] = rect
         return rect
 
     def _panel_header_rects(self, pid, rect):

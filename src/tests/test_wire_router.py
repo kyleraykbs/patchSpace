@@ -35,3 +35,22 @@ def test_orthogonalize_inserts_elbows_for_diagonal_hops():
     assert pts[-1] == (50, 100)
     for (ax, ay), (bx, by) in zip(pts, pts[1:]):
         assert abs(ax - bx) < 1e-6 or abs(ay - by) < 1e-6
+
+
+def test_polyline_rects_wraps_each_segment_with_spacing():
+    rects = wr.polyline_rects([(0, 0), (100, 0), (100, 50)], half=5)
+    assert rects == [
+        (-5.0, -5.0, 105.0, 5.0),
+        (95.0, -5.0, 105.0, 55.0),
+    ]
+
+
+def test_route_keeps_clear_of_a_prior_wire_obstacle():
+    # A thin vertical obstacle standing in for an earlier wire.
+    prior = wr.polyline_rects([(100, -100), (100, 100)], half=wr.SPACING)
+    path = wr.route(0, 0, 200, 0, prior)
+    assert path is not None
+    rect = prior[0]
+    for (ax, ay), (bx, by) in zip(path, path[1:]):
+        assert not wr._segment_hits_rect(ax, ay, bx, by, *rect)
+

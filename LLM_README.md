@@ -233,19 +233,27 @@ a node is being dragged, its panel is held at the size it had when the drag bega
 `PANEL_DRAG_GROW` past the baseline - so picking a node up never shrinks the box, nudging
 the edge makes room, and dragging well past the cap takes the node out.
 
-*Wire routing.* Edges are drawn in `on_draw` via `_wire_points`. If the straight socket-to-
-socket line is clear the usual smooth bezier is used (`draw_bezier_link`). If it would cut
-through another **node or panel**, the edge instead asks `gui/wire_router.py` (an A* over a
-coarse grid of the endpoints' bounding box; obstacles = every other visible node rect and
-every panel box, each inflated by `PAD`, with a turn penalty) for a short **orthogonal
-detour**, and `render_utils.draw_square_path` strokes it as a square run with rounded
-corners (radius clamped to half the shorter adjoining segment; cairo has no arc-to, so a
-corner is two short segments joined by a cubic whose control points both sit at the
-vertex). The panel holding either endpoint is excluded from the obstacles (a wire must be
-able to leave its own panel); panels are passed as `(x1,y1,x2,y2)` just like node rects.
-`wire_router.orthogonalize` inserts L-elbows so every segment is axis-aligned, then
-`simplify` drops near-duplicate/collinear points. The router is pure geometry (no GTK) and
-unit-tested in `tests/test_wire_router.py`.
+*Wire routing.* Edges are drawn in `on_draw`, which first runs `_route_all_wires` (before
+the panel boxes, since panels grow around their wires). If the straight socket-to-socket
+line is clear, the usual smooth bezier is used (`draw_bezier_link`). Otherwise the edge is
+routed by `gui/wire_router.py`: an A* over a coarse grid of the endpoints' bounding box,
+with a turn penalty, avoiding every visible node rect **and every panel box**, each
+inflated by `PAD`. Obstacle sets are asymmetric on purpose:
+- The **endpoint nodes are obstacles too** (so a wire can't loop back through its own
+  node) with a `clear_rects` corridor punched out at each socket, plus a short straight
+  `STUB` out of the socket before it may turn - the "plugged in" look.
+- A panel holding either endpoint is skipped (a wire must leave/enter its own panel);
+  routing always uses the content-only `_panel_rect_base`, so growing a panel to enclose
+  its wires can't feed back into the next frame's route.
+- Edges are routed **in order**, and each finished wire is laid down as a thin keep-out
+  strip (`polyline_rects`, `SPACING`) so later wires keep visible clearance from it
+  (straight beziers contribute their straight segment).
+The result is a strictly axis-aligned polyline (`orthogonalize` inserts L-elbows,
+`simplify` drops collinear points); `render_utils.draw_square_path` strokes it as a square
+run with rounded corners (cubic with both controls at the vertex; cairo has no arc-to).
+`_wire_bounds` records where each panel's *owned* wires (LCA owner) run, and `_panel_rect`
+grows the content box to enclose them (`_panel_rect_base` is the un-grown auto-fit). The
+router is pure geometry (no GTK) and unit-tested in `tests/test_wire_router.py`.
 
 *Edit mode.* A panel's parameter values (volumes, switches, effect knobs) are **not**
 written back to its file by default - the daemon serves the committed file values from

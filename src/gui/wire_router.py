@@ -25,6 +25,12 @@ PAD = 12.0
 MARGIN = 220.0
 # Extra A* cost for changing direction, so paths prefer straight runs.
 TURN_COST = 0.6
+# Half-thickness of the keep-out strips laid around already-routed wires so
+# a new wire keeps visible clearance from them.
+SPACING = 8.0
+# How far a wire runs straight out of a socket before it may turn (the
+# little horizontal stub that makes a connection read as plugged in).
+STUB = 18.0
 
 _DIRS = ((1, 0), (-1, 0), (0, 1), (0, -1))
 
@@ -94,6 +100,18 @@ def orthogonalize(points: Sequence[Point]) -> List[Point]:
     return out
 
 
+def polyline_rects(points: Sequence[Point], half: float = SPACING) -> List[Rect]:
+    """Thin keep-out rectangles for each segment of a routed wire, so a
+    later wire can be routed to keep its distance (see SPACING)."""
+    rects: List[Rect] = []
+    for (ax, ay), (bx, by) in zip(points, points[1:]):
+        rects.append((
+            min(ax, bx) - half, min(ay, by) - half,
+            max(ax, bx) + half, max(ay, by) + half,
+        ))
+    return rects
+
+
 def simplify(points: Sequence[Point]) -> List[Point]:
     """Drop near-duplicate and collinear midpoints from a polyline."""
     out: List[Point] = []
@@ -118,6 +136,7 @@ def simplify(points: Sequence[Point]) -> List[Point]:
 def route(
     sx: float, sy: float, ex: float, ey: float,
     obstacles: Iterable[Rect],
+    clear_rects: Iterable[Rect] = (),
     cell: float = CELL,
     pad: float = PAD,
     margin: float = MARGIN,
@@ -125,8 +144,13 @@ def route(
     """A short orthogonal path from (sx,sy) to (ex,ey) avoiding `obstacles`,
     or None if no route was found (caller falls back to a straight bezier).
 
+    ``clear_rects`` are holes punched in the blocked grid: corridors that
+    let a wire exit its own node's socket even though that node is one of
+    the obstacles.
+
     Returns world-space points; callers may append the exact socket
     endpoints around the result."""
+    clear_rects = list(clear_rects)
     obstacles = list(obstacles)
     base_minx = min(sx, ex) - margin
     base_miny = min(sy, ey) - margin
@@ -160,6 +184,15 @@ def route(
             for j in range(j1, j2 + 1):
                 if ox1 <= minx + i * cell <= ox2 and oy1 <= miny + j * cell <= oy2:
                     blocked.add((i, j))
+
+    # Punch the socket corridors back out of the blocked grid so a wire can
+    # leave/enter a node that is itself listed as an obstacle.
+    for cx1, cy1, cx2, cy2 in clear_rects:
+        i1, j1 = cell_of(cx1, cy1)
+        i2, j2 = cell_of(cx2, cy2)
+        for i in range(i1, i2 + 1):
+            for j in range(j1, j2 + 1):
+                blocked.discard((i, j))
 
     start = cell_of(sx, sy)
     goal = cell_of(ex, ey)
