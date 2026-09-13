@@ -198,6 +198,11 @@ restart re-apply the file's membership, positions, edges and params. `read-write
 default) reads and writes. The GUI draws a panel as a tinted-grid box (grid shares the
 world grid's origin/spacing so it overlays it). Its title floats just above the box like a
 group's title (panel colour, zoom-scaled font clamped so it stops growing past a point).
+Panel boxes and headers share one **paint order**, bottom to top (`_panel_paint_order`):
+ancestors first so a nested panel sits on top of its parent, and among same-depth panels
+the most recently added/placed draws last. Hit tests (`find_panel_at` and the per-button
+`find_panel_*_at`) walk the reverse (`_panel_order_top_first`), so a click always lands on
+the panel the user sees on top rather than the first-inserted one.
 A left-drag on the title *or any empty panel background* moves the panel; on the right of
 the title row are rounded-square buttons in the same outline style as the group +/-
 buttons: the physics-stop (pin/pause) toggle, then a delete (trash) button on writable

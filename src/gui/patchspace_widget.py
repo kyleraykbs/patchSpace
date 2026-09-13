@@ -1800,11 +1800,23 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     # ---------- panel hit tests ----------
 
-    def _panel_order_deepest_first(self):
-        return sorted(self.panels, key=lambda p: p.count("::"), reverse=True)
+    def _panel_paint_order(self):
+        """Panels in paint order, bottom to top.
+
+        A panel's ancestors paint before it, so a nested panel sits on
+        top of its parent; among panels at the same depth the one added
+        (or placed) most recently paints last.  This is the single source
+        of truth for both drawing and hit testing - hit tests walk the
+        *reverse* of this so a click lands on the panel the user sees."""
+        order = list(self.panels)
+        index = {pid: i for i, pid in enumerate(order)}
+        return sorted(order, key=lambda p: (p.count("::"), index[p]))
+
+    def _panel_order_top_first(self):
+        return list(reversed(self._panel_paint_order()))
 
     def find_panel_at(self, x, y, exclude=None):
-        for pid in self._panel_order_deepest_first():
+        for pid in self._panel_order_top_first():
             if pid == "":
                 continue
             if exclude and (
@@ -1820,8 +1832,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         return None
 
     def find_panel_reset_at(self, x, y):
-        for pid, panel in self.panels.items():
-            if pid == "" or not panel.get("readonly"):
+        for pid in self._panel_order_top_first():
+            panel = self.panels.get(pid)
+            if pid == "" or panel is None or not panel.get("readonly"):
                 continue
             rect = self._panel_rect(pid)
             if rect is None:
@@ -1832,7 +1845,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         return None
 
     def find_panel_anchor_at(self, x, y):
-        for pid in self._panel_order_deepest_first():
+        for pid in self._panel_order_top_first():
             if pid == "":
                 continue
             rect = self._panel_rect(pid)
@@ -1844,7 +1857,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         return None
 
     def find_panel_header_at(self, x, y):
-        for pid in self._panel_order_deepest_first():
+        for pid in self._panel_order_top_first():
             if pid == "":
                 continue
             rect = self._panel_rect(pid)
@@ -1856,7 +1869,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         return None
 
     def find_panel_menu_at(self, x, y):
-        for pid in self._panel_order_deepest_first():
+        for pid in self._panel_order_top_first():
             if pid == "":
                 continue
             rect = self._panel_rect(pid)
@@ -1868,7 +1881,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         return None
 
     def find_panel_delete_at(self, x, y):
-        for pid in self._panel_order_deepest_first():
+        for pid in self._panel_order_top_first():
             if pid == "":
                 continue
             rect = self._panel_rect(pid)
@@ -1880,7 +1893,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         return None
 
     def find_panel_edit_at(self, x, y):
-        for pid in self._panel_order_deepest_first():
+        for pid in self._panel_order_top_first():
             if pid == "":
                 continue
             rect = self._panel_rect(pid)
@@ -1892,7 +1905,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         return None
 
     def find_panel_close_at(self, x, y):
-        for pid in self._panel_order_deepest_first():
+        for pid in self._panel_order_top_first():
             if pid == "":
                 continue
             rect = self._panel_rect(pid)
@@ -6300,7 +6313,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self._mark_layout_dirty()
 
     def find_panel_io_plus_at(self, x, y):
-        for pid in self._panel_order_deepest_first():
+        for pid in self._panel_order_top_first():
             if pid == "":
                 continue
             rect = self._panel_rect(pid)
@@ -6400,8 +6413,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         cr.stroke()
 
     def _draw_panel_boxes(self, cr, pal):
-        # Deepest first so a nested panel's box sits on top.
-        for pid in sorted(self.panels, key=lambda p: p.count("::"), reverse=True):
+        # Bottom to top: ancestors first, then nested panels on top of
+        # them; later placements of the same depth draw last.  Hit tests
+        # walk the reverse (see _panel_order_top_first).
+        for pid in self._panel_paint_order():
             if pid == "":
                 continue
             rect = self._panel_rect(pid)
@@ -6462,13 +6477,15 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 cr.stroke()
 
     def _draw_panel_headers(self, cr, pal):
-        for pid, panel in self.panels.items():
+        # Same paint order as the boxes so headers layer with their panel.
+        for pid in self._panel_paint_order():
             if pid == "":
                 continue
             rect = self._panel_rect(pid)
             if rect is None:
                 continue
             _x, _y, _w, _h = rect
+            panel = self.panels[pid]
             geo = self._panel_header_rects(pid, rect)
             r, g, b = self._hex_to_rgb(panel.get("color"))
             font = self._panel_title_font()
