@@ -287,8 +287,11 @@ the base rect so ports stay on the content edge. Wire waypoints then snap to the
 half-grid (`WIRE_GRID_STEP = 20`, i.e. half of `draw_grid_background`'s 40px) as best they
 can: `_snap_to_grid` rounds each non-socket segment's perpendicular coordinate and rebuilds
 the corners, keeping socket segments exact and rejecting the snap if it would hit an
-obstacle. The router is pure geometry (no GTK) and unit-tested in
-`tests/test_wire_router.py`.
+obstacle. A perpendicular jog shorter than the grid step that *has* to be there (a stubby
+vertical step between two horizontal runs, rarely the reverse) is then blended into a
+smooth sigmoid by `_sigmoid_short_segments` (cubic with controls at the corners, sampled;
+only when the curve clears the obstacles), so there is no hard little kink. The router is
+pure geometry (no GTK) and unit-tested in `tests/test_wire_router.py`.
 
 *Node appearance.* A node the daemon hasn't finished bringing up (`ready` false) draws at
 `NODE_LOADING_ALPHA` (0.45) and fades to full once ready. A brand-new node also animates in

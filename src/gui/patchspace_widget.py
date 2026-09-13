@@ -1968,6 +1968,101 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 return path
         return pts
 
+    def _sigmoid_short_segments(self, path, obstacles,
+                                min_len=WIRE_GRID_STEP):
+        """Replace a too-short perpendicular jog (a vertical step between two
+        horizontal runs, or rarely the reverse) with a smooth sigmoid.
+
+        Orthogonal routing sometimes has to step a few px up/down when two
+        runs are nearly collinear; a stubby straight segment there reads as a
+        hard little kink, so the step is blended into an S-curve as long as
+        the curve clears the obstacles.  The result is a dense polyline
+        (sampled curve) drawn like any other route."""
+        if len(path) < 4:
+            return path
+        pts = list(path)
+        out = [pts[0]]
+
+        def _clear(a, b):
+            return not segment_blocked(
+                a[0], a[1], b[0], b[1], obstacles, pad=WIRE_PAD
+            )
+
+        i = 1
+        while i < len(pts) - 1:
+            prev = out[-1]
+            a, b = pts[i], pts[i + 1]
+            nxt = pts[i + 2] if i + 2 < len(pts) else None
+            vertical = abs(a[0] - b[0]) < 1e-6 and abs(a[1] - b[1]) > 1e-6
+            horizontal = abs(a[1] - b[1]) < 1e-6 and abs(a[0] - b[0]) > 1e-6
+            short = math.hypot(a[0] - b[0], a[1] - b[1]) < min_len
+            jog = (
+                short and nxt is not None
+                and (
+                    vertical
+                    and abs(prev[1] - a[1]) < 1e-6
+                    and abs(nxt[1] - b[1]) < 1e-6
+                )
+            ) or (
+                short and nxt is not None
+                and horizontal
+                and abs(prev[0] - a[0]) < 1e-6
+                and abs(nxt[0] - b[0]) < 1e-6
+            )
+            if not jog:
+                out.append(a)
+                i += 1
+                continue
+            if vertical:
+                s = min(min_len, abs(prev[0] - a[0]), abs(nxt[0] - b[0]))
+                if s <= 1e-6:
+                    out.append(a)
+                    i += 1
+                    continue
+                dir_a = 1.0 if prev[0] > a[0] else -1.0
+                dir_b = 1.0 if nxt[0] > b[0] else -1.0
+                start = (a[0] + dir_a * s, a[1])
+                end = (b[0] + dir_b * s, b[1])
+            else:
+                s = min(min_len, abs(prev[1] - a[1]), abs(nxt[1] - b[1]))
+                if s <= 1e-6:
+                    out.append(a)
+                    i += 1
+                    continue
+                dir_a = 1.0 if prev[1] > a[1] else -1.0
+                dir_b = 1.0 if nxt[1] > b[1] else -1.0
+                start = (a[0], a[1] + dir_a * s)
+                end = (b[0], b[1] + dir_b * s)
+            # Controls at the original corners give a smooth S with
+            # horizontal/vertical tangents at start/end.
+            p1, p2 = a, b
+            curve = []
+            steps = max(8, int(math.hypot(start[0] - end[0],
+                                          start[1] - end[1]) / 14))
+            for k in range(steps + 1):
+                t = k / steps
+                mt = 1.0 - t
+                w0 = mt * mt * mt
+                w1 = 3 * mt * mt * t
+                w2 = 3 * mt * t * t
+                w3 = t * t * t
+                curve.append((
+                    w0 * start[0] + w1 * p1[0] + w2 * p2[0] + w3 * end[0],
+                    w0 * start[1] + w1 * p1[1] + w2 * p2[1] + w3 * end[1],
+                ))
+            if all(_clear(curve[k], curve[k + 1])
+                   for k in range(len(curve) - 1)):
+                out.append(start)
+                out.extend(curve[1:])
+                i += 2
+            else:
+                out.append(a)
+                i += 1
+        while i < len(pts):
+            out.append(pts[i])
+            i += 1
+        return out
+
     def _wire_points(self, edge, x1, y1, x2, y2, wire_rects, wire_panels,
                      extra_obstacles=()):
         """A square route (rounded at draw time) from socket to socket that
@@ -2021,8 +2116,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             src_stub = dst_stub = True
         if not (src_stub or dst_stub):
             # The route already leaves/enters horizontally: no stub needed.
-            return self._snap_to_grid(
-                self._simplify_orthogonal(list(core), obstacles), obstacles
+            return self._sigmoid_short_segments(
+                self._snap_to_grid(
+                    self._simplify_orthogonal(list(core), obstacles), obstacles
+                ),
+                obstacles,
             )
 
         # Stick out only where the route doesn't already head outward.  The
@@ -2056,8 +2154,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             path.insert(0, (x1, y1))
         if dst_stub:
             path.append((x2, y2))
-        return self._snap_to_grid(
-            self._simplify_orthogonal(path, obstacles), obstacles
+        return self._sigmoid_short_segments(
+            self._snap_to_grid(
+                self._simplify_orthogonal(path, obstacles), obstacles
+            ),
+            obstacles,
         )
 
     def _route_still_valid(self, points, edge, x1, y1, x2, y2,
@@ -2093,8 +2194,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                  rect[2] + WIRE_PAD, rect[3] + WIRE_PAD)
             )
         for (ax, ay), (bx, by) in zip(points, points[1:]):
-            if abs(ax - bx) > 0.5 and abs(ay - by) > 0.5:
-                return False
+            # Sigmoid-smoothed jogs are diagonal on purpose, so there is no
+            # squareness requirement - only clearance.
             if segment_blocked(ax, ay, bx, by, obs, pad=0.0):
                 return False
         return True
