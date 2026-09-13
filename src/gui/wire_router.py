@@ -162,24 +162,37 @@ def route(
     clear_rects = list(clear_rects)
     obstacles = list(obstacles)
     keep_blocked = list(keep_blocked)
-    base_minx = min(sx, ex) - margin
-    base_miny = min(sy, ey) - margin
-    # Orient the grid so the start point lands exactly on a cell centre.
-    # Otherwise the first cell centre can sit a fraction of a cell behind
-    # the socket and the wire leaves with a tiny backward jog.
-    minx = sx - round((sx - base_minx) / cell) * cell
-    miny = sy - round((sy - base_miny) / cell) * cell
-    maxx = max(sx, ex) + margin
-    maxy = max(sy, ey) + margin
-    cols = int(math.ceil((maxx - minx) / cell)) + 1
-    rows = int(math.ceil((maxy - miny) / cell)) + 1
+    # Adaptive pitch per axis: pick the cell size so both endpoints land
+    # exactly on cell centres ((ex-sx) is an integer number of cells).  A
+    # fixed pitch leaves the goal a few px off-grid, which the final exact
+    # endpoint then turns into a tiny, ugly segment.
+    span_x = abs(ex - sx)
+    span_y = abs(ey - sy)
+    if span_x > 1e-9:
+        nx = max(1, int(round(span_x / cell)))
+        cellx = span_x / nx
+    else:
+        nx = 0
+        cellx = cell
+    if span_y > 1e-9:
+        ny = max(1, int(round(span_y / cell)))
+        celly = span_y / ny
+    else:
+        ny = 0
+        celly = cell
+    mx = int(math.ceil(margin / cell))
+    my = int(math.ceil(margin / cell))
+    minx = min(sx, ex) - mx * cellx
+    miny = min(sy, ey) - my * celly
+    cols = nx + 2 * mx + 1
+    rows = ny + 2 * my + 1
     if cols < 2 or rows < 2:
         return None
 
     def cell_of(x: float, y: float):
         return (
-            min(cols - 1, max(0, int((x - minx) / cell))),
-            min(rows - 1, max(0, int((y - miny) / cell))),
+            min(cols - 1, max(0, int(round((x - minx) / cellx)))),
+            min(rows - 1, max(0, int(round((y - miny) / celly)))),
         )
 
     blocked = set()
@@ -192,7 +205,8 @@ def route(
         i2, j2 = cell_of(ox2, oy2)
         for i in range(i1, i2 + 1):
             for j in range(j1, j2 + 1):
-                if ox1 <= minx + i * cell <= ox2 and oy1 <= miny + j * cell <= oy2:
+                if (ox1 <= minx + i * cellx <= ox2
+                        and oy1 <= miny + j * celly <= oy2):
                     blocked.add((i, j))
 
     # Punch the socket corridors back out of the blocked grid so a wire can
@@ -214,7 +228,8 @@ def route(
         i2, j2 = cell_of(ox2, oy2)
         for i in range(i1, i2 + 1):
             for j in range(j1, j2 + 1):
-                if ox1 <= minx + i * cell <= ox2 and oy1 <= miny + j * cell <= oy2:
+                if (ox1 <= minx + i * cellx <= ox2
+                        and oy1 <= miny + j * celly <= oy2):
                     blocked.add((i, j))
 
     start = cell_of(sx, sy)
@@ -265,6 +280,6 @@ def route(
     cells.append((node[0], node[1]))
     cells.reverse()
     points = [(sx, sy)]
-    points += [(minx + i * cell, miny + j * cell) for i, j in cells[1:-1]]
+    points += [(minx + i * cellx, miny + j * celly) for i, j in cells[1:-1]]
     points.append((ex, ey))
     return simplify(orthogonalize(points))

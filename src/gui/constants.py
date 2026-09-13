@@ -48,6 +48,15 @@ LAYOUT_TICK_MS = 33
 LAYOUT_SETTLE_TICKS = 20
 LAYOUT_SETTLE_EPSILON = 0.05
 
+# Node appearance animation (PatchSpace).  A node that hasn't finished
+# loading draws at NODE_LOADING_ALPHA and fades to full when the daemon
+# reports it ready; a brand-new node scales up from nothing with a
+# slight overshoot ("pop") over NODE_MATERIALIZE_MS.
+NODE_MATERIALIZE_MS = 260
+NODE_FADE_MS = 220
+NODE_LOADING_ALPHA = 0.45
+ANIM_TICK_MS = 16
+
 # How long to wait after the node layout changes (drag end, anchor
 # toggle, the physics settling) before pushing the canvas positions +
 # anchored flags to the daemon to be persisted. Long enough to coalesce

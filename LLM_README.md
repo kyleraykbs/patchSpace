@@ -283,8 +283,21 @@ grows the content box to enclose them. Only that drawn box grows: **physics and 
 layout use `_panel_rect_base`** (content-only), because if panel motion or port positions
 reacted to the wire-expanded rect the loop *panel moves -> nodes move -> new wire bounds
 -> bigger panel -> panel moves* would never settle. IO bars/plus/port hit-tests also use
-the base rect so ports stay on the content edge. The router is pure geometry (no GTK) and
-unit-tested in `tests/test_wire_router.py`.
+the base rect so ports stay on the content edge. Wire waypoints then snap to the canvas
+half-grid (`WIRE_GRID_STEP = 20`, i.e. half of `draw_grid_background`'s 40px) as best they
+can: `_snap_to_grid` rounds each non-socket segment's perpendicular coordinate and rebuilds
+the corners, keeping socket segments exact and rejecting the snap if it would hit an
+obstacle. The router is pure geometry (no GTK) and unit-tested in
+`tests/test_wire_router.py`.
+
+*Node appearance.* A node the daemon hasn't finished bringing up (`ready` false) draws at
+`NODE_LOADING_ALPHA` (0.45) and fades to full once ready. A brand-new node also animates in
+on creation: it scales up from nothing about its centre with an ease-out-back "pop"
+(`_ease_out_back`) over `NODE_MATERIALIZE_MS`. `_anim_tick` (a 16ms `GLib` timeout) drives
+per-node alpha/scale and repaints while anything is animating; the draw path wraps an
+animating node in a cairo group and `paint_with_alpha` so the whole node (text included)
+fades/scales uniformly. Only the `DrawingArea`'s own node rendering uses this - the raw
+PipeWire tab is untouched.
 
 *Edit mode.* A panel's parameter values (volumes, switches, effect knobs) are **not**
 written back to its file by default - the daemon serves the committed file values from

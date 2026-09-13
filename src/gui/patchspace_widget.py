@@ -42,6 +42,10 @@ from constants import (
     GRAPH_CANVAS_MIN_SIZE,
     SESSION_LOAD_OVERLAY_MIN_MS,
     SESSION_LOAD_OVERLAY_TIMEOUT_MS,
+    NODE_MATERIALIZE_MS,
+    NODE_FADE_MS,
+    NODE_LOADING_ALPHA,
+    ANIM_TICK_MS,
     ZOOM_MIN,
     ZOOM_MAX,
 )
@@ -91,6 +95,10 @@ from color_picker import ColorPicker
 from bool_state import resolve_bool_state_from_poll
 
 logger = logging.getLogger(__name__)
+
+# The world grid drawn by draw_grid_background is 40px; wire waypoints snap
+# to its half-step so runs sit on grid lines "as best as possible".
+WIRE_GRID_STEP = 20.0
 
 
 class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
@@ -188,6 +196,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # recomputed per call.  See node_height/node_width.
         self._node_h_cache = {}
         self._node_w_cache = {}
+        # Per-node appearance animation: {nid: monotonic birth time} for the
+        # materialize scale-up, and {nid: alpha} faded toward 1 as a node
+        # finishes loading (see _anim_tick / _draw_node).
+        self._node_born: dict = {}
+        self._node_alpha: dict = {}
+        self._node_fade: dict = {}
+        GLib.timeout_add(ANIM_TICK_MS, self._anim_tick)
         # Per-frame geometry cache for group nesting (the enclosed-group
         # walk is O(groups^2) and was recomputed many times inside one
         # redraw).  Cleared at the start of each on_draw - see
@@ -965,6 +980,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 self.anchored_nodes.discard(nid)
                 self.selected_nodes.discard(nid)
                 self._user_created_nodes.discard(nid)
+                self._node_born.pop(nid, None)
+                self._node_alpha.pop(nid, None)
+                self._node_fade.pop(nid, None)
 
         for nid, ndata in daemon_nodes.items():
             ntype = normalize_node_type(ndata.get("type"))
@@ -1048,6 +1066,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     anchored = bool(ndata.get("anchored", False))
                 if anchored:
                     self.anchored_nodes.add(nid)
+                # New node: start the materialize pop and fade it up from
+                # nothing (see _anim_tick / _draw_node).
+                self._node_born[nid] = time.monotonic()
+                self._node_alpha[nid] = 0.0
             else:
                 node = self.nodes[nid]
                 # Update all fields except volume if this node is being dragged
@@ -1900,6 +1922,52 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 i += 1
         return wire_simplify(wire_orthogonalize(out))
 
+    def _snap_to_grid(self, path, obstacles, step=WIRE_GRID_STEP):
+        """Nudge each segment onto the canvas half-grid (best effort).
+
+        Snaps every non-socket segment's perpendicular coordinate to the
+        nearest multiple of ``step`` while rebuilding corners as the
+        intersection of the snapped segments, so runs line up with the drawn
+        grid.  Segments touching a socket keep the socket's exact
+        coordinate, and the whole snap is rejected (original returned) if it
+        would put any segment into an obstacle."""
+        if step <= 0 or len(path) < 3:
+            return path
+        n = len(path)
+        horiz = [abs(path[k][1] - path[k + 1][1]) < 1e-6 for k in range(n - 1)]
+        seg = []
+        for k in range(n - 1):
+            if k in (0, n - 2):
+                # Segment on a socket: keep its exact perpendicular coord.
+                coord = path[k][1] if horiz[k] else path[k][0]
+            else:
+                coord = round(
+                    (path[k][1] if horiz[k] else path[k][0]) / step
+                ) * step
+            seg.append((horiz[k], coord))
+        pts = [path[0]]
+        for i in range(1, n - 1):
+            if seg[i - 1][0]:
+                pts.append((seg[i][1], seg[i - 1][1]))
+            else:
+                pts.append((seg[i - 1][1], seg[i][1]))
+        pts.append(path[-1])
+        pts = wire_simplify(wire_orthogonalize(pts))
+        m = len(pts)
+        for k in range(m - 1):
+            # Skip the segments touching a socket: they legitimately graze
+            # the endpoint node (which is in `obstacles`), and the snap
+            # never changes their perpendicular coordinate anyway.
+            if k == 0 or k == m - 2:
+                continue
+            ax, ay = pts[k]
+            bx, by = pts[k + 1]
+            if abs(ax - bx) > 0.5 and abs(ay - by) > 0.5:
+                return path
+            if segment_blocked(ax, ay, bx, by, obstacles, pad=WIRE_PAD):
+                return path
+        return pts
+
     def _wire_points(self, edge, x1, y1, x2, y2, wire_rects, wire_panels,
                      extra_obstacles=()):
         """A square route (rounded at draw time) from socket to socket that
@@ -1953,7 +2021,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             src_stub = dst_stub = True
         if not (src_stub or dst_stub):
             # The route already leaves/enters horizontally: no stub needed.
-            return self._simplify_orthogonal(list(core), obstacles)
+            return self._snap_to_grid(
+                self._simplify_orthogonal(list(core), obstacles), obstacles
+            )
 
         # Stick out only where the route doesn't already head outward.  The
         # stub has an absolute minimum length (so the first segment always
@@ -1986,7 +2056,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             path.insert(0, (x1, y1))
         if dst_stub:
             path.append((x2, y2))
-        return self._simplify_orthogonal(path, obstacles)
+        return self._snap_to_grid(
+            self._simplify_orthogonal(path, obstacles), obstacles
+        )
 
     def _route_still_valid(self, points, edge, x1, y1, x2, y2,
                            wire_rects, base_panels):
@@ -2743,7 +2815,25 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         for nid, node in self.nodes.items():
             if not self._node_revealed(nid):
                 continue
+            scale = self._node_scale(nid)
+            alpha = self._node_alpha.get(nid, 1.0)
+            if scale >= 0.999 and alpha >= 0.999:
+                self._draw_node(cr, pal, nid, node)
+                continue
+            # Materialize/loading: scale about the node centre and paint the
+            # whole node through a group so the alpha applies uniformly.
+            cr.save()
+            if scale < 0.999:
+                cx = node["x"] + self.node_width(nid) / 2.0
+                cy = node["y"] + self.node_height(nid) / 2.0
+                cr.translate(cx, cy)
+                cr.scale(max(scale, 0.01), max(scale, 0.01))
+                cr.translate(-cx, -cy)
+            cr.push_group()
             self._draw_node(cr, pal, nid, node)
+            cr.pop_group_to_source()
+            cr.paint_with_alpha(max(alpha, 0.0))
+            cr.restore()
 
         # A tiny panel-colour chip at each node's bottom-left corner while
         # the node lives in a non-root panel (root-level nodes get none).
@@ -2832,6 +2922,66 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 draw_square_path(cr, [(sx, sy), (cx, sy), (cx, cy)])
 
         cr.restore()
+
+    @staticmethod
+    def _ease_out_back(t):
+        """Pop: 0 -> 1 with a small overshoot past 1 near the end."""
+        t = max(0.0, min(1.0, t))
+        c1 = 1.70158
+        c3 = c1 + 1.0
+        u = t - 1.0
+        return 1.0 + c3 * u * u * u + c1 * u * u
+
+    @staticmethod
+    def _ease_in_out(t):
+        t = max(0.0, min(1.0, t))
+        return t * t * (3.0 - 2.0 * t)
+
+    def _node_scale(self, nid):
+        born = self._node_born.get(nid)
+        if born is None:
+            return 1.0
+        dur = NODE_MATERIALIZE_MS / 1000.0
+        if dur <= 0:
+            return 1.0
+        t = (time.monotonic() - born) / dur
+        if t >= 1.0:
+            return 1.0
+        return self._ease_out_back(t)
+
+    def _anim_tick(self):
+        """Drive the node appearance animations and repaint while any is
+        running.  A node fades toward NODE_LOADING_ALPHA until the daemon
+        reports it ready, then toward full; a new node also scales up (see
+        _node_scale)."""
+        now = time.monotonic()
+        mat = NODE_MATERIALIZE_MS / 1000.0
+        fade = NODE_FADE_MS / 1000.0
+        active = False
+        for nid, node in self.nodes.items():
+            target = 1.0 if node.get("ready", True) else NODE_LOADING_ALPHA
+            st = self._node_fade.get(nid)
+            if st is None or st["target"] != target:
+                st = {
+                    "target": target,
+                    "from": self._node_alpha.get(nid, target),
+                    "t0": now,
+                }
+                self._node_fade[nid] = st
+            t = (now - st["t0"]) / fade if fade > 0 else 1.0
+            if t >= 1.0:
+                self._node_alpha[nid] = target
+            else:
+                self._node_alpha[nid] = st["from"] + (
+                    target - st["from"]
+                ) * self._ease_in_out(t)
+                active = True
+            born = self._node_born.get(nid)
+            if born is not None and now - born < mat:
+                active = True
+        if active:
+            self.queue_draw()
+        return True
 
     def _draw_node(self, cr, pal, nid, node):
         x, y = node["x"], node["y"]
