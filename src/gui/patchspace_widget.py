@@ -366,7 +366,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # All physics (node physics *and* panel-vs-panel) is paused by
         # default: the graph stays exactly where it is until the user
         # resumes it with the pause/resume button (or the menu check).
-        self.physics_active = False
+        # Physics runs by default; the top-right pause button (and the
+        # hamburger "Physics" check) turns it off.  New panels start
+        # anchored/paused regardless (see _panel_is_paused).
+        self.physics_active = True
         # Consecutive awake layout ticks since the last settle/sleep -
         # capped in on_layout_tick so a non-converging layout can't
         # spin the CPU forever (see that method).

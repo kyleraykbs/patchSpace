@@ -303,11 +303,11 @@ inside each panel in that panel's local frame (internal edges only). Node physic
 auto-fit both use a panel's **direct** nodes (`_panel_direct_nodes`), not its subtree -
 using the subtree double-integrated descendants (two force steps in two origin frames,
 which drifted them and grew the parent box without bound) and double-counted them in the
-box. **All** physics (node layout *and* panel-vs-panel) is **paused by default**
-(`physics_active = False`): `_hierarchical_step` returns early, so nothing moves until the
-user resumes it from the hamburger menu ("Physics") or the floating pause/resume button
-under the panels toggle at the top-right (the two stay in sync via `_set_physics`). When
-on, per parent,
+box. **All** physics (node layout *and* panel-vs-panel) is **on by default**
+(`physics_active = True`); pause it from the hamburger menu ("Physics") or the floating
+pause/resume button under the panels toggle at the top-right (the two stay in sync via
+`_set_physics`). New panels are pinned/paused regardless (see below), so a freshly created
+panel doesn't get shoved by the layout. When on, per parent,
 the direct child panels repel each other in the parent's local frame (siblings only -
 running every panel through one flat pass made a child fight its own parent). Panels use
 a dedicated `panel_force_layout` with *size-aware* springs: an edge's rest length grows by

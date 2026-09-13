@@ -375,11 +375,12 @@ class MainWindow(Gtk.ApplicationWindow):
         )
         box.append(reload_panels_btn)
 
-        # All physics (node layout and panel repulsion) is paused by
-        # default; this resumes it.  Mirrors the floating top-right
-        # pause/resume button (see _set_physics).
+        # All physics (node layout and panel repulsion) runs by default;
+        # this pauses it.  Mirrors the floating top-right pause/resume
+        # button (see _set_physics).  New panels are pinned, so turning
+        # physics on doesn't shove a freshly created panel around.
         self._physics_check = Gtk.CheckButton(label="Physics")
-        self._physics_check.set_active(False)
+        self._physics_check.set_active(True)
         self._physics_check.set_tooltip_text(
             "Run node/panel physics (off: the graph stays put)"
         )
@@ -445,9 +446,11 @@ class MainWindow(Gtk.ApplicationWindow):
 
         # Physics pause/resume, directly under the panels toggle.  Active =
         # panel physics running; shows a pause icon while running and a play
-        # icon while paused.
+        # icon while paused.  Physics is on by default now (new panels are
+        # still pinned, so they don't move on their own).
         self._physics_toggle = Gtk.ToggleButton()
-        self._physics_toggle.set_icon_name("media-playback-start-symbolic")
+        self._physics_toggle.set_icon_name("media-playback-pause-symbolic")
+        self._physics_toggle.set_active(True)
         self._physics_toggle.set_tooltip_text(
             "Pause/resume all physics (off: the graph stays put)"
         )
