@@ -1969,6 +1969,19 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 return path
         return pts
 
+    def _smooth_jogs(self, path, obstacles, min_len=WIRE_GRID_STEP):
+        """Run _sigmoid_short_segments until it stops changing anything.
+
+        One pass can leave a short step that only appears once an earlier
+        jog is blended (the blend changes the neighbouring segment lengths),
+        which is why some jogs turned into sigmoids and others didn't."""
+        for _ in range(4):
+            new = self._sigmoid_short_segments(path, obstacles, min_len)
+            if new == path:
+                break
+            path = new
+        return path
+
     def _sigmoid_short_segments(self, path, obstacles,
                                 min_len=WIRE_GRID_STEP):
         """Replace a too-short perpendicular jog (a vertical step between two
@@ -2121,13 +2134,16 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             src_stub = dst_stub = True
         if not (src_stub or dst_stub):
             # The route already leaves/enters horizontally: no stub needed.
-            return self._round_short_ends(
-                self._sigmoid_short_segments(
-                    self._snap_to_grid(
-                        self._simplify_orthogonal(list(core), obstacles),
-                        obstacles,
+            return self._drop_short_straights(
+                self._round_short_ends(
+                    self._smooth_jogs(
+                        self._snap_to_grid(
+                            self._simplify_orthogonal(list(core), obstacles),
+                            obstacles,
+                        ),
+                        smooth_obstacles,
                     ),
-                    obstacles,
+                    smooth_obstacles,
                 ),
                 smooth_obstacles,
             )
@@ -2163,12 +2179,15 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             path.insert(0, (x1, y1))
         if dst_stub:
             path.append((x2, y2))
-        return self._round_short_ends(
-            self._sigmoid_short_segments(
-                self._snap_to_grid(
-                    self._simplify_orthogonal(path, obstacles), obstacles
+        return self._drop_short_straights(
+            self._round_short_ends(
+                self._smooth_jogs(
+                    self._snap_to_grid(
+                        self._simplify_orthogonal(path, obstacles), obstacles
+                    ),
+                    smooth_obstacles,
                 ),
-                obstacles,
+                smooth_obstacles,
             ),
             smooth_obstacles,
         )
@@ -2233,6 +2252,41 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 if all(_clear(curve[k], curve[k + 1])
                        for k in range(len(curve) - 1)):
                     pts = [s] + curve[1:] + pts[2:]
+        return pts
+
+    def _drop_short_straights(self, path, obstacles, min_len=WIRE_GRID_STEP):
+        """Last-resort cleanup: delete any surviving short axis-aligned
+        straight by merging it into its neighbours (which may become a short
+        diagonal - fine, it is inside/next to a smoothed curve).  Keeps the
+        result only where the merged segment stays clear."""
+        pts = list(path)
+        if len(pts) < 3:
+            return pts
+
+        def _clear(a, b):
+            return not segment_blocked(
+                a[0], a[1], b[0], b[1], obstacles, pad=WIRE_PAD
+            )
+
+        i = 1
+        guard = 0
+        while i < len(pts) - 1 and guard < 200:
+            guard += 1
+            a, b = pts[i], pts[i + 1]
+            length = math.hypot(b[0] - a[0], b[1] - a[1])
+            axis = abs(a[0] - b[0]) < 1e-6 or abs(a[1] - b[1]) < 1e-6
+            if not (axis and length < min_len):
+                i += 1
+                continue
+            c = pts[i + 2] if i + 2 < len(pts) else None
+            if c is not None and _clear(a, c):
+                del pts[i + 1]
+                continue
+            if _clear(pts[i - 1], b):
+                del pts[i]
+                i = max(1, i - 1)
+                continue
+            i += 1
         return pts
 
     def _route_still_valid(self, points, edge, x1, y1, x2, y2,

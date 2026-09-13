@@ -292,11 +292,14 @@ the corners, keeping socket segments exact and rejecting the snap if it would hi
 obstacle. A perpendicular jog shorter than the grid step that *has* to be there (a stubby
 vertical step between two horizontal runs, rarely the reverse) is then blended into a
 smooth sigmoid by `_sigmoid_short_segments` (cubic with controls at the corners, sampled;
-only when the curve clears the obstacles), so there is no hard little kink. A short
+only when the curve clears the obstacles). `_smooth_jogs` runs that pass repeatedly until
+nothing changes, because one blend can expose another short step. A short
 *socket-adjacent* first/last step gets the same treatment from `_round_short_ends` (a
-single rounded curve into the socket), checked against obstacles with the two endpoint
-nodes excluded - their sockets sit on the border, so including them would reject every
-blend. The router is pure geometry (no GTK) and unit-tested in
+single rounded curve into the socket), and `_drop_short_straights` is a last-resort merge
+of any surviving short straight into its neighbours (which may become a short diagonal,
+fine among the sampled curves). All three clearance-check against obstacles with the two
+endpoint nodes excluded - their sockets sit on the border, so including them would reject
+every blend. The router is pure geometry (no GTK) and unit-tested in
 `tests/test_wire_router.py`.
 
 *Node appearance.* A node the daemon hasn't finished bringing up (`ready` false) draws at
