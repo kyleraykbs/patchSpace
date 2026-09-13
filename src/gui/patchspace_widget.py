@@ -4041,6 +4041,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         if n_press != 1:
             return
         self.grab_focus()
+        self.dismiss_context_popover()
         wx, wy = self.to_world(x, y)
 
         # Panel reset button (read-only panels) - re-apply the file state.
@@ -4987,6 +4988,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     def on_drag_begin(self, gesture, start_x, start_y):
         self.grab_focus()
+        self.dismiss_context_popover()
         # A fresh press always starts from a clean slate - a previous
         # interaction that ended via ::cancel (or that never produced a
         # drag-end) must not leak its connection/node/pan state into
@@ -7556,6 +7558,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self.queue_draw()
 
     def on_right_drag_begin(self, gesture, start_x, start_y):
+        self.dismiss_context_popover()
         # A right press *during* a left drag cancels that drag and swallows
         # the click (no marquee, no menu): a held node snaps back to where
         # it was picked up, and a wire being dragged is just put back.

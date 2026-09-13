@@ -103,6 +103,11 @@ class GraphViewMixin:
         if ctrl and keyval in (Gdk.KEY_z, Gdk.KEY_Z):
             self.undo()
             return True
+        if keyval == Gdk.KEY_Escape:
+            # Safety valve: close a context popover whose input grab may be
+            # holding the window (see popup_context_menu).
+            self.dismiss_context_popover()
+            return True
         return False
 
     def popup_context_menu(self, popover, x, y):
@@ -112,7 +117,7 @@ class GraphViewMixin:
         """
         # 0. Dismiss any menu that is already open before opening this
         #    one, so two popovers never hold the pointer at once.
-        if self._context_popover is not None:
+        if self._context_popover is not None and self._context_popover is not popover:
             try:
                 self._context_popover.popdown()
             except Exception:
@@ -122,6 +127,7 @@ class GraphViewMixin:
 
         # 1. Set the popover's parent to the current widget
         popover.set_parent(self)
+        popover.set_autohide(True)
 
         # 2. Create a Gdk.Rectangle at the cursor's position
         #    The coordinates are in the parent widget's space
@@ -148,8 +154,32 @@ class GraphViewMixin:
         # synchronously from a gesture handler can leave that gesture
         # and the popover fighting over the pointer, which showed up as
         # the canvas going unresponsive after "drag, then right-click".
+        #
+        # Guarded so a popdown landing between scheduling and running
+        # can't resurrect a dismissed popover: one shown without a later
+        # ::closed holds an input grab and leaves the *whole window*
+        # refusing mouse input.
         def _show():
-            popover.popup()
+            if self._context_popover is not popover:
+                return GLib.SOURCE_REMOVE
+            if not popover.get_visible() and popover.get_parent() is not None:
+                popover.popup()
             return GLib.SOURCE_REMOVE
 
         GLib.idle_add(_show)
+
+    def dismiss_context_popover(self):
+        """Force any open context popover down (a safety valve for a grab
+        that got stuck - see popup_context_menu)."""
+        pop = getattr(self, "_context_popover", None)
+        if pop is None:
+            return
+        self._context_popover = None
+        try:
+            if pop.get_visible():
+                pop.popdown()
+            if pop.get_parent() is not None:
+                pop.unparent()
+        except Exception:
+            pass
+
