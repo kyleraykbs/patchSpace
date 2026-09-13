@@ -308,8 +308,11 @@ every blend. The router is pure geometry (no GTK) and unit-tested in
 containers go transparent while `.opaque-chrome` (headerbar, tab bar, toolbars, side
 panels, console, with a **literal** palette color, not libadwaita's `@window_bg_color`
 which isn't defined here) keeps everything else filled and the CSD shadow/rounded corners
-are removed. Panels and their IO strips draw an **opaque `node_bg` backing** before the
-colour tint, so they read as solid cards over the translucent grid (nodes already did).
+are removed. Panels and their IO strips draw their `node_bg` backing at the **same
+`CANVAS_BG_ALPHA`** before the colour tint, so a panel is exactly as see-through as the
+grid behind it (just tinted); nodes are fully opaque. The toolbar is wrapped in a
+full-width opaque strip and the notebook padding/border is zeroed so the padding around
+the grid isn't left transparent.
 See-through needs the compositor not to fill a border background behind the window; on
 niri add:
 
