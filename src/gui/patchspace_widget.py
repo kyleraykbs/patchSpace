@@ -53,7 +53,6 @@ from render_utils import (
     draw_text_unbounded,
     draw_text_wrapped,
     wrapped_text_height,
-    draw_bezier_link,
     draw_square_path,
     draw_grid_background,
 )
@@ -1836,35 +1835,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         x1, y1, x2, y2 = rect
         return x1 <= x <= x2 and y1 <= y <= y2
 
-    @staticmethod
-    def _bezier_points(x1, y1, x2, y2, steps=14):
-        """Sample the same cubic `draw_bezier_link` strokes, so the
-        clear-path test measures the curve actually drawn, not its chord."""
-        dx = max(40.0, abs(x2 - x1) * 0.5)
-        p0x, p0y = x1, y1
-        p1x, p1y = x1 + dx, y1
-        p2x, p2y = x2 - dx, y2
-        p3x, p3y = x2, y2
-        pts = []
-        for i in range(steps + 1):
-            t = i / steps
-            mt = 1.0 - t
-            a = mt * mt * mt
-            b = 3.0 * mt * mt * t
-            c = 3.0 * mt * t * t
-            d = t * t * t
-            pts.append((
-                a * p0x + b * p1x + c * p2x + d * p3x,
-                a * p0y + b * p1y + c * p2y + d * p3y,
-            ))
-        return pts
-
     def _wire_points(self, edge, x1, y1, x2, y2, wire_rects, wire_panels,
                      extra_obstacles=()):
         """A square route (rounded at draw time) from socket to socket that
         steers clear of other nodes, panels, other wires, *and its own
-        endpoints' bodies*, or None when the straight socket-to-socket line is
-        already clear - in which case the caller draws the usual bezier.
+        endpoints' bodies*.  Always returns an orthogonal path (a plain L on
+        the rare fallback when every route is blocked).
 
         ``wire_rects`` is {nid: (x1,y1,x2,y2)} and ``wire_panels`` a list of
         (pid, (x1,y1,x2,y2)); both are built once per frame (see on_draw).
@@ -1882,35 +1858,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 continue
             panels.append(rect)
         extra = list(extra_obstacles)
-
-        def _expand(rect, pad):
-            rx1, ry1, rx2, ry2 = rect
-            return (rx1 - pad, ry1 - pad, rx2 + pad, ry2 + pad)
-
-        def _shrink(rect, pad):
-            rx1, ry1, rx2, ry2 = rect
-            return (rx1 + pad, ry1 + pad, rx2 - pad, ry2 - pad)
-
-        # Other nodes/panels count at full clearance; the endpoints are
-        # shrunk so the socket on their border doesn't count, while a curve
-        # that cuts back through their body does.
-        direct = (
-            [_expand(r, WIRE_PAD) for r in other_nodes]
-            + [_expand(r, WIRE_PAD) for r in panels]
-            + [_shrink(r, WIRE_PAD + 4) for r in own]
-            + extra
-        )
-
-        # Prefer the smooth (sigmoid) bezier whenever the *actual curve* -
-        # not just the straight chord between sockets - clears everything.
-        # A bulge that clips a node (or the wire's own node when the target
-        # is behind the socket) therefore still gets a square route.
-        curve = self._bezier_points(x1, y1, x2, y2)
-        if not any(
-            segment_blocked(ax, ay, bx, by, direct, pad=0.0)
-            for (ax, ay), (bx, by) in zip(curve, curve[1:])
-        ):
-            return None
 
         # Route around everything, with a corridor out of each socket so the
         # wire can leave/enter its own (now-blocking) node.
@@ -1964,7 +1911,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             core = route_wire(start[0], start[1], end[0], end[1], static,
                               clear_rects=clear2)
         if not core:
-            return None
+            # Last resort (everything blocked): a plain square L.  Still
+            # orthogonal, so the caller never needs a bezier fallback.
+            return [(x1, y1), (x2, y1), (x2, y2)]
         path = list(core)
         if src_stub:
             path.insert(0, (x1, y1))
@@ -2718,7 +2667,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             if points:
                 draw_square_path(cr, points)
             else:
-                draw_bezier_link(cr, out_x, out_y, in_x, in_y)
+                # Skipped by _route_all_wires (detaching/unrevealed): a
+                # plain square L keeps the no-bezier invariant.
+                draw_square_path(
+                    cr, [(out_x, out_y), (in_x, out_y), (in_x, in_y)]
+                )
 
         for nid, node in self.nodes.items():
             if not self._node_revealed(nid):
@@ -2806,9 +2759,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             node = self.nodes.get(nid)
             if node:
                 sx, sy = self._socket_position(nid, "out", idx)
+                cx, cy = self.drag_current_xy
                 cr.set_source_rgb(*pal["pending_link"])
                 cr.set_line_width(2)
-                draw_bezier_link(cr, sx, sy, *self.drag_current_xy)
+                draw_square_path(cr, [(sx, sy), (cx, sy), (cx, cy)])
 
         cr.restore()
 

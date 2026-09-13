@@ -234,12 +234,12 @@ a node is being dragged, its panel is held at the size it had when the drag bega
 the edge makes room, and dragging well past the cap takes the node out.
 
 *Wire routing.* Edges are drawn in `on_draw`, which first runs `_route_all_wires` (before
-the panel boxes, since panels grow around their wires). The smooth **sigmoid bezier is
-always preferred**: `_wire_points` samples the exact cubic `draw_bezier_link` would stroke
-(`_bezier_points`) and, if every sampled segment clears the obstacles below, draws it. Only
-a curve that would clip something is routed by `gui/wire_router.py`: an A* over a coarse
-grid of the endpoints' bounding box, with a turn penalty, avoiding every visible node rect
-**and every panel box**, each inflated by `PAD`. Obstacle sets are asymmetric on purpose:
+the panel boxes, since panels grow around their wires). Wires are **always orthogonal**
+(there is no bezier/sigmoid fallback): `_wire_points` returns a square path, and only the
+final rare last resort - when A* can't find a route - is a plain L. Routing is an A* over
+a coarse grid of the endpoints' bounding box (`gui/wire_router.py`), with a turn penalty,
+avoiding every visible node rect **and every panel box**, each inflated by `PAD`;
+`draw_square_path` rounds the bends at draw time. Obstacle sets are asymmetric on purpose:
 - The **endpoint nodes are obstacles too** (so a wire can't loop back through its own
   node) with a `clear_rects` corridor punched out at each socket. A socket only gets a
   straight `STUB` where the route doesn't *already* head outward (output = right, input =
@@ -254,9 +254,9 @@ grid of the endpoints' bounding box, with a turn penalty, avoiding every visible
   routing always uses the content-only `_panel_rect_base`, so growing a panel to enclose
   its wires can't feed back into the next frame's route.
 - Edges are routed **in order**, and each finished wire is laid down as a thin keep-out
-  strip (`polyline_rects`, `SPACING`) so later wires keep visible clearance from it
-  (beziers contribute their sampled curve). If the strips crowd a route out, the router
-  retries ignoring other wires rather than dropping to an overlapping bezier.
+  strip (`polyline_rects`, `SPACING`) so later wires keep visible clearance from it. If the
+  strips crowd a route out, the router retries ignoring other wires rather than dropping to
+  a straight L.
 - A routed wire is **cached and reused** (`_route_cache`/`_route_still_valid`) while it
   still starts/ends on the sockets, stays square, and clears the *static* obstacles (nodes
   and panels) - it deliberately does **not** test other wires. If each wire re-routed in
@@ -269,7 +269,7 @@ The result is a strictly axis-aligned polyline (`orthogonalize` inserts L-elbows
 "squared" wire whose bends are blended over a generous `radius` (default 30, clamped to
 half the shorter adjoining segment) by a cubic with both controls at the vertex - on the
 router's ~one-cell segments this consumes each segment, so consecutive bends join into
-continuous sigmoid-like curves instead of hard right angles (cairo has no arc-to).
+continuous rounded curves instead of hard right angles (cairo has no arc-to).
 `_wire_bounds` records where each panel's *owned* wires (LCA owner) run, and `_panel_rect`
 grows the content box to enclose them. Only that drawn box grows: **physics and port
 layout use `_panel_rect_base`** (content-only), because if panel motion or port positions
