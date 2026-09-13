@@ -7313,9 +7313,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self.queue_draw()
 
     def on_right_drag_begin(self, gesture, start_x, start_y):
-        # A right press *during* a left node-drag cancels that drag: snap the
-        # dragged node(s) back to where they were picked up and swallow the
-        # click (no marquee, no menu).
+        # A right press *during* a left drag cancels that drag and swallows
+        # the click (no marquee, no menu): a held node snaps back to where
+        # it was picked up, and a wire being dragged is just put back.
         cancelled = False
         if self.dragging_node is not None and self.drag_node_starts:
             for nid, (sx, sy) in self.drag_node_starts.items():
@@ -7324,10 +7324,16 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     node["x"] = sx
                     node["y"] = sy
             cancelled = True
-        # A right press often follows (or is chorded during) a left
-        # drag; force any lingering left drag to release so its grab
-        # can't fight the marquee/menu.
-        self._drag_gesture.reset()
+        if self.connecting_from is not None or self.detaching_edge is not None:
+            cancelled = True
+        if not cancelled:
+            # No in-progress left drag to cancel: release any lingering
+            # gesture so a previous press can't fight the marquee/menu.
+            # (When we *are* cancelling, leave the left gesture alone - it
+            # is still holding the button, and resetting it from the right
+            # gesture's callback can wedge GTK's implicit grab, after which
+            # the canvas stops receiving clicks.)
+            self._drag_gesture.reset()
         self._reset_drag_state()
         self._right_drag_cancelled = cancelled
         if cancelled:
