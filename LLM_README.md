@@ -265,11 +265,14 @@ avoiding every visible node rect **and every panel box**, each inflated by `PAD`
   when a wire is (re)routed, so established wires never chase a newcomer and the whole
   thing converges.
 The result is a strictly axis-aligned polyline (`orthogonalize` inserts L-elbows,
-`simplify` drops collinear points); `render_utils.draw_square_path` strokes it as a
-"squared" wire whose bends are blended over a generous `radius` (default 30, clamped to
-half the shorter adjoining segment) by a cubic with both controls at the vertex - on the
-router's ~one-cell segments this consumes each segment, so consecutive bends join into
-continuous rounded curves instead of hard right angles (cairo has no arc-to).
+`simplify` drops collinear points). `_simplify_orthogonal` then greedily collapses the A*
+staircase into as few straight runs/L-elbows as a clear two-segment path allows (longest
+skip first), so there are no redundant points or pointless extra bends.
+`render_utils.draw_square_path` strokes it with a **constant** `CORNER_RADIUS` (14): each
+bend is a cubic with both controls at the vertex, and the radius is only shortened when a
+segment is too short to fit it (the router keeps stubs/bends at least `2*radius` long via
+`MIN_STUB`, so that clamp rarely applies and the curves don't visibly fluctuate). Cairo
+has no arc-to, which is why the corner is a Bezier.
 `_wire_bounds` records where each panel's *owned* wires (LCA owner) run, and `_panel_rect`
 grows the content box to enclose them. Only that drawn box grows: **physics and port
 layout use `_panel_rect_base`** (content-only), because if panel motion or port positions

@@ -23,17 +23,20 @@ PAD = 12.0
 # How far outside the two endpoints the search grid extends, so there is
 # room to route around a node sitting directly between them.
 MARGIN = 220.0
-# Extra A* cost for changing direction, so paths prefer straight runs.
-TURN_COST = 0.6
+# Extra A* cost for changing direction, so paths come out as straight as
+# possible (few long runs) instead of a many-cornered staircase.
+TURN_COST = 1.2
 # Half-thickness of the keep-out strips laid around already-routed wires so
 # a new wire keeps visible clearance from them.  The router also inflates
 # obstacles by PAD, so parallel wires end up about SPACING + PAD apart.
 SPACING = 20.0
 # How far a wire runs straight out of a socket before it may turn (the
 # little horizontal stub that makes a connection read as plugged in), and
-# the absolute minimum that stub may be shortened to.
-STUB = 18.0
-MIN_STUB = 14.0
+# the absolute minimum that stub may be shortened to.  Kept >= 2 x the
+# render corner radius (render_utils.CORNER_RADIUS) so every bend fits a
+# constant-radius curve.
+STUB = 30.0
+MIN_STUB = 28.0
 
 _DIRS = ((1, 0), (-1, 0), (0, 1), (0, -1))
 

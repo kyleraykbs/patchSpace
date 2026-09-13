@@ -63,9 +63,11 @@ from wire_router import (
     PAD as WIRE_PAD,
     SPACING as WIRE_SPACING,
     STUB as WIRE_STUB,
+    orthogonalize as wire_orthogonalize,
     polyline_rects as wire_polyline_rects,
     route as route_wire,
     segment_blocked,
+    simplify as wire_simplify,
 )
 from view_mixin import GraphViewMixin
 from node_specs import (
@@ -1835,6 +1837,56 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         x1, y1, x2, y2 = rect
         return x1 <= x <= x2 and y1 <= y <= y2
 
+    def _simplify_orthogonal(self, path, obstacles):
+        """Collapse a staircase route into as few straight runs/L-elbows as
+        possible without cutting through anything.
+
+        A* emits a point per grid cell, so even a clean detour arrives as a
+        long staircase; this greedily skips to the farthest later point that
+        a clear two-segment L can reach (longest skip first) instead of
+        leaving all the redundant corners for the renderer to curve."""
+        if len(path) < 3:
+            return list(path)
+        n = len(path)
+        out = [path[0]]
+        i = 0
+
+        def _clear(a, b):
+            return not segment_blocked(
+                a[0], a[1], b[0], b[1], obstacles, pad=WIRE_PAD
+            )
+
+        while i < n - 1:
+            placed = False
+            # Continue the direction we arrived in (or the socket's outgoing
+            # stub) so the merged run stays as straight as possible.
+            if i > 0:
+                dxin = path[i][0] - path[i - 1][0]
+            else:
+                dxin = 1.0
+            horizontal_first = abs(dxin) > 1e-6
+            for j in range(n - 1, i + 1, -1):
+                a, b = path[i], path[j]
+                if abs(a[1] - b[1]) < 1e-6 or abs(a[0] - b[0]) < 1e-6:
+                    candidates = [[a, b]]
+                else:
+                    h = [a, (b[0], a[1]), b]
+                    v = [a, (a[0], b[1]), b]
+                    candidates = [h, v] if horizontal_first else [v, h]
+                for cand in candidates:
+                    if all(_clear(cand[k], cand[k + 1])
+                           for k in range(len(cand) - 1)):
+                        out.extend(cand[1:])
+                        i = j
+                        placed = True
+                        break
+                if placed:
+                    break
+            if not placed:
+                out.append(path[i + 1])
+                i += 1
+        return wire_simplify(wire_orthogonalize(out))
+
     def _wire_points(self, edge, x1, y1, x2, y2, wire_rects, wire_panels,
                      extra_obstacles=()):
         """A square route (rounded at draw time) from socket to socket that
@@ -1886,7 +1938,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             src_stub = dst_stub = True
         if not (src_stub or dst_stub):
             # The route already leaves/enters horizontally: no stub needed.
-            return list(core)
+            return self._simplify_orthogonal(list(core), obstacles)
 
         # Stick out only where the route doesn't already head outward.  The
         # stub has an absolute minimum length (so the first segment always
@@ -1898,12 +1950,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             slen = min(slen, span / 2.0)
         start = (x1 + slen, y1) if src_stub else (x1, y1)
         end = (x2 - slen, y2) if dst_stub else (x2, y2)
-        # Clear only around the *stubbed* endpoints: the region behind them
-        # (back over the stub, toward the node) stays blocked, so the next
-        # segment can't fold back and overlap the line already drawn.
+        # Clear only *outward* of each stubbed endpoint: the region behind
+        # it (back over the stub, toward the node) stays blocked, so the
+        # next segment can't fold back and overlap the line already drawn.
         clear2 = [
-            (start[0] - WIRE_CELL, y1 - corr, start[0] + WIRE_CELL, y1 + corr),
-            (end[0] - WIRE_CELL, y2 - corr, end[0] + WIRE_CELL, y2 + corr),
+            (start[0], y1 - corr, start[0] + WIRE_CELL, y1 + corr),
+            (end[0] - WIRE_CELL, y2 - corr, end[0], y2 + corr),
         ]
         core = route_wire(start[0], start[1], end[0], end[1], obstacles,
                           clear_rects=clear2)
@@ -1919,7 +1971,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             path.insert(0, (x1, y1))
         if dst_stub:
             path.append((x2, y2))
-        return path
+        return self._simplify_orthogonal(path, obstacles)
 
     def _route_still_valid(self, points, edge, x1, y1, x2, y2,
                            wire_rects, base_panels):

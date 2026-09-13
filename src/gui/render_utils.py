@@ -215,16 +215,23 @@ def draw_bezier_link(cr, x1, y1, x2, y2):
     cr.stroke()
 
 
-def draw_square_path(cr, points, radius=30.0):
+# One corner radius for every wire bend.  Kept constant (not scaled by the
+# adjoining segment) so a wire's curves don't visibly vary; the router keeps
+# its segments at least 2*radius long (stub >= MIN_STUB) so the clamp below
+# rarely kicks in.
+CORNER_RADIUS = 14.0
+
+
+def draw_square_path(cr, points, radius=CORNER_RADIUS):
     """Stroke an axis-aligned polyline as a flowing "squared" wire.
 
     The router (gui/wire_router.py) returns right-angled detours around
-    nodes/panels.  Each bend is blended over ``radius`` (clamped to half
-    the shorter adjoining segment) as a cubic whose control points both
-    sit at the vertex, so a short run becomes continuous sigmoid-like
-    curves rather than hard right angles; long straight sections still
-    read as straight.  Cairo has no arc-to, which is why the corner is a
-    Bezier here."""
+    nodes/panels, already reduced to few turns (see
+    PatchSpaceGraphWidget._simplify_orthogonal).  Each bend is blended over
+    the constant ``radius`` as a cubic whose control points both sit at the
+    vertex; the radius is only shortened when a segment is too short to fit
+    it, so consecutive bends join into smooth curves rather than hard right
+    angles (cairo has no arc-to, which is why the corner is a Bezier)."""
     pts = list(points)
     if len(pts) < 2:
         return
