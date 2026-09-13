@@ -1911,39 +1911,54 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         ):
             return None
 
-        # Route around everything, but punch a corridor out of each socket so
-        # the wire can still leave/enter its own (now-blocking) node.  Both
-        # ends get a short straight stub (output faces right, input faces
-        # left) so the wire visibly plugs in before it may turn - clamped so
-        # a constant-length stub can never overshoot the other endpoint.  If
-        # the target is level-or-behind the socket there is no room for a
-        # stub, so the wire just heads to the point.
+        # Route around everything, with a corridor out of each socket so the
+        # wire can leave/enter its own (now-blocking) node.
         obstacles = other_nodes + own + panels + extra
+        static = other_nodes + own + panels
         corr = WIRE_CELL * 1.5
-        dx = x2 - x1
-        if dx >= 2 * WIRE_STUB:
-            sox, six = x1 + WIRE_STUB, x2 - WIRE_STUB
-        elif dx > 0:
-            sox = six = x1 + dx / 2.0
-        else:
-            sox, six = x1, x2
         clear = [
-            (min(x1, sox) - WIRE_CELL, y1 - corr,
-             max(x1, sox) + WIRE_CELL, y1 + corr),
-            (min(x2, six) - WIRE_CELL, y2 - corr,
-             max(x2, six) + WIRE_CELL, y2 + corr),
+            (x1 - WIRE_CELL, y1 - corr, x1 + WIRE_CELL, y1 + corr),
+            (x2 - WIRE_CELL, y2 - corr, x2 + WIRE_CELL, y2 + corr),
         ]
-        core = route_wire(sox, y1, six, y2, obstacles, clear_rects=clear)
+
+        core = route_wire(x1, y1, x2, y2, obstacles, clear_rects=clear)
         if not core:
-            # Crowded out by other wires: retry ignoring them so we still get
-            # a square route rather than an overlapping bezier.
-            core = route_wire(
-                sox, y1, six, y2, other_nodes + own + panels,
-                clear_rects=clear,
+            core = route_wire(x1, y1, x2, y2, static, clear_rects=clear)
+
+        def _outward(points, idx, sx, sy, direction):
+            px, py = points[idx]
+            return abs(py - sy) < 0.5 and (px - sx) * direction > 0
+
+        if core:
+            src_stub = len(core) >= 2 and not _outward(core, 1, x1, y1, 1.0)
+            dst_stub = len(core) >= 2 and not _outward(
+                core, len(core) - 2, x2, y2, -1.0
             )
+        else:
+            src_stub = dst_stub = True
+        if not (src_stub or dst_stub):
+            # The route already leaves/enters horizontally: no stub needed.
+            return list(core)
+
+        # Stick out only where the route doesn't already head outward, and
+        # clamp the length so it can't shoot past the other socket.
+        span = abs(x2 - x1)
+        slen = min(WIRE_STUB, max(6.0, span * 0.5))
+        start = (x1 + slen, y1) if src_stub else (x1, y1)
+        end = (x2 - slen, y2) if dst_stub else (x2, y2)
+        core = route_wire(start[0], start[1], end[0], end[1], obstacles,
+                          clear_rects=clear)
+        if not core:
+            core = route_wire(start[0], start[1], end[0], end[1], static,
+                              clear_rects=clear)
         if not core:
             return None
-        return [(x1, y1)] + list(core) + [(x2, y2)]
+        path = list(core)
+        if src_stub:
+            path.insert(0, (x1, y1))
+        if dst_stub:
+            path.append((x2, y2))
+        return path
 
     def _route_still_valid(self, points, edge, x1, y1, x2, y2,
                            wire_rects, base_panels):

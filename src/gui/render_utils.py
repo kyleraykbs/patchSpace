@@ -215,15 +215,16 @@ def draw_bezier_link(cr, x1, y1, x2, y2):
     cr.stroke()
 
 
-def draw_square_path(cr, points, radius=9.0):
-    """Stroke an axis-aligned polyline with rounded corners.
+def draw_square_path(cr, points, radius=30.0):
+    """Stroke an axis-aligned polyline as a flowing "squared" wire.
 
-    The wire router (gui/wire_router.py) returns right-angled detours
-    around nodes/panels; this rounds each bend by ``radius`` (clamped to
-    half the shorter adjoining segment) so the run reads as a bent wire,
-    not rigid PCB traces.  Cairo has no arc-to, so a corner is two short
-    line segments joined by a cubic whose control points both sit at the
-    vertex - a clean quadratic-like fillet."""
+    The router (gui/wire_router.py) returns right-angled detours around
+    nodes/panels.  Each bend is blended over ``radius`` (clamped to half
+    the shorter adjoining segment) as a cubic whose control points both
+    sit at the vertex, so a short run becomes continuous sigmoid-like
+    curves rather than hard right angles; long straight sections still
+    read as straight.  Cairo has no arc-to, which is why the corner is a
+    Bezier here."""
     pts = list(points)
     if len(pts) < 2:
         return
@@ -239,6 +240,9 @@ def draw_square_path(cr, points, radius=9.0):
         if lin < 1e-6 or lout < 1e-6:
             cr.line_to(vx, vy)
             continue
+        # Generous corner: on the ~one-cell segments the router emits this
+        # consumes the whole segment, so consecutive bends join into a
+        # smooth sigmoid instead of leaving a stub of straight line.
         r = min(radius, lin / 2.0, lout / 2.0)
         cr.line_to(vx - inx / lin * r, vy - iny / lin * r)
         cr.curve_to(vx, vy, vx, vy, vx + outx / lout * r, vy + outy / lout * r)

@@ -241,10 +241,12 @@ a curve that would clip something is routed by `gui/wire_router.py`: an A* over 
 grid of the endpoints' bounding box, with a turn penalty, avoiding every visible node rect
 **and every panel box**, each inflated by `PAD`. Obstacle sets are asymmetric on purpose:
 - The **endpoint nodes are obstacles too** (so a wire can't loop back through its own
-  node) with a `clear_rects` corridor punched out at each socket, plus a short straight
-  `STUB` out of the socket before it may turn - the "plugged in" look. The stub is clamped
-  to the midpoint when the endpoints are closer than `2*STUB`, and skipped entirely when
-  the target sits level-or-behind the socket, so a fixed stub can never overshoot.
+  node) with a `clear_rects` corridor punched out at each socket. A socket only gets a
+  straight `STUB` where the route doesn't *already* head outward (output = right, input =
+  left): `_wire_points` routes socket-to-socket first, and if the first/last segment
+  already leaves/enters horizontally that way no stub is added; otherwise it re-routes
+  from a stubbed point, clamped so it can't shoot past the other socket - the "plugged in"
+  look without overshoot.
 - A panel holding either endpoint is skipped (a wire must leave/enter its own panel);
   routing always uses the content-only `_panel_rect_base`, so growing a panel to enclose
   its wires can't feed back into the next frame's route.
@@ -260,8 +262,11 @@ grid of the endpoints' bounding box, with a turn penalty, avoiding every visible
   when a wire is (re)routed, so established wires never chase a newcomer and the whole
   thing converges.
 The result is a strictly axis-aligned polyline (`orthogonalize` inserts L-elbows,
-`simplify` drops collinear points); `render_utils.draw_square_path` strokes it as a square
-run with rounded corners (cubic with both controls at the vertex; cairo has no arc-to).
+`simplify` drops collinear points); `render_utils.draw_square_path` strokes it as a
+"squared" wire whose bends are blended over a generous `radius` (default 30, clamped to
+half the shorter adjoining segment) by a cubic with both controls at the vertex - on the
+router's ~one-cell segments this consumes each segment, so consecutive bends join into
+continuous sigmoid-like curves instead of hard right angles (cairo has no arc-to).
 `_wire_bounds` records where each panel's *owned* wires (LCA owner) run, and `_panel_rect`
 grows the content box to enclose them. Only that drawn box grows: **physics and port
 layout use `_panel_rect_base`** (content-only), because if panel motion or port positions
