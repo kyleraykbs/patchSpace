@@ -615,10 +615,13 @@ class MainWindow(Gtk.ApplicationWindow):
         box.append(cols)
 
         self._panels_list_box = Gtk.ListBox()
-        self._panels_list_box.add_css_class("panels-list")
+        # Transparent inner list; the rounded darker card lives on the
+        # ScrolledWindow (below) so its corners stay put while the list
+        # scrolls.
+        self._panels_list_box.add_css_class("panels-list-inner")
         self._panels_list_box.set_selection_mode(Gtk.SelectionMode.NONE)
         scrolled = Gtk.ScrolledWindow()
-        scrolled.add_css_class("panels-list-scroll")
+        scrolled.add_css_class("panels-list")
         scrolled.set_vexpand(True)
         scrolled.set_hexpand(True)
         scrolled.set_child(self._panels_list_box)
@@ -1088,8 +1091,8 @@ class MainWindow(Gtk.ApplicationWindow):
                 f"  background-color: {bg_hex};"
                 "  border-radius: 10px;"
                 "  padding: 4px; }"
-                ".panels-list-scroll { background: transparent; }"
-                ".panels-list > row { background: transparent; }"
+                ".panels-list-inner { background: transparent; }"
+                ".panels-list-inner > row { background: transparent; }"
                 ".mouse-help {"
                 "  background-color: rgba(0, 0, 0, 0.38);"
                 "  border-radius: 8px; padding: 6px 9px; }"
