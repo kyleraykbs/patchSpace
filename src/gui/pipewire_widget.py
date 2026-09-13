@@ -27,8 +27,6 @@ from constants import (
     LAYOUT_SETTLE_EPSILON,
     POST_MUTATION_REFRESH_MS,
     GRAPH_CANVAS_MIN_SIZE,
-    TRANSPARENT_CANVAS,
-    CANVAS_BG_ALPHA,
 )
 from render_utils import (
     theme_palette,
@@ -237,15 +235,10 @@ class PipeWireGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     def on_draw(self, area, cr, w, h):
         pal = theme_palette(self)
-        # Semi-transparent canvas, matching the PatchSpace grid, but only
-        # when opted in (see TRANSPARENT_CANVAS).
-        cr.save()
-        if TRANSPARENT_CANVAS:
-            cr.set_source_rgba(*pal["bg"], CANVAS_BG_ALPHA)
-        else:
-            cr.set_source_rgb(*pal["bg"])
+        # Opaque canvas background (see the PatchSpace note: transparency
+        # leaks at the window edges under a tiling compositor).
+        cr.set_source_rgb(*pal["bg"])
         cr.paint()
-        cr.restore()
 
         cr.save()
         self.apply_view_transform(cr)

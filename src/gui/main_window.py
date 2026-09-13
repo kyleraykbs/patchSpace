@@ -31,7 +31,6 @@ from constants import (
     ADD_NODE_PANEL_WIDTH,
     ADD_NODE_PANEL_MIN_WIDTH,
     ADD_NODE_PANEL_MAX_WIDTH,
-    TRANSPARENT_CANVAS,
 )
 from socket_client import PatchBayClient
 from daemon_control import DaemonManager
@@ -241,14 +240,7 @@ class MainWindow(Gtk.ApplicationWindow):
         super().__init__(application=app)
         self.set_title("Patch Space")
         self.set_default_size(1200, 800)
-        # See the compositor/desktop through the PatchSpace grid.  Opt-in:
-        # tiling compositors that fill a border background (niri) wash the
-        # whole transparent client area out otherwise.  The CSS is installed
-        # unconditionally (it also styles .mouse-help / .opaque-chrome); only
-        # the class that activates the transparent selectors is conditional.
         self._install_translucency_css()
-        if TRANSPARENT_CANVAS:
-            self.add_css_class("translucent-canvas")
 
         # Explicit titlebar with the program name (the default CSD title
         # also shows it, but this makes the name unambiguous and matches
@@ -1007,33 +999,14 @@ class MainWindow(Gtk.ApplicationWindow):
         return True
 
     def _install_translucency_css(self):
-        """See-through *canvas background only*.
+        """CSS for the small bottom-left mouse-controls legend.
 
-        The two graph canvases clear to alpha 0 in their ``on_draw``, and
-        this makes just their ancestor containers (and the window surface)
-        transparent so the compositor can show what's behind the grid.  The
-        app chrome is explicitly painted opaque again via
-        ``.opaque-chrome`` (toolbars, side panels, console), so everything
-        except the grid area is untouched."""
+        (Named for the removed canvas-transparency experiment; see
+        ``_build_mouse_help``.  The canvases are opaque on purpose - GTK's
+        client-side decorations plus a tiling compositor's border background
+        fill make a see-through canvas leak at the window edges.)"""
         css = Gtk.CssProvider()
         css.load_from_data(
-            b"window.translucent-canvas {"
-            b"  background-color: transparent;"
-            b"  background-image: none;"
-            b"  box-shadow: none;"
-            b"  border-radius: 0; }"
-            b"window.translucent-canvas .csd,"
-            b"window.translucent-canvas headerbar,"
-            b"window.translucent-canvas notebook > header {"
-            b"  background-color: @window_bg_color;"
-            b"  box-shadow: none;"
-            b"  border-radius: 0; }"
-            b"window.translucent-canvas notebook > stack,"
-            b"window.translucent-canvas paned,"
-            b"window.translucent-canvas overlay {"
-            b"  background-color: transparent; }"
-            b"window.translucent-canvas .opaque-chrome {"
-            b"  background-color: @window_bg_color; }"
             b".mouse-help {"
             b"  background-color: rgba(0, 0, 0, 0.38);"
             b"  border-radius: 8px; padding: 6px 9px; }"

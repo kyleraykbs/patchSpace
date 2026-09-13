@@ -42,8 +42,6 @@ from constants import (
     GRAPH_CANVAS_MIN_SIZE,
     SESSION_LOAD_OVERLAY_MIN_MS,
     SESSION_LOAD_OVERLAY_TIMEOUT_MS,
-    TRANSPARENT_CANVAS,
-    CANVAS_BG_ALPHA,
     NODE_MATERIALIZE_MS,
     NODE_FADE_MS,
     NODE_LOADING_ALPHA,
@@ -3042,15 +3040,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # wires running inside them, so their boxes must know the routes.
         self._route_all_wires()
         pal = theme_palette(self)
-        # Semi-transparent canvas only when opted in (see TRANSPARENT_CANVAS);
-        # otherwise paint the opaque theme background as before.
-        cr.save()
-        if TRANSPARENT_CANVAS:
-            cr.set_source_rgba(*pal["bg"], CANVAS_BG_ALPHA)
-        else:
-            cr.set_source_rgb(*pal["bg"])
+        # Opaque canvas background.  (See the note in main_window: GTK's
+        # client-side decorations plus a tiling compositor's border
+        # background fill make a see-through canvas leak at the window
+        # edges, so it is deliberately opaque.)
+        cr.set_source_rgb(*pal["bg"])
         cr.paint()
-        cr.restore()
 
         cr.save()
         self.apply_view_transform(cr)
