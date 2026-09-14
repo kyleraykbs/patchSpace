@@ -203,7 +203,9 @@ automatically because ownership is derived from ids.
 restart re-apply the file's membership, positions, edges and params. `read-write` (the
 default) reads and writes. The GUI draws a panel as a tinted-grid box (grid shares the
 world grid's origin/spacing so it overlays it). Its title floats just above the box like a
-group's title (panel colour, zoom-scaled font clamped so it stops growing past a point).
+group's title (panel colour, zoom-scaled font clamped so it stops growing past a point)
+and is drawn **bold** to read as a heading (`draw_text_unbounded(..., bold=True)`; the
+header geometry measures it bold too).
 Panel boxes and headers share one **paint order**, bottom to top (`_panel_paint_order`):
 ancestors first so a nested panel sits on top of its parent, and among same-depth panels
 the most recently added/placed draws last. Hit tests (`find_panel_at` and the per-button
@@ -237,41 +239,133 @@ the edge makes room, and dragging well past the cap takes the node out.
 the panel boxes, since panels grow around their wires). Wires are **always orthogonal**
 (there is no bezier/sigmoid fallback): `_wire_points` returns a square path, and only the
 final rare last resort - when A* can't find a route - is a plain L. Routing is an A* over
-a coarse grid of the endpoints' bounding box (`gui/wire_router.py`), with a turn penalty,
+a coarse grid of the endpoints' bounding box (`gui/wire_router.py`), with a turn penalty
+(`TURN_COST`) and a milder "moving away from the goal" penalty (`BACKTRACK_COST`, so a
+detour prefers going around beside an obstacle over diving past it and hooking back),
 avoiding every visible node rect **and every panel box**, each inflated by `PAD`;
 `draw_square_path` rounds the bends at draw time. Obstacle sets are asymmetric on purpose:
 - The **endpoint nodes are obstacles too** (so a wire can't loop back through its own
-  node) with a `clear_rects` corridor punched out at each socket. Other wires are passed
-  as `keep_blocked` (applied *after* the holes), so a socket corridor can't punch through
-  them - a wire routes around an existing one rather than along it. A socket only gets a
+  node) with a `clear_rects` corridor punched out at each socket. Other wires **and every
+  other node/panel** are passed as `keep_blocked` (applied *after* the holes), so a socket
+  corridor only ever punches through the *endpoint* nodes - it can't cut through a node
+  that happens to sit next to the socket. (`route`'s corridor loop also only discards a
+  cell whose centre is actually inside the corridor; rounding the corners to grid indices
+  used to clear a band up to half a pitch beyond it.) A socket only gets a
   straight `STUB` where the route doesn't *already* head outward (output = right, input =
   left): `_wire_points` routes socket-to-socket first, and if the first/last segment
   already leaves/enters horizontally that way no stub is added; otherwise it re-routes
-  from a stubbed point. The stub has an **absolute minimum** (`MIN_STUB`) so the first
-  segment always clears the origin node, and is clamped so it can't shoot past the other
-  socket. The re-route clears only around the *stubbed* endpoints, leaving the region back
+  from a stubbed point. "Already heads outward" means a sideways run of at least
+  `MIN_STUB` (`_outward`), *not* the smaller grid step - a one-cell sidestep (20px) is
+  exactly the "leaves almost no room, then dives straight down" case and must still get a
+  stub. If only *one* end needs a stub, the re-route still starts the already-outward end
+  `min(MIN_STUB, want)` out and prepends its exit (`src_outward`/`dst_outward` ->
+  `src_leg`/`dst_leg`), otherwise the fresh A* can leave that socket vertically even
+  though the original route left it sideways. **Every** leg-length site (both stubs, both
+  out-legs, and `_third_node_escape`'s `step`) is capped by `want`, so no one side can
+  overshoot a tight span. The wanted stub is
+  `want = min(STUB, |x2 - x1| / 2)` - i.e. **half the horizontal span at most**: if the
+  two sockets are closer together than two full stubs, each gets half the distance so the
+  two stubs *meet in the middle* instead of overshooting each other (which showed up as a
+  hook that curved past the socket and came back). The two clamped lengths are then
+  **shared symmetrically**: when both ends want a stub but one side's clamp is tighter, both
+  use the smaller of the two, so one end doesn't stick fully out while the other dives
+  straight out of its socket. (Extending the cramped end *past* its clamp was tried and
+  pushed the stub into the crowding node, so sharing only ever shortens the freer end.) It
+  is also capped by the nearest other
+  node/panel along that direction
+  (`_stub_len`), because a fixed-length stub could end inside a neighbour - then the
+  router couldn't reach that endpoint and the fallback drew straight through the node.
+  `_stub_len` skips the endpoint being stubbed but **not** the other endpoint: the stub
+  must not run past the node it is connecting to. Two connected nodes sitting close
+  together therefore clamp each other's stub to ~0 - but that is not a collision, so
+  instead of forcing a collapsed stub (`MIN_USABLE_STUB`), the wire routes
+  socket-to-socket directly. That is the "Bool Warp Out next to its destination" case:
+  the pre-fix code built a near-zero first segment, the cleanup passes erased it, and the
+  wire hugged/looped its own node.
+  When the cap is due to a *third* node (a real crowd) below one grid step, the wire
+  instead takes an L-shaped **escape** (`_third_node_escape`): a sideways leg as far as
+  the gap allows (pad-clear if possible, else merely body-clear) followed by a
+  perpendicular step past the crowding rects. Only rects whose near edge is within the
+  stub's reach count as "crowding" the socket, so a node far off to the side on the same
+  row can't make the escape dodge past it. Both ends dodge to the same side (the target's
+  side of the source) so the two escapes don't cross. Short (< `MIN_USABLE_STUB`) exit
+  legs and escapes are attached *after* the smoothing cleanup, since the first leg can be
+  shorter than a grid step and `_drop_short_straights` / `_round_short_ends` would
+  otherwise merge it away and put the wire straight into the port - the exact failure the
+  stub exists to prevent.
+  If the stubbed re-route fails at all, `_wire_points` falls back to the clean
+  socket-to-socket route before the obstacle-unaware `_stubbed_fallback`, so a bad stub
+  endpoint can't make the wire cut through a node.
+  The re-route clears only around the *stubbed* endpoints, leaving the region back
   over the stub blocked, so the next segment can't fold back and overlap the line already
-  drawn - the "plugged in" look without overshoot or self-overlap. Two fallbacks bypass the
+  drawn - the "plugged in" look without overshoot or self-overlap. A wire whose route
+  reaches a stubbed endpoint horizontally from the *socket side* is re-routed once with a
+  thin `behind` strip blocked (the hook retry in `_wire_points`), so the A* enters from
+  outside instead of doubling back. As a backstop, `_dehairpin` then drops collinear
+  reversals (pure retraces) and replaces a *short* non-collinear reversal with an
+  orthogonal elbow - never a diagonal - which is what the rounded corners would otherwise
+  draw as a self-crossing loop. `_drop_short_straights` likewise refuses to merge two
+  neighbours into a long diagonal. The socket
+  corridors
+  themselves are **outward-only** (from the socket out, not punched into the node), so a
+  route can't step a few px inside its own node. Two fallbacks bypass the
   router entirely - the "everything blocked" last resort in `_wire_points` and the
   detaching/unrevealed edge in `on_draw` - and both use `_stubbed_fallback`, an orthogonal
   Z that still exits each socket sideways by at least `WIRE_MIN_STUB` (a bare L degenerated
-  to a straight vertical line when ports were stacked).
+  to a straight vertical line when ports were stacked). It **always exits the source to the
+  right and enters the target from the left**, even when the target sits behind the source
+  and that makes the middle run double back - the earlier "meet in the middle" clamp made
+  the source exit leftwards straight through its own node whenever the target was to its
+  left.
+- The A* grid's pitch is adaptive per axis (so both endpoints land on cell centres), but
+  the pitch is clamped to `[CELL/2, 2*CELL]`. Without that clamp, two nearly-level sockets
+  gave a near-zero y pitch and the search margin - `ceil(MARGIN/pitch) * pitch` - collapsed
+  from `MARGIN` world units to a handful of pixels, so the grid couldn't route around a
+  node and `route` returned `None` (again falling through to a straight line through it).
 - A panel holding either endpoint is skipped (a wire must leave/enter its own panel);
   routing always uses the content-only `_panel_rect_base`, so growing a panel to enclose
   its wires can't feed back into the next frame's route.
 - Edges are routed **in order**, and each finished wire is laid down as a thin keep-out
-  strip (`polyline_rects`, `SPACING`) so later wires keep visible clearance from it - but
-  only from wires that **don't lead to the same place**. Two wires sharing a source or a
-  destination (`from_node`/`to_node`) skip each other's strips, so they may overlap/bundle
-  (and two wires off one socket don't block each other). If the strips crowd a route out,
-  the router retries ignoring other wires rather than dropping to a straight L.
+  strip (`polyline_rects`, `SPACING`) so later wires keep visible clearance from it. Two
+  wires that share a source or destination (`from_node`/`to_node`) are allowed to *bundle*
+  rather than keep the full spacing, but still get a smaller `BUNDLE_SPACING` strip
+  (`bundle_strips`, applied via `extra`) instead of no keep-out at all - so a fan-out reads
+  as a close pair rather than one thick line sitting exactly on top of itself.
+  If clearing the wire strips would force an absurdly long route
+  (`_route`'s `len > 1.5 * manhattan + WIRE_CELL` test), `_wire_points` falls back to the
+  node/panel-clear route: a wire may end up closer to another wire, but it won't
+  dive past the target and hook back to satisfy spacing. Likewise a cached route is
+  re-checked against the other wires' strips (`_wire_spacing_rects` -> `_route_still_valid`'s
+  `spacing_rects`), throttled per edge (`_route_spacing_evicted`, 0.5s) so a close pair
+  can't re-route every frame, and only against wires that actually *changed* last frame
+  (`_route_changed`) rather than every wire every frame.
+- **Routing is incremental, not per-frame.** `_route_all_wires` starts with a cheap
+  `_wire_routing_signature` (revealed node boxes, edge set, panel boxes, groups, reveal/
+  detach/drag state); if it matches the last frame the function returns immediately and
+  keeps the previous routes, bounds and caches. When it does run, a cached route is only
+  re-checked against obstacles that *moved* this frame (`_wire_last_boxes`/
+  `_wire_last_panels` -> `_route_still_valid`'s `moved_nodes`/`moved_panels`), so a node
+  drag only re-routes the wires near it. Known-unroutable edges (`_route_fallback`, the
+  `_stubbed_fallback` Z) are reused and, on a small drag, shifted with their
+  endpoints (`<= WIRE_CELL`) instead of spending full A* searches that will fail again.
+  The shift pins the true sockets and re-squares the two adjacent segments (and runs
+  `_dehairpin`), because a plain shift-then-pin leaves the exit/entry segments diagonal
+  when the two ends moved by different amounts - the "angled line while dragging a
+  fallback wire" bug.
+  `route()` itself keeps a flat int blocked-set and flat `best`/`came` arrays with the
+  heuristic inlined. This took a 60-node/90-edge graph from ~1.4s *every frame* to
+  ~0.0ms idle, ~18ms/frame drawing, and ~10-20ms of routing during a node drag.
+- A panel's floating **title row** (`_panel_header_rects["header"]`) is a *soft* obstacle:
+  `_route_all_wires` collects the titles of the panels not holding an endpoint and passes
+  them to `_wire_points`, which first routes with them in the obstacle/keep-blocked set and,
+  only if that fails, re-routes dropping the titles. So a wire goes around a panel's title
+  when it can and crosses it only when there is no other route.
 - A routed wire is **cached and reused** (`_route_cache`/`_route_still_valid`) while it
-  still starts/ends on the sockets, stays square, and clears the *static* obstacles (nodes
-  and panels) - it deliberately does **not** test other wires. If each wire re-routed in
-  response to its neighbours' new strips, a pair/trio could alternate between detours
-  forever (the observed "cycles between 3 states"); wire-vs-wire spacing is applied only
-  when a wire is (re)routed, so established wires never chase a newcomer and the whole
-  thing converges.
+  still starts/ends on the sockets, stays square, clears the *static* obstacles (nodes and
+  panels), and keeps its distance from the other wires (`spacing_rects`). Re-checking wire
+  spacing on the cached path is what stops a stale wire from being overlapped by a
+  neighbour that moved onto it after it was routed; the per-edge throttle keeps a close
+  pair from alternating detours forever (the observed "cycles between 3 states").
 The result is a strictly axis-aligned polyline (`orthogonalize` inserts L-elbows,
 `simplify` drops collinear points). `_simplify_orthogonal` then greedily collapses the A*
 staircase into as few straight runs/L-elbows as a clear two-segment path allows (longest
@@ -336,7 +430,18 @@ for "Pan", the right for "Select".
 
 *Node appearance.* A node the daemon hasn't finished bringing up (`ready` false) draws at
 `NODE_LOADING_ALPHA` (0.45) and fades to full once ready, and is not a hit target while it
-loads (`_hit_nodes` skips it). A heavy node (Echo Cancel, ...) is added to the canvas
+loads (`_hit_nodes` skips it). That gate belongs on **live-signal** controls (volume
+slider, gate/switcher/mute toggle, device rows) - a control on a node that isn't up yet is
+meaningless. It must **not** apply to **configuration** actions (the inline text field,
+the settings gear, the three-dot/Settings menu, right-click), because those are exactly
+how a node that got stuck not-ready is fixed; gating them out traps the user. So
+`_hit_nodes` takes `require_ready` (default true) and the config-only hit tests
+(`find_field_at`, `find_settings_gear_at`, `find_three_dots_at`, `_open_context_menu`'s
+`find_node_at`) pass `require_ready=False`. Note `WarpOutNode` is a plain `Node`, not a
+`BackedNode`, so the daemon's `_node_is_ready` returns true for it - an unset `warp_name`
+does not itself make it not-ready; a stuck `ready` false is the GUI's optimistic
+placeholder (`_add_placeholder_node`) or a genuinely-starting backed node. A heavy node
+(Echo Cancel, ...) is added to the canvas
 immediately as an optimistic **placeholder** (`_add_placeholder_node`, called from
 `_on_add_node`/`add_node_at`): the daemon holds its `add_node` reply until the module has
 actually spawned, so a poll can't reveal it before then and otherwise nothing would appear
@@ -357,6 +462,25 @@ from the model immediately (so it is not hit-tested, wired or laid out), and onl
 snapshot box fades over `NODE_DELETE_MS`, started at the user action and de-duplicated so
 the poll that finally drops the node doesn't start a second one. Only the `DrawingArea`'s
 own node rendering uses this - the raw PipeWire tab is untouched.
+
+*Connection draw-in.* A connection the user just made draws itself in from source to
+target over `EDGE_DRAW_MS`, with the leading `WIRE_FADE` (34px) fading to transparent so
+the tip reads as still-arriving. `_note_new_edge` (called at the two `add_edge` sends)
+stashes the deterministic edge id in `_pending_edge_draw`; the poll that echoes the edge
+stamps its birth in `_edge_born` (both `update_from_daemon` and `_anim_tick` promote, so
+the very first drawn frame animates). The draw path uses `_draw_growing_wire`, which
+splits the route by arc length (`_grow_split`) into an opaque body and a short tail
+resampled into per-step alpha strokes. Only GUI-initiated edges animate - a session/panel
+load doesn't draw every wire in.
+
+*Connection retract.* Removing a connection runs the same animation **in reverse**: the
+snapshot of its last drawn path shrinks from the target back to the source (progress 1 ->
+0, leading tip still fading). It starts immediately when the GUI sends `remove_edge`
+(`_retire_edge`) or when the poll drops an edge (`update_from_daemon` ->
+`_start_edge_ghost`), de-duplicated via `_edge_ghosted`; the ghost is drawn behind the
+nodes and skipped in the normal edge loop while it runs. A poll that still reports an
+optimistically-removed edge does not cancel the retract (only a genuine re-add does), so
+poll lag can't make the wire flicker back.
 
 *Edit mode.* A panel's parameter values (volumes, switches, effect knobs) are **not**
 written back to its file by default - the daemon serves the committed file values from
@@ -410,7 +534,12 @@ after every poll so ports follow the box as it grows/moves, and the panel reserv
 `NODE_WIDTH/2 + PANEL_IO_MARGIN` inside each port edge (and enough height for the stack) so
 ports never overlap nodes. Wire the port from outside the panel on its outer side and to
 internal nodes on its inner side - ordinary edges, so LCA edge-ownership already places
-them in the right file.
+them in the right file. Unlike ordinary single-input transparent nodes, a panel port is a
+**bus**: `PanelInNode`/`PanelOutNode` set `MIX_INPUTS` and override
+`allows_multiple_inputs()`, so several edges may land on the same audio port and their
+sources are all resolved/summed (`PatchSpace._resolve_sources`). Boolean panel ports set
+`ALLOW_MULTIPLE_BOOLEAN`, letting several edges target one boolean port; resolution still
+takes the first wired source (`_resolve_boolean_input`).
 
 *Panels side view.* A docked, scrollable list of panel files lives on the right (the endchild of an outer `Gtk.Paned`), toggled by a button directly under the top-right
 hamburger (`main_window._panels_toggle` / `_build_panels_view`). A column-header row labels
@@ -469,11 +598,14 @@ it is excluded from its panel's auto-grown bounds, so the source panel doesn't s
 under the cursor and steal the drop. After the rename the GUI immediately re-sends the
 moved nodes' positions under their *new* ids (`_reparent_after_drag`), because the
 debounced layout save still holds the old ids and would be ignored - otherwise the nodes
-bounce back to where they were picked up. The drop target is resolved from the *drag-time*
-geometry (baseline + capped growth) while the drag state is still active; after it's
-cleared every panel re-fits to include the dropped node, so the source would always win
-and a node could never be dragged out. Groups land in the panel that is the LCA of
-their members.
+bounce back to where they were picked up. The drop target is resolved from each panel's
+**drag-start box** (`_panel_drag_baseline`, via `_panel_drop_target`) while the drag state
+is still active - *not* the box as it grows toward the dragged node. Using the grown box
+would let the source panel follow the node out and swallow the drop (hard to drag a node
+out), and a grown source panel under the pointer could shadow the panel the user actually
+dropped onto (so the node never nested there). A node dropped with its centre inside a
+different panel's drag-start box nests into it; outside every box it lands at the root.
+Groups land in the panel that is the LCA of their members.
 
 *Creating a panel* (`Create Panel…`): with a selection, the new panel is fitted around
 the selected nodes' bounds and **nested into the panel those nodes live in** (the GUI sends
@@ -499,6 +631,22 @@ Right-clicking **while a left node-drag is in progress** cancels it: the dragged
 snap back to where they were picked up and the click is swallowed (no menu/marquee). A
 floating circular Delete button sits at the canvas's bottom-right whenever there is a
 selection and confirms (Gtk.AlertDialog) before removing the selected nodes.
+
+**Context popovers are deferred** (`GraphViewMixin.popup_context_menu`): the actual
+`popover.popup()` runs on the next idle, not synchronously from the gesture handler, or
+the popover and the opening gesture fight over the pointer grab (the canvas goes
+unresponsive after "drag, then right-click"). Because of that, `dismiss_context_popover`
+takes a `force` flag and `on_drag_begin` calls it with `force=False`: `Gtk.GestureDrag`'s
+`drag-begin` fires on the same left-button press that `on_click` used to request the
+popover, so a plain dismiss there would cancel the still-pending popup and the field
+editor would never open. `force=False` only dismisses popovers that are already visible,
+leaving a requested-but-unshown one alone. (The device/app chooser was never affected
+because it opens after a daemon round-trip, long after the press.) Any widget inside the
+popover that needs focus - e.g. the inline field editor's `Gtk.Entry`
+(`show_field_edit`) - must be passed as `focus_widget=`, which grabs focus *after* the
+popup has mapped. Calling `entry.grab_focus()` at the call site is too early (the popover
+isn't mapped yet), leaves the entry unfocused, and a click into it can lose the
+pointer-grab race.
 
 **Session load is asynchronous.** `_cmd_load_session` starts a background thread and
 immediately returns `{"status": "ok", "started": true}`. There is **no completion

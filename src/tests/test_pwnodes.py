@@ -26,6 +26,8 @@ from pwnodes import (
     BooleanWarpInNode,
     BooleanWarpOutNode,
     BoolPanelInNode,
+    PanelInNode,
+    PanelOutNode,
     NoiseCancelNode,
     SplitterNode,
     VolumeProcessNode,
@@ -1393,3 +1395,61 @@ def test_rename_preserves_internal_link_bookkeeping():
     assert space._edge_links["user->edge"].pairs == {(5, 6)}
     # In-flight bookkeeping follows the re-key too.
     assert space._inflight_links[(1, 2)][0] == "__internal__:new:0"
+
+
+def test_panel_input_mixes_multiple_external_sources():
+    """Unlike an ordinary single-input transparent node, a panel input is
+    a bus: several external sources may feed it and all of them reach the
+    internal consumer."""
+    g = FakeGraph()
+    a_ports = g.add_source(10, "srcA")
+    b_ports = g.add_source(20, "srcB")
+    sink_ports = g.add_sink(30, "sink")
+    space = make_space(g)
+    space.mark_graph_loaded()
+    space.add_node(NamedSource("sa", "srcA"))
+    space.add_node(NamedSource("sb", "srcB"))
+    space.add_node(PanelInNode("pin", port_name="Mic"))
+    space.add_node(NamedSink("snk", "sink"))
+    space.add_edge("sa", "pin", "in")
+    space.add_edge("sb", "pin", "in")
+    space.add_edge("pin", "snk")
+    space.sync()
+    assert (a_ports["FL"], sink_ports["FL"]) in g.linked_pairs()
+    assert (b_ports["FL"], sink_ports["FL"]) in g.linked_pairs()
+
+
+def test_panel_output_mixes_multiple_internal_sources():
+    g = FakeGraph()
+    a_ports = g.add_source(10, "srcA")
+    b_ports = g.add_source(20, "srcB")
+    sink_ports = g.add_sink(30, "sink")
+    space = make_space(g)
+    space.mark_graph_loaded()
+    space.add_node(NamedSource("sa", "srcA"))
+    space.add_node(NamedSource("sb", "srcB"))
+    space.add_node(PanelOutNode("pout", port_name="Out"))
+    space.add_node(NamedSink("snk", "sink"))
+    space.add_edge("sa", "pout", "in")
+    space.add_edge("sb", "pout", "in")
+    space.add_edge("pout", "snk")
+    space.sync()
+    assert (a_ports["FL"], sink_ports["FL"]) in g.linked_pairs()
+    assert (b_ports["FL"], sink_ports["FL"]) in g.linked_pairs()
+
+
+def test_panel_boolean_input_accepts_multiple_edges():
+    g = FakeGraph()
+    space = make_space(g)
+    space.mark_graph_loaded()
+    space.add_node(BooleanSourceNode("a", output=0))
+    space.add_node(BooleanSourceNode("b", output=1))
+    space.add_node(BoolPanelInNode("pin"))
+    # Both land on the same boolean port; the first wired one wins.
+    space.add_edge("a", "pin", "in")
+    space.add_edge("b", "pin", "in")
+    space.add_node(GateNode("gate", enabled=False))
+    space.add_edge("pin", "gate", "ctrl")
+    space.sync()
+    assert space.nodes["gate"].bool_driven is True
+    assert space.nodes["gate"].bool_state is False

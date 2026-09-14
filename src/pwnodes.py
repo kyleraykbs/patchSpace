@@ -1191,7 +1191,16 @@ class BooleanWarpOutNode(Node):
 class PanelInNode(TransparentNode):
     """A panel input port: external audio arrives on "in" and the panel's
     internal nodes pull it from "out".  Pure logical pass-through (no
-    backing)."""
+    backing).  Unlike other single-input transparent nodes it is a *bus*:
+    several upstream edges may feed the same input and their sources are
+    summed/mixed downstream."""
+
+    # See PatchSpace._resolve_sources: mix every inbound audio edge rather
+    # than passing only the first.
+    MIX_INPUTS = True
+
+    def allows_multiple_inputs(self) -> bool:
+        return True
 
     def __init__(self, node_id, port_name: str = "", description: str = ""):
         super().__init__(node_id)
@@ -1201,7 +1210,13 @@ class PanelInNode(TransparentNode):
 
 class PanelOutNode(TransparentNode):
     """A panel output port: internal audio arrives on "in" and external
-    nodes pull it from "out".  Pure logical pass-through (no backing)."""
+    nodes pull it from "out".  Pure logical pass-through (no backing).  Also
+    a mixing bus - several internal edges may feed it."""
+
+    MIX_INPUTS = True
+
+    def allows_multiple_inputs(self) -> bool:
+        return True
 
     def __init__(self, node_id, port_name: str = "", description: str = ""):
         super().__init__(node_id)
@@ -1219,6 +1234,9 @@ class BoolPanelInNode(Node):
     default, as before)."""
 
     BOOLEAN_INPUT = "in"
+    # Several edges may land on the same boolean port; resolution takes
+    # the first wired source (see _resolve_boolean_input).
+    ALLOW_MULTIPLE_BOOLEAN = True
 
     def __init__(self, node_id, port_name: str = "", description: str = "",
                  default_state: Optional[bool] = None):
@@ -1236,6 +1254,10 @@ class BoolPanelOutNode(Node):
     republished outside on "out"."""
 
     BOOLEAN_INPUT = "in"
+    # Like the audio panel ports, several edges may land on the same
+    # boolean port; resolution takes the first wired source (see
+    # _resolve_boolean_input).
+    ALLOW_MULTIPLE_BOOLEAN = True
 
     def __init__(self, node_id, port_name: str = "", description: str = ""):
         super().__init__(node_id)
@@ -2838,13 +2860,18 @@ class PatchSpace:
                     f"cannot connect a {from_kind} output to a {to_kind} input"
                 )
             if to_kind == "boolean":
-                # A boolean input is a single control signal, not a
-                # mixable audio bus: exactly one source may drive it.
-                for existing in self._edges_into.get(to_node, []):
-                    if existing.to_port == to_port:
-                        raise ValueError(
-                            f"{to_node}.{to_port} is already driven"
-                        )
+                # A boolean input is usually a single control signal, not a
+                # mixable bus: exactly one source may drive it.  Panel
+                # boolean ports opt out (ALLOW_MULTIPLE_BOOLEAN) so several
+                # sources can be offered; the first wired one wins.
+                if getattr(target, "ALLOW_MULTIPLE_BOOLEAN", False):
+                    pass
+                else:
+                    for existing in self._edges_into.get(to_node, []):
+                        if existing.to_port == to_port:
+                            raise ValueError(
+                                f"{to_node}.{to_port} is already driven"
+                            )
             elif (
                 target.is_transparent()
                 and not target.allows_multiple_inputs()
@@ -3157,6 +3184,15 @@ class PatchSpace:
             upstream = [e for e in upstream if not self._edge_is_boolean(e)]
             if not upstream:
                 return []
+            # A mixing transparent node (a panel input/output bus) sums
+            # every inbound audio edge instead of selecting just one.
+            if getattr(node, "MIX_INPUTS", False):
+                mixed: List[dict] = []
+                for e in upstream:
+                    mixed.extend(
+                        self._resolve_sources(e.from_node, e.from_port, seen)
+                    )
+                return mixed
             # A single-input transparent node has exactly one inbound
             # edge; InverseSwitcherNode has one per input and picks the
             # one its button selected (see select_upstream).

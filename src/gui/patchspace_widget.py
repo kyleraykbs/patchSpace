@@ -22,6 +22,7 @@ if/elif chains here.
 
 from __future__ import annotations
 
+import cairo
 import json
 import constants
 import logging
@@ -48,6 +49,7 @@ from constants import (
     NODE_LOADING_ALPHA,
     NODE_DELETE_MS,
     ANIM_TICK_MS,
+    EDGE_DRAW_MS,
     ZOOM_MIN,
     ZOOM_MAX,
 )
@@ -65,7 +67,9 @@ from render_utils import (
 )
 from force_layout import ForceLayout
 from wire_router import (
+    BUNDLE_SPACING as WIRE_BUNDLE_SPACING,
     CELL as WIRE_CELL,
+    MARGIN as WIRE_MARGIN,
     MIN_STUB as WIRE_MIN_STUB,
     PAD as WIRE_PAD,
     SPACING as WIRE_SPACING,
@@ -103,9 +107,23 @@ logger = logging.getLogger(__name__)
 # to its half-step so runs sit on grid lines "as best as possible".
 WIRE_GRID_STEP = 20.0
 
+# A socket stub shorter than this is treated as "no usable sideways exit":
+# it reads as no exit at all, and the cleanup passes (_drop_short_straights /
+# _round_short_ends, both keyed on WIRE_GRID_STEP) merge it away - leaving the
+# wire to hug its own node's border.  Below this the stub is attached as a
+# short leg *after* cleanup instead (or replaced by a perpendicular jog).
+MIN_USABLE_STUB = WIRE_GRID_STEP
+
+# Length of the transparent fade at the leading tip while a freshly-made
+# connection draws itself in (see _draw_growing_wire).
+WIRE_FADE = 34.0
+
 
 class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     NODE_WIDTH = 180
+    # Extra world padding around the viewport when culling offscreen draws,
+    # so a panel's floating title / a node's shadow just outside still draw.
+    _CULL_MARGIN = 260.0
     NODE_HEIGHT = 80
     # Top padding before the first header line, and the gap between
     # each wrapped header line thereafter (type label, then
@@ -219,6 +237,24 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # the node later reappears at the daemon's default position - see
         # the deletion loop in update_from_daemon.
         self._placeholder_since: dict = {}
+        # Connections the user just made: their wire draws itself in from
+        # source to target.  _pending_edge_draw holds edge ids we've asked
+        # the daemon to create (before the poll echoes them); once the edge
+        # appears the ticker stamps its birth in _edge_born and it animates
+        # for EDGE_DRAW_MS.  Keyed by the deterministic edge id so a poll
+        # that lags the command doesn't matter.
+        self._pending_edge_draw: dict = {}
+        self._edge_born: dict = {}
+        # A removed connection retracts: its last drawn path is snapshotted
+        # (eid -> {points, is_bool, t0}) and drawn shrinking from the target
+        # back to the source, the reverse of the draw-in animation.
+        self._edge_ghosts: dict = {}
+        self._edge_ghosted: set = set()
+        # Per-edge timestamp of the last time wire-spacing invalidated its
+        # cached route (see _route_still_valid), so two wires that keep
+        # ending up within spacing of each other can't be re-routed on every
+        # single frame forever.
+        self._route_spacing_evicted: dict = {}
         GLib.timeout_add(ANIM_TICK_MS, self._anim_tick)
         # Per-frame geometry cache for group nesting (the enclosed-group
         # walk is O(groups^2) and was recomputed many times inside one
@@ -368,6 +404,26 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._wire_routes: dict = {}
         self._wire_bounds: dict = {}
         self._wire_panel_cache: dict = {}
+        # Signature of the last routed frame's inputs (node boxes, edges,
+        # panels, groups, reveal state).  Routing is expensive, so if nothing
+        # that affects it changed since the last frame we reuse the routes
+        # wholesale instead of re-validating (and re-routing) every wire.
+        self._wire_routing_sig = None
+        # Edges whose last route was the obstacle-unaware _stubbed_fallback
+        # (no path exists).  Those would fail the static re-validation every
+        # frame and be re-routed forever, so they're reused until their
+        # endpoints move.
+        self._route_fallback: set = set()
+        # Edges whose route actually changed on the last frame.  Cached-route
+        # spacing is only re-checked against these (not against every wire
+        # every frame), which stops the spacing check from churning.
+        self._route_changed = None
+        # Per-node/panel boxes from the last routed frame, so a cached route
+        # only needs re-checking against obstacles that actually moved.
+        self._wire_last_boxes = {}
+        self._wire_last_panels = {}
+        # Transient: set by _wire_points when it gives up to the fallback.
+        self._wire_fell_back = False
         # eid -> last committed route, reused while it stays clear (see
         # _route_still_valid) so interacting wires don't flip between
         # near-equal detours every frame.
@@ -1198,7 +1254,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 node["profile_index"] = ndata.get("profile_index")
                 node["codec_label"] = ndata.get("profile_description", "")
 
-        self.edges = {
+        new_edges = {
             eid: {
                 "from_node": edata["from_node"],
                 "to_node": edata["to_node"],
@@ -1211,6 +1267,29 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             }
             for eid, edata in daemon_edges.items()
         }
+        # Edges that vanished get a reverse (retract) animation: snapshot
+        # their last drawn path now and draw it shrinking to nothing.
+        for eid, old_edge in self.edges.items():
+            if eid not in new_edges:
+                self._start_edge_ghost(eid, old_edge)
+        # An edge that came back (a fresh add) cancels any in-flight retract;
+        # a poll that merely still reports an optimistically-removed edge does
+        # not, so the retract can't be interrupted by poll lag.
+        for eid in new_edges:
+            if eid in self._edge_ghosts and (
+                eid in self._pending_edge_draw or eid in self._edge_born
+            ):
+                del self._edge_ghosts[eid]
+                self._edge_ghosted.discard(eid)
+        self.edges = new_edges
+
+        # A connection the user just made is echoed here; stamp its birth
+        # now so the very first frame it is drawn already animates (the
+        # ticker would otherwise promote it one frame later).
+        if self._pending_edge_draw:
+            for eid in [e for e in self._pending_edge_draw if e in self.edges]:
+                del self._pending_edge_draw[eid]
+                self._edge_born[eid] = time.monotonic()
 
         # Nodes touched by at least one not-yet-wired edge - drawn with
         # a "still wiring" badge (see _draw_node / _header_blocks)
@@ -2117,23 +2196,30 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         Obstacle-unaware on purpose (there is no route to be aware of)."""
         if slen is None:
             slen = WIRE_MIN_STUB
-        mid_x = (x1 + x2) / 2.0
-        ex1 = x1 + max(slen, mid_x - x1)
-        ex2 = x2 - max(slen, x2 - mid_x)
         if abs(y1 - y2) < 1e-6:
-            # Same row: the two stubs join with a horizontal run.
-            return [(x1, y1), (ex1, y1), (ex2, y2), (x2, y2)]
-        # Step across on a mid row so the middle segment is horizontal (not
-        # a diagonal), keeping the whole path orthogonal even when the stubs
-        # cross (near-vertical ports).
+            if x2 >= x1:
+                # Same row and the target is ahead: a straight run is right.
+                return [(x1, y1), (x2, y2)]
+            # Same row but the target is *behind* the source: step around so
+            # the wire never runs back through its own source node.
+            d = max(slen, abs(x1 - x2) * 0.5)
+            return [
+                (x1, y1), (x1 + d, y1), (x1 + d, y1 - d),
+                (x2 - d, y1 - d), (x2 - d, y1), (x2, y1),
+            ]
+        # Always exit the source to the *right* (x1 + slen) and enter the
+        # target from the *left* (x2 - slen), even when that makes the middle
+        # run double back.  Clamping the stubs to the midpoint instead made
+        # the source exit leftwards whenever the target sat to its left -
+        # straight through the node body and out the far side.
         mid_y = (y1 + y2) / 2.0
         return [
-            (x1, y1), (ex1, y1), (ex1, mid_y),
-            (ex2, mid_y), (ex2, y2), (x2, y2),
+            (x1, y1), (x1 + slen, y1), (x1 + slen, mid_y),
+            (x2 - slen, mid_y), (x2 - slen, y2), (x2, y2),
         ]
 
     def _wire_points(self, edge, x1, y1, x2, y2, wire_rects, wire_panels,
-                     extra_obstacles=()):
+                     extra_obstacles=(), panel_titles=None):
         """A square route (rounded at draw time) from socket to socket that
         steers clear of other nodes, panels, other wires, *and its own
         endpoints' bodies*.  Always returns an orthogonal path (a plain L on
@@ -2142,61 +2228,257 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         ``wire_rects`` is {nid: (x1,y1,x2,y2)} and ``wire_panels`` a list of
         (pid, (x1,y1,x2,y2)); both are built once per frame (see on_draw).
         ``extra_obstacles`` are keep-out rects from already-routed wires.
-        Panels holding either endpoint are ignored (a wire has to be able to
-        leave/enter its own panel)."""
+        ``panel_titles`` maps a panel id to its floating title row; wires
+        prefer to route around those but are allowed to cross them when no
+        title-clear route exists.  Panels holding either endpoint are ignored
+        (a wire has to be able to leave/enter its own panel)."""
+        panel_titles = panel_titles or {}
         skip = {edge["from_node"], edge["to_node"]}
         own = [r for nid, r in wire_rects.items() if nid in skip]
         other_nodes = [r for nid, r in wire_rects.items() if nid not in skip]
         panels = []
-        for _pid, rect in wire_panels:
+        titles = []
+        for pid, rect in wire_panels:
             if self._contains_point(rect, x1, y1) or self._contains_point(
                 rect, x2, y2
             ):
                 continue
             panels.append(rect)
+            header = panel_titles.get(pid)
+            if header is not None:
+                titles.append(header)
         extra = list(extra_obstacles)
+        # The router only searches `endpoint span + MARGIN`, so drop any
+        # wire keep-out rect entirely outside that area: the router would
+        # clip it away anyway, but rasterizing hundreds of far strips per
+        # route is what made routing slow on a busy graph.
+        _lo_x = min(x1, x2) - WIRE_MARGIN
+        _hi_x = max(x1, x2) + WIRE_MARGIN
+        _lo_y = min(y1, y2) - WIRE_MARGIN
+        _hi_y = max(y1, y2) + WIRE_MARGIN
+        extra = [
+            r for r in extra
+            if not (r[2] < _lo_x or r[0] > _hi_x
+                    or r[3] < _lo_y or r[1] > _hi_y)
+        ]
 
         # Route around everything, with a corridor out of each socket so the
-        # wire can leave/enter its own (now-blocking) node.  Other wires are
-        # keep_blocked so a socket corridor can't punch through them.
+        # wire can leave/enter its own (now-blocking) node.  The corridor
+        # hole must only punch through the *endpoint* nodes; every other
+        # node/panel is passed as keep_blocked (applied after the hole) so a
+        # socket corridor can't cut through a node that happens to sit next
+        # to the socket.  Other wires are kept blocked too.
         static = other_nodes + own + panels
-        obstacles = static + extra
+        keep_nodes = other_nodes + panels
+        # Post-processing clearance checks include the titles too, so a
+        # cleanup pass can't introduce a fresh crossing.
+        obstacles = static + titles + extra
         # Endpoint node boxes excluded: the socket sits on their border, so a
         # socket-adjacent smoothing check must not treat its own node as a
         # blocker (it would reject every short first/last blend).
-        smooth_obstacles = other_nodes + panels + extra
+        smooth_obstacles = other_nodes + panels + titles + extra
         corr = WIRE_CELL * 1.5
         clear = [
-            (x1 - WIRE_CELL, y1 - corr, x1 + WIRE_CELL, y1 + corr),
-            (x2 - WIRE_CELL, y2 - corr, x2 + WIRE_CELL, y2 + corr),
+            # Outward-only: the socket sits on the node border, so the wire
+            # leaves that way (or runs along the border).  Punching *inward*
+            # too let a route step a few px inside its own node.
+            (x1, y1 - corr, x1 + WIRE_CELL, y1 + corr),
+            (x2 - WIRE_CELL, y2 - corr, x2, y2 + corr),
         ]
 
-        core = route_wire(x1, y1, x2, y2, static, clear_rects=clear,
-                          keep_blocked=extra)
+        def _route(a, b, clear_rects, with_titles, behind=()):
+            """Route a->b avoiding nodes/panels and, when ``with_titles``,
+            the panel title rows.  Wire keep-out strips are honoured only
+            while they don't force an absurd detour: if clearing them costs
+            far more than going direct, fall back to the node/panel-clear
+            route (it may pass closer to a wire, but not across nodes).
+            ``behind`` rects stay blocked after the corridors so a stubbed
+            endpoint can only be approached from *outside* its stub (used for
+            the hook-retry below, not for the normal route)."""
+            obs = static + (titles if with_titles else [])
+            keep = keep_nodes + (titles if with_titles else []) + list(behind)
+            r = route_wire(a[0], a[1], b[0], b[1], obs,
+                           clear_rects=clear_rects, keep_blocked=keep + extra)
+            if r and extra:
+                direct = abs(a[0] - b[0]) + abs(a[1] - b[1])
+                rlen = sum(
+                    math.hypot(q[0] - p[0], q[1] - p[1])
+                    for p, q in zip(r, r[1:])
+                )
+                if rlen > 1.5 * direct + WIRE_CELL:
+                    r2 = route_wire(a[0], a[1], b[0], b[1], obs,
+                                    clear_rects=clear_rects, keep_blocked=keep)
+                    if r2:
+                        r2len = sum(
+                            math.hypot(q[0] - p[0], q[1] - p[1])
+                            for p, q in zip(r2, r2[1:])
+                        )
+                        if r2len < rlen:
+                            r = r2
+            if not r:
+                r = route_wire(a[0], a[1], b[0], b[1], obs,
+                               clear_rects=clear_rects, keep_blocked=keep)
+            return r
+
+        core = _route((x1, y1), (x2, y2), clear, True)
         if not core:
-            core = route_wire(x1, y1, x2, y2, static, clear_rects=clear)
+            # No title-clear route: allow crossing the panel titles rather
+            # than give up (only other nodes/panels/wires stay hard).
+            core = _route((x1, y1), (x2, y2), clear, False)
+        # The socket-to-socket route, kept as a node/panel-clear fallback if
+        # the stubbed re-route below fails (it is far better than the
+        # obstacle-unaware _stubbed_fallback).
+        core_socket = core
 
         def _outward(points, idx, sx, sy, direction):
             # Only counts as an outward exit if it actually runs a
             # reasonable distance sideways; a few-px sideways hop (or a
             # vertical start hugging the node edge) must still get a stub,
-            # so a wire never dives straight up/down into a port.
+            # so a wire never dives straight up/down into a port.  The bar
+            # is WIRE_MIN_STUB, not the (smaller) grid step: a one-cell
+            # sidestep is exactly the "leaves almost no room then goes
+            # straight down" case.
             px, py = points[idx]
             return (
                 abs(py - sy) < 0.5
-                and (px - sx) * direction >= WIRE_GRID_STEP
+                and (px - sx) * direction >= WIRE_MIN_STUB
             )
 
         if core:
-            src_stub = len(core) >= 2 and not _outward(core, 1, x1, y1, 1.0)
-            dst_stub = len(core) >= 2 and not _outward(
+            src_outward = len(core) >= 2 and _outward(core, 1, x1, y1, 1.0)
+            dst_outward = len(core) >= 2 and _outward(
                 core, len(core) - 2, x2, y2, -1.0
             )
+            src_stub = not src_outward
+            dst_stub = not dst_outward
         else:
             src_stub = dst_stub = True
+            src_outward = dst_outward = False
+        # Stick out only where the route doesn't already head outward.  The
+        # wanted stub is capped at half the horizontal span: if the two
+        # sockets are closer than two stubs, a full WIRE_MIN_STUB each would
+        # overshoot each other (a hook/curve), so half the span lets the two
+        # stubs *meet* in the middle instead.  It is also capped by the
+        # nearest other node/panel along that direction: a fixed-length stub
+        # could end inside a neighbouring node, the router couldn't reach that
+        # endpoint, and the fallback drew a straight line through the node.
+        span = abs(x2 - x1)
+        want = min(WIRE_STUB, span * 0.5)
+        # The two nodes this wire connects are never "crowding" its sockets:
+        # the source sits behind its output, and the destination is where the
+        # wire is going.  Only a *third* node/panel should force an escape.
+        skip_ends = {edge["from_node"], edge["to_node"]}
+
+        def _stub_len(sx, sy, direction, own):
+            """How far the stub may run outward from (sx, sy) before it
+            reaches another node/panel (leaving WIRE_PAD plus a 2px margin).
+            ``own`` (the endpoint being stubbed) is skipped, so the *other*
+            endpoint still clamps it - the stub must not run past the node
+            it is connecting to."""
+            limit = want
+            rects = [
+                r for nid, r in wire_rects.items() if nid != own
+            ] + panels
+            for rx1, ry1, rx2, ry2 in rects:
+                if not (ry1 - WIRE_PAD <= sy <= ry2 + WIRE_PAD):
+                    continue
+                if direction > 0 and rx1 >= sx:
+                    limit = min(limit, rx1 - WIRE_PAD - 2.0 - sx)
+                elif direction < 0 and rx2 <= sx:
+                    limit = min(limit, sx - rx2 - WIRE_PAD - 2.0)
+            return max(0.0, limit)
+
+        def _third_node_escape(sx, sy, direction, dodge_down):
+            """When a *third* node/panel (not the other endpoint) sits right
+            in front of the socket, build an L-shaped escape: run
+            horizontally out as far as the gap allows (pad-clear if
+            possible, else just clear of the crowding body), then step
+            perpendicular past every crowding rect on ``dodge_down``'s side.
+            Returns (points_from_socket, tip) or None when nothing crowds or
+            the dodge can't clear it."""
+            # The escape's horizontal leg is bounded by the same span-aware
+            # budget as a normal stub (never longer than half the span).
+            step = min(WIRE_MIN_STUB, want)
+            rects = [
+                r for nid, r in wire_rects.items() if nid not in skip_ends
+            ] + panels
+            # Only rects whose near edge sits within the stub's reach count
+            # as crowding the socket - a node far off to the side (but on the
+            # same row) must not make the escape dodge past it.
+            reach = want + WIRE_PAD + 2.0
+            crowd = []
+            for rx1, ry1, rx2, ry2 in rects:
+                if not (ry1 - WIRE_PAD <= sy <= ry2 + WIRE_PAD):
+                    continue
+                if direction > 0 and sx <= rx1 <= sx + reach:
+                    crowd.append((rx1, ry1, rx2, ry2))
+                elif direction < 0 and sx - reach <= rx2 <= sx:
+                    crowd.append((rx1, ry1, rx2, ry2))
+            if not crowd:
+                return None
+            near = min(abs(r[0] - sx) if direction > 0 else abs(sx - r[2])
+                       for r in crowd)
+            h = near - WIRE_PAD - 2.0
+            if h <= 0.0:
+                # No pad-clear room: settle for staying out of the body.
+                h = max(0.0, near - 2.0)
+            h = min(h, step)
+            tip_x = sx + direction * h
+            downs = [r[3] + WIRE_PAD + WIRE_GRID_STEP for r in crowd]
+            ups = [r[1] - WIRE_PAD - WIRE_GRID_STEP for r in crowd]
+            dodge_y = max(downs) if dodge_down else min(ups)
+            tip = (tip_x, dodge_y)
+            for rx1, ry1, rx2, ry2 in rects:
+                if (rx1 - 1.0 <= tip[0] <= rx2 + 1.0
+                        and ry1 - 1.0 <= tip[1] <= ry2 + 1.0):
+                    return None
+            return [(sx, sy), (tip_x, sy), tip], tip
+
+        # Both ends dodge to the same side (the target's side of the source)
+        # so the two escapes head the same way instead of crossing.
+        dodge_down = y2 >= y1
+        src_len = _stub_len(x1, y1, 1.0, edge["from_node"]) if src_stub else 0.0
+        dst_len = _stub_len(x2, y2, -1.0, edge["to_node"]) if dst_stub else 0.0
+        # Share the room equally: when only one side's clamp leaves space, the
+        # other would otherwise stick fully out while this one dives straight
+        # out of its socket.  Both get the tighter of the two usable lengths,
+        # so the two legs stay symmetric and meet in the middle.  (Extending
+        # the cramped side *past* its clamp was tried and pushed the stub into
+        # the crowding node, so this only ever shortens the freer side.)
+        if src_stub and dst_stub and src_len > 1.0 and dst_len > 1.0:
+            shared = min(src_len, dst_len)
+            src_len = shared
+            dst_len = shared
+        src_esc = (
+            _third_node_escape(x1, y1, 1.0, dodge_down)
+            if src_stub and src_len < MIN_USABLE_STUB else None
+        )
+        dst_esc = (
+            _third_node_escape(x2, y2, -1.0, dodge_down)
+            if dst_stub and dst_len < MIN_USABLE_STUB else None
+        )
+        # A stub only clamped by the far endpoint (no third-node crowd) means
+        # there is genuinely no room for a sideways exit *between the two
+        # nodes* - forcing one collapses it to a near-zero segment that the
+        # cleanup passes then erase, and the wire hugs its own border.  Route
+        # socket-to-socket instead (the first core already does).
+        #
+        # Gate this on the two sockets actually being close: when the clamp
+        # came from a *third* node and the escape couldn't clear it, don't
+        # drop the stub - keep the (short) sideways leg, or the wire dives
+        # straight up/down out of a socket that still has room to the side.
+        close_span = span < 2.0 * MIN_USABLE_STUB
+        if (core is not None and src_stub and close_span
+                and src_len < MIN_USABLE_STUB and src_esc is None):
+            src_stub = False
+        if (core is not None and dst_stub and close_span
+                and dst_len < MIN_USABLE_STUB and dst_esc is None):
+            dst_stub = False
+
         if not (src_stub or dst_stub):
-            # The route already leaves/enters horizontally: no stub needed.
-            return self._drop_short_straights(
+            # The route leaves/enters sideways already (or the far endpoint
+            # is too close to stub): use it as-is.
+            return self._dehairpin(self._drop_short_straights(
                 self._round_short_ends(
                     self._smooth_jogs(
                         self._snap_to_grid(
@@ -2208,42 +2490,129 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     smooth_obstacles,
                 ),
                 smooth_obstacles,
-            )
+            ))
 
-        # Stick out only where the route doesn't already head outward.  The
-        # stub has an absolute minimum length (so the first segment always
-        # clears the node by WIRE_MIN_STUB).  Deliberately NOT clamped to
-        # half the span: when the two sockets are near-vertically aligned
-        # that clamp collapsed the stub to zero and the wire left the node
-        # straight down.  A little over/under-shoot on the horizontal is
-        # preferable to no sideways exit at all.
-        span = abs(x2 - x1)
-        slen = min(WIRE_STUB, max(WIRE_MIN_STUB, span * 0.5))
-        start = (x1 + slen, y1) if src_stub else (x1, y1)
-        end = (x2 - slen, y2) if dst_stub else (x2, y2)
-        # Clear only *outward* of each stubbed endpoint: the region behind
-        # it (back over the stub, toward the node) stays blocked, so the
-        # next segment can't fold back and overlap the line already drawn.
-        clear2 = [
-            (start[0], y1 - corr, start[0] + WIRE_CELL, y1 + corr),
-            (end[0] - WIRE_CELL, y2 - corr, end[0], y2 + corr),
-        ]
-        core = route_wire(start[0], start[1], end[0], end[1], static,
-                          clear_rects=clear2, keep_blocked=extra)
+        # Build each exit leg.  A third-node escape (or a stub shorter than
+        # MIN_USABLE_STUB) is attached *after* the cleanup passes, since they
+        # would otherwise merge its short first segment away.
+        src_leg = None
+        dst_leg = None
+        if src_esc is not None:
+            src_leg, start = src_esc
+        elif src_stub:
+            start = (x1 + src_len, y1)
+            if src_len < MIN_USABLE_STUB:
+                src_leg = [(x1, y1), start]
+        elif src_outward:
+            # The direct route already left sideways, but we're re-routing
+            # (the far end still needs a stub).  Start the new route a stub
+            # out and prepend the exit, or the fresh A* may leave the socket
+            # vertically instead.  Capped by `want` like every other stub so
+            # it can't overshoot a tight near-side span (`WIRE_MIN_STUB` is
+            # only the ceiling, not a fixed length).
+            src_leg_len = min(WIRE_MIN_STUB, want)
+            start = (x1 + src_leg_len, y1)
+            src_leg = [(x1, y1), start]
+        else:
+            start = (x1, y1)
+        if dst_esc is not None:
+            dst_leg, end = dst_esc
+        elif dst_stub:
+            end = (x2 - dst_len, y2)
+            if dst_len < MIN_USABLE_STUB:
+                dst_leg = [(x2, y2), end]
+        elif dst_outward:
+            dst_leg_len = min(WIRE_MIN_STUB, want)
+            end = (x2 - dst_leg_len, y2)
+            dst_leg = [(x2, y2), end]
+        else:
+            end = (x2, y2)
+
+        # Clear the route's start/end; a side with an exit leg gets an
+        # outward-only corridor, an un-stubbed side the wide socket corridor
+        # so the wire can leave in any direction.
+        clear2 = []
+        if src_stub or src_leg is not None:
+            clear2.append(
+                (start[0], start[1] - corr,
+                 start[0] + WIRE_CELL, start[1] + corr)
+            )
+        else:
+            clear2.append(
+                (x1 - WIRE_CELL, y1 - corr, x1 + WIRE_CELL, y1 + corr)
+            )
+        if dst_stub or dst_leg is not None:
+            clear2.append(
+                (end[0] - WIRE_CELL, end[1] - corr,
+                 end[0], end[1] + corr)
+            )
+        else:
+            clear2.append(
+                (x2 - WIRE_CELL, y2 - corr, x2 + WIRE_CELL, y2 + corr)
+            )
+        core = _route(start, end, clear2, core_socket is not None)
         if not core:
-            core = route_wire(start[0], start[1], end[0], end[1], static,
-                              clear_rects=clear2)
+            # Crossing the panel titles is preferred over giving up.
+            core = _route(start, end, clear2, False)
+        # A hook: the route leaves/enters a stubbed endpoint horizontally from
+        # the *socket side*, so the appended exit leg doubles back over it.
+        # Retry with a thin "behind" strip that blocks that approach - this
+        # makes the A* come around and enter from outside (a proper corner)
+        # instead of leaving a loop for the renderer to round.
+        if core is not None:
+            hook = False
+            if (src_stub and start[0] > x1 + 1.0 and len(core) >= 2
+                    and abs(core[1][1] - start[1]) < 0.5
+                    and core[1][0] < start[0]):
+                hook = True
+            if (dst_stub and end[0] < x2 - 1.0 and len(core) >= 2
+                    and abs(core[-2][1] - end[1]) < 0.5
+                    and core[-2][0] > end[0]):
+                hook = True
+            if hook:
+                bm = WIRE_PAD + 3.0
+                behind = []
+                if src_stub and start[0] > x1 + 1.0:
+                    behind.append((x1, y1 - bm, start[0], y1 + bm))
+                if dst_stub and end[0] < x2 - 1.0:
+                    behind.append((end[0], y2 - bm, x2, y2 + bm))
+                core2 = _route(
+                    start, end, clear2, core_socket is not None, behind
+                )
+                if not core2:
+                    core2 = _route(start, end, clear2, False, behind)
+                if core2:
+                    core = core2
+        direct = False
+        if not core and core_socket is not None:
+            # The stubbed re-route failed (usually because the stub endpoint
+            # ended up boxed in).  Before giving up on the sideways exit, try
+            # once with the *wide* socket corridors as well as the stub ones:
+            # the narrow clear2 boxes the route in at a crowded socket, and we
+            # don't want to fall back to a socket-to-socket route that dives
+            # straight up/down out of the port.
+            wide = clear2 + clear
+            core3 = _route(start, end, wide, core_socket is not None)
+            if not core3:
+                core3 = _route(start, end, wide, False)
+            if core3:
+                core = core3
+            else:
+                core = core_socket
+                direct = True
         if not core:
             # Last resort (everything blocked): an obstacle-unaware Z that
             # still exits each socket horizontally by at least WIRE_MIN_STUB,
             # so even stacked/vertical ports don't get a bare vertical line.
-            return self._stubbed_fallback(x1, y1, x2, y2)
+            self._wire_fell_back = True
+            return self._dehairpin(self._stubbed_fallback(x1, y1, x2, y2))
         path = list(core)
-        if src_stub:
-            path.insert(0, (x1, y1))
-        if dst_stub:
-            path.append((x2, y2))
-        return self._drop_short_straights(
+        if not direct:
+            if src_stub and src_leg is None:
+                path.insert(0, (x1, y1))
+            if dst_stub and dst_leg is None:
+                path.append((x2, y2))
+        cleaned = self._drop_short_straights(
             self._round_short_ends(
                 self._smooth_jogs(
                     self._snap_to_grid(
@@ -2255,6 +2624,15 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             ),
             smooth_obstacles,
         )
+        # Attach the exit legs *after* cleanup: their first (sideways)
+        # segment can be shorter than a grid step, and the cleanup passes
+        # would otherwise merge it away and the wire would hug the port - the
+        # exact failure the stub exists to prevent.
+        if src_leg is not None and not direct:
+            cleaned = src_leg[:-1] + cleaned
+        if dst_leg is not None and not direct:
+            cleaned = cleaned + list(reversed(dst_leg[:-1]))
+        return self._dehairpin(cleaned)
 
     @staticmethod
     def _sample_cubic(p0, p1, p2, p3, steps=12):
@@ -2332,6 +2710,16 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 a[0], a[1], b[0], b[1], obstacles, pad=WIRE_PAD
             )
 
+        def _merge_ok(a, c):
+            # Merging deletes the middle point; the joined segment is allowed
+            # to be a short diagonal, but a long one reads as a "weirdly
+            # angled straight line", so reject that.
+            if not _clear(a, c):
+                return False
+            if abs(a[0] - c[0]) < 1e-6 or abs(a[1] - c[1]) < 1e-6:
+                return True
+            return math.hypot(c[0] - a[0], c[1] - a[1]) < 2.0 * WIRE_GRID_STEP
+
         i = 1
         guard = 0
         while i < len(pts) - 1 and guard < 200:
@@ -2343,28 +2731,75 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 i += 1
                 continue
             c = pts[i + 2] if i + 2 < len(pts) else None
-            if c is not None and _clear(a, c):
+            if c is not None and _merge_ok(a, c):
                 del pts[i + 1]
                 continue
-            if _clear(pts[i - 1], b):
+            if _merge_ok(pts[i - 1], b):
                 del pts[i]
                 i = max(1, i - 1)
                 continue
             i += 1
         return pts
 
-    def _route_still_valid(self, points, edge, x1, y1, x2, y2,
-                           wire_rects, base_panels):
-        """Whether a cached route can be reused: it still starts/ends on the
-        current sockets, is square, and clears the *static* obstacles (nodes
-        and panels).
+    @staticmethod
+    def _dehairpin(path):
+        """Remove points where the polyline doubles back on itself.
 
-        Deliberately does NOT test other wires: if each wire re-routed in
-        response to its neighbours' new keep-out strips, a pair (or trio) of
-        wires can alternate between detours forever.  Wire-vs-wire spacing
-        is applied only when a wire is (re)routed - when adding a new wire it
-        goes around the established ones, but established wires don't chase
-        it - which converges."""
+        A wire can reach a stub tip from the socket side and then run back
+        out along the appended exit leg; that over-and-back reads as a
+        self-crossing loop once `draw_square_path` rounds the corners.
+        Collinear reversals are pure retraces (dropped outright).  A short
+        non-collinear reversal (a smoothed curve bending past the tip) is
+        replaced by an orthogonal elbow at the corner, so the path stays
+        square instead of becoming a weird diagonal.  Long non-collinear
+        reversals are part of the route and left alone."""
+        if len(path) < 3:
+            return path
+        cur = list(path)
+        for _ in range(8):
+            out = [cur[0]]
+            changed = False
+            for p in cur[1:]:
+                if len(out) >= 2:
+                    a, b = out[-2], out[-1]
+                    d1x, d1y = b[0] - a[0], b[1] - a[1]
+                    d2x, d2y = p[0] - b[0], p[1] - b[1]
+                    l1 = math.hypot(d1x, d1y)
+                    l2 = math.hypot(d2x, d2y)
+                    if (d1x * d2x + d1y * d2y < 0.0
+                            and min(l1, l2) > 1e-9):
+                        if abs(d1x * d2y - d1y * d2x) < 1e-6:
+                            out.pop()
+                            changed = True
+                        elif min(l1, l2) < 2.0 * WIRE_GRID_STEP:
+                            out.pop()
+                            # Elbow square with the longer neighbour.
+                            if abs(d2x) >= abs(d2y):
+                                out.append((a[0], p[1]))
+                            else:
+                                out.append((p[0], a[1]))
+                            changed = True
+                out.append(p)
+            cur = out
+            if not changed:
+                break
+        return cur
+
+    def _route_still_valid(self, points, edge, x1, y1, x2, y2,
+                           wire_rects, base_panels, spacing_rects=(),
+                           moved_nodes=None, moved_panels=None):
+        """Whether a cached route can be reused: it still starts/ends on the
+        current sockets, is square, clears the *static* obstacles (nodes and
+        panels), and (``spacing_rects``) is still a sane distance from the
+        other wires.
+
+        Wire-vs-wire spacing used to be applied only when a wire was first
+        routed, so a cached wire could be overlapped by a neighbour that
+        moved afterwards and never be pushed off it.  Checking the cached
+        path against the other wires' keep-out strips catches that.  The
+        caller throttles how often this can fire per edge (a pair that keeps
+        ending up close must not re-route every frame), and the strips are
+        thin enough that a merely-parallel neighbour doesn't jitter."""
         if not points or len(points) < 2:
             return False
         if (abs(points[0][0] - x1) > 0.5 or abs(points[0][1] - y1) > 0.5
@@ -2372,25 +2807,105 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 or abs(points[-1][1] - y2) > 0.5):
             return False
         skip = {edge["from_node"], edge["to_node"]}
+        # Inflate by a hair *less* than the routing pad: a route that runs
+        # exactly along the pad boundary (which the router legitimately
+        # produces) must not be treated as a violation, or every route
+        # invalidates itself every frame.
+        pad = WIRE_PAD - 3.0
+        if moved_nodes is None:
+            obs_src = [(nid, r) for nid, r in wire_rects.items()
+                       if nid not in skip]
+        else:
+            obs_src = [(nid, r) for nid, r in moved_nodes
+                       if nid not in skip]
         obs = [
-            (r[0] - WIRE_PAD, r[1] - WIRE_PAD, r[2] + WIRE_PAD, r[3] + WIRE_PAD)
-            for nid, r in wire_rects.items() if nid not in skip
+            (r[0] - pad, r[1] - pad, r[2] + pad, r[3] + pad)
+            for _nid, r in obs_src
         ]
-        for _pid, rect in base_panels:
+        panels = base_panels if moved_panels is None else moved_panels
+        for _pid, rect in panels:
             if self._contains_point(rect, x1, y1) or self._contains_point(
                 rect, x2, y2
             ):
                 continue
             obs.append(
-                (rect[0] - WIRE_PAD, rect[1] - WIRE_PAD,
-                 rect[2] + WIRE_PAD, rect[3] + WIRE_PAD)
+                (rect[0] - pad, rect[1] - pad, rect[2] + pad, rect[3] + pad)
             )
         for (ax, ay), (bx, by) in zip(points, points[1:]):
             # Sigmoid-smoothed jogs are diagonal on purpose, so there is no
             # squareness requirement - only clearance.
             if segment_blocked(ax, ay, bx, by, obs, pad=0.0):
                 return False
+            if spacing_rects and segment_blocked(
+                ax, ay, bx, by, spacing_rects, pad=-1.0
+            ):
+                return False
         return True
+
+    def _wire_spacing_rects(self, eid, fn, tn, routes, only=None):
+        """Keep-out strips for the *other* wires in ``routes`` (a routes dict
+        keyed by edge id), for checking a cached route's clearance.
+        Shared-endpoint wires use the smaller bundle half-width so a fan-out
+        only re-routes a stale cached sibling when they are genuinely close,
+        not merely within full spacing.
+
+        ``only``, when given, restricts the check to those edge ids - used to
+        test a cached route only against wires that actually changed (rather
+        than every wire every frame, which churned and was slow)."""
+        rects = []
+        for oeid, pts in routes.items():
+            if oeid == eid or not pts:
+                continue
+            if only is not None and oeid not in only:
+                continue
+            oe = self.edges.get(oeid)
+            if oe is None:
+                continue
+            shared = oe["from_node"] == fn or oe["to_node"] == tn
+            rects.extend(wire_polyline_rects(
+                pts, half=WIRE_BUNDLE_SPACING if shared else WIRE_SPACING
+            ))
+        return rects
+
+    def _wire_routing_signature(self):
+        """A cheap fingerprint of everything routing reads: revealed node
+        boxes, the edge set, panel content boxes (+ labels), group membership
+        and the reveal/detach/drag state.  Compared each frame so an
+        unchanged graph can skip routing entirely."""
+        nodes = tuple(
+            (nid, round(node["x"], 3), round(node["y"], 3),
+             self.node_width(nid), self.node_height(nid))
+            for nid, node in self.nodes.items()
+            if self._node_revealed(nid)
+        )
+        edges = tuple(
+            (eid, e["from_node"], e["to_node"],
+             e.get("to_port", "in"), e.get("from_port", "out"))
+            for eid, e in self.edges.items()
+        )
+        panels = []
+        for pid, panel in self.panels.items():
+            if not pid:
+                continue
+            rect = self._panel_rect_base(pid)
+            if rect is None:
+                continue
+            panels.append((
+                pid, panel.get("label", ""),
+                round(rect[0], 3), round(rect[1], 3),
+                round(rect[2], 3), round(rect[3], 3),
+            ))
+        groups = tuple(
+            (gid, g.get("label", ""), g.get("color", ""),
+             tuple(sorted(g.get("nodes") or ())))
+            for gid, g in self.groups.items()
+        )
+        return (
+            nodes, edges, tuple(panels), groups,
+            None if self._revealed is None else frozenset(self._revealed),
+            None if self.detaching_edge is None else self.detaching_edge[0],
+            self.dragging_node,
+        )
 
     def _route_all_wires(self):
         """Route every edge once per frame, in edge order.
@@ -2402,6 +2917,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         feed back into the routing (which would make panels creep outward
         every frame).  ``_wire_bounds`` records where each panel's own wires
         go so ``_panel_rect`` can grow to contain them."""
+        sig = self._wire_routing_signature()
+        if sig == self._wire_routing_sig:
+            # Nothing routing reads has changed: keep last frame's routes.
+            return
+        self._wire_routing_sig = sig
         self._wire_routes = {}
         self._wire_bounds = {}
         self._wire_panel_cache = {}
@@ -2415,6 +2935,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             if self._node_revealed(nid)
         }
         base_panels = []
+        panel_titles = {}
         for pid in self.panels:
             if not pid:
                 continue
@@ -2422,8 +2943,46 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             if rect is not None:
                 rx, ry, rw, rh = rect
                 base_panels.append((pid, (rx, ry, rx + rw, ry + rh)))
+                # The floating title row above the box is a *soft* obstacle:
+                # wires prefer to go around it but may cross it when there is
+                # no other route (see _wire_points).
+                header = self._panel_header_rects(pid, rect).get("header")
+                if header is not None:
+                    panel_titles[pid] = header
+        # Only obstacles that moved since the last routed frame need to be
+        # re-checked on a cached route: everything else is unchanged, and the
+        # cached route was already clear of it.  On the first frame every box
+        # is "moved" (nothing recorded yet), so the check is exhaustive.
+        moved_nodes = [
+            (nid, rect) for nid, rect in wire_rects.items()
+            if self._wire_last_boxes.get(nid) != rect
+        ]
+        self._wire_last_boxes = dict(wire_rects)
+        moved_panels = [
+            (pid, rect) for pid, rect in base_panels
+            if self._wire_last_panels.get(pid) != rect
+        ]
+        self._wire_last_panels = dict(base_panels)
         strips = []
+        # Same paths laid down with the smaller bundle half-width, for wires
+        # that share an endpoint (see the extra= filter below).
+        bundle_strips = []
         cache = {}
+        prev_routes = self._route_cache
+        prev_fallback = self._route_fallback
+        self._route_fallback = set()
+        # Wires that changed last frame; spacing is only re-checked against
+        # those (None on the first frame = check against all).
+        changed_before = self._route_changed
+        changed_now = set()
+        now = time.monotonic()
+        for eid in list(self._route_spacing_evicted):
+            if eid not in self.edges:
+                del self._route_spacing_evicted[eid]
+        # Only let wire-spacing invalidate a cached route once every this
+        # long, per edge, so two wires that keep drifting within spacing of
+        # each other settle instead of re-routing every frame.
+        evict_cooldown = 0.5
         for eid, edge in self.edges.items():
             if self.detaching_edge and self.detaching_edge[0] == eid:
                 continue
@@ -2436,29 +2995,84 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 continue
             out_x, out_y, in_x, in_y = self._edge_endpoints(edge)
             # Wires that don't lead to the same place (share neither
-            # endpoint) keep clear of each other; wires that do (same source
-            # or same destination) are allowed to overlap/bundle, so they
-            # don't push each other apart.  This also lets two wires off one
-            # socket share space instead of blocking each other.
+            # endpoint) keep clear of each other at full spacing; wires that
+            # do (same source or same destination) are allowed to *bundle*,
+            # but still get a smaller keep-out so a fan-out reads as a close
+            # pair rather than one thick line sitting exactly on top of
+            # itself.
             fn, tn = edge["from_node"], edge["to_node"]
             extra = [r for f, t, r in strips if f != fn and t != tn]
+            extra += [r for f, t, r in bundle_strips if f == fn or t == tn]
             points = self._route_cache.get(eid)
-            if points is not None and self._route_still_valid(
-                points, edge, out_x, out_y, in_x, in_y,
-                wire_rects, base_panels,
-            ):
-                reuse = True
+            old_points = points
+            if points is not None and eid in prev_fallback:
+                # Last frame this edge had no route at all (the fallback Z):
+                # don't re-validate it against the obstacles it was allowed
+                # to cross.  On a small drag, translate the fallback instead
+                # of spending several full A* searches that will just fail
+                # again; only a large jump re-tries the router.
+                dx0 = out_x - points[0][0]
+                dy0 = out_y - points[0][1]
+                dx1 = in_x - points[-1][0]
+                dy1 = in_y - points[-1][1]
+                if max(abs(dx0), abs(dy0), abs(dx1), abs(dy1)) <= WIRE_CELL:
+                    mx = (dx0 + dx1) / 2.0
+                    my = (dy0 + dy1) / 2.0
+                    shifted = [(p[0] + mx, p[1] + my) for p in points]
+                    # Pin the true sockets and re-square the adjacent
+                    # segments: setting the shifted first/last point straight
+                    # to the new socket leaves the exit segment diagonal when
+                    # the two ends moved by different amounts (the "angled
+                    # line" seen while dragging a fallback wire).
+                    shifted[0] = (out_x, out_y)
+                    shifted[-1] = (in_x, in_y)
+                    if len(shifted) >= 2:
+                        if abs(points[0][1] - points[1][1]) < 1e-6:
+                            shifted[1] = (shifted[1][0], out_y)
+                        else:
+                            shifted[1] = (out_x, shifted[1][1])
+                        if abs(points[-1][1] - points[-2][1]) < 1e-6:
+                            shifted[-2] = (shifted[-2][0], in_y)
+                        else:
+                            shifted[-2] = (in_x, shifted[-2][1])
+                    points = self._dehairpin(shifted)
+                    valid = True
+                    self._route_fallback.add(eid)
+                else:
+                    valid = False
+            elif points is not None:
+                spacing = ()
+                last = self._route_spacing_evicted.get(eid, 0.0)
+                if now - last >= evict_cooldown:
+                    spacing = self._wire_spacing_rects(
+                        eid, fn, tn, prev_routes, only=changed_before
+                    )
+                valid = self._route_still_valid(
+                    points, edge, out_x, out_y, in_x, in_y,
+                    wire_rects, base_panels, spacing_rects=spacing,
+                    moved_nodes=moved_nodes, moved_panels=moved_panels,
+                )
+                if not valid and spacing:
+                    self._route_spacing_evicted[eid] = now
             else:
+                valid = False
+            if not valid:
+                self._wire_fell_back = False
                 points = self._wire_points(
                     edge, out_x, out_y, in_x, in_y, wire_rects, base_panels,
-                    extra_obstacles=extra,
+                    extra_obstacles=extra, panel_titles=panel_titles,
                 )
-                reuse = False
+                if self._wire_fell_back:
+                    self._route_fallback.add(eid)
+                if points != old_points:
+                    changed_now.add(eid)
             cache[eid] = points
             self._wire_routes[eid] = points
             path_pts = points or [(out_x, out_y), (in_x, in_y)]
             for r in wire_polyline_rects(path_pts):
                 strips.append((fn, tn, r))
+            for r in wire_polyline_rects(path_pts, half=WIRE_BUNDLE_SPACING):
+                bundle_strips.append((fn, tn, r))
             owner = self._panel_lca(
                 self._panel_of_node(edge["from_node"]),
                 self._panel_of_node(edge["to_node"]),
@@ -2477,8 +3091,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     max(box[2], new[2]), max(box[3], new[3]),
                 )
         self._route_cache = cache
+        self._route_changed = changed_now
 
-    def _hit_nodes(self, x=None, y=None):
+    def _hit_nodes(self, x=None, y=None, require_ready=True):
         """Nodes in hit-test order: top-most (last drawn) first.
 
         Nodes are painted in insertion order (see on_draw), so the most
@@ -2491,10 +3106,17 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         within its rectangle, so the click can't fall through to a
         slider/body of a node drawn underneath.  Callers that hit-test
         things outside any body (sockets, the canvas itself) still get
-        every node, top-first."""
+        every node, top-first.
+
+        ``require_ready=False`` lifts the not-yet-ready filter.  That
+        filter belongs on live-signal controls (a volume slider or gate
+        toggle on a node that isn't up yet is meaningless), but NOT on
+        configuration actions (the inline field, the three-dot/Settings
+        menu): those are how a node that got stuck not-ready is fixed, so
+        gating them out traps the user."""
         if x is not None and y is not None:
             for nid, node in reversed(self.nodes.items()):
-                if not node.get("ready", True):
+                if require_ready and not node.get("ready", True):
                     # Still loading: drawn translucent and not a hit target.
                     continue
                 if node["x"] <= x <= node["x"] + self.node_width(nid) and node[
@@ -2503,7 +3125,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     return iter(((nid, node),))
         return iter(
             (nid, node) for nid, node in reversed(self.nodes.items())
-            if node.get("ready", True)
+            if (not require_ready) or node.get("ready", True)
         )
 
     # ---------- panel hit tests ----------
@@ -2538,6 +3160,30 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             if px <= x <= px + pw and py <= y <= py + ph:
                 return pid
         return None
+
+    def _panel_drop_target(self, cx, cy):
+        """Which panel a node dropped with its centre at (cx, cy) belongs
+        to, or "" for the root canvas.
+
+        Membership is decided from each panel's *drag-start* box
+        (``_panel_drag_baseline``), not the box as it grows toward the
+        dragged node during the drag.  The grown box would otherwise follow
+        the node out and swallow the drop, making it hard to drag a node
+        out - and, worse, a source panel that grew under the pointer could
+        shadow the panel the user actually dropped onto, so the node never
+        nested there."""
+        for pid in self._panel_order_top_first():
+            if pid == "":
+                continue
+            rect = self._panel_drag_baseline.get(pid)
+            if rect is None:
+                rect = self._panel_rect_base(pid)
+            if rect is None:
+                continue
+            px, py, pw, ph = rect
+            if px <= cx <= px + pw and py <= cy <= py + ph:
+                return pid
+        return ""
 
     def find_panel_reset_at(self, x, y):
         for pid in self._panel_order_top_first():
@@ -2624,8 +3270,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 return pid
         return None
 
-    def find_node_at(self, x, y):
-        for nid, node in self._hit_nodes(x, y):
+    def find_node_at(self, x, y, require_ready=True):
+        for nid, node in self._hit_nodes(x, y, require_ready=require_ready):
             if node["x"] <= x <= node["x"] + self.node_width(nid) and node["y"] <= y <= node[
                 "y"
             ] + self.node_height(nid):
@@ -2778,7 +3424,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         the node whose Settings dialog should open when it's clicked.
         Only nodes with spec.settings (extra controls beyond the generic
         ID/label rows) and not panel ports draw one."""
-        for nid, node in self._hit_nodes(x, y):
+        # Config action: reachable even while the node isn't ready (Settings
+        # is how an unset required field gets fixed).
+        for nid, node in self._hit_nodes(x, y, require_ready=False):
             if node.get("type") in self._PORT_IN_TYPES | self._PORT_OUT_TYPES:
                 continue
             if not spec_for(node["type"]).settings:
@@ -2967,7 +3615,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         return None
 
     def find_three_dots_at(self, x, y):
-        for nid, node in self._hit_nodes(x, y):
+        # Config action: the menu (and its Settings entry) must stay
+        # reachable on a node that isn't ready, or the user is locked out
+        # of the only way to fix it.
+        for nid, node in self._hit_nodes(x, y, require_ready=False):
             if node.get("type") in self._PORT_IN_TYPES | self._PORT_OUT_TYPES:
                 continue
             dot_x = node["x"] + self.node_width(nid) - 14
@@ -2977,7 +3628,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         return None
 
     def find_field_at(self, x, y):
-        for nid, node in self._hit_nodes(x, y):
+        # Config action: reachable even while the node isn't ready, so an
+        # unset field (the very thing keeping it not ready) can be edited.
+        for nid, node in self._hit_nodes(x, y, require_ready=False):
             if not spec_for(node["type"]).field:
                 continue
             node_h = self.node_height(nid)
@@ -3047,6 +3700,17 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     # ---------- drawing ----------
 
+    def _rect_visible(self, x1, y1, x2, y2):
+        """Whether a world-space AABB intersects the current viewport (plus
+        a margin so panels/shadows/headers just offscreen still draw).  Used
+        to skip drawing work for offscreen items."""
+        vr = getattr(self, "_view_rect", None)
+        if vr is None:
+            return True
+        m = self._CULL_MARGIN
+        return not (x2 < vr[0] - m or x1 > vr[2] + m
+                    or y2 < vr[1] - m or y1 > vr[3] + m)
+
     def on_draw(self, area, cr, w, h):
         # Frame the graph once, the first time there are nodes and a real
         # allocation, so startup opens on the session rather than empty
@@ -3083,6 +3747,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
         cr.save()
         self.apply_view_transform(cr)
+        # Visible world rect for cheap AABB culling of the draw loops below
+        # (the model can be much larger than the viewport).
+        _v1x, _v1y = self.to_world(0.0, 0.0)
+        _v2x, _v2y = self.to_world(float(w), float(h))
+        self._view_rect = (
+            min(_v1x, _v2x), min(_v1y, _v2y),
+            max(_v1x, _v2x), max(_v1y, _v2y),
+        )
 
         draw_grid_background(cr, pal, self.pan_x, self.pan_y, self.zoom, w, h)
 
@@ -3097,7 +3769,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         cr.set_line_width(2)
         # Routes were computed in _route_all_wires() before panels were
         # drawn (so their boxes could grow around them).
+        _wire_now = time.monotonic()
         for eid, edge in self.edges.items():
+            if eid in self._edge_ghosts:
+                # Already removed locally; the retract animation draws it.
+                continue
             if self.detaching_edge and self.detaching_edge[0] == eid:
                 continue
             if edge["from_node"] not in self.nodes or edge["to_node"] not in self.nodes:
@@ -3108,6 +3784,17 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             ):
                 continue
             out_x, out_y, in_x, in_y = self._edge_endpoints(edge)
+            points = self._wire_routes.get(eid)
+            if points:
+                _xs = [p[0] for p in points]
+                _ys = [p[1] for p in points]
+                if not self._rect_visible(min(_xs), min(_ys), max(_xs), max(_ys)):
+                    continue
+            elif not self._rect_visible(
+                min(out_x, in_x), min(out_y, in_y),
+                max(out_x, in_x), max(out_y, in_y),
+            ):
+                continue
             src_node = self.nodes[edge["from_node"]]
             is_bool = (
                 port_kind(
@@ -3115,23 +3802,55 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 )
                 == "boolean"
             )
-            cr.set_source_rgb(
-                *(pal["boolean_port"] if is_bool else pal["link"])
-            )
-            points = self._wire_routes.get(eid)
+            color = pal["boolean_port"] if is_bool else pal["link"]
             if points:
-                draw_square_path(cr, points)
+                wire_pts = points
             else:
                 # Skipped by _route_all_wires (detaching/unrevealed): a
                 # stubbed Z keeps the no-bezier invariant and still exits
                 # each socket sideways.
-                draw_square_path(
-                    cr,
-                    self._stubbed_fallback(out_x, out_y, in_x, in_y),
+                wire_pts = self._stubbed_fallback(out_x, out_y, in_x, in_y)
+            # A connection the user just made draws itself in from source to
+            # target, with a fading leading tip (see _draw_growing_wire).
+            born = self._edge_born.get(eid)
+            if born is not None:
+                dur = EDGE_DRAW_MS / 1000.0
+                t = (_wire_now - born) / dur if dur > 0 else 1.0
+                if t < 1.0:
+                    self._draw_growing_wire(
+                        cr, wire_pts, color, self._ease_in_out(t)
+                    )
+                    continue
+            cr.set_source_rgb(*color)
+            draw_square_path(cr, wire_pts)
+
+        # Removed connections retract (the draw-in run in reverse: the
+        # visible tip walks back from the target to the source).
+        if self._edge_ghosts:
+            dur = EDGE_DRAW_MS / 1000.0
+            for g in self._edge_ghosts.values():
+                t = (_wire_now - g["t0"]) / dur if dur > 0 else 1.0
+                if t >= 1.0:
+                    continue
+                pts = g["points"]
+                _xs = [p[0] for p in pts]
+                _ys = [p[1] for p in pts]
+                if not self._rect_visible(min(_xs), min(_ys), max(_xs), max(_ys)):
+                    continue
+                self._draw_growing_wire(
+                    cr, pts,
+                    pal["boolean_port"] if g["is_bool"] else pal["link"],
+                    self._ease_in_out(1.0 - t),
                 )
 
         for nid, node in self.nodes.items():
             if not self._node_revealed(nid):
+                continue
+            if not self._rect_visible(
+                node["x"], node["y"],
+                node["x"] + self.node_width(nid),
+                node["y"] + self.node_height(nid),
+            ):
                 continue
             if nid not in self._anim_seen:
                 # First frame this node is visible: start the pop now so it
@@ -3304,6 +4023,37 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             "t0": time.monotonic(),
         })
 
+    def _start_edge_ghost(self, eid, edge):
+        """Snapshot a removed connection's last drawn path so it can retract
+        (draw in reverse) instead of blinking out of existence.  Called both
+        optimistically when the user removes an edge and from the poll that
+        drops it; de-duplicated so only one animation runs."""
+        if eid in self._edge_ghosted:
+            return
+        points = self._wire_routes.get(eid) or self._route_cache.get(eid)
+        if not points:
+            return
+        src = self.nodes.get(edge.get("from_node"))
+        is_bool = (
+            src is not None
+            and port_kind(
+                src["type"], edge.get("from_port", "out"), "out"
+            ) == "boolean"
+        )
+        self._edge_ghosted.add(eid)
+        self._edge_ghosts[eid] = {
+            "points": list(points),
+            "is_bool": is_bool,
+            "t0": time.monotonic(),
+        }
+
+    def _retire_edge(self, eid):
+        """Start the retract animation for an edge the GUI is removing, so
+        it begins on the user's action instead of waiting for the poll."""
+        edge = self.edges.get(eid)
+        if edge is not None:
+            self._start_edge_ghost(eid, edge)
+
     def _node_scale(self, nid):
         born = self._node_born.get(nid)
         if born is None:
@@ -3365,9 +4115,129 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             ]
             self._ghosted = {g["id"] for g in self._ghosts}
             active = True
+        # Draw-in animation for freshly-made connections.  Promote a pending
+        # edge once the daemon has echoed it (its id exists locally), then
+        # keep repainting until every one has finished.
+        if self._pending_edge_draw:
+            for eid, t0 in list(self._pending_edge_draw.items()):
+                if eid in self.edges:
+                    del self._pending_edge_draw[eid]
+                    self._edge_born[eid] = now
+                elif now - t0 > 3.0:
+                    # The add never showed up (rejected/removed): stop
+                    # waiting so this can't grow without bound.
+                    del self._pending_edge_draw[eid]
+        if self._edge_born:
+            dur = EDGE_DRAW_MS / 1000.0
+            for eid, born in list(self._edge_born.items()):
+                if dur <= 0 or now - born >= dur:
+                    del self._edge_born[eid]
+                else:
+                    active = True
+        # Retracting (removed) connections.
+        if self._edge_ghosts:
+            dur = EDGE_DRAW_MS / 1000.0
+            for eid, g in list(self._edge_ghosts.items()):
+                if dur <= 0 or now - g["t0"] >= dur:
+                    del self._edge_ghosts[eid]
+                else:
+                    active = True
+            self._edge_ghosted = set(self._edge_ghosts)
         if active:
             self.queue_draw()
         return True
+
+    @staticmethod
+    def _grow_split(points, target, fade):
+        """Split a polyline by arc length into an opaque ``base`` (up to
+        ``target - fade``) and a ``tail`` (from there to ``target``), both
+        closed on the exact split points so the two pieces join seamlessly.
+
+        ``target``/``fade`` are clamped to the polyline; a zero-length tail
+        comes back as a single point."""
+        total = sum(
+            math.hypot(bx - ax, by - ay)
+            for (ax, ay), (bx, by) in zip(points, points[1:])
+        )
+        target = max(0.0, min(target, total))
+        near = max(0.0, target - fade)
+
+        def _lerp(a, b, t):
+            return (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
+
+        base = [points[0]]
+        tail = []
+        acc = 0.0
+        for a, b in zip(points, points[1:]):
+            seg = math.hypot(b[0] - a[0], b[1] - a[1])
+            if seg <= 1e-9:
+                continue
+            seg_end = acc + seg
+            if acc < near:
+                end_d = min(near, seg_end)
+                p = _lerp(a, b, (end_d - acc) / seg)
+                if p != base[-1]:
+                    base.append(p)
+            if seg_end > near:
+                start_d = max(near, acc)
+                end_d = min(target, seg_end)
+                if end_d > start_d:
+                    pa = _lerp(a, b, (start_d - acc) / seg)
+                    pb = _lerp(a, b, (end_d - acc) / seg)
+                    if not tail:
+                        tail.append(pa)
+                    tail.append(pb)
+            acc = seg_end
+            if acc >= target:
+                break
+        if not tail:
+            tail = [base[-1]]
+        return base, tail
+
+    def _draw_growing_wire(self, cr, points, color, progress):
+        """Stroke a connection that is drawing itself in from source to
+        target: the wire is revealed up to ``progress`` of its length, and
+        the leading ``WIRE_FADE`` of that run fades to transparent so the
+        tip reads as "still arriving" rather than a hard cut."""
+        if len(points) < 2 or progress <= 0.0:
+            return
+        r, g, b = color
+        total = sum(
+            math.hypot(bx - ax, by - ay)
+            for (ax, ay), (bx, by) in zip(points, points[1:])
+        )
+        if total <= 0.0:
+            return
+        target = max(0.0, min(1.0, progress)) * total
+        base, tail = self._grow_split(points, target, WIRE_FADE)
+
+        if len(base) >= 2:
+            cr.set_source_rgb(r, g, b)
+            draw_square_path(cr, base)
+
+        # Resample the (short) tail so the alpha ramp is a smooth gradient
+        # even across a corner, then stroke each step at its own alpha.
+        samples = [tail[0]]
+        for a, c in zip(tail, tail[1:]):
+            seg = math.hypot(c[0] - a[0], c[1] - a[1])
+            steps = max(1, int(seg / 4.0))
+            for j in range(1, steps + 1):
+                t = j / steps
+                samples.append((
+                    a[0] + (c[0] - a[0]) * t,
+                    a[1] + (c[1] - a[1]) * t,
+                ))
+        if len(samples) >= 2:
+            cr.set_line_cap(cairo.LINE_CAP_ROUND)
+            last = len(samples) - 1
+            for i in range(last):
+                a, c = samples[i], samples[i + 1]
+                alpha = max(0.0, 1.0 - (i + 1) / last)
+                cr.set_source_rgba(r, g, b, alpha)
+                cr.move_to(a[0], a[1])
+                cr.line_to(c[0], c[1])
+                cr.stroke()
+            cr.set_line_cap(cairo.LINE_CAP_BUTT)
 
     def _draw_node(self, cr, pal, nid, node):
         x, y = node["x"], node["y"]
@@ -4341,8 +5211,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         box.append(apply_btn)
 
         popover.set_child(box)
-        self.popup_context_menu(popover, screen_x, screen_y)
-        entry.grab_focus()
+        # Focus is grabbed by popup_context_menu once the popover has
+        # actually mapped - doing it here (before it is shown) leaves the
+        # entry unfocused and hard to click into.
+        self.popup_context_menu(popover, screen_x, screen_y, focus_widget=entry)
 
     def _show_choice_popover(self, screen_x, screen_y, title, choices, on_pick):
         """`choices` is a list of (label, value) tuples. Shared by
@@ -5028,7 +5900,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     def on_drag_begin(self, gesture, start_x, start_y):
         self.grab_focus()
-        self.dismiss_context_popover()
+        # Do NOT cancel a popover that on_click just requested on this same
+        # press (its popup() is deferred to an idle and it isn't visible
+        # yet); drag-begin fires right after the click handler, and
+        # cancelling here made the field editor never open.
+        self.dismiss_context_popover(force=False)
         # A fresh press always starts from a clean slate - a previous
         # interaction that ended via ::cancel (or that never produced a
         # drag-end) must not leak its connection/node/pan state into
@@ -5431,6 +6307,16 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             base += f"@{from_port}"
         return base
 
+    def _note_new_edge(self, from_node, to_node, to_port, from_port):
+        """Arm the draw-in animation for a connection the user just made.
+        Stored as "pending" until the daemon echoes it in a poll (the edge
+        id may not exist locally yet), at which point the ticker stamps its
+        birth - so the animation always starts from the first visible frame
+        rather than from when the command was sent."""
+        self._pending_edge_draw[
+            self._edge_id(from_node, to_node, to_port, from_port)
+        ] = time.monotonic()
+
     def _ports_compatible(self, from_nid, from_port, to_nid, to_port):
         """Whether an edge from (from_nid, from_port) to (to_nid,
         to_port) is legal: both ports must be the same kind (audio with
@@ -5585,10 +6471,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     if (
                         target_nid != old_to_nid or target_port != old_to_port
                     ) and target_nid != from_nid:
+                        self._retire_edge(eid)
                         self.client.send({"command": "remove_edge", "edge_id": eid})
                         if self._ports_compatible(
                             from_nid, source_port, target_nid, target_port
                         ):
+                            self._note_new_edge(
+                                from_nid, target_nid, target_port, source_port
+                            )
                             self.client.send(
                                 {
                                     "command": "add_edge",
@@ -5600,6 +6490,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                             )
                         GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
                 else:
+                    self._retire_edge(eid)
                     self.client.send({"command": "remove_edge", "edge_id": eid})
                     GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
             elif target_nid is not None:
@@ -5608,12 +6499,16 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                         out_nid, target_nid, target_port, source_port
                     )
                     if existing_eid in self.edges:
+                        self._retire_edge(existing_eid)
                         self.client.send(
                             {"command": "remove_edge", "edge_id": existing_eid}
                         )
                     elif self._ports_compatible(
                         out_nid, source_port, target_nid, target_port
                     ):
+                        self._note_new_edge(
+                            out_nid, target_nid, target_port, source_port
+                        )
                         self.client.send(
                             {
                                 "command": "add_edge",
@@ -5659,8 +6554,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             return
         cx = node["x"] + self.node_width(dragged) / 2
         cy = node["y"] + self.node_height(dragged) / 2
-        pid = self.find_panel_at(cx, cy)
-        target = pid if pid is not None else ""
+        target = self._panel_drop_target(cx, cy)
         current = dragged.rsplit("::", 1)[0] if "::" in dragged else ""
         if target == current:
             return
@@ -6311,10 +7205,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         except ValueError:
             return (0.2, 0.5, 0.9)
 
-    def _text_size(self, text, font_size):
+    def _text_size(self, text, font_size, bold=False):
         layout = self.create_pango_layout(text or "")
+        weight = "bold " if bold else ""
         layout.set_font_description(
-            Pango.FontDescription.from_string(f"sans {font_size}")
+            Pango.FontDescription.from_string(f"sans {weight}{font_size}")
         )
         return layout.get_pixel_size()
 
@@ -6907,7 +7802,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         panel = self.panels[pid]
         font = self._panel_title_font()
         label = panel.get("label") or self._panel_local(pid)
-        _tw, th = self._text_size(label, font)
+        _tw, th = self._text_size(label, font, bold=True)
         d = max(18.0, th * 1.6)
         # Sit the title/buttons a little further above the box so the row
         # clears the border and the buttons don't crowd the top edge.
@@ -7134,6 +8029,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             rect = self._panel_rect(pid)
             if rect is None:
                 continue
+            if not self._rect_visible(
+                rect[0], rect[1], rect[0] + rect[2], rect[1] + rect[3]
+            ):
+                continue
             x, y, w, h = rect
             panel = self.panels[pid]
             r, g, b = self._hex_to_rgb(panel.get("color"))
@@ -7213,6 +8112,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             rect = self._panel_rect(pid)
             if rect is None:
                 continue
+            if not self._rect_visible(
+                rect[0], rect[1], rect[0] + rect[2], rect[1] + rect[3]
+            ):
+                continue
             _x, _y, _w, _h = rect
             panel = self.panels[pid]
             geo = self._panel_header_rects(pid, rect)
@@ -7224,7 +8127,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             draw_text_unbounded(
                 cr, tx1, ty1,
                 panel.get("label") or self._panel_local(pid),
-                font, (r, g, b),
+                font, (r, g, b), bold=True,
             )
             # Physics-stop toggle, immediately left of the settings/reset
             # button at the far right.  Same rounded-square outline style
@@ -7359,6 +8262,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             if bounds is None:
                 continue
             x1, y1, x2, y2 = bounds
+            if not self._rect_visible(x1, y1, x2, y2):
+                continue
             r, g, b = self._hex_to_rgb(group.get("color"))
             cr.set_source_rgb(r, g, b)
             cr.set_line_width(1.5)
@@ -7369,6 +8274,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     def _draw_group_headers(self, cr, pal):
         for gid, group in self._merged_groups().items():
+            bounds = self._group_bounds(gid, group)
+            if bounds is not None and not self._rect_visible(*bounds):
+                continue
             info = self._group_header_layout(gid, group)
             if info is None:
                 continue
@@ -7722,11 +8630,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
         eid = self.find_edge_at(wx, wy)
         if eid:
+            self._retire_edge(eid)
             self.client.send({"command": "remove_edge", "edge_id": eid})
             GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
             return
 
-        nid = self.find_node_at(wx, wy)
+        nid = self.find_node_at(wx, wy, require_ready=False)
         if nid:
             self.show_node_menu(nid, x, y)
             return

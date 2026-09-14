@@ -54,3 +54,31 @@ def test_route_keeps_clear_of_a_prior_wire_obstacle():
     for (ax, ay), (bx, by) in zip(path, path[1:]):
         assert not wr._segment_hits_rect(ax, ay, bx, by, *rect)
 
+
+def test_route_expands_margin_on_the_short_axis():
+    # Two nearly-level sockets with tall nodes between them.  The adaptive
+    # grid used to collapse the search margin on the short (y) axis, so the
+    # router gave up and the caller drew a straight line through the nodes.
+    left = (414.0, 40.0, 594.0, 165.0)    # target node
+    right = (729.0, 41.0, 909.0, 166.0)   # source node
+    clear = [(873.0, 50.0, 945.0, 158.0), (378.0, 48.0, 450.0, 156.0)]
+    path = wr.route(909, 104, 414, 102, [right, left], clear_rects=clear)
+    assert path is not None
+    # The socket-adjacent first/last segments touch their own node's border;
+    # every interior segment must clear both nodes.
+    for (ax, ay), (bx, by) in list(zip(path, path[1:]))[1:-1]:
+        assert not wr.segment_blocked(ax, ay, bx, by, [right, left], pad=0)
+
+
+def test_socket_corridor_does_not_unblock_a_neighbouring_node():
+    # Clearing a socket corridor must only punch cells whose centre is
+    # inside it, not a rounded band half a cell beyond - otherwise a wire
+    # cuts the corner of a node sitting just past the corridor.
+    n0 = (265.0, 231.0, 445.0, 356.0)
+    n1 = (479.0, 134.0, 659.0, 259.0)
+    clear = [(485.0, 240.0, 521.0, 348.0), (403.0, 142.0, 439.0, 250.0)]
+    path = wr.route(485, 294, 439, 196, [n0, n1], clear_rects=clear)
+    assert path is not None
+    for (ax, ay), (bx, by) in zip(path, path[1:]):
+        assert not wr.segment_blocked(ax, ay, bx, by, [n1], pad=0)
+

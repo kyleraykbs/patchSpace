@@ -142,9 +142,7 @@ class LogConsole(Gtk.Box):
 
     def _scroll_to_bottom(self):
         if self._active and self._follow:
-            self._view.scroll_to_iter(
-                self._buffer.get_end_iter(), 0.0, True, 0.0, 1.0
-            )
+            self._view.scroll_to_iter(self._buffer.get_end_iter(), 0.0, True, 0.0, 1.0)
         return False
 
     def set_active(self, active: bool) -> None:
@@ -180,13 +178,9 @@ class LogConsole(Gtk.Box):
         for resp in self.client.get_responses():
             self._outstanding = False
             if resp.get("status") == "ok" and "lines" in resp:
-                self.append_lines(
-                    resp.get("lines", []), resp.get("last_seq", 0)
-                )
+                self.append_lines(resp.get("lines", []), resp.get("last_seq", 0))
             elif resp.get("status") == "error":
-                self._append_text(
-                    f"[log console] daemon error: {resp.get('message')}"
-                )
+                self._append_text(f"[log console] daemon error: {resp.get('message')}")
 
     def _append_text(self, text: str) -> None:
         self._buffer.insert(self._buffer.get_end_iter(), text + "\n")
@@ -217,9 +211,7 @@ class LogConsole(Gtk.Box):
         if self._line_count > self.MAX_LINES:
             self._buffer.delete(
                 self._buffer.get_start_iter(),
-                self._buffer.get_iter_at_line(
-                    self._line_count - self.MAX_LINES
-                ),
+                self._buffer.get_iter_at_line(self._line_count - self.MAX_LINES),
             )
             self._line_count = self.MAX_LINES
 
@@ -228,7 +220,6 @@ class LogConsole(Gtk.Box):
             GLib.source_remove(self._poll_id)
             self._poll_id = 0
         self.client.stop()
-
 
 
 class MainWindow(Gtk.ApplicationWindow):
@@ -660,7 +651,8 @@ class MainWindow(Gtk.ApplicationWindow):
             if self._physics_toggle.get_active() != active:
                 self._physics_toggle.set_active(active)
             self._physics_toggle.set_icon_name(
-                "media-playback-pause-symbolic" if active
+                "media-playback-pause-symbolic"
+                if active
                 else "media-playback-start-symbolic"
             )
         finally:
@@ -757,10 +749,8 @@ class MainWindow(Gtk.ApplicationWindow):
                 "Nodes defined by this panel file",
             ),
             (
-                f"{len(children)} "
-                f"{'panel' if len(children) == 1 else 'panels'}",
-                "Sub-panels: " + ", ".join(children) if children
-                else "No sub-panels",
+                f"{len(children)} " f"{'panel' if len(children) == 1 else 'panels'}",
+                "Sub-panels: " + ", ".join(children) if children else "No sub-panels",
             ),
         ):
             lab = Gtk.Label(label=line)
@@ -776,8 +766,7 @@ class MainWindow(Gtk.ApplicationWindow):
         auto.set_active(bool(entry.get("auto_load")))
         auto.set_sensitive(writable)
         auto.set_tooltip_text(
-            "Load this panel at startup" if writable
-            else "This panel file is read-only"
+            "Load this panel at startup" if writable else "This panel file is read-only"
         )
         auto.connect(
             "toggled",
@@ -808,7 +797,8 @@ class MainWindow(Gtk.ApplicationWindow):
         delete.set_valign(Gtk.Align.START)
         delete.set_sensitive(writable)
         delete.set_tooltip_text(
-            "Delete this panel file and all its placements" if writable
+            "Delete this panel file and all its placements"
+            if writable
             else "This panel file is read-only"
         )
         delete.connect(
@@ -854,9 +844,7 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         if index != 1:
             return
-        self.client.send(
-            {"command": "delete_panel_file", "stem": entry.get("stem")}
-        )
+        self.client.send({"command": "delete_panel_file", "stem": entry.get("stem")})
         # The listing is refreshed when the daemon's reply lands (see
         # process_responses) - and by the periodic side-view poll - so the
         # row disappears even if this reply is delayed.
@@ -873,7 +861,7 @@ class MainWindow(Gtk.ApplicationWindow):
         box.set_margin_bottom(10)
         box.set_can_target(False)
         for button, text in (
-            ("left", "Pick / pan"),
+            ("left", "Pick / Move / Pan"),
             ("middle", "Pan"),
             ("right", "Select"),
         ):
@@ -891,9 +879,7 @@ class MainWindow(Gtk.ApplicationWindow):
         area.set_content_width(18)
         area.set_content_height(26)
         area.set_valign(Gtk.Align.CENTER)
-        area.set_draw_func(
-            lambda _a, cr, w, h: self._draw_mouse_icon(cr, w, h, button)
-        )
+        area.set_draw_func(lambda _a, cr, w, h: self._draw_mouse_icon(cr, w, h, button))
         return area
 
     @staticmethod
@@ -1033,7 +1019,9 @@ class MainWindow(Gtk.ApplicationWindow):
 
         r, g, b = theme_palette(self).get("bg", (0.1, 0.1, 0.1))
         bg_hex = "#%02x%02x%02x" % (
-            int(round(r * 255)), int(round(g * 255)), int(round(b * 255))
+            int(round(r * 255)),
+            int(round(g * 255)),
+            int(round(b * 255)),
         )
         # Side-panel "alt" background: the GTK headerbar/sidebar colour (the
         # brighter one Firefox uses for its titlebar/active tab), falling
@@ -1177,9 +1165,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._console_button = Gtk.ToggleButton()
         self._console_button.set_tooltip_text("Show/hide the daemon log console")
         console_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        console_box.append(
-            Gtk.Image.new_from_icon_name("utilities-terminal-symbolic")
-        )
+        console_box.append(Gtk.Image.new_from_icon_name("utilities-terminal-symbolic"))
         console_box.append(Gtk.Label(label="Logs"))
         self._console_button.set_child(console_box)
         self._console_button.connect("toggled", self._on_console_toggled)
@@ -1192,9 +1178,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._recenter_button = Gtk.Button()
         self._recenter_button.set_tooltip_text("Recenter and fit all nodes")
         recenter_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        recenter_box.append(
-            Gtk.Image.new_from_icon_name("zoom-fit-best-symbolic")
-        )
+        recenter_box.append(Gtk.Image.new_from_icon_name("zoom-fit-best-symbolic"))
         recenter_box.append(Gtk.Label(label="Recenter"))
         self._recenter_button.set_child(recenter_box)
         self._recenter_button.connect(
@@ -1302,9 +1286,7 @@ class MainWindow(Gtk.ApplicationWindow):
                     self._update_panels_view(resp)
                 elif "payload" in resp and "panel_id" in resp:
                     self.ps_widget.on_panel_export(resp)
-                elif "stem" in resp and (
-                    "removed" in resp or "auto_load" in resp
-                ):
+                elif "stem" in resp and ("removed" in resp or "auto_load" in resp):
                     # A panel-*file* action completed (delete, auto-load):
                     # re-read the listing so the side view updates now
                     # rather than at the next periodic refresh.

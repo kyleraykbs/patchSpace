@@ -11,7 +11,7 @@ from __future__ import annotations
 import math
 import zlib
 
-from gi.repository import Pango, PangoCairo
+from gi.repository import Gtk, Pango, PangoCairo
 
 _FALLBACK_BG = (0.137, 0.137, 0.145)
 _FALLBACK_NODE_BG = (0.196, 0.196, 0.208)
@@ -26,6 +26,12 @@ _FALLBACK_SELECT = (0.98, 0.76, 0.24)
 _FALLBACK_PENDING_LINK = (0.98, 0.76, 0.24)
 _FALLBACK_WARNING = (0.94, 0.65, 0.22)
 _FALLBACK_ERROR = (0.88, 0.20, 0.20)
+
+# Grid safety caps (see draw_grid_background): below this on-screen line
+# spacing the grid is a flat wash, and this absolute ceiling guards against
+# a pathological zoom making the line loops run away.
+_MIN_GRID_SCREEN_SPACING = 6.0
+_MAX_GRID_LINES = 2000
 _FALLBACK_SUCCESS = (0.30, 0.72, 0.42)
 
 _THEME_COLOR_NAMES = [
@@ -37,11 +43,36 @@ _THEME_COLOR_NAMES = [
 ]
 
 
+def _theme_key():
+    """A cheap key that changes when the theme / colour scheme changes, so
+    named-colour lookups can be cached across frames (they were re-queried
+    from GTK dozens of times per frame)."""
+    try:
+        settings = Gtk.Settings.get_default()
+        return (
+            settings.get_property("gtk-theme-name"),
+            settings.get_property("gtk-application-prefer-dark-theme"),
+        )
+    except Exception:
+        return None
+
+
+_COLOR_CACHE = {}
+
+
 def _lookup(widget, name, fallback):
+    key = _theme_key()
+    cache_key = (name, key)
+    if key is not None and cache_key in _COLOR_CACHE:
+        cached = _COLOR_CACHE[cache_key]
+        return cached if cached is not None else fallback
     ctx = widget.get_style_context()
     ok, rgba = ctx.lookup_color(name)
     if ok:
-        return (rgba.red, rgba.green, rgba.blue)
+        value = (rgba.red, rgba.green, rgba.blue)
+        if key is not None:
+            _COLOR_CACHE[cache_key] = value
+        return value
     return fallback
 
 
@@ -121,17 +152,23 @@ def draw_text_ellipsized(cr, x, y, text, max_width, font_size, color):
     PangoCairo.show_layout(cr, layout)
 
 
-def draw_text_unbounded(cr, x, y, text, font_size, color):
+def draw_text_unbounded(cr, x, y, text, font_size, color, bold=False):
     """Draw one line of text with no width/ellipsis constraint.
 
     Used for a group's title: it sits above its box and the box never
     constrains it, so it must always read in full.  The ellipsized
     variant measured the text in unscaled world units but let
     PangoCairo apply the view's zoom to the font, so as soon as you
-    zoomed in the fixed width clipped the title to an ellipsis."""
+    zoomed in the fixed width clipped the title to an ellipsis.
+
+    ``bold`` is used for panel titles, which read as headings over their
+    box rather than annotations beside it."""
     layout = PangoCairo.create_layout(cr)
     layout.set_text(text or "", -1)
-    layout.set_font_description(Pango.FontDescription.from_string(f"sans {font_size}"))
+    weight = "bold " if bold else ""
+    layout.set_font_description(
+        Pango.FontDescription.from_string(f"sans {weight}{font_size}")
+    )
     PangoCairo.update_layout(cr, layout)
     cr.set_source_rgb(*color)
     cr.move_to(x, y)
@@ -269,7 +306,11 @@ def draw_grid_background(cr, pal, pan_x, pan_y, zoom, width, height, spacing=40)
     draws the grid lines that fall inside it, rather than drawing a
     fixed-size grid that would either not cover the view or draw
     thousands of pointless offscreen lines.
-    """
+
+    Zoomed far out the visible world rect is enormous, so the line count
+    explodes (a near-freeze at ZOOM_MIN).  Skip the grid once the lines
+    would be closer than MIN_GRID_SCREEN_SPACING on screen - at that point
+    it is a flat wash anyway."""
     if zoom <= 0 or width <= 0 or height <= 0:
         return
 
@@ -277,6 +318,16 @@ def draw_grid_background(cr, pal, pan_x, pan_y, zoom, width, height, spacing=40)
     top = -pan_y / zoom
     right = left + width / zoom
     bottom = top + height / zoom
+
+    # Cap the line count two ways: screen spacing (density) and an absolute
+    # ceiling, so a pathological zoom can never make this loop run away.
+    line_px = spacing * zoom
+    if line_px < _MIN_GRID_SCREEN_SPACING:
+        return
+    cols = (right - left) / spacing
+    rows = (bottom - top) / spacing
+    if cols > _MAX_GRID_LINES or rows > _MAX_GRID_LINES:
+        return
 
     r, g, b = pal.get("node_border", _FALLBACK_NODE_BORDER)
     cr.set_source_rgba(r, g, b, 0.15)

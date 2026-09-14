@@ -26,10 +26,19 @@ MARGIN = 320.0
 # Extra A* cost for changing direction, so paths come out as straight as
 # possible (few long runs) instead of a many-cornered staircase.
 TURN_COST = 1.2
+# Mild extra A* cost for a step that moves *away* from the goal, so a detour
+# that has to go around something prefers passing beside it over diving well
+# past the target row and hooking back.
+BACKTRACK_COST = 0.6
 # Half-thickness of the keep-out strips laid around already-routed wires so
 # a new wire keeps visible clearance from them.  The router also inflates
 # obstacles by PAD, so parallel wires end up about SPACING + PAD apart.
 SPACING = 20.0
+# Two wires that share an endpoint are allowed to *bundle* rather than keep
+# the full SPACING - but still get this smaller keep-out instead of none, so
+# a fan-out/fan-in reads as a close pair of wires rather than one thick line.
+# (The router's own PAD inflation still separates them by ~PAD + this.)
+BUNDLE_SPACING = 4.0
 # How far a wire runs straight out of a socket before it may turn (the
 # little horizontal stub that makes a connection read as plugged in), and
 # the absolute minimum that stub may be shortened to.  Kept comfortably
@@ -182,8 +191,18 @@ def route(
     else:
         ny = 0
         celly = cell
-    mx = int(math.ceil(margin / cell))
-    my = int(math.ceil(margin / cell))
+    # Clamp the adaptive pitch.  Without this, two nearly-level sockets
+    # (span_y ~ 0) gave celly ~ 0 and the margin below - computed as
+    # ceil(margin / celly) * celly - collapsed from MARGIN world units to a
+    # handful of pixels, so the A* grid was too small to route around a node
+    # and `route` returned None.  The caller's last-resort fallback then drew
+    # a straight line straight through the node.  A half-cell floor keeps the
+    # search area at least MARGIN on both axes while still tracking the
+    # endpoints closely enough (the exact endpoints are appended regardless).
+    cellx = min(max(cellx, cell * 0.5), cell * 2.0)
+    celly = min(max(celly, cell * 0.5), cell * 2.0)
+    mx = int(math.ceil(margin / cellx))
+    my = int(math.ceil(margin / celly))
     minx = min(sx, ex) - mx * cellx
     miny = min(sy, ey) - my * celly
     cols = nx + 2 * mx + 1
@@ -197,6 +216,8 @@ def route(
             min(rows - 1, max(0, int(round((y - miny) / celly)))),
         )
 
+    # Blocked cells are flat ints (i * rows + j): cheaper to hash and test
+    # than tuples in the A* inner loop.
     blocked = set()
     for ox1, oy1, ox2, oy2 in obstacles:
         ox1 -= pad
@@ -206,19 +227,33 @@ def route(
         i1, j1 = cell_of(ox1, oy1)
         i2, j2 = cell_of(ox2, oy2)
         for i in range(i1, i2 + 1):
+            xx = minx + i * cellx
+            if not (ox1 <= xx <= ox2):
+                continue
+            base = i * rows
             for j in range(j1, j2 + 1):
-                if (ox1 <= minx + i * cellx <= ox2
-                        and oy1 <= miny + j * celly <= oy2):
-                    blocked.add((i, j))
+                yy = miny + j * celly
+                if oy1 <= yy <= oy2:
+                    blocked.add(base + j)
 
     # Punch the socket corridors back out of the blocked grid so a wire can
-    # leave/enter a node that is itself listed as an obstacle.
+    # leave/enter a node that is itself listed as an obstacle.  Like the
+    # obstacle loops, only discard a cell whose centre is actually inside the
+    # corridor: rounding the corners to grid indices would otherwise clear a
+    # band up to half a pitch outside it, letting a wire nick a node sitting
+    # just beyond the corridor.
     for cx1, cy1, cx2, cy2 in clear_rects:
         i1, j1 = cell_of(cx1, cy1)
         i2, j2 = cell_of(cx2, cy2)
         for i in range(i1, i2 + 1):
+            xx = minx + i * cellx
+            if not (cx1 <= xx <= cx2):
+                continue
+            base = i * rows
             for j in range(j1, j2 + 1):
-                blocked.discard((i, j))
+                yy = miny + j * celly
+                if cy1 <= yy <= cy2:
+                    blocked.discard(base + j)
 
     # Re-block anything that must survive the holes above (other wires).
     for ox1, oy1, ox2, oy2 in keep_blocked:
@@ -229,57 +264,71 @@ def route(
         i1, j1 = cell_of(ox1, oy1)
         i2, j2 = cell_of(ox2, oy2)
         for i in range(i1, i2 + 1):
+            xx = minx + i * cellx
+            if not (ox1 <= xx <= ox2):
+                continue
+            base = i * rows
             for j in range(j1, j2 + 1):
-                if (ox1 <= minx + i * cellx <= ox2
-                        and oy1 <= miny + j * celly <= oy2):
-                    blocked.add((i, j))
+                yy = miny + j * celly
+                if oy1 <= yy <= oy2:
+                    blocked.add(base + j)
 
-    start = cell_of(sx, sy)
-    goal = cell_of(ex, ey)
-    blocked.discard(start)
-    blocked.discard(goal)
-    if start == goal:
+    si, sj = cell_of(sx, sy)
+    gi, gj = cell_of(ex, ey)
+    blocked.discard(si * rows + sj)
+    blocked.discard(gi * rows + gj)
+    if (si, sj) == (gi, gj):
         return [(sx, sy), (ex, ey)]
 
-    def heuristic(i: int, j: int) -> float:
-        return abs(i - goal[0]) + abs(j - goal[1])
-
-    # A* over (cell, incoming direction) so turns can be penalised.
-    best = {(start[0], start[1], -1): 0.0}
-    came = {}
-    heap = [(heuristic(*start), 0.0, start[0], start[1], -1)]
+    # A* over (cell, incoming direction) so turns can be penalised.  State
+    # indices are flat ints and direction -1 (the source cell) maps to 0, so
+    # a state is (cell * 5 + direction + 1).  `best`/`came` are plain lists,
+    # and the heuristic is inlined - this loop is the routing hot spot.
+    INF = math.inf
+    best = [INF] * (cols * rows * 5)
+    came = [-1] * (cols * rows * 5)
+    best[(si * rows + sj) * 5] = 0.0
+    heap = [(abs(si - gi) + abs(sj - gj), 0.0, si, sj, -1)]
+    push = heapq.heappush
+    pop = heapq.heappop
     found = None
     while heap:
-        f, g, i, j, direction = heapq.heappop(heap)
-        if (i, j) == goal:
-            found = (i, j, direction)
+        _f, g, i, j, direction = pop(heap)
+        if i == gi and j == gj:
+            found = (i * rows + j) * 5 + direction + 1
             break
-        if g > best.get((i, j, direction), math.inf) + 1e-9:
+        cell = i * rows + j
+        state = cell * 5 + direction + 1
+        if g > best[state] + 1e-9:
             continue
+        hi = abs(i - gi) + abs(j - gj)
         for nd, (dx, dy) in enumerate(_DIRS):
-            ni, nj = i + dx, j + dy
+            ni = i + dx
+            nj = j + dy
             if not (0 <= ni < cols and 0 <= nj < rows):
                 continue
-            if (ni, nj) in blocked:
+            nc = ni * rows + nj
+            if nc in blocked:
                 continue
             turn = 0.0 if direction in (-1, nd) else TURN_COST
+            hn = abs(ni - gi) + abs(nj - gj)
             ng = g + 1.0 + turn
-            key = (ni, nj, nd)
-            if ng < best.get(key, math.inf) - 1e-9:
+            if hn > hi:
+                ng += BACKTRACK_COST
+            key = nc * 5 + nd + 1
+            if ng < best[key] - 1e-9:
                 best[key] = ng
-                came[key] = (i, j, direction)
-                heapq.heappush(
-                    heap, (ng + heuristic(ni, nj), ng, ni, nj, nd)
-                )
+                came[key] = state
+                push(heap, (ng + hn, ng, ni, nj, nd))
     if found is None:
         return None
 
     cells = []
-    node = found
-    while node in came:
-        cells.append((node[0], node[1]))
-        node = came[node]
-    cells.append((node[0], node[1]))
+    s = found
+    while s != -1:
+        cell = s // 5
+        cells.append((cell // rows, cell % rows))
+        s = came[s]
     cells.reverse()
     points = [(sx, sy)]
     points += [(minx + i * cellx, miny + j * celly) for i, j in cells[1:-1]]

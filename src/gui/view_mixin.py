@@ -110,11 +110,19 @@ class GraphViewMixin:
             return True
         return False
 
-    def popup_context_menu(self, popover, x, y):
+    def popup_context_menu(self, popover, x, y, focus_widget=None):
         """
         Show a popover context menu at the specified (x, y) coordinates.
         This method works reliably with GTK4's Python bindings.
-        """
+
+        ``focus_widget``, if given, is focused once the popover has actually
+        popped up (see the deferred ``_show`` below).  Grabbing focus on a
+        widget inside a not-yet-mapped popover is unreliable in GTK4 - the
+        widget ends up unfocused and a click into it can lose to leftover
+        pointer-grab state - so the caller must not call ``grab_focus``
+        itself."""
+
+
         # 0. Dismiss any menu that is already open before opening this
         #    one, so two popovers never hold the pointer at once.
         if self._context_popover is not None and self._context_popover is not popover:
@@ -164,15 +172,29 @@ class GraphViewMixin:
                 return GLib.SOURCE_REMOVE
             if not popover.get_visible() and popover.get_parent() is not None:
                 popover.popup()
+                if focus_widget is not None:
+                    focus_widget.grab_focus()
             return GLib.SOURCE_REMOVE
 
         GLib.idle_add(_show)
 
-    def dismiss_context_popover(self):
+    def dismiss_context_popover(self, force=True):
         """Force any open context popover down (a safety valve for a grab
-        that got stuck - see popup_context_menu)."""
+        that got stuck - see popup_context_menu).
+
+        ``force=False`` leaves a popover that has been *requested* but not
+        yet shown alone.  ``on_drag_begin`` runs on the same left-button
+        press that ``on_click`` uses to open a popover (the field editor,
+        the three-dot menu); the popover's ``popup()`` is deferred to an
+        idle, so at drag-begin time it is still pending.  Cancelling it
+        there meant the field editor never appeared - while the
+        device/app chooser worked only because a daemon round-trip opened
+        it after the press had fully finished."""
         pop = getattr(self, "_context_popover", None)
         if pop is None:
+            return
+        if not force and not pop.get_visible():
+            # Requested-but-not-shown: don't cancel it.
             return
         self._context_popover = None
         try:

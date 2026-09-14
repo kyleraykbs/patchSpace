@@ -72,6 +72,11 @@ NODE_LOADING_ALPHA = 0.45
 NODE_DELETE_MS = 320
 ANIM_TICK_MS = 16
 
+# How long a freshly-made connection takes to draw itself in from source to
+# target, with a transparent fade at the leading tip (see
+# PatchSpaceGraphWidget._draw_growing_wire).
+EDGE_DRAW_MS = 420
+
 # How long to wait after the node layout changes (drag end, anchor
 # toggle, the physics settling) before pushing the canvas positions +
 # anchored flags to the daemon to be persisted. Long enough to coalesce
