@@ -1688,6 +1688,15 @@ def sound_rev(path: str) -> str:
     return f"{st.st_mtime_ns}:{st.st_size}"
 
 
+#: path -> (probed_at, seconds): when each file was last probed for its length,
+#: so a file that changes on every poll (a take being recorded) is not re-probed
+#: each time.  See probe_duration.
+_DURATION_LAST: Dict[str, Tuple[float, float]] = {}
+
+#: Shortest gap between length probes of the same path, seconds.
+_DURATION_MIN_INTERVAL_S = 2.0
+
+
 #: path -> peaks; see probe_peaks.  A file's shape doesn't change either.
 _PEAKS_CACHE: Dict[str, List[Tuple[float, float]]] = {}
 
@@ -1704,6 +1713,15 @@ def probe_duration(path: str) -> float:
     cache_key = (resolved, sound_rev(resolved))
     if cache_key in _DURATION_CACHE:
         return _DURATION_CACHE[cache_key]
+    # A file still being written has a new revision on every poll, so the
+    # per-revision cache never hits for it and each poll would run ffprobe -
+    # *under the daemon's lock*, because this is called while serializing the
+    # nodes.  Re-probe such a file at most this often; the length of a take
+    # that is still recording is not meaningful anyway.
+    last = _DURATION_LAST.get(resolved)
+    if last is not None \
+            and _time.monotonic() - last[0] < _DURATION_MIN_INTERVAL_S:
+        return last[1]
     duration = 0.0
     try:
         result = subprocess.run(
@@ -1722,6 +1740,7 @@ def probe_duration(path: str) -> float:
         if len(_DURATION_CACHE) > 256:
             _DURATION_CACHE.clear()
         _DURATION_CACHE[cache_key] = duration
+    _DURATION_LAST[resolved] = (_time.monotonic(), duration)
     return duration
 
 

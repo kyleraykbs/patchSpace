@@ -92,7 +92,12 @@ def test_a_knob_drag_moves_only_that_side():
     assert w.nodes["clip1"]["start"] == pytest.approx(3.5)
     # The other handle stayed exactly where it was.
     assert w.nodes["clip1"]["end"] == pytest.approx(6.0)
-    assert client.sent[-1] == {
+    # Nothing goes out mid-drag: a drop sends the settled times once (see
+    # _flush_clip_times), so the daemon is never fed every tick of a drag.
+    assert not [c for c in client.sent if c.get("command") == "set_node_property"]
+    w._flush_clip_times()
+    starts = [c for c in client.sent if c.get("property") == "start"]
+    assert starts and starts[-1] == {
         "command": "set_node_property", "node_id": "clip1",
         "property": "start", "value": pytest.approx(3.5),
     }
@@ -167,6 +172,8 @@ def test_dragging_a_knob_slides_the_selection():
     w._drag_clip(w._clip_x_at("clip1", 3.0), mid_y)
     assert w.nodes["clip1"]["start"] == pytest.approx(3.0)
     assert w.nodes["clip1"]["end"] == pytest.approx(7.0)
+    w._flush_clip_times()   # a drop sends the settled times once
+    w._flush_clip_times()   # a drop sends the settled times once
     assert [c["property"] for c in client.sent[-2:]] == ["start", "end"]
     # And it cannot slide off either end of the file.
     w._drag_clip(w._clip_x_at("clip1", 100.0), mid_y)
@@ -187,6 +194,7 @@ def test_dragging_the_filled_middle_moves_the_selection():
     w._drag_clip(w._clip_x_at("clip1", 5.0), mid_y)
     assert w.nodes["clip1"]["start"] == pytest.approx(3.0)
     assert w.nodes["clip1"]["end"] == pytest.approx(7.0)
+    w._flush_clip_times()   # a drop sends the settled times once
     assert [c["property"] for c in client.sent[-2:]] == ["start", "end"]
 
     # It cannot slide off either end of the file.
@@ -524,3 +532,31 @@ def test_an_empty_waveform_for_a_real_file_is_asked_for_again():
                 "peaks": [(-1.0, 1.0)]})
     assert w._clip_waves["clip1"]["peaks"] == [(-1.0, 1.0)]
     assert polls() == 2
+
+
+def test_a_clip_drag_sends_its_times_once_on_release():
+    """The daemon does not need every tick of a drag - only where the clip was
+    dropped.  Sending per motion is what let minutes of backlog build up between
+    the pointer and the daemon.  The node itself stays live under the pointer."""
+    w, client = _recorder_and_clip()
+    w.update_from_daemon({
+        "nodes": {"clip1": {
+            "id": "clip1", "type": "clip", "label": "Clip", "x": 0.0, "y": 0.0,
+            "ready": True, "connected": True, "declarative": False,
+            "selection_label": "Clip", "description": "",
+            "start": 1.0, "end": 3.0, "duration": 10.0, "source_start": 0.0,
+            "source_path": "/sounds/demo.wav"}},
+        "edges": {}, "panels": [], "groups": []})
+
+    w.clip_dragging = ("slide", "clip1")
+    w._clip_drag_origin = (0.0, (1.0, 3.0))
+    for x in (10.0, 20.0, 30.0):
+        w._drag_clip(x, 0.0)
+
+    assert not [c for c in client.sent if c.get("command") == "set_node_property"]
+    assert w.nodes["clip1"]["end"] - w.nodes["clip1"]["start"] == pytest.approx(2.0)
+
+    w._flush_clip_times()                    # what a drop does
+    sent = [c for c in client.sent if c.get("command") == "set_node_property"]
+    assert [c["property"] for c in sent] == ["start", "end"]
+    assert sent[0]["value"] == pytest.approx(w.nodes["clip1"]["start"])

@@ -401,6 +401,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         #: ("start"|"end"|"pan", node_id) while a Clip selection is dragged.
         self.clip_dragging = None
         self._clip_drag_origin = (0.0, 0.0)
+        #: Clips whose times changed in the current drag; sent when it ends.
+        self._clip_pending_send: set = set()
         # The Button node whose face the pointer is over (see on_motion and
         # _draw_impulse_button): its face lifts a step to read as pressable.
         self.hover_impulse = None
@@ -8119,8 +8121,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             start = max(0.0, min(total - length, origin_start + shift))
             node["start"] = start
             node["end"] = start + length
-            self._send_property(nid, "start", start)
-            self._send_property(nid, "end", start + length)
+            # Sent on release, not per motion: the daemon does not need every
+            # tick of a drag, and a command per motion is what put minutes of
+            # backlog between the pointer and the daemon.
+            self._clip_pending_send.add(nid)
             self.queue_draw()
             return
         if part == "pan":
@@ -8145,8 +8149,24 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         else:
             seconds = max(seconds, sel_start)
         node[part] = seconds - base
-        self._send_property(nid, part, seconds - base)
+        self._clip_pending_send.add(nid)
         self.queue_draw()
+
+    def _flush_clip_times(self) -> None:
+        """Send whatever a Clip drag settled on, once, when it ends.
+
+        A drag marks its times continuously so the timeline stays live under the
+        pointer, but the daemon only needs the position the clip was *dropped*
+        at - see _drag_clip."""
+        if not self._clip_pending_send:
+            return
+        for nid in sorted(self._clip_pending_send):
+            node = self.nodes.get(nid)
+            if node is None:
+                continue
+            self._send_property(nid, "start", float(node.get("start", 0.0) or 0.0))
+            self._send_property(nid, "end", node.get("end"))
+        self._clip_pending_send.clear()
 
     def _reset_drag_state(self):
         """Forget any in-progress drag/connection.  Called at the start
@@ -8157,6 +8177,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         "panning" mode with no way to click out of it."""
         self.connecting_from = None
         self.detaching_edge = None
+        self._flush_clip_times()
         self.clip_dragging = None
         self.dragging_node = None
         self.dragging_panel = None

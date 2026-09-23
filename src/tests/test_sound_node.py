@@ -532,6 +532,7 @@ def test_an_unfinalised_read_is_not_remembered(tmp_path, monkeypatch):
     monkeypatch.setattr(pwnodes.subprocess, "run", fake_run)
     pwnodes._PEAKS_CACHE.clear()
     pwnodes._DURATION_CACHE.clear()
+    pwnodes._DURATION_LAST.clear()
 
     # A file with content but nothing readable yet: try again next time.
     real = tmp_path / "take.wav"
@@ -540,11 +541,42 @@ def test_an_unfinalised_read_is_not_remembered(tmp_path, monkeypatch):
     assert pwnodes.probe_peaks(str(real)) == []
     assert pwnodes.probe_duration(str(real)) == 0.0
     assert pwnodes.probe_duration(str(real)) == 0.0
-    assert len(calls) == 4
+    # Two waveform decodes, then one length probe (the second is inside the
+    # per-path floor - see probe_duration).
+    assert len(calls) == 3
 
     # An empty file is a real answer; don't re-run ffmpeg for it for ever.
     empty = tmp_path / "empty.wav"
     empty.write_bytes(b"")
     assert pwnodes.probe_peaks(str(empty)) == []
     assert pwnodes.probe_peaks(str(empty)) == []
-    assert len(calls) == 5
+    assert len(calls) == 4
+
+
+def test_a_file_being_written_is_not_re_probed_every_poll(tmp_path, monkeypatch):
+    """`probe_duration` runs while the daemon serializes its nodes, i.e. under
+    the command lock, and a file that is still being written has a new revision
+    on every poll - so without a floor each poll ran ffprobe with every other
+    command queued behind it."""
+    calls = []
+
+    class Result:
+        returncode = 0
+        stdout = "3.0"
+
+    def fake_run(*args, **kwargs):
+        calls.append(1)
+        return Result()
+
+    monkeypatch.setattr(pwnodes.subprocess, "run", fake_run)
+    pwnodes._DURATION_CACHE.clear()
+    pwnodes._DURATION_LAST.clear()
+    take = tmp_path / "take.wav"
+    take.write_bytes(b"x" * 100)
+
+    assert pwnodes.probe_duration(str(take)) == pytest.approx(3.0)
+    assert len(calls) == 1
+
+    take.write_bytes(b"x" * 200)             # it grew: a new revision
+    assert pwnodes.probe_duration(str(take)) == pytest.approx(3.0)
+    assert len(calls) == 1                   # but not re-probed yet

@@ -553,3 +553,38 @@ gesture accepts; tested only structurally (no touchscreen here).
   fingerprint, waveform, view state, asked-at, recording flag, pending
   positions, effect slider, physics velocity.  A node reusing a freed id would
   otherwise inherit the previous one's shape.
+
+* **Don't cache a read that raced the writer.**  A take that has just stopped
+  can be decoded before the file is finalised: no peaks and no length, for a
+  file that has content.  Caching that under the file's revision meant every
+  retry got the same nothing until some *later* revision came along - "the clip
+  is blank and the waveform never shows up, and it resolves itself but takes
+  forever".  Both `probe_peaks`/`probe_duration` and the GUI's own revision
+  bookkeeping now treat an empty answer for a file with content as "ask again",
+  and only cache answers worth keeping.
+* **An autosave that runs per tick while the user is dragging is a lag machine.**
+  Every morphing action marks the session dirty - a clip's times, a node's
+  layout, dozens of times a second during a drag - and exporting the whole
+  session each time left the daemon writing while the pointer moved on.  The
+  GUI's polls then carried stale positions, so a dragged selection *snapped back*
+  to where the daemon last knew it and the app only caught up when the drag
+  stopped ("the numbers take forever to catch up, and only then is it responsive
+  again").  The autosave waits for a quiet 2s now.  The same export-per-motion
+  cost is the best explanation so far for the "bogs down as time goes on"
+  reports, too: it scales with the size of the session.
+
+* **Don't send every tick of a gesture, and don't do slow work while the user is
+  moving.**  Three things made the daemon lag minutes behind the pointer, all of
+  them in the sound path:
+  - the clip's times were sent on *every* motion (`_drag_clip`); the daemon only
+    needs where the clip was *dropped*.  The node still updates locally under the
+    pointer, and `_flush_clip_times` sends once on release.
+  - `probe_duration` runs while the nodes are being serialized, i.e. *under the
+    command lock*, and a take that is being recorded changes its revision on
+    every poll - so each poll ran ffprobe with every other command queued behind
+    it.  Re-probing the same path is now floored at 2s (a still-recording take's
+    length is not meaningful anyway).
+  - the autosave exported the whole session per tick while every morphing action
+    marked it dirty (see above) - it now waits for a quiet 2s.
+  The general rule: anything that *executes* long after it was *sent* is a bug of
+  its own, separate from whatever it was sent to do.
