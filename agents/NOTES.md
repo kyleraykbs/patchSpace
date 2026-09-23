@@ -513,3 +513,16 @@ gesture accepts; tested only structurally (no touchscreen here).
   a Clip downstream of one never saw it and kept loading the take live.  Collect
   the recording take *paths* before the node loop and judge every node against
   the file it is showing.
+
+* **An optimistic placeholder has to be a *complete* node.**  The dict the GUI
+  shows before the daemon confirms a new node was missing `"id"`, and drawing a
+  node asks for it (`_bottom_control_height` -> `_impulse_wired(node["id"])`), so
+  adding anything with an impulse input - Sound Player, Recorder, Button - raised
+  KeyError and the node never appeared.  Adding one through the daemon worked,
+  which is what localised it to the GUI's optimistic path.
+* **Take the daemon's truth every poll; guard only the *echo*.**  `recording`
+  was applied when a node was first seen and never again, so a take that ended
+  on its own left the button showing Stop for ever - and pressing it asked to
+  stop a take that was already over.  The poll's value is applied every time
+  now, with `_accept_bool_echo` holding an optimistic press until the daemon
+  agrees (the guard the gates and switchers already used).
