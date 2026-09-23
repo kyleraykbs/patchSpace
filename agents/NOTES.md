@@ -135,3 +135,20 @@ the JSON-merge helpers (`flake.lib.patchbay`).  Two gotchas worth remembering:
   `nix build .#checks.<system>.module-merge` for the merge-precedence check.  Reach for a
   *worse* config to confirm a gate actually fails — the first version of the validation
   used `| tee`, whose exit status hid the failure entirely.
+
+## Known follow-ups (found while diagnosing the close-pair wire)
+
+The fix for "a close-pair wire hides a leg under a node" (`_close_pair_z`) covered the
+*drawing* path.  A review of the routing code also turned up three places where a wire can
+be drawn with endpoints that no longer match `_socket_position`, none of which is the
+reported symptom (nothing to do until one is observed):
+
+* `_route_fallback`'s small-drag shift (a known-unroutable edge is shifted with its
+  endpoints instead of re-routed) - check it re-pins *both* sockets when only one moved.
+* `_edge_ghosts` draws the last snapped path (intended, for the retract animation), so an
+  edge removed *and* re-added inside the same animation window can show the old geometry.
+* `_wire_routing_signature` is complete for single-socket nodes (both x/y and w/h are in
+  it), but a *local* label/`meta` edit (`_on_settings_response`, `_rename_node_local`)
+  mutates label/description without clearing `_node_h_cache`, so a multi-socket node
+  (Echo Cancel, Switcher, Bundle Split, Filter) can draw its box at the old height until
+  the next poll clears the cache - self-healing within one poll, cosmetic.
