@@ -4406,6 +4406,22 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             return None
         return None
 
+    def find_clip_selection_at(self, x, y):
+        """The Clip node whose selection's *filled* middle is under the pointer:
+        dragging there moves the whole selection."""
+        for nid, node in self._hit_nodes(x, y, require_ready=False):
+            if spec_for(node["type"]).control != "clip":
+                continue
+            rx, ry, rw, rh = self._clip_rect(nid)
+            if not (rx <= x <= rx + rw and ry <= y <= ry + rh):
+                continue
+            sel_start, sel_end = self._clip_selection(nid)
+            x0, x1 = self._clip_x_at(nid, sel_start), self._clip_x_at(nid, sel_end)
+            if min(x0, x1) <= x <= max(x0, x1):
+                return nid
+            return None
+        return None
+
     def find_clip_body_at(self, x, y):
         """The Clip node whose timeline is under the pointer: dragging there
         pans the view, the wheel zooms it."""
@@ -5623,7 +5639,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     CLIP_AREA_HEIGHT = CLIP_HEIGHT + CLIP_ROW_H + 16
     CLIP_MARGIN = 10
     #: Draggable side band of the selection, in world units.
-    CLIP_HANDLE_W = 9.0
+    #: Grab band of a selection line (the knobs sit on top of it).  Narrow, so
+    #: the selection's filled middle is comfortably a move rather than a resize.
+    CLIP_HANDLE_W = 6.0
     #: Grab knob at the top of each selection line: dragging it *slides* the
     #: selection (dragging the line itself moves just that side).
     CLIP_KNOB = 9.0
@@ -6521,7 +6539,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         if px is None or not dy:
             return False
         wx, wy = self.to_world(px, py)
-        factor = 0.85 if dy > 0 else 1.0 / 0.85
+        # Scrolling up (dy < 0) zooms *in*: a smaller span is a closer view, so
+        # the wheel's direction maps straight onto it (getting this backwards is
+        # the classic inverted zoom).
+        factor = 1.0 / 0.85 if dy > 0 else 0.85
         return self.zoom_clip_at(wx, wy, factor)
 
     def on_motion(self, controller, x, y):
@@ -6556,12 +6577,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self.set_cursor(Gdk.Cursor.new_from_name("pointer", None))
         elif self.find_impulse_fallback_at(wx, wy) is not None:
             self.set_cursor(Gdk.Cursor.new_from_name("pointer", None))
-        elif self.find_clip_knob_at(wx, wy) is not None:
-            self.set_cursor(Gdk.Cursor.new_from_name("grab", None))
         elif self.find_clip_box_at(wx, wy) is not None:
             self.set_cursor(Gdk.Cursor.new_from_name("pointer", None))
-        elif self.find_clip_handle_at(wx, wy) is not None:
+        elif (self.find_clip_knob_at(wx, wy) is not None
+                or self.find_clip_handle_at(wx, wy) is not None):
             self.set_cursor(Gdk.Cursor.new_from_name("ew-resize", None))
+        elif self.find_clip_selection_at(wx, wy) is not None:
+            self.set_cursor(Gdk.Cursor.new_from_name("grab", None))
         elif self.find_clip_body_at(wx, wy) is not None:
             self.set_cursor(Gdk.Cursor.new_from_name("grab", None))
         elif (
@@ -7941,11 +7963,15 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self.pinned_nodes.add(slider_hit)
             return
 
+        # A handle (or the thin line under one) resizes *that* side - it used
+        # to start a slide, which dragged the other handle along with it.
         clip_knob = self.find_clip_knob_at(wx, wy)
         if clip_knob is not None:
-            nid, _which = clip_knob
-            self.clip_dragging = ("slide", nid)
-            self._clip_drag_origin = (wx, self._clip_selection(nid))
+            nid, which = clip_knob
+            self.clip_dragging = (which, nid)
+            self._clip_drag_origin = (
+                wx, self._clip_selection(nid)[0 if which == "start" else 1]
+            )
             self.pinned_nodes.add(nid)
             self.queue_draw()
             return
@@ -7963,6 +7989,16 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self.queue_draw()
             return
 
+        # Dragging the selection's filled middle moves the whole selection.
+        clip_selection = self.find_clip_selection_at(wx, wy)
+        if clip_selection is not None:
+            self.clip_dragging = ("slide", clip_selection)
+            self._clip_drag_origin = (wx, self._clip_selection(clip_selection))
+            self.pinned_nodes.add(clip_selection)
+            self.queue_draw()
+            return
+
+        # Anywhere else on the waveform pans the view.
         clip_body = self.find_clip_body_at(wx, wy)
         if clip_body is not None:
             self.clip_dragging = ("pan", clip_body)

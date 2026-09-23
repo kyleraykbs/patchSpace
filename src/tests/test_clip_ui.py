@@ -78,32 +78,28 @@ def test_the_selection_sides_are_grabbable_and_the_waveform_is_not():
     assert w.find_clip_body_at(w._clip_x_at("clip1", 4.0), mid_y) == "clip1"
 
 
-def test_dragging_a_side_writes_that_time_and_tells_the_daemon():
-    w, client = _widget()
-    _rx, _ry, _rw, rh = w._clip_rect("clip1")
-    _x, y, _w, _h = w._clip_rect("clip1")
+def test_a_knob_drag_moves_only_that_side():
+    """A handle resizes *its* side and nothing else.  It used to start a slide,
+    which dragged the other handle along with it."""
+    w, client = _widget(duration=10.0, start=2.0, end=6.0)
+    _x, y, _w, rh = w._clip_rect("clip1")
     mid_y = y + rh / 2.0
+    kx, ky, kw, kh = w._clip_knob_rect("clip1", "start")
 
-    # A press on the line, then a move: the edge follows the *delta*, so a
-    # press that grazes the line doesn't teleport it (the grab band is a few
-    # pixels - minutes, at a whole-file zoom).
-    w.on_drag_begin(None, w._clip_x_at("clip1", 2.0), mid_y)
+    w.on_drag_begin(None, kx + kw / 2.0, ky + kh / 2.0)
     assert w.clip_dragging == ("start", "clip1")
     w._drag_clip(w._clip_x_at("clip1", 3.5), mid_y)
     assert w.nodes["clip1"]["start"] == pytest.approx(3.5)
+    # The other handle stayed exactly where it was.
+    assert w.nodes["clip1"]["end"] == pytest.approx(6.0)
     assert client.sent[-1] == {
         "command": "set_node_property", "node_id": "clip1",
         "property": "start", "value": pytest.approx(3.5),
     }
-    # A press *without* a move leaves it exactly where it was.
-    w.on_drag_begin(None, w._clip_x_at("clip1", 4.0), mid_y)
-    w._drag_clip(w._clip_x_at("clip1", 4.0), mid_y)
-    assert w.nodes["clip1"]["start"] == pytest.approx(3.5)
     # It cannot cross the other side.
     w._drag_clip(w._clip_x_at("clip1", 9.0), mid_y)
     assert w.nodes["clip1"]["start"] == pytest.approx(6.0)
-
-
+    assert w.nodes["clip1"]["end"] == pytest.approx(6.0)
 def test_the_wheel_zooms_the_timeline_under_it_and_nothing_else():
     w, _ = _widget()
     _rx, _ry, _rw, rh = w._clip_rect("clip1")
@@ -178,42 +174,65 @@ def test_dragging_a_knob_slides_the_selection():
     assert w.nodes["clip1"]["end"] == pytest.approx(10.0)
 
 
-def test_a_knob_drag_through_the_gesture_moves_the_selection():
-    """The whole path, not just _drag_clip: press on a knob (the hit-test has to
-    find it), move, release.  This is what "the handles won't move" was - the
-    drag reached the daemon, which rejected the property, so the next poll put
-    the old value back under the pointer."""
-    w, _ = _widget(duration=10.0, start=2.0, end=6.0)
-    kx, ky, kw, kh = w._clip_knob_rect("clip1", "start")
-
-    w.on_drag_begin(None, kx + kw / 2.0, ky + kh / 2.0)
+def test_dragging_the_filled_middle_moves_the_selection():
+    """The selection's filled middle is the *move*: both times shift together,
+    and the length is kept."""
+    w, client = _widget(duration=10.0, start=2.0, end=6.0)
+    _x, y, _w, rh = w._clip_rect("clip1")
+    mid_y = y + rh / 2.0
+    # Inside the selection, away from either side's grab band.
+    w.on_drag_begin(None, w._clip_x_at("clip1", 4.0), mid_y)
     assert w.clip_dragging == ("slide", "clip1")
-    w.on_drag_update(None, 60.0, 0.0)
-    assert w.nodes["clip1"]["start"] > 2.5, w.nodes["clip1"]
-    assert w.nodes["clip1"]["end"] == pytest.approx(
-        w.nodes["clip1"]["start"] + 4.0
-    )
-    w.on_drag_end(None, 60.0, 0.0)
-    assert w.clip_dragging is None
 
+    w._drag_clip(w._clip_x_at("clip1", 5.0), mid_y)
+    assert w.nodes["clip1"]["start"] == pytest.approx(3.0)
+    assert w.nodes["clip1"]["end"] == pytest.approx(7.0)
+    assert [c["property"] for c in client.sent[-2:]] == ["start", "end"]
 
+    # It cannot slide off either end of the file.
+    w._drag_clip(w._clip_x_at("clip1", 100.0), mid_y)
+    assert w.nodes["clip1"]["start"] == pytest.approx(6.0)
+    assert w.nodes["clip1"]["end"] == pytest.approx(10.0)
 def test_a_handle_drag_is_scaled_by_the_canvas_zoom():
-    """The drag offset arrives in screen pixels; the times are in world units,
-    so it has to be divided by the zoom.  Testing only at zoom 1 hid this: the
-    transform cancelled and the bug looked like "the handle doesn't move"."""
+    """The drag offset arrives in screen pixels and the times are in world
+    units, so it has to be divided by the zoom.  Testing only at zoom 1 hid
+    this: the transform cancelled and the bug read as "the handle won't move"."""
     w, _ = _widget(duration=10.0, start=2.0, end=6.0)
     w.zoom = 2.5
     w.pan_x, w.pan_y = -120.0, 40.0
 
+    # Press the *start* handle at that zoom (screen coords are world*zoom+pan).
     kx, ky, kw, kh = w._clip_knob_rect("clip1", "start")
-    sx, sy = kx * w.zoom + w.pan_x, ky * w.zoom + w.pan_y
+    sx = kx * w.zoom + w.pan_x
+    sy = ky * w.zoom + w.pan_y
     w.on_drag_begin(None, sx + kw * w.zoom / 2, sy + kh * w.zoom / 2)
-    assert w.clip_dragging == ("slide", "clip1")
+    assert w.clip_dragging == ("start", "clip1")
 
-    # 50 screen pixels at zoom 2.5 is 20 world units, i.e. 20/ (span) of the
-    # file: the selection must move by exactly that much time.
+    # 50 screen pixels at zoom 2.5 is 20 world units: that edge moves by exactly
+    # that much time, and the other edge not at all.
     _rx, _ry, rw, _rh = w._clip_rect("clip1")
     _start, span = w._clip_span("clip1")
     w.on_drag_update(None, 50.0, 0.0)
-    moved = w.nodes["clip1"]["start"] - 2.0
-    assert moved == pytest.approx(20.0 / rw * span, rel=0.02)
+    assert w.nodes["clip1"]["start"] - 2.0 == pytest.approx(
+        20.0 / rw * span, rel=0.02
+    )
+    assert w.nodes["clip1"]["end"] == pytest.approx(6.0)
+def test_the_wheel_zooms_in_scrolling_up_and_out_scrolling_down():
+    w, _ = _widget(duration=10.0, start=2.0, end=6.0)
+    _rx, _ry, _rw, rh = w._clip_rect("clip1")
+    _x, y, _w, _h = w._clip_rect("clip1")
+    mid_y = y + rh / 2.0
+    w.track_pointer(*_to_screen(w, w._clip_x_at("clip1", 5.0), mid_y))
+
+    wheel_up, wheel_down = -1.0, 1.0          # GTK: down is positive dy
+    assert w.on_clip_scroll(None, 0.0, wheel_up) is True
+    assert w._clip_span("clip1")[1] == pytest.approx(8.5)      # zoomed in
+    w.on_clip_scroll(None, 0.0, wheel_down)
+    w.on_clip_scroll(None, 0.0, wheel_down)
+    assert w._clip_span("clip1")[1] > 8.5                      # zoomed back out
+    # ...and nowhere else the wheel is left to the canvas.
+    assert w.on_clip_scroll(None, 0.0, wheel_up) is True
+
+
+def _to_screen(w, wx, wy):
+    return (wx * w.zoom + w.pan_x, wy * w.zoom + w.pan_y)
