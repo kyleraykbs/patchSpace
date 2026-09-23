@@ -1298,7 +1298,7 @@ class PatchSpaceDaemon:
         root = tree.get(panels.ROOT_ID)
         if root is not None:
             referenced = set(root.child_stems().values())
-            added = False
+            adopted = []
             for directory in dirs:
                 for path in panels.list_files(directory):
                     stem = panels.file_stem(path)
@@ -1311,19 +1311,30 @@ class PatchSpaceDaemon:
                     if not (isinstance(raw, dict) and raw.get("auto_load")):
                         continue
                     referenced.add(stem)
-                    root.config.setdefault("panels", []).append(
+                    adopted.append(stem)
+            if adopted:
+                # Add the references to a *freshly read* root and write that,
+                # so the file on disk is "what we just loaded, plus these
+                # children".  Adding them to the tree loaded above and then
+                # writing a reload of the file discarded both halves - the
+                # added references lived only in the in-memory root, and the
+                # reload (which cannot see them: they were never written) is
+                # what got written back - so an auto_load panel in a
+                # read-only directory was never actually adopted.
+                tree = panels.load_tree(root_path, dirs, self._panel_dir_writable())
+                fresh = tree[panels.ROOT_ID]
+                for stem in adopted:
+                    fresh.config.setdefault("panels", []).append(
                         panels.child_ref(stem, stem)
                     )
-                    added = True
-            if added:
                 # Drop root nodes that now belong to a migrated panel.
-                root.config["nodes"] = {
+                fresh.config["nodes"] = {
                     nid: cfg
-                    for nid, cfg in (root.config.get("nodes") or {}).items()
+                    for nid, cfg in (fresh.config.get("nodes") or {}).items()
                     if panels.panel_of(nid) == panels.ROOT_ID
                 }
+                panels.write_file(root_path, fresh)
                 tree = panels.load_tree(root_path, dirs, self._panel_dir_writable())
-                panels.write_file(root_path, tree[panels.ROOT_ID])
         return tree
 
     @staticmethod

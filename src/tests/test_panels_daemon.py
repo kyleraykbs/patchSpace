@@ -787,3 +787,51 @@ def test_create_panel_nests_into_given_parent(tmp_path):
     tree = d._load_panels_tree()
     assert "kit::sub" in tree
     assert "b" in tree["kit::sub"].nodes
+
+
+def test_an_auto_load_panel_in_a_read_only_dir_is_adopted(tmp_path):
+    """A panel file that opts in with `auto_load` and is not referenced by the
+    root is spawned at the root on start-up - which is how a Nix-generated
+    panel dir (read-only, nobody references it) shows up at all.
+
+    The adoption used to be a no-op: the new child reference was appended to
+    the in-memory root, then a *fresh read from disk* (which cannot see it)
+    was written back - so the reference was lost on both sides and the panel
+    never loaded, in that run or any later one."""
+    rw = tmp_path / "panels"
+    rw.mkdir()
+    ro = tmp_path / "store-panels"
+    ro.mkdir()
+    (ro / "main.json").write_text(json.dumps({
+        "type": "panel", "label": "Main", "color": "#445566",
+        "mode": "read-only", "auto_load": True,
+        "config": {"nodes": {"paul": {"type": "gate", "params": {}}},
+                   "edges": [], "panels": [], "groups": []},
+    }))
+    root = tmp_path / "root.json"
+    root.write_text(json.dumps({
+        "type": "panel", "label": "root", "color": "#000000",
+        "mode": "read-write",
+        "config": {"nodes": {}, "edges": [], "panels": [], "groups": []},
+    }))
+    d = PatchSpaceDaemon(
+        panel_dirs=[(str(rw), True), (str(ro), False)],
+        root_panel_path=str(root),
+    )
+    tree = d._load_panels_tree()
+    assert "main" in tree, "the auto_load panel was not adopted"
+    assert set(tree["main"].config["nodes"]) == {"paul"}
+
+    # …and the root panel now references it, so the next start loads it too.
+    written = json.loads(root.read_text())
+    stems = {
+        e if isinstance(e, str) else e.get("stem")
+        for e in written["config"]["panels"]
+    }
+    assert "main" in stems, written["config"]["panels"]
+
+    # Idempotent: a second load changes nothing and still sees the panel.
+    before = root.read_text()
+    tree2 = d._load_panels_tree()
+    assert "main" in tree2
+    assert root.read_text() == before

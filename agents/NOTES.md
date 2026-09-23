@@ -209,3 +209,14 @@ thrashing.  Fixes (all tested):
   owner is alive *and* its parent is a daemon (`_is_daemon_process`) - it
   only sweeps true orphans (parent init/user manager);
 * `_terminate_orphan_helpers` applies the same predicate.
+
+## The auto-load adoption was a no-op (2026-09-23)
+
+A Nix-generated panel dir is read-only and referenced by nothing, so its files
+only ever load through the `auto_load` adoption in `_load_panels_tree`.  That
+code appended the child reference to the in-memory root, then reloaded the root
+*from disk* (which cannot see the unwritten reference) and wrote *that* back -
+so the reference was lost on both sides and the panel never appeared (which is
+why a declarative graph could be built, validated, passed into the unit and
+still not show up in the GUI).  Fixed to: reload, append to the fresh root,
+write, reload again.  Idempotent, and the root file keeps every node it had.

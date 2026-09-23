@@ -1049,6 +1049,18 @@ approach for pure GUI behavior). "It passed pytest" is not proof an effect works
 
 ## 5. Hard-won rules / traps (read before debugging effects)
 
+**Panel files are loaded by reference, and the auto-load adoption has to write
+before it reloads.** `panels.load_tree` reads the root panel and then only the
+children it *references* - a panel file that nothing mentions is simply not
+seen, which is why a Nix-generated read-only panel dir relies on `auto_load`.
+The adoption ("spawn an unreferenced `auto_load` file at the root") built its
+new child reference on the tree it had in memory, then reloaded the root *from
+disk* - which cannot see a reference that has not been written - and wrote
+*that* back, so both halves were discarded and the panel never loaded, in that
+run or any later one.  Order is load → append to a freshly read root → write →
+reload; `tests/test_panels_daemon.py` pins it.
+
+
 **Two daemons must never share a session - and a daemon that cannot serve
 must not run.** Both halves were learned the hard way, in one incident: a
 Patch Space socket left in `/tmp` *owned by another user* (root, in this
