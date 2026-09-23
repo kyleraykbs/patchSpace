@@ -38,7 +38,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
-from gui.node_specs import NODE_TYPE_SPECS, normalize_node_type, port_kind
+import migrations
+from gui.node_specs import (
+    NODE_TYPE_SPECS,
+    normalize_node_type,
+    port_kind,
+    ports_compatible,
+)
 
 # Switch ports were renamed a/b -> on/off; the engine tolerates the old
 # names (see pwnodes.ABSwitchNode._LEGACY_PORTS) but a config should be
@@ -99,11 +105,20 @@ def _node_type(config: dict, node_id: str) -> Optional[str]:
 
 
 def _valid_inputs(node_type: str) -> Optional[Set[str]]:
+    # A Merge Bundle's inputs are dynamic (in1, in2, ...) and a Filter's
+    # classifier inputs are too (filter1, filter2, ...): the edge names
+    # them, so any port is valid and there is no fixed set to check.
+    if node_type in ("bundle", "filter"):
+        return None
     spec = NODE_TYPE_SPECS.get(node_type)
     return set(spec.inputs) if spec is not None else None
 
 
 def _valid_outputs(node_type: str) -> Optional[Set[str]]:
+    # A Split Bundle's outputs are dynamic (one per live member, keyed by
+    # node.name), so any output port is valid.
+    if node_type == "bundle_split":
+        return None
     spec = NODE_TYPE_SPECS.get(node_type)
     return set(spec.outputs) if spec is not None else None
 
@@ -215,7 +230,7 @@ def validate(config: dict, known_types: Optional[Iterable[str]] = None) -> List[
             continue
         if ins is None or outs is None:
             continue
-        if port_kind(ftype, nout, "out") != port_kind(ttype, nin, "in"):
+        if not ports_compatible(ftype, nout, ttype, nin):
             issues.append(
                 Issue(
                     ERROR,
@@ -279,6 +294,7 @@ def repair(
     dedupe_groups: bool = False,
     drop_orphans: bool = False,
     collapse_duplicate_lines: bool = False,
+    migrate: bool = True,
 ) -> RepairResult:
     """Return a repaired copy of ``config`` plus the fixes applied.
 
@@ -287,7 +303,24 @@ def repair(
     edges are removed.  ``dedupe_groups`` (overlapping group membership
     may be intentional tagging), ``drop_orphans`` and
     ``collapse_duplicate_lines`` are opt-in.
+
+    ``migrate`` (default True) brings an old-schema config forward to the
+    current node shapes.  Incremental single-placement loads pass False so
+    a live sibling placement built from the same file can't be rewritten
+    out from under it (see main._load_session).
     """
+    # Bring the config's schema forward first (legacy node shapes -> the
+    # current ones), on a shallow copy so the caller's dict is untouched.
+    config = dict(config)
+    config["nodes"] = {
+        nid: dict(node) for nid, node in (config.get("nodes") or {}).items()
+    }
+    config["edges"] = [dict(e) for e in (config.get("edges") or [])]
+    config["groups"] = [dict(g) for g in (config.get("groups") or [])]
+    migration_fixes: List[str] = []
+    if migrate:
+        config, migration_fixes = migrations.migrate(config)
+
     nodes_in = config.get("nodes", {}) or {}
     edges_in = config.get("edges", []) or []
     groups_in = config.get("groups", []) or []
@@ -296,6 +329,7 @@ def repair(
     issues = validate(config, known)
     result = RepairResult(config={"nodes": {}, "edges": [], "groups": []}, issues=issues)
     fixes = result.fixes
+    fixes.extend(migration_fixes)
 
     # 1. Nodes of a known type survive (normalized to their canonical key).
     nodes: Dict[str, dict] = {}
@@ -335,9 +369,11 @@ def repair(
         if (
             ins is not None
             and outs is not None
-            and port_kind(ftype, from_port, "out") != port_kind(ttype, to_port, "in")
+            and not ports_compatible(ftype, from_port, ttype, to_port)
         ):
-            fixes.append(f"dropped edge {f}->{t}: boolean/audio port mismatch")
+            fixes.append(
+                f"dropped edge {f}->{t}: boolean/audio/filter port mismatch"
+            )
             continue
         new_edge = {"from": f, "to": t}
         if to_port != "in":
@@ -389,6 +425,8 @@ def repair(
                 fixes.append(f"dropped orphan node {nid!r}")
 
     result.config = {"nodes": nodes, "edges": edges, "groups": groups}
+    if "schema_version" in config:
+        result.config["schema_version"] = config["schema_version"]
     result.issues = validate(result.config, known)
     return result
 

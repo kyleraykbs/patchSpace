@@ -21,6 +21,15 @@ _FALLBACK_SUBTEXT = (0.63, 0.63, 0.66)
 _FALLBACK_INPUT_PORT = (0.35, 0.78, 0.51)
 _FALLBACK_OUTPUT_PORT = (0.94, 0.47, 0.42)
 _FALLBACK_BOOLEAN_PORT = (0.55, 0.55, 0.58)
+# Bundle wires carry a *set* of streams, filter wires a classifier
+# predicate - both are control-plane-ish, so they get distinct cool
+# colours rather than the audio green/red.
+_FALLBACK_BUNDLE_PORT = (0.55, 0.80, 0.95)
+_FALLBACK_FILTER_PORT = (0.78, 0.62, 0.95)
+# An impulse is a momentary event, not a stream: a cyan that no other
+# socket kind uses, so a Button's output is unmistakable next to the
+# audio green/red and the boolean grey.
+_FALLBACK_IMPULSE_PORT = (0.30, 0.86, 0.86)
 _FALLBACK_LINK = (0.42, 0.65, 0.98)
 _FALLBACK_SELECT = (0.98, 0.76, 0.24)
 _FALLBACK_PENDING_LINK = (0.98, 0.76, 0.24)
@@ -102,6 +111,9 @@ def theme_palette(widget) -> dict:
         "input_port": _FALLBACK_INPUT_PORT,
         "output_port": _FALLBACK_OUTPUT_PORT,
         "boolean_port": _FALLBACK_BOOLEAN_PORT,
+        "bundle_port": _FALLBACK_BUNDLE_PORT,
+        "filter_port": _FALLBACK_FILTER_PORT,
+        "impulse_port": _FALLBACK_IMPULSE_PORT,
         "link": _lookup(widget, "accent_color", _FALLBACK_LINK),
         "select": _FALLBACK_SELECT,
         "pending_link": _FALLBACK_PENDING_LINK,

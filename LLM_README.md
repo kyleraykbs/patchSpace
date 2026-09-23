@@ -14,8 +14,9 @@ codebase deliberately documents *why* and *what failed before*, not just *what*.
 - **Work in `src/`.** The legacy tree was removed and the rewrite was promoted into its
   place (commit "Promote src-rewrite to src; drop the legacy tree"). There is no
   `src-rewrite/` any more.
-- **Test command:** from `src/`, run `python -m pytest -q` (currently **114 passing,
-  ~2s**). Tests are headless and do not touch real PipeWire.
+- **Test command:** from `src/`, run `python -m pytest -q` (currently **250 passing,
+  ~6s**; the GTK canvas tests skip without a display). Tests are headless and do not
+  touch real PipeWire.
 - **Run it:** `nix run` (GUI) or `nix run .#daemon` (headless daemon) from the repo root;
   or, in `nix develop`, `cd src && python main.py` and `cd src/gui && python patchbay_gui.py`.
 - **The GUI starts/owns the daemon.** On launch it adopts a daemon that is already
@@ -42,6 +43,8 @@ codebase deliberately documents *why* and *what failed before*, not just *what*.
     ├── pwgraph.py         # live PipeWire graph model (pw-dump driven)
     ├── pwproc.py          # OwnedPwNode / OwnedPwProcess (pw-cli/pw-dump subprocesses)
     ├── pwmatch.py         # matching helpers for external nodes
+    ├── migrations.py      # versioned node/config migrations (legacy -> current)
+    ├── session_repair.py  # validate/repair a session config (CLI + daemon)
     ├── patchbay_cli.py    # synchronous one-shot socket client (CLI tools)
     ├── apply_config.py    # CLI: apply an exported config
     ├── export_config.py   # CLI: export current config
@@ -150,6 +153,25 @@ sync), the GUI holds the last resolved value rather than flashing back to the no
 stored default (`gui/bool_state.py:resolve_bool_state_from_poll`); it clears once ctrl is
 genuinely disconnected.
 
+**Impulse (`button` / `sound_effect`).** A fourth control-plane kind, but a *momentary
+event* rather than a level: `ButtonNode` ("Button") has one `impulse` output and no state
+at all, `SoundEffectNode` ("Sound Effect") has an `impulse` input plus an audio output and
+plays `path` when triggered. Nothing about an impulse is resolved on a sync - there is no
+value to sample - so it is a **push**: the GUI sends one `impulse` command and
+`PatchSpace.pulse()` walks the impulse edges out of the button, calling `on_impulse()` on
+each node it reaches (once per node, cycle-safe). `sync_locked` skips control-plane edges
+(`_edge_is_control`) so an impulse edge never becomes a PipeWire link, and the canvas
+draws the socket as a filled dot with a short-dashed wire (`IMPULSE_DASH`). The Sound
+Effect is a `_SingleSinkNode` whose dummy sink is the node's *socket* (its audio out is
+the dummy's monitor); each impulse spawns a short-lived
+`pw-cat --playback <path> --target <dummy>`. Its `overlap` flag (the node's on-body
+**Stack** switch) picks restart-on-retrigger (default) vs stacking takes. Those playback
+children are deliberately *not* `backings` - a player exits when the file ends, and a
+naturally-dead backing is what `dead_backings()`/health call a fault, so they are handed
+over by `BackedNode.owned_backings()` (used by both teardown paths) and retired by
+`refresh_live()` on the supervision tick. `playing` (live player count) is serialized for
+the node's green dot + count read-out.
+
 **Effect sandwich (central idea):** every effect is
 ```
 source -> [ in-dummy sink ] --link--> [ fx capture ] <-> DSP <-> [ fx playback ] --link--> [ out-dummy sink ] -> sink
@@ -159,9 +181,63 @@ User edges attach to the stable dummy sockets, never to the DSP module. A module
 Internal links are re-derived by name each sync, so they self-heal.
 
 **Lazy loading:** structural pieces (dummies/keepalives) are created synchronously on
-add and basically can't fail. The module (the failure-prone part) is materialised by the
-supervision tick. A module failure degrades one node's interior — not the add, not the
+add and basically can't fail. The module (the failure-prone part) is materialised by
+the supervision tick. A module failure degrades one node's interior — not the add, not the
 sync, not the chain.
+
+**Bundles, classifiers and filters (`pwnodes.py`).** A *bundle* is a logical set of live
+PipeWire endpoints travelling on one wire, instead of the single stream an ordinary audio
+port carries. Bundles are typed by side: a **source** bundle holds endpoints audio can be
+pulled FROM (`All Inputs`, `All Apps`); a **sink** bundle holds endpoints audio can be
+pushed TO (`All Outputs`). Three extra port kinds exist alongside `audio`/`boolean`:
+`bundle`, `filter` and `impulse` (the latter documented above). `add_edge` pairs boolean
+only with boolean, filter only with filter and impulse only with impulse, but lets audio
+and bundle pair either way (a single stream is a bundle of one), so "route everything this
+bundle stands for into this sink" is just an edge. The canvas draws bundle/filter sockets
+as diamonds and their wires dotted (and as short dash-stroked rubber bands while
+dragging); `render_utils.theme_palette` gains `bundle_port`/`filter_port`/`impulse_port`
+colours. `gui/node_specs.ports_compatible` and `session_repair` mirror the daemon's rule
+so the GUI/repair can never fabricate a connection the daemon rejects.
+
+* `AllInputsNode` / `AllAppsNode` (`InputNode`) produce a source bundle from
+  `source_filters()`; `AllOutputsNode` (`Node`) produces a sink bundle from
+  `sink_filters()`. `bundle_side()` reports which.
+* `ClassifierNode` subclasses (`Regex`/`MediaClass`/`Description`/`ExternalOnly`) are
+  pure control-plane predicates with one `filter` output; `invert` complements any of
+  them. They are plugged into a Filter node's `filter` input.
+* `FilterNode` (`TransparentNode`) resolves its bundle input to exact live ids and keeps
+  the members *every* wired classifier matches (AND). Its `filterN` inputs are dynamic
+  like a Merge Bundle's: the daemon reports `filter_input_ports` (one per wired classifier
+  plus a spare), so one Filter node can hold an arbitrary number of classifiers. No
+  classifier wired passes the bundle through unchanged; a wired-but-empty classifier
+  matches nothing (mirroring the old leaves' empty pattern). Returning exact ids is what
+  makes chained Filters *intersect*.
+* `BundleMergeNode` (Merge Bundle) collects several lines/bundles. Its input sockets are
+  dynamic: the daemon reports `bundle_input_ports` (one per inbound line plus a spare), so
+  plugging into the spare grows another socket; wiring is the usual mixing-bus union.
+* `BundleSplitNode` (Split Bundle) takes a bundle apart: the daemon reports `bundle_members`
+  (one per live source, keyed by its node.name) and the canvas draws one output socket per
+  member, each carrying just that member's stream (`_resolve_sources` resolves the port name
+  by `nodeName`). Both are serialized per poll (no stored ports); `session_repair` treats
+  their ports as dynamic and skips the static port check.
+* `BundleToAudioNode` is the explicit source-bundle → single-stream conversion point.
+* `BundleOutputNode` is the terminal for a sink bundle: it sums its audio `in` into a
+  private internal dummy sink and monitors that out to every sink its `bundle` input
+  resolves to (`_bundle_output_links`, so N+M links rather than N*M). A source bundle may
+  also simply feed a normal output node directly.
+
+**Node migrations (`migrations.py`).** Old node shapes are brought forward by a
+versioned registry: `config["schema_version"]` selects which `Migration.apply(config)`
+functions run, each returning its list of fixes. The loader calls it only on *full*
+loads from disk (startup, `reload_panels`, explicit `load_session`/import) — not on
+incremental single-placement reloads, which must match the sibling placements already in
+the graph (see `main._load_session`'s `migrate` flag). `session_repair.repair` runs the
+same pass (so the repair CLI with `--write` persists it). The first migration rewrites
+the six legacy Regex/Media Class/Description input/output leaves as bundle pipelines
+(`All Inputs`/`All Outputs` → matching classifier → `Filter`, plus a `Bundle Output`
+terminal on the sink side), keeping panel-qualified ids in their panel while sharing one
+root-level preset per side. Legacy type keys stay in `NODE_TYPE_REGISTRY`/specs as
+aliases so an unmigrated file still loads.
 
 **Serialization:** `_SERIAL_ATTRS` (main.py) is the single list of node attributes that
 `get_nodes`/`export` emit, read via `getattr(node, attr)`. `_LAYOUT_ATTRS` (x/y/anchored)
@@ -428,7 +504,14 @@ A non-interactive bottom-left legend (`_build_mouse_help`) shows the mouse contr
 little mouse glyph per row with the left button highlighted for "Pick / pan", the middle
 for "Pan", the right for "Select".
 
-*Node appearance.* A node the daemon hasn't finished bringing up (`ready` false) draws at
+*Node appearance.* Every non-port node draws its type's symbolic icon in the header's
+top-left corner, tinted with the node's category colour (`nid` decides the "mute" glyph for
+a `mute_`-prefixed volume). GTK4 can't paint a symbolic icon onto a foreign cairo context,
+so `_node_icon_pixbuf` snapshots the `Gtk.IconPaintable`, runs it through a
+`Gsk.CairoRenderer` to a texture, decodes it to a `GdkPixbuf` and caches per
+(name, size, colour); `_header_line_layout` insets the first header line by
+`NODE_ICON_LEFT_RESERVE` and is shared by `_draw_header` and both height measurements so
+the wrap width can't drift. A node the daemon hasn't finished bringing up (`ready` false) draws at
 `NODE_LOADING_ALPHA` (0.45) and fades to full once ready, and is not a hit target while it
 loads (`_hit_nodes` skips it). That gate belongs on **live-signal** controls (volume
 slider, gate/switcher/mute toggle, device rows) - a control on a node that isn't up yet is
@@ -942,14 +1025,27 @@ approach for pure GUI behavior). "It passed pytest" is not proof an effect works
 ## 6. GUI specifics
 
 - **`node_specs.py` is the UI source of truth.** `NodeSpec(label, inputs, outputs,
-  control=..., field=..., settings=[...], boolean_inputs/outputs=..., socket_labels=...)`.
+  control=..., field=..., settings=[...], boolean_inputs/outputs=..., impulse_inputs/
+  outputs=..., toggle=..., indicator=..., socket_labels=...)`.
   - `control` ∈ `None | "volume" | "gate" | "boolean" | "fallback_onoff" | "wetdry" |
-    "sensitivity" | "gain"` selects the inline control drawn on the node body. Boolean
-    source nodes use `"boolean"`; gate/switcher fallback on/off uses `"fallback_onoff"`
-    (read-only white when a ctrl signal is wired).
+    "sensitivity" | "gain" | "impulse"` selects the inline control drawn on the node body.
+    Boolean source nodes use `"boolean"`; gate/switcher fallback on/off uses
+    `"fallback_onoff"` (read-only white when a ctrl signal is wired); a Button uses
+    `"impulse"` (the gate-shaped face, grey until a press pulses it green for
+    `IMPULSE_FLASH_MS` - deliberately the only feedback, since a button has no state).
   - `socket_labels=False` suppresses per-port name labels on the symmetric boolean gates.
   - `settings` rows are `(attr, label, kind[, extra])` with kind `bool|number|choice|text`;
     `number` extra is `{min,max,step}`.
+  - `toggle=(attr, label)` adds a small two-segment on/off switch on the node body (the
+    gate toggle's shape, sized down) above the field/control row, with the label as its
+    caption - a bool property the user flips in place instead of opening Settings (the
+    Sound Effect's **Stack**). It costs a row of height (`_bottom_control_height` →
+    `TOGGLE_ROW_GAP` + `TOGGLE_ROW_HEIGHT`), drawn/hit-tested through the shared
+    `_toggle_switch_rect`.
+  - `indicator="playing"` adds a live read-out at the node's bottom-right: a status dot
+    plus the count to its left (the Sound Effect's running playback streams, daemon
+    `playing`), inside the field row, which gives up `INDICATOR_WIDTH` for it
+    (`_field_rect`). Display only - there is nothing to click.
 - **Groups merge by local id.** Canvas groups whose id shares a local part (`grp` and
   `file::grp`, or the same id in two declarative files) render as **one** outline with the
   contributing groups' titles **stacked** (each in its own colour), via `_merged_groups()` /

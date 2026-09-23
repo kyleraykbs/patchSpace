@@ -30,7 +30,7 @@ import math
 import random
 import time
 
-from gi.repository import Gtk, Gdk, GLib, GObject, Pango
+from gi.repository import Gtk, Gdk, GdkPixbuf, GLib, GObject, Gsk, Pango
 
 from constants import (
     REFRESH_INTERVAL_MS,
@@ -49,6 +49,7 @@ from constants import (
     NODE_LOADING_ALPHA,
     NODE_DELETE_MS,
     ANIM_TICK_MS,
+    IMPULSE_FLASH_MS,
     EDGE_DRAW_MS,
     ZOOM_MIN,
     ZOOM_MAX,
@@ -118,6 +119,16 @@ MIN_USABLE_STUB = WIRE_GRID_STEP
 # connection draws itself in (see _draw_growing_wire).
 WIRE_FADE = 34.0
 
+# Dash pattern for a bundle or filter wire - a bundle stands for a whole
+# set of streams and a filter wire carries a predicate, so neither reads
+# as a single solid audio link.
+BUNDLE_DASH = (5.0, 4.0)
+
+# Dash pattern for an impulse wire - shorter and tighter than BUNDLE_DASH,
+# so a momentary event (a Button firing a Sound Effect) never reads as a
+# dashed bundle of streams.
+IMPULSE_DASH = (2.5, 3.0)
+
 
 class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     NODE_WIDTH = 180
@@ -134,6 +145,24 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     SLIDER_MARGIN = 10
     FIELD_HEIGHT = 22
     FIELD_MARGIN = 10
+    # Extra height a node-body switch row needs (the Sound Effect's
+    # Stack switch).  The switch is drawn above the inline field/control
+    # row; see _bottom_control_height and _toggle_switch_rect, which
+    # derive their geometry from this one number.
+    TOGGLE_ROW_HEIGHT = 20
+    # Gap between that switch row and the inline field/control below it.
+    # Without it the switch's bottom edge rides the field box's top edge;
+    # the node grows by this much (see _bottom_control_height) so the
+    # switch moves up without eating into the field.
+    TOGGLE_ROW_GAP = 6
+    # The inline on/off switch a `toggle` row draws: the gate toggle's
+    # two-segment shape shrunk to sit in that row beside its caption
+    # (see _toggle_switch_rect / _draw_toggle_row).
+    TOGGLE_SWITCH_WIDTH = 62
+    TOGGLE_SWITCH_HEIGHT = 18
+    # Room reserved on the right of a node's inline field for its live
+    # status read-out (a dot + count) - see _play_indicator_rect.
+    INDICATOR_WIDTH = 30
     # The gate control is a big centered toggle rather than a small
     # checkbox (see _draw_gate_toggle/_gate_rect), so it claims more
     # of the node body than the generic "has_extra_row" bump other
@@ -168,6 +197,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     # Kept just wide enough for the widest type label ("Inv. Switcher")
     # to stay on one line.
     HEADER_ICON_RESERVE = 44
+    # The node-type glyph drawn in the header's top-left corner, and the
+    # room its row reserves to the left of the first header line so the
+    # type label wraps/ellipsizes before running under it.
+    NODE_ICON_SIZE = 16
+    NODE_ICON_LEFT_RESERVE = 22
     # A *compact* node (see _COMPACT_NODE_TYPES: splitter and the boolean
     # logic gates) with no label renders as a plain square this many
     # pixels on a side (just the three-dot menu and, dimmed, the anchor
@@ -217,6 +251,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # recomputed per call.  See node_height/node_width.
         self._node_h_cache = {}
         self._node_w_cache = {}
+        # Node-type glyphs, rendered once from the GTK icon theme to a
+        # pixbuf and cached: {(icon_name, size, rgb): GdkPixbuf.Pixbuf}.
+        # Rendering goes through a Gsk.CairoRenderer (GTK4 no longer
+        # paints symbolic icons straight onto a foreign cairo context).
+        self._node_icon_cache: dict = {}
         # Per-node appearance animation: {nid: monotonic birth time} for the
         # materialize scale-up, and {nid: alpha} faded toward 1 as a node
         # finishes loading (see _anim_tick / _draw_node).
@@ -250,6 +289,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # back to the source, the reverse of the draw-in animation.
         self._edge_ghosts: dict = {}
         self._edge_ghosted: set = set()
+        # Buttons the user just pressed: {nid: press time}, driving the
+        # grey -> green -> grey pulse on the button face (see
+        # _draw_impulse_button).  Purely local - the button carries no
+        # state the daemon could echo back, so this is the press's only
+        # feedback; the play count on whatever it fired comes from the
+        # poll.
+        self._impulse_flash: dict = {}
         # Per-edge timestamp of the last time wire-spacing invalidated its
         # cached route (see _route_still_valid), so two wires that keep
         # ending up within spacing of each other can't be re-routed on every
@@ -808,6 +854,15 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             }
         )
 
+    def _send_impulse(self, node_id):
+        """Fire one impulse out of a Button node (main.py's _cmd_impulse).
+
+        The button holds no state, so there is nothing optimistic to
+        remember: the pulse happens daemon-side, and the nodes it reaches
+        report their own play count on the next poll.  The local flash is
+        the press's only immediate feedback (see _draw_impulse_button)."""
+        self.client.send({"command": "impulse", "node_id": node_id})
+
     def _send_property(self, node_id, prop, value):
         self.client.send(
             {
@@ -1123,6 +1178,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     "device_volume": 1.0,
                     "device_name": ndata.get("device_name", ""),
                     "app_name": ndata.get("app_name", ""),
+                    # Sound Effect: live playback count + the body
+                    # checkbox's value (absent on every other type).
+                    "playing": ndata.get("playing", 0),
+                    "overlap": ndata.get("overlap", False),
                     "connected": ndata.get("connected", False),
                     "is_bluetooth": ndata.get("is_bluetooth", False),
                     "selection_label": ndata.get("selection_label", ""),
@@ -1141,6 +1200,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     "volume_locked": ndata.get("volume_locked", True),
                     "force_default": ndata.get("force_default", True),
                 }
+                self._apply_dynamic_ports(self.nodes[nid], ndata)
                 # A node the GUI itself asked the daemon to create is a
                 # user-spawned node -> anchor it by default.  Anything
                 # else that appears is a loaded/imported node, so use
@@ -1161,6 +1221,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 node["type"] = ntype
                 node["inputs"] = spec.inputs
                 node["outputs"] = spec.outputs
+                self._apply_dynamic_ports(node, ndata)
                 node["meta"] = ndata
                 new_label = ndata.get("label", "")
                 if node.get("label", "") != new_label and self._is_compact_node(node):
@@ -1191,6 +1252,19 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 )
                 node["device_name"] = ndata.get("device_name", "")
                 node["app_name"] = ndata.get("app_name", "")
+                # Sound Effect: the live play count (drives the node's
+                # dot/count read-out) and its retrigger checkbox, which
+                # takes the same optimistic-echo guard as the other
+                # boolean body controls.  Both keys are only sent for
+                # nodes that have them, so nothing else gains dead state.
+                if "playing" in ndata:
+                    node["playing"] = ndata.get("playing", 0)
+                if "overlap" in ndata:
+                    overlap = self._accept_bool_echo(
+                        nid, "overlap", ndata.get("overlap", False)
+                    )
+                    if overlap is not None:
+                        node["overlap"] = bool(overlap)
                 node["connected"] = ndata.get("connected", False)
                 node["is_bluetooth"] = ndata.get("is_bluetooth", False)
                 node["selection_label"] = ndata.get("selection_label", "")
@@ -1687,12 +1761,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             if self._header_block_is_id(node_id, text):
                 continue
             # Must match _draw_header's per-line max_width exactly -
-            # the type label (i == 0) shares its row with the
-            # three-dot menu icon, so it wraps at a narrower width
-            # than the lines below it.
-            max_width = self.node_width(node_id) - (
-                self.HEADER_ICON_RESERVE if i == 0 else 20
-            )
+            # the type label (i == 0) shares its row with the node-type
+            # glyph and the three-dot menu icon, so it wraps at a
+            # narrower width than the lines below it.
+            _left, max_width = self._header_line_layout(node_id, node, i)
             wrapped_h = wrapped_text_height(self, text, max_width, font_size)
             extra += max(0.0, wrapped_h - self._single_line_height(font_size))
         return extra
@@ -1835,11 +1907,38 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             # nothing is wired into the ctrl input, and a read-only white
             # state indicator once a boolean signal drives the node.
             return self.GATE_AREA_HEIGHT
-        if spec.control in ("gate", "switcher", "boolean"):
+        if spec.control in ("gate", "switcher", "boolean", "impulse"):
+            # The impulse Button's face is the same big rounded rect the
+            # gate toggle draws (see _gate_rect / _draw_impulse_button),
+            # so it claims the same height.
             return self.GATE_AREA_HEIGHT
         if spec.has_extra_row:
-            return 25
+            # The generic bottom block: the inline field/control row, plus
+            # (for a node with one) the gap and the switch row above it -
+            # the node grows by the gap so the switch clears the field.
+            extra = self.TOGGLE_ROW_GAP + self.TOGGLE_ROW_HEIGHT
+            return 25 + (extra if spec.toggle else 0)
         return 0
+
+    def _toggle_switch_rect(self, nid):
+        """Geometry of a `toggle` row's inline on/off switch - single
+        source of truth shared by drawing (_draw_toggle_row) and
+        hit-testing (find_toggle_switch_at), like _gate_rect.
+
+        The switch's top edge is derived from _bottom_control_height (the
+        reserved block, which already contains TOGGLE_ROW_GAP above the
+        field row, so the switch can't ride the field's top edge), so the
+        reserved height, the drawn switch and its hit-test can't drift."""
+        node = self.nodes[nid]
+        x = (
+            node["x"] + self.NODE_WIDTH - self.FIELD_MARGIN
+            - self.TOGGLE_SWITCH_WIDTH
+        )
+        y = (
+            node["y"] + self.node_height(nid)
+            - (self._bottom_control_height(node) + 2)
+        )
+        return (x, y, self.TOGGLE_SWITCH_WIDTH, self.TOGGLE_SWITCH_HEIGHT)
 
     def _header_stack_height(self, node_id, node):
         """Pixel height of everything drawn in the node's header block,
@@ -1848,13 +1947,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         blocks = self._header_blocks(node_id, node)
         total = self.HEADER_TOP_PAD
         for i, (text, font_size, _color) in enumerate(blocks):
-            if node["type"] in self._PORT_IN_TYPES | self._PORT_OUT_TYPES:
-                reserve = 20
-            else:
-                reserve = self.HEADER_ICON_RESERVE if i == 0 else 20
-                if i == 0 and spec_for(node["type"]).settings:
-                    reserve += 22  # room for the settings cog too
-            max_width = self.node_width(node_id) - reserve
+            _left, max_width = self._header_line_layout(node_id, node, i)
             if self._header_block_is_id(node_id, text):
                 # Ellipsized to a single line - see _draw_header.
                 total += self._single_line_height(font_size)
@@ -1893,7 +1986,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             bottom = self._bottom_control_height(node)
             return top, bottom
 
-        if len(node.get("inputs", [])) <= 1:
+        # A single socket on *both* sides is the legacy case: centred in
+        # the body with the header's height added symmetrically.  A node
+        # with several sockets on either side (Echo Cancel's inputs, a
+        # Split Bundle's many outputs, ...) labels them and must clear the
+        # header below it.
+        if max(len(node.get("inputs", [])), len(node.get("outputs", []))) <= 1:
             offset = 0
             if node.get("meta", {}).get("description") or node.get("label"):
                 offset += 20
@@ -1902,7 +2000,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             offset += self._bottom_control_height(node)
             return offset, offset
 
-        # Labelled sockets (more than one input, e.g. Echo Cancel):
+        # Labelled sockets (more than one on a side, e.g. Echo Cancel or
+        # a Split Bundle):
         # sit below the wrapped header on top and clear of the bottom
         # control too, so an input switch's "a"/"b" circles never land
         # on the A/B button.
@@ -1935,6 +2034,140 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         else:
             y = node["y"] + top + band * (index + 1) / (total + 1)
         return (x, y)
+
+    @staticmethod
+    def _apply_dynamic_ports(node, ndata):
+        """Apply the daemon-reported dynamic ports.
+
+        A Bundle merge node reports ``bundle_inputs`` (one socket per
+        plugged line plus a spare) so it grows an input each time one is
+        used; a Bundle Split node reports ``bundle_members`` (one output
+        socket per live member, with a readable label each).  Any other
+        node keeps its static spec ports."""
+        merge_inputs = ndata.get("bundle_inputs")
+        filter_inputs = ndata.get("filter_inputs")
+        if merge_inputs:
+            node["inputs"] = list(merge_inputs)
+        elif filter_inputs:
+            # Bundle in first, then the classifier sockets.
+            node["inputs"] = ["in"] + list(filter_inputs)
+        members = ndata.get("bundle_members")
+        if not members:
+            node.pop("output_labels", None)
+            return
+        ports = []
+        labels = {}
+        for member in members:
+            port = member.get("port")
+            if not port or port in labels:
+                continue
+            ports.append(port)
+            labels[port] = member.get("label") or port
+        node["outputs"] = ports
+        node["output_labels"] = labels
+
+    @staticmethod
+    def _socket_color(pal, kind, is_output):
+        """The palette colour for a socket of `kind`.  Bundle, filter and
+        impulse sockets are not audio, so they get their own cool colours
+        instead of the input/output green/red."""
+        if kind == "boolean":
+            return pal["boolean_port"]
+        if kind == "bundle":
+            return pal["bundle_port"]
+        if kind == "filter":
+            return pal["filter_port"]
+        if kind == "impulse":
+            return pal["impulse_port"]
+        return pal["output_port"] if is_output else pal["input_port"]
+
+    @staticmethod
+    def _trace_socket(cr, sx, sy, kind):
+        """Trace one socket's path (not fill/stroke it).  Audio, boolean
+        and impulse sockets are circles; a *bundle* (a set of streams on
+        one wire) or *filter* (a classifier predicate) socket is a
+        diamond, so "this port is not one signal" reads before its wire
+        is drawn.  An impulse is a filled dot of its own colour instead -
+        it pairs only with another impulse socket, and its wire's short
+        dash (see IMPULSE_DASH) is what marks it as an event."""
+        r = PatchSpaceGraphWidget.SOCKET_RADIUS
+        if kind in ("bundle", "filter"):
+            d = r * 1.4
+            cr.move_to(sx, sy - d)
+            cr.line_to(sx + d, sy)
+            cr.line_to(sx, sy + d)
+            cr.line_to(sx - d, sy)
+            cr.close_path()
+        else:
+            cr.arc(sx, sy, r, 0, 2 * math.pi)
+
+    def _edge_wire_kind(self, edge):
+        """The kind of signal an edge carries, from its two endpoints:
+        "filter" / "bundle" / "boolean" / "impulse" / "audio".  A bundle
+        wire is dotted and cannot pair with a boolean/filter/impulse
+        wire, so either endpoint's kind is authoritative for its group."""
+        src = self.nodes.get(edge.get("from_node"))
+        dst = self.nodes.get(edge.get("to_node"))
+        kinds = []
+        if src is not None:
+            kinds.append(port_kind(src["type"], edge.get("from_port", "out"), "out"))
+        if dst is not None:
+            kinds.append(port_kind(dst["type"], edge.get("to_port", "in"), "in"))
+        for special in ("filter", "bundle", "boolean", "impulse"):
+            if special in kinds:
+                return special
+        return "audio"
+
+    @staticmethod
+    def _wire_color(pal, kind):
+        if kind == "boolean":
+            return pal["boolean_port"]
+        if kind == "bundle":
+            return pal["bundle_port"]
+        if kind == "filter":
+            return pal["filter_port"]
+        if kind == "impulse":
+            return pal["impulse_port"]
+        return pal["link"]
+
+    @staticmethod
+    def _wire_dash(kind):
+        """The dash pattern for one wire kind, or None for a solid line.
+        Bundle and filter wires are dashed alike; an impulse gets a
+        shorter, tighter mark so a momentary event never reads as a
+        (dashed) bundle of streams."""
+        if kind == "impulse":
+            return IMPULSE_DASH
+        if kind in ("bundle", "filter"):
+            return BUNDLE_DASH
+        return None
+
+    def _field_rect(self, nid):
+        """Geometry of a node's inline text field - single source of truth
+        shared by drawing (_draw_text_field), hit-testing (find_field_at)
+        and the live status read-out that shares the field's row on the
+        right for a node that has one (see _play_indicator_rect).  The
+        field gives up INDICATOR_WIDTH there instead of sliding under it."""
+        node = self.nodes[nid]
+        spec = spec_for(node["type"])
+        x = node["x"] + self.FIELD_MARGIN
+        w = self.NODE_WIDTH - 2 * self.FIELD_MARGIN
+        if spec.indicator:
+            w -= self.INDICATOR_WIDTH + 6
+        y = node["y"] + self.node_height(nid) - self.FIELD_HEIGHT - 5
+        return (x, y, w, self.FIELD_HEIGHT)
+
+    def _play_indicator_rect(self, nid):
+        """(dot_x, dot_y, dot_r, text_right) for a node's live status
+        read-out: a status dot hard against the node's bottom-right
+        corner, with its count right-aligned just to the left of it.
+        Only nodes whose spec declares ``indicator`` have one."""
+        node = self.nodes[nid]
+        fx, fy, _fw, fh = self._field_rect(nid)
+        dot_r = 5.0
+        dot_x = node["x"] + self.NODE_WIDTH - self.FIELD_MARGIN - dot_r
+        dot_y = fy + fh / 2.0
+        return (dot_x, dot_y, dot_r, dot_x - dot_r - 5.0)
 
     def _gate_rect(self, nid):
         """Geometry of the big gate toggle - single source of truth
@@ -3595,6 +3828,32 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 return nid
         return None
 
+    def find_impulse_button_at(self, x, y):
+        """The Button node's clickable face.  Same geometry as the gate
+        toggle (see _gate_rect), because it is drawn the same way."""
+        for nid, node in self._hit_nodes(x, y):
+            if spec_for(node["type"]).control != "impulse":
+                continue
+            gx, gy, gw, gh = self._gate_rect(nid)
+            if gx <= x <= gx + gw and gy <= y <= gy + gh:
+                return nid
+        return None
+
+    def find_toggle_switch_at(self, x, y):
+        """The node-body on/off switch a spec declares with ``toggle``
+        (the Sound Effect's Stack switch).  Geometry comes from
+        _toggle_switch_rect, so it matches the drawn switch.
+
+        Config action: reachable even while the node isn't ready - it is
+        a setting, not a live control (same rule as find_field_at)."""
+        for nid, node in self._hit_nodes(x, y, require_ready=False):
+            if not spec_for(node["type"]).toggle:
+                continue
+            sx, sy, sw, sh = self._toggle_switch_rect(nid)
+            if sx <= x <= sx + sw and sy <= y <= sy + sh:
+                return nid
+        return None
+
     def find_mute_checkbox_at(self, x, y):
         return self._find_bottom_checkbox_at(
             x,
@@ -3633,13 +3892,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         for nid, node in self._hit_nodes(x, y, require_ready=False):
             if not spec_for(node["type"]).field:
                 continue
-            node_h = self.node_height(nid)
-            field_y = node["y"] + node_h - self.FIELD_HEIGHT - 5
-            field_x = node["x"] + self.FIELD_MARGIN
-            field_w = self.NODE_WIDTH - 2 * self.FIELD_MARGIN
+            field_x, field_y, field_w, field_h = self._field_rect(nid)
             if (
                 field_x <= x <= field_x + field_w
-                and field_y <= y <= field_y + self.FIELD_HEIGHT
+                and field_y <= y <= field_y + field_h
             ):
                 return nid
         return None
@@ -3795,14 +4051,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 max(out_x, in_x), max(out_y, in_y),
             ):
                 continue
-            src_node = self.nodes[edge["from_node"]]
-            is_bool = (
-                port_kind(
-                    src_node["type"], edge.get("from_port", "out"), "out"
-                )
-                == "boolean"
-            )
-            color = pal["boolean_port"] if is_bool else pal["link"]
+            kind = self._edge_wire_kind(edge)
+            color = self._wire_color(pal, kind)
             if points:
                 wire_pts = points
             else:
@@ -3810,6 +4060,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 # stubbed Z keeps the no-bezier invariant and still exits
                 # each socket sideways.
                 wire_pts = self._stubbed_fallback(out_x, out_y, in_x, in_y)
+            dash = self._wire_dash(kind)
+            if dash is not None:
+                cr.set_dash(dash)
             # A connection the user just made draws itself in from source to
             # target, with a fading leading tip (see _draw_growing_wire).
             born = self._edge_born.get(eid)
@@ -3820,9 +4073,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     self._draw_growing_wire(
                         cr, wire_pts, color, self._ease_in_out(t)
                     )
+                    cr.set_dash([])
                     continue
             cr.set_source_rgb(*color)
             draw_square_path(cr, wire_pts)
+            cr.set_dash([])
 
         # Removed connections retract (the draw-in run in reverse: the
         # visible tip walks back from the target to the source).
@@ -3837,11 +4092,16 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 _ys = [p[1] for p in pts]
                 if not self._rect_visible(min(_xs), min(_ys), max(_xs), max(_ys)):
                     continue
+                gkind = g.get("kind", "boolean" if g.get("is_bool") else "audio")
+                gdash = self._wire_dash(gkind)
+                if gdash is not None:
+                    cr.set_dash(gdash)
                 self._draw_growing_wire(
                     cr, pts,
-                    pal["boolean_port"] if g["is_bool"] else pal["link"],
+                    self._wire_color(pal, gkind),
                     self._ease_in_out(1.0 - t),
                 )
+                cr.set_dash([])
 
         for nid, node in self.nodes.items():
             if not self._node_revealed(nid):
@@ -3979,12 +4239,20 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             if node:
                 sx, sy = self._socket_position(nid, "out", idx)
                 cx, cy = self.drag_current_xy
-                cr.set_source_rgb(*pal["pending_link"])
+                kind = port_kind(node["type"], node["outputs"][idx], "out")
+                dash = self._wire_dash(kind)
+                if dash is not None:
+                    color = self._wire_color(pal, kind)
+                    cr.set_dash(dash)
+                else:
+                    color = pal["pending_link"]
+                cr.set_source_rgb(*color)
                 cr.set_line_width(2)
                 # Rubber band while dragging a new connection: a smooth
                 # sigmoid curve (square routing would look terrible mid-
                 # gesture, and the final wire is re-routed on release).
                 draw_bezier_link(cr, sx, sy, cx, cy)
+                cr.set_dash([])
 
         cr.restore()
 
@@ -4033,17 +4301,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         points = self._wire_routes.get(eid) or self._route_cache.get(eid)
         if not points:
             return
-        src = self.nodes.get(edge.get("from_node"))
-        is_bool = (
-            src is not None
-            and port_kind(
-                src["type"], edge.get("from_port", "out"), "out"
-            ) == "boolean"
-        )
+        kind = self._edge_wire_kind(edge)
         self._edge_ghosted.add(eid)
         self._edge_ghosts[eid] = {
             "points": list(points),
-            "is_bool": is_bool,
+            "kind": kind,
+            "is_bool": kind == "boolean",
             "t0": time.monotonic(),
         }
 
@@ -4053,6 +4316,21 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         edge = self.edges.get(eid)
         if edge is not None:
             self._start_edge_ghost(eid, edge)
+
+    def _impulse_flash_progress(self, nid):
+        """0..1 progress through a button's press pulse, or None when it
+        isn't pulsing.  The flash is local (see _impulse_flash) and ages
+        out in _anim_tick, which also keeps repainting while it runs."""
+        t0 = self._impulse_flash.get(nid)
+        if t0 is None:
+            return None
+        dur = IMPULSE_FLASH_MS / 1000.0
+        if dur <= 0:
+            return None
+        t = (time.monotonic() - t0) / dur
+        if t >= 1.0:
+            return None
+        return t
 
     def _node_scale(self, nid):
         born = self._node_born.get(nid)
@@ -4143,6 +4421,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 else:
                     active = True
             self._edge_ghosted = set(self._edge_ghosts)
+        # Button press pulses (local, see _impulse_flash).
+        if self._impulse_flash:
+            dur = IMPULSE_FLASH_MS / 1000.0
+            for nid, t0 in list(self._impulse_flash.items()):
+                if dur <= 0 or now - t0 >= dur:
+                    del self._impulse_flash[nid]
+                else:
+                    active = True
         if active:
             self.queue_draw()
         return True
@@ -4302,6 +4588,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         cr.set_dash([])
 
         if node["type"] not in self._PORT_IN_TYPES | self._PORT_OUT_TYPES:
+            # The node-type glyph in the header's top-left corner, tinted
+            # with the node's category colour.  Drawn before the header
+            # text, which _header_line_layout insets to clear it.
+            icon_type = "mute" if is_mute_node(nid) else node["type"]
+            self._draw_node_icon(
+                cr, icon_for_add_node_type(icon_type),
+                x + 9, y + 9, self.NODE_ICON_SIZE, border_color,
+            )
             self._draw_anchor_icon(
                 cr, pal, x, y, node_w, nid in self.anchored_nodes
             )
@@ -4349,8 +4643,18 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self._draw_threshold_slider(
                 cr, x, y, node_h, node.get("sensitivity", 0.0)
             )
+        elif spec.control == "impulse":
+            self._draw_impulse_button(cr, nid, node)
         elif spec.field:
-            self._draw_text_field(cr, x, y, node_h, self._field_value(node))
+            self._draw_text_field(cr, nid, self._field_value(node))
+
+        # The node-body switch and the live status read-out sit with the
+        # inline field, not instead of it, so they are keyed off the spec
+        # rather than the control/field dispatch above.
+        if spec.toggle:
+            self._draw_toggle_row(cr, pal, nid, node)
+        if spec.indicator:
+            self._draw_play_indicator(cr, pal, nid, node)
 
         for i, row_kind in enumerate(self._device_rows(node)):
             self._draw_device_row(cr, nid, node, i, row_kind)
@@ -4370,11 +4674,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         multi_input = len(node["inputs"]) > 1
         for i in range(len(node["inputs"])):
             sx, sy = self._socket_position(nid, "in", i)
-            is_bool = port_kind(node["type"], node["inputs"][i], "in") == "boolean"
-            cr.set_source_rgb(
-                *(pal["boolean_port"] if is_bool else pal["input_port"])
-            )
-            cr.arc(sx, sy, self.SOCKET_RADIUS, 0, 2 * math.pi)
+            kind = port_kind(node["type"], node["inputs"][i], "in")
+            cr.set_source_rgb(*self._socket_color(pal, kind, False))
+            self._trace_socket(cr, sx, sy, kind)
             cr.fill()
             # A single "in" socket is self-explanatory and every node
             # type had exactly that until EchoCancelNode - only label
@@ -4396,29 +4698,57 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         for i in range(len(node["outputs"])):
             sx, sy = self._socket_position(nid, "out", i)
             is_source = self.connecting_from == (nid, i)
-            is_bool = port_kind(node["type"], node["outputs"][i], "out") == "boolean"
+            kind = port_kind(node["type"], node["outputs"][i], "out")
             cr.set_source_rgb(
                 *(
                     pal["select"]
                     if is_source
-                    else (pal["boolean_port"] if is_bool else pal["output_port"])
+                    else self._socket_color(pal, kind, True)
                 )
             )
-            cr.arc(sx, sy, self.SOCKET_RADIUS, 0, 2 * math.pi)
+            self._trace_socket(cr, sx, sy, kind)
             cr.fill()
-            # Multi-output nodes (today only the Switcher's "a"/"b") get
-            # their sockets labelled, right-aligned inside the node body;
-            # a lone "out" socket is self-explanatory and left unlabelled.
+            # Multi-output nodes get their sockets labelled inside the
+            # node body: the Switcher's short "a"/"b" right-aligned in a
+            # narrow box, a Split Bundle's member lines in a wider box so
+            # an app name is readable.  A lone "out" socket needs no label.
             if multi_output and spec.socket_labels:
-                draw_text_ellipsized(
-                    cr,
-                    sx - 25,
-                    sy - 5,
-                    node["outputs"][i],
-                    14,
-                    8,
-                    pal["subtext"],
-                )
+                labels = node.get("output_labels")
+                if labels:
+                    draw_text_ellipsized(
+                        cr,
+                        sx - 92,
+                        sy - 5,
+                        labels.get(node["outputs"][i], node["outputs"][i]),
+                        80,
+                        8,
+                        pal["subtext"],
+                    )
+                else:
+                    draw_text_ellipsized(
+                        cr,
+                        sx - 25,
+                        sy - 5,
+                        node["outputs"][i],
+                        14,
+                        8,
+                        pal["subtext"],
+                    )
+
+    def _header_line_layout(self, nid, node, i):
+        """(left_inset, max_width) for header line `i`, shared by
+        _draw_header and the two height measurements so they can never
+        disagree about how a line wraps.  The first line shares its row
+        with the node-type glyph on the left and the anchor/three-dot/
+        settings badges on the right, so it is inset on both sides; the
+        lines below only clear the right-side content."""
+        if node["type"] in self._PORT_IN_TYPES | self._PORT_OUT_TYPES:
+            return 0.0, self.node_width(nid) - 20
+        reserve = self.HEADER_ICON_RESERVE if i == 0 else 20
+        if i == 0 and spec_for(node["type"]).settings:
+            reserve += 22  # room for the settings cog too
+        left = self.NODE_ICON_LEFT_RESERVE if i == 0 else 0
+        return float(left), self.node_width(nid) - reserve - left
 
     def _draw_header(self, cr, pal, nid, node, x, y, color=None):
         """Draw every _header_blocks() line, stacked top to bottom by each
@@ -4433,28 +4763,17 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         for i, (text, font_size, color_key) in enumerate(
             self._header_blocks(nid, node)
         ):
-            # The first line (the type label) shares its row with the
-            # anchor/three-dot/settings badges in the top-right corner, so
-            # it gets a narrower width than every line below it.  Ports
-            # have no badges, so they keep the full width for their label.
-            if node["type"] in self._PORT_IN_TYPES | self._PORT_OUT_TYPES:
-                reserve = 20
-            else:
-                base = self.HEADER_ICON_RESERVE if i == 0 else 20
-                if i == 0 and spec_for(node["type"]).settings:
-                    base += 22  # room for the settings cog too
-                reserve = base
-            max_width = self.node_width(nid) - reserve
+            left, max_width = self._header_line_layout(nid, node, i)
             text_rgb = color if color is not None else pal[color_key]
             if self._header_block_is_id(nid, text):
                 draw_text_ellipsized(
-                    cr, x + 10, text_y, text, max_width, font_size,
+                    cr, x + 10 + left, text_y, text, max_width, font_size,
                     text_rgb,
                 )
                 block_h = self._single_line_height(font_size)
             else:
                 block_h = draw_text_wrapped(
-                    cr, x + 10, text_y, text, max_width, font_size,
+                    cr, x + 10 + left, text_y, text, max_width, font_size,
                     text_rgb,
                 )
             text_y += block_h + self.HEADER_BLOCK_GAP
@@ -4515,6 +4834,66 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             cr.arc(dot_x, start_y + i * 6, 2.2, 0, 2 * math.pi)
             cr.set_source_rgb(0.7, 0.7, 0.7)
             cr.fill()
+
+    def _node_icon_pixbuf(self, icon_name, size, rgb):
+        """Render a symbolic GTK icon to a GdkPixbuf tinted `rgb`, cached
+        per (name, size, colour).  GTK4 has no way to paint a symbolic
+        icon onto a foreign cairo context directly, so the paintable is
+        snapshotted and run through a Gsk.CairoRenderer to a texture,
+        then decoded to a pixbuf (which cairo *can* draw).  Failures
+        (no display, missing icon) cache None so we don't retry every
+        frame."""
+        key = (icon_name, size, rgb)
+        cache = self._node_icon_cache
+        if key in cache:
+            return cache[key]
+        pixbuf = None
+        try:
+            display = self.get_display() or Gdk.Display.get_default()
+            if display is None:
+                # Not realized yet - don't cache a miss that would stick.
+                return None
+            if icon_name:
+                theme = Gtk.IconTheme.get_for_display(display)
+                paintable = theme.lookup_icon(
+                    icon_name, None, size, 1, Gtk.TextDirection.NONE,
+                    Gtk.IconLookupFlags.FORCE_SYMBOLIC,
+                )
+                if paintable is not None:
+                    colour = Gdk.RGBA()
+                    colour.red, colour.green, colour.blue = rgb
+                    colour.alpha = 1.0
+                    snapshot = Gtk.Snapshot.new()
+                    paintable.snapshot_symbolic(snapshot, size, size, [colour])
+                    node = snapshot.to_node()
+                    if node is not None:
+                        renderer = Gsk.CairoRenderer.new()
+                        renderer.realize(None)
+                        try:
+                            texture = renderer.render_texture(node, None)
+                        finally:
+                            renderer.unrealize()
+                        if texture is not None:
+                            png = texture.save_to_png_bytes()
+                            loader = GdkPixbuf.PixbufLoader.new_with_type("png")
+                            loader.write(png.get_data())
+                            loader.close()
+                            pixbuf = loader.get_pixbuf()
+        except Exception:
+            logger.debug("Could not render node icon %r", icon_name, exc_info=True)
+        cache[key] = pixbuf
+        return pixbuf
+
+    def _draw_node_icon(self, cr, icon_name, x, y, size, rgb):
+        pixbuf = self._node_icon_pixbuf(icon_name, size, rgb)
+        if pixbuf is None:
+            return
+        cr.save()
+        ox = x + (size - pixbuf.get_width()) / 2.0
+        oy = y + (size - pixbuf.get_height()) / 2.0
+        Gdk.cairo_set_source_pixbuf(cr, pixbuf, ox, oy)
+        cr.paint()
+        cr.restore()
 
     @staticmethod
     def _settings_cog_center(x, y, width):
@@ -4822,12 +5201,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     def _draw_mute_checkbox(self, cr, x, y, node_h, volume):
         self._draw_check_row(cr, x, y, node_h, volume > 0.5, "Pass audio")
 
-    def _draw_text_field(self, cr, x, y, node_h, value):
-        field_y = y + node_h - self.FIELD_HEIGHT - 5
-        field_w = self.NODE_WIDTH - 2 * self.FIELD_MARGIN
-        field_x = x + self.FIELD_MARGIN
+    def _draw_text_field(self, cr, nid, value):
+        field_x, field_y, field_w, field_h = self._field_rect(nid)
 
-        draw_rounded_rect(cr, field_x, field_y, field_w, self.FIELD_HEIGHT, 4)
+        draw_rounded_rect(cr, field_x, field_y, field_w, field_h, 4)
         cr.set_source_rgb(0.14, 0.14, 0.15)
         cr.fill_preserve()
         cr.set_source_rgb(0.42, 0.42, 0.45)
@@ -4838,7 +5215,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         color = (0.85, 0.85, 0.86) if value else (0.5, 0.5, 0.53)
         font_size = 10
 
-        baseline_y = field_y + (self.FIELD_HEIGHT - font_size) // 2
+        baseline_y = field_y + (field_h - font_size) // 2
         draw_text_ellipsized(
             cr,
             field_x + 6,
@@ -4848,6 +5225,125 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             font_size,
             color,
         )
+
+    def _draw_toggle_row(self, cr, pal, nid, node):
+        """The node-body switch declared by ``spec.toggle`` - an
+        (attr, label) the user flips in place (the Sound Effect's Stack
+        behaviour).  Drawn as the gate toggle's two-segment on/off switch,
+        sized down to sit inline above the path field with its caption to
+        the left: the active segment is filled (theme success green for
+        On, a neutral grey for Off - "off" here is a choice, not a fault),
+        the inactive one stays recessed.  Geometry comes from
+        _toggle_switch_rect, which the hit-test shares."""
+        attr, caption = spec_for(node["type"]).toggle
+        on = bool(node.get(attr, False))
+        x, y, w, h = self._toggle_switch_rect(nid)
+        radius = h / 2.0
+        half = w / 2.0
+
+        cr.select_font_face("sans")
+        cr.set_font_size(10)
+        cr.set_source_rgb(*pal["subtext"])
+        extents = cr.text_extents(caption)
+        cr.move_to(node["x"] + self.FIELD_MARGIN,
+                   y + (h - extents.height) / 2 - extents.y_bearing)
+        cr.show_text(caption)
+
+        draw_rounded_rect(cr, x, y, w, h, radius)
+        cr.set_source_rgb(0.20, 0.20, 0.22)
+        cr.fill_preserve()
+        cr.set_source_rgb(0.46, 0.46, 0.49)
+        cr.set_line_width(1.0)
+        cr.stroke()
+
+        active = 0 if on else 1
+        active_color = pal["success"] if on else (0.42, 0.42, 0.45)
+        cr.set_font_size(9)
+        for i, label in enumerate(("On", "Off")):
+            seg_x = x + i * half
+            if i == active:
+                draw_rounded_rect(cr, seg_x + 1.5, y + 1.5, half - 3, h - 3,
+                                  radius - 1.5)
+                cr.set_source_rgb(*active_color)
+                cr.fill()
+            extents = cr.text_extents(label)
+            text_x = seg_x + (half - extents.width) / 2 - extents.x_bearing
+            text_y = y + (h - extents.height) / 2 - extents.y_bearing
+            if i == active and on:
+                # Dark text reads on the success green.
+                cr.set_source_rgb(0.06, 0.16, 0.09)
+            elif i == active:
+                cr.set_source_rgb(0.88, 0.88, 0.90)
+            else:
+                cr.set_source_rgb(0.62, 0.62, 0.65)
+            cr.move_to(text_x, text_y)
+            cr.show_text(label)
+
+    def _draw_play_indicator(self, cr, pal, nid, node):
+        """Live "is it making sound" read-out for a node whose spec
+        declares an indicator: a dot at the bottom-right of the node body
+        and the number of running streams to its left.  Green while
+        anything is playing, dim otherwise - a momentary trigger has no
+        other way to show it happened."""
+        dot_x, dot_y, dot_r, text_right = self._play_indicator_rect(nid)
+        count = int(node.get("playing", 0) or 0)
+        playing = count > 0
+        color = pal["success"] if playing else (0.42, 0.42, 0.46)
+
+        cr.select_font_face("sans")
+        cr.set_font_size(10)
+        text = str(count)
+        extents = cr.text_extents(text)
+        cr.set_source_rgb(*(pal["success"] if playing else (0.55, 0.55, 0.58)))
+        cr.move_to(text_right - extents.width, dot_y - extents.height / 2
+                   - extents.y_bearing)
+        cr.show_text(text)
+
+        cr.arc(dot_x, dot_y, dot_r, 0, 2 * math.pi)
+        cr.set_source_rgb(*color)
+        cr.fill()
+
+    def _draw_impulse_button(self, cr, nid, node):
+        """The Button node's clickable face: the gate toggle's big
+        rounded rect, grey while idle and pulsing to the success green
+        for IMPULSE_FLASH_MS after a press (see _impulse_flash), captioned
+        with the node's label ("Trigger" when it has none)."""
+        x, y, w, h = self._gate_rect(nid)
+        radius = 10
+        t = self._impulse_flash_progress(nid)
+
+        idle_fill = (0.30, 0.30, 0.33)
+        idle_border = (0.46, 0.46, 0.49)
+        # Ease the green in and back out so the press reads as a pulse
+        # rather than a one-frame blink (the ticker repaints while it runs).
+        glow = 1.0 - abs(2.0 * t - 1.0) if t is not None else 0.0
+        hot_fill = (0.30, 0.72, 0.42)
+        hot_border = (0.20, 0.46, 0.28)
+        fill = tuple(
+            idle + (hot - idle) * glow for idle, hot in zip(idle_fill, hot_fill)
+        )
+        border = tuple(
+            idle + (hot - idle) * glow
+            for idle, hot in zip(idle_border, hot_border)
+        )
+
+        draw_rounded_rect(cr, x, y, w, h, radius)
+        cr.set_source_rgb(*fill)
+        cr.fill_preserve()
+        cr.set_source_rgb(*border)
+        cr.set_line_width(1.5)
+        cr.stroke()
+
+        label_text = node.get("label") or "Trigger"
+        cr.select_font_face("sans")
+        cr.set_font_size(12)
+        extents = cr.text_extents(label_text)
+        text_x = x + (w - extents.width) / 2 - extents.x_bearing
+        text_y = y + (h - extents.height) / 2 - extents.y_bearing
+        cr.set_source_rgb(*(0.06, 0.16, 0.09) if glow > 0.5
+                          else (0.78, 0.78, 0.80))
+        cr.move_to(text_x, text_y)
+        cr.show_text(label_text)
 
     def _draw_device_row(self, cr, nid, node, row_index, row_kind):
         row_x, row_y, row_w, row_h = self._device_row_rect(nid, row_index)
@@ -4933,6 +5429,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             or self.find_switcher_toggle_at(wx, wy) is not None
             or self.find_boolean_toggle_at(wx, wy) is not None
             or self.find_fallback_toggle_at(wx, wy) is not None
+            or self.find_impulse_button_at(wx, wy) is not None
+            or self.find_toggle_switch_at(wx, wy) is not None
             or self.find_three_dots_at(wx, wy) is not None
             or self.find_anchor_icon_at(wx, wy) is not None
             or self.find_settings_gear_at(wx, wy) is not None
@@ -5133,6 +5631,33 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             else:
                 self._toggle_switch_state(nid)
             self.queue_draw()
+            return
+
+        nid = self.find_impulse_button_at(wx, wy)
+        if nid is not None:
+            # Momentary: fire the pulse and start the local press flash.
+            # Nothing is stored optimistically - a button has no state to
+            # echo - but the nodes it drives re-report their play count,
+            # so refresh once the daemon has had time to react.
+            self._impulse_flash[nid] = time.monotonic()
+            self._send_impulse(nid)
+            self.queue_draw()
+            GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
+            return
+
+        nid = self.find_toggle_switch_at(wx, wy)
+        if nid is not None:
+            attr = spec_for(self.nodes[nid]["type"]).toggle[0]
+            node = self.nodes[nid]
+            value = not bool(node.get(attr, False))
+            node[attr] = value
+            # Same optimistic-echo guard as the other boolean switches: a
+            # poll that raced our in-flight command would otherwise flip
+            # the switch back for a beat (see _accept_bool_echo).
+            self._pending_bool[(nid, attr)] = value
+            self._send_property(nid, attr, value)
+            self.queue_draw()
+            GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
             return
 
         nid = self.find_mute_checkbox_at(wx, wy)
@@ -6039,6 +6564,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             or self.find_switcher_toggle_at(wx, wy) is not None
             or self.find_boolean_toggle_at(wx, wy) is not None
             or self.find_fallback_toggle_at(wx, wy) is not None
+            or self.find_impulse_button_at(wx, wy) is not None
+            or self.find_toggle_switch_at(wx, wy) is not None
             or self.find_three_dots_at(wx, wy) is not None
             or self.find_anchor_icon_at(wx, wy) is not None
             or self.find_settings_gear_at(wx, wy) is not None
@@ -6319,16 +6846,23 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     def _ports_compatible(self, from_nid, from_port, to_nid, to_port):
         """Whether an edge from (from_nid, from_port) to (to_nid,
-        to_port) is legal: both ports must be the same kind (audio with
-        audio, boolean with boolean).  Mirrors the daemon's add_edge
-        check so the GUI never sends a connection it knows will fail."""
+        to_port) is legal.  Mirrors the daemon's add_edge check: boolean
+        pairs only with boolean, impulse only with impulse and filter only
+        with filter, while audio and bundle ports may pair either way (a
+        bundle is a set of audio streams; one stream is a bundle of one)."""
         src = self.nodes.get(from_nid)
         dst = self.nodes.get(to_nid)
         if src is None or dst is None:
             return False
-        return port_kind(src["type"], from_port, "out") == port_kind(
-            dst["type"], to_port, "in"
-        )
+        from_kind = port_kind(src["type"], from_port, "out")
+        to_kind = port_kind(dst["type"], to_port, "in")
+        if (from_kind == "boolean") != (to_kind == "boolean"):
+            return False
+        if (from_kind == "impulse") != (to_kind == "impulse"):
+            return False
+        if (from_kind == "filter") != (to_kind == "filter"):
+            return False
+        return True
 
     def on_drag_end(self, gesture, offset_x, offset_y):
         # Always clear the transient drag/connection state, even if a
@@ -8746,6 +9280,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             config["media_class"] = "Stream/Input/Audio"
         elif node_type in ("description_input", "description_output"):
             config["description"] = "description"
+        elif node_type == "regex_classifier":
+            config["pattern"] = ".*"
+        elif node_type == "media_class_classifier":
+            # A classifier's side isn't known when it is created, so the
+            # source-side default is just a starting point.
+            config["media_class"] = "Stream/Output/Audio"
+        elif node_type == "description_classifier":
+            config["description"] = "description"
         elif node_type in ("volume", "mute"):
             config["backing_node_name"] = f"volume_{node_id}"
             config["initial_volume"] = 1.0
@@ -8847,6 +9389,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             "device_volume": 1.0,
             "device_name": "",
             "app_name": "",
+            "playing": 0,
+            "overlap": False,
             "connected": False,
             "is_bluetooth": False,
             "selection_label": "",

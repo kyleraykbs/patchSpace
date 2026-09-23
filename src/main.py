@@ -80,7 +80,22 @@ from pwnodes import (
     MediaClassOutputNode,
     DescriptionInputNode,
     DescriptionOutputNode,
+    AllInputsNode,
+    AllOutputsNode,
+    AllAppsNode,
+    ClassifierNode,
+    RegexClassifierNode,
+    MediaClassClassifierNode,
+    DescriptionClassifierNode,
+    ExternalOnlyClassifierNode,
+    FilterNode,
+    BundleToAudioNode,
+    BundleMergeNode,
+    BundleSplitNode,
+    BundleOutputNode,
     SplitterNode,
+    SoundEffectNode,
+    ButtonNode,
     PATCHBAY_VIRTUAL_SINK_NAME,
     PATCHBAY_VIRTUAL_MIC_NAME,
     device_profile_name,
@@ -214,7 +229,22 @@ NODE_TYPE_REGISTRY: Dict[str, type] = {
     "regex_output": RegexOutputNode,
     "media_class_output": MediaClassOutputNode,
     "description_output": DescriptionOutputNode,
+    # Bundles: preset sources, classifiers, filters and terminals.
+    "all_inputs": AllInputsNode,
+    "all_outputs": AllOutputsNode,
+    "all_apps": AllAppsNode,
+    "regex_classifier": RegexClassifierNode,
+    "media_class_classifier": MediaClassClassifierNode,
+    "description_classifier": DescriptionClassifierNode,
+    "external_only_classifier": ExternalOnlyClassifierNode,
+    "filter": FilterNode,
+    "bundle": BundleMergeNode,
+    "bundle_split": BundleSplitNode,
+    "bundle_to_audio": BundleToAudioNode,
+    "bundle_output": BundleOutputNode,
     "splitter": SplitterNode,
+    "button": ButtonNode,
+    "sound_effect": SoundEffectNode,
     "gate": GateNode,
     "switcher": SwitcherNode,
     "inverse_switcher": InverseSwitcherNode,
@@ -334,7 +364,10 @@ _SERIAL_ATTRS = (
     "hf_damp",
     "predelay",
     "force_default",
+    "invert",
     "declarative",
+    "path",
+    "overlap",
 )
 
 # GUI layout state a node may carry.  Serialized separately (only when
@@ -1145,7 +1178,10 @@ class PatchBayDaemon:
         if not new_ids:
             return
         config = self._flatten_panels(tree, only_panels=new_ids)
-        self._load_session(config, declarative=True)
+        # Incremental placement of a live file's sibling: load it in the
+        # file's own schema (no migration) so it matches the placements
+        # already in the graph; a full session load migrates them all.
+        self._load_session(config, declarative=True, migrate=False)
         self._dirty = True
         self._wake_ticker()
 
@@ -1160,7 +1196,8 @@ class PatchBayDaemon:
             "Auto-loading %d panel(s), %d node(s)",
             max(0, len(tree) - 1), len(config["nodes"]),
         )
-        self._load_session(config, declarative=False)
+        # Full load from disk: bring any legacy node shapes forward.
+        self._load_session(config, declarative=False, migrate=True)
         self._panel_mtimes = panels.snapshot(self._panel_dir_paths())
         self._dirty = True
 
@@ -2017,7 +2054,8 @@ class PatchBayDaemon:
                 self._install_panels(tree)
                 config = self._flatten_panels(tree)
                 self._remove_panels_from_space()
-                result = self._load_session(config, declarative=True)
+                # Full reload from disk: migrate any legacy nodes.
+                result = self._load_session(config, declarative=True, migrate=True)
                 result["panels"] = len(tree) - 1
                 self._dirty = True
                 self._wake_ticker()
@@ -2110,7 +2148,9 @@ class PatchBayDaemon:
                 config = self._flatten_panels(
                     {**self.panels, **subtree}, only_panels=set(subtree)
                 )
-                self._load_session(config, declarative=True)
+                # Rebuilding one placement's subtree to match its sibling
+                # keeps the file's own schema (see _load_new_placement).
+                self._load_session(config, declarative=True, migrate=False)
                 self._store_imperative_edges(imperative)
                 self._dirty = True
                 self._wake_ticker()
@@ -2832,7 +2872,8 @@ class PatchBayDaemon:
                 self.space.sync_locked()
         return self._wire_edge_carefully(edge)
 
-    def _load_session(self, config: dict, declarative: bool = False) -> dict:
+    def _load_session(self, config: dict, declarative: bool = False,
+                      migrate: bool = False) -> dict:
         """Stage a full config (same shape export/import already use)
         onto the running PatchSpace: create every node's structural
         pieces up front, bring every BACKED node up one at a time (see
@@ -2850,7 +2891,8 @@ class PatchBayDaemon:
         # the lossless fixes run here (no group collapsing, no orphan
         # pruning) - see session_repair.repair.
         repaired = session_repair.repair(
-            config, known_types=set(NODE_TYPE_REGISTRY), dedupe_groups=False
+            config, known_types=set(NODE_TYPE_REGISTRY), dedupe_groups=False,
+            migrate=migrate,
         )
         if repaired.fixes:
             logger.info(
@@ -3257,7 +3299,8 @@ class PatchBayDaemon:
         def _run():
             self._begin_heavy_load()
             try:
-                self._load_session(config)
+                # Explicit user session load/import: migrate legacy nodes.
+                self._load_session(config, migrate=True)
             except Exception:
                 logger.exception("Background session load failed")
             finally:
@@ -3407,8 +3450,35 @@ class PatchBayDaemon:
             return cls(node_id, g("media_class", ""), g("port_type"))
         if cls is DescriptionOutputNode:
             return cls(node_id, g("description", ""), g("port_type"))
+        if cls in (AllInputsNode, AllOutputsNode, AllAppsNode):
+            return cls(node_id)
+        if cls is RegexClassifierNode:
+            return cls(node_id, g("pattern", ""), g("invert", False))
+        if cls is MediaClassClassifierNode:
+            return cls(node_id, g("media_class", ""), g("invert", False))
+        if cls is DescriptionClassifierNode:
+            return cls(node_id, g("description", ""), g("invert", False))
+        if cls is ExternalOnlyClassifierNode:
+            return cls(node_id, g("invert", False))
+        if cls is FilterNode:
+            return cls(node_id)
+        if cls in (BundleMergeNode, BundleSplitNode):
+            return cls(node_id)
+        if cls is BundleToAudioNode:
+            return cls(node_id)
+        if cls is BundleOutputNode:
+            return cls(node_id, backing)
         if cls is SplitterNode:
             return cls(node_id, backing)
+        if cls is ButtonNode:
+            return cls(node_id)
+        if cls is SoundEffectNode:
+            return cls(
+                node_id,
+                backing,
+                g("path", ""),
+                g("overlap", False),
+            )
         if cls is GateNode:
             return cls(node_id, g("enabled", True))
         if cls in (SwitcherNode, InverseSwitcherNode):
@@ -3867,6 +3937,27 @@ class PatchBayDaemon:
             self._dirty = True
             return {"status": "ok"}
 
+    def _cmd_impulse(self, cmd: dict) -> dict:
+        """Fire one impulse out of a Button node (see PatchSpace.pulse).
+
+        The button carries no state, so there is nothing to store: the
+        command walks the impulse edges leaving the node and triggers
+        every node it reaches.  The reply names them so a press that
+        reached nothing is visible in the log instead of being silent."""
+        node_id = cmd.get("node_id")
+        if not node_id:
+            return {"status": "error", "message": "node_id required"}
+        node = self.space.nodes.get(node_id)
+        if not isinstance(node, ButtonNode):
+            return {
+                "status": "error",
+                "message": f"Node {node_id} is not a button",
+            }
+        fired = self.space.pulse(node_id)
+        if not fired:
+            logger.info("Impulse from %r reached no impulse inputs", node_id)
+        return {"status": "ok", "fired": fired}
+
     def _cmd_set_node_property(self, cmd: dict) -> dict:
         node_id = cmd.get("node_id")
         prop = cmd.get("property")
@@ -3893,6 +3984,7 @@ class PatchBayDaemon:
                 "warp_name",
                 "port_name",
                 "default_state",
+                "path",
             ):
                 if hasattr(node, prop):
                     setattr(node, prop, value)
@@ -3901,6 +3993,13 @@ class PatchBayDaemon:
                         "status": "error",
                         "message": f"Node has no {prop!r} property",
                     }
+            elif prop == "overlap" and isinstance(node, SoundEffectNode):
+                # Retrigger behaviour (the node's Stack switch): off
+                # (default) restarts the sound, on lets impulses stack
+                # (see SoundEffectNode).
+                node.overlap = bool(value)
+            elif prop == "invert" and isinstance(node, ClassifierNode):
+                node.invert = bool(value)
             elif prop == "force_default" and self._line_volume_target(node) is not None:
                 # The line nodes share the built-in's force flag; set it on
                 # the built-in and mirror it back onto every line node.
@@ -4627,6 +4726,24 @@ class PatchBayDaemon:
                 # acoustically dead effect) with something stronger than
                 # the neutral "not connected yet" badge. See _node_health.
                 data["health"] = self._node_health(node)
+            if isinstance(node, SoundEffectNode):
+                # How many playback streams are live right now, so the
+                # GUI can light the node's play indicator (see
+                # SoundEffectNode.playing).
+                data["playing"] = node.playing
+            if isinstance(node, FilterNode):
+                # One dynamic filter socket per wired classifier plus a
+                # spare, so a single Filter can hold many classifiers.
+                data["filter_inputs"] = self.space.filter_input_ports(node_id)
+            if isinstance(node, BundleMergeNode):
+                # One dynamic input socket per plugged-in line plus a
+                # spare, so the GUI grows a socket each time one is used.
+                data["bundle_inputs"] = self.space.bundle_input_ports(node_id)
+            if isinstance(node, BundleSplitNode):
+                # One dynamic output socket per live member, so the GUI can
+                # draw a line per stream (port key = the member's node.name;
+                # label is what to show beside it).
+                data["bundle_members"] = self.space.bundle_members(node_id)
             if isinstance(node, LiveResolvableNode):
                 data["connected"] = node.live_node_id is not None
                 data["is_bluetooth"] = node.live_props.get("device.api") == "bluez5"
@@ -4721,6 +4838,8 @@ class PatchBayDaemon:
                 response = self._cmd_remove_edge(cmd)
             elif command == "set_gate":
                 response = self._cmd_set_gate(cmd)
+            elif command == "impulse":
+                response = self._cmd_impulse(cmd)
             elif command == "set_volume":
                 response = self._cmd_set_volume(cmd)
             elif command == "set_volume_range":

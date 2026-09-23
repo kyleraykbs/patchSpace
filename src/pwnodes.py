@@ -571,6 +571,21 @@ class BackedNode(Node):
         pass; the daemon debounces the exact timing."""
         self._reload_due = _time.monotonic()
 
+    def owned_backings(self) -> List[OwnedPwNode]:
+        """Hand over every backing this node owns and forget them, so the
+        caller can destroy them outside this lock.
+
+        A node's *structural* backings are the ones it must keep alive
+        (see ``backings``); a subclass may also own ephemeral children it
+        deliberately keeps out of that list because a natural exit is not
+        a fault - SoundEffectNode's playback streams, which end every
+        time a sound finishes and must therefore not count toward
+        ``dead_backings()``/readiness.  Everything the node owns has to
+        die with it either way, so both the single-node and the batched
+        teardown path go through here."""
+        backings, self.backings = self.backings, []
+        return backings
+
     def teardown_backing(self) -> None:
         """Destroy every owned backing at once instead of one at a time.
 
@@ -585,7 +600,7 @@ class BackedNode(Node):
         streams) - one at a time that's "the whole chain takes forever
         to delete"; concurrently it's bounded by the single slowest
         destroy instead of their sum."""
-        backings, self.backings = self.backings, []
+        backings = self.owned_backings()
         if len(backings) <= 1:
             for owned in backings:
                 owned.destroy()
@@ -1188,6 +1203,36 @@ class BooleanWarpOutNode(Node):
         return "boolean"
 
 
+# ---------------------------------------------------------------------------
+# Impulse: momentary trigger wires
+# ---------------------------------------------------------------------------
+#
+# An *impulse* is a momentary event - a bang.  A Button fires one, and a
+# node with an impulse input reacts to it (see SoundEffectNode).  Like a
+# boolean or a filter wire it is control-plane: it never becomes a
+# PipeWire link, and add_edge pairs it only with another impulse port.
+#
+# Unlike a boolean it has no *value* to resolve on every sync, so nothing
+# in `_resolve_boolean` / sync_locked's link pass touches it: an impulse
+# is a push, walked once per press by `PatchSpace.pulse()`.  That keeps
+# the momentary nature honest - there is no stored state that a poll
+# could read, and a node that missed a pulse will not hear it "again"
+# on the next supervision tick.
+
+
+class ButtonNode(Node):
+    """A momentary push button: one impulse output and no state at all.
+
+    Pressing it in the GUI sends one ``impulse`` command; the daemon
+    walks the impulse edges leaving this node and calls ``on_impulse()``
+    on everything it reaches, once per node.  Fan-out is just several
+    edges leaving the single output, so one button can fire any number
+    of sound effects."""
+
+    def port_kind(self, port: str, direction: str) -> str:
+        return "impulse" if direction == "out" else "audio"
+
+
 class PanelInNode(TransparentNode):
     """A panel input port: external audio arrives on "in" and the panel's
     internal nodes pull it from "out".  Pure logical pass-through (no
@@ -1284,6 +1329,231 @@ class ExcludeFilterNode(TransparentNode):
 
 
 # ---------------------------------------------------------------------------
+# Bundles: preset sources, classifiers, filters and terminals
+# ---------------------------------------------------------------------------
+#
+# A *bundle* is a logical set of live PipeWire endpoints travelling on a
+# single wire, instead of the one stream an ordinary audio port carries.
+# Bundles are typed by side:
+#
+#   * a *source* bundle holds endpoints audio can be pulled FROM
+#     (hardware inputs, app playback streams, sink monitors);
+#   * a *sink* bundle holds endpoints audio can be pushed TO
+#     (hardware outputs, app recording streams).
+#
+# A "filter" wire is a *third* kind: a classifier's predicate (a pure
+# control-plane value, like a boolean) consumed by a Filter node.  It
+# never becomes a PipeWire link.  A fourth, the "impulse" (see
+# ButtonNode / SoundEffectNode above), is momentary rather than a level:
+# it is a pushed event, not a value anything resolves.
+#
+# `add_edge` lets a bundle port pair with an audio port either way (a
+# single stream is a bundle of one), so "route everything this bundle
+# stands for into this sink" is just an edge; boolean and filter wires
+# pair only with their own kind.
+
+
+class AllInputsNode(InputNode):
+    """Preset bundle source: every input-side source (hardware capture,
+    virtual mics, and app playback streams).  Anchored regexes so the
+    match is the exact classes rather than a substring that would also
+    swallow internal plumbing."""
+
+    def port_kind(self, port: str, direction: str) -> str:
+        return "bundle" if direction == "out" else "audio"
+
+    def bundle_side(self) -> str:
+        return "source"
+
+    def source_filters(self):
+        return [{"mediaClassRegex": "^Audio/Source$|^Stream/Output/Audio$"}]
+
+
+class AllAppsNode(InputNode):
+    """Preset bundle source: every app playback stream.  App recording
+    streams are sinks, so they are reached through All Outputs instead."""
+
+    def port_kind(self, port: str, direction: str) -> str:
+        return "bundle" if direction == "out" else "audio"
+
+    def bundle_side(self) -> str:
+        return "source"
+
+    def source_filters(self):
+        return [{"mediaClassRegex": "^Stream/Output/Audio$"}]
+
+
+class AllOutputsNode(Node):
+    """Preset bundle source of *sink endpoints*: every playback device
+    and app recording stream, as a target set to route audio INTO.
+
+    The bundle is a set of endpoints to push audio to, so it is consumed
+    by a Filter (to narrow it) and then by a Bundle Output terminal (to
+    actually deliver audio)."""
+
+    def port_kind(self, port: str, direction: str) -> str:
+        return "bundle" if direction == "out" else "audio"
+
+    def bundle_side(self) -> str:
+        return "sink"
+
+    def sink_filters(self):
+        return [
+            {"mediaClassRegex": "^Audio/Sink$"},
+            {"mediaClassRegex": "^Stream/Input/Audio$"},
+        ]
+
+
+class ClassifierNode(Node):
+    """A pure control-plane predicate with a single ``filter`` output.
+
+    A classifier carries no audio and owns no backing; it is plugged into
+    a Filter node's ``filter`` input, which applies it to the bundle
+    flowing through that Filter.  ``invert`` turns any classifier into
+    its complement without a second node type."""
+
+    def __init__(self, node_id, invert: bool = False):
+        super().__init__(node_id)
+        self.invert = bool(invert)
+
+    def port_kind(self, port: str, direction: str) -> str:
+        return "filter" if direction == "out" else "audio"
+
+    def matches(self, props: dict, side: str) -> bool:
+        """Whether a bundle member (identified by its live props) passes
+        this classifier.  ``side`` is "source" or "sink" - the two
+        matchers differ (a sink ``name`` is an exact node.name, a source
+        ``name`` is a substring of application.name/node.name)."""
+        return False
+
+    def classify(self, props: dict, side: str) -> bool:
+        return (not self.matches(props, side)) if self.invert else self.matches(props, side)
+
+
+class RegexClassifierNode(ClassifierNode):
+    def __init__(self, node_id, pattern: str = "", invert: bool = False):
+        super().__init__(node_id, invert)
+        self.pattern = pattern
+
+    def matches(self, props: dict, side: str) -> bool:
+        if not self.pattern:
+            return False
+        if side == "sink":
+            return pwmatch.matches_sink_target(
+                props.get("_node_id"), props, {"nameRegex": self.pattern}
+            )
+        return pwmatch.matches_source_filter(props, {"nameRegex": self.pattern})
+
+
+class MediaClassClassifierNode(ClassifierNode):
+    def __init__(self, node_id, media_class: str = "", invert: bool = False):
+        super().__init__(node_id, invert)
+        self.media_class = media_class
+
+    def matches(self, props: dict, side: str) -> bool:
+        if not self.media_class:
+            return False
+        return pwmatch.matches_source_filter(props, {"mediaClass": self.media_class})
+
+
+class DescriptionClassifierNode(ClassifierNode):
+    def __init__(self, node_id, description: str = "", invert: bool = False):
+        super().__init__(node_id, invert)
+        self.description = description
+
+    def matches(self, props: dict, side: str) -> bool:
+        if not self.description:
+            return False
+        return pwmatch.matches_source_filter(props, {"description": self.description})
+
+
+class ExternalOnlyClassifierNode(ClassifierNode):
+    """Classifier that keeps everything PatchBay doesn't own (real apps
+    and hardware), stripping our own built-ins and plumbing.  See
+    ``pwmatch.is_patchbay_owned``."""
+
+    def matches(self, props: dict, side: str) -> bool:
+        return not pwmatch.is_patchbay_owned(props)
+
+
+class FilterNode(TransparentNode):
+    """Bundle in + one or more classifiers in -> filtered bundle out.
+
+    The bundle input carries a set of endpoints; each ``filterN`` input
+    carries a classifier's predicate.  The node resolves the incoming
+    bundle to its exact live members and keeps the ones *every* wired
+    classifier matches (AND - adding classifiers narrows, exactly like
+    chaining Filter nodes).  With no classifier wired the bundle passes
+    through unchanged; a *wired but empty* classifier matches nothing,
+    mirroring the legacy leaves an empty pattern used to match nothing.
+
+    The filter inputs are dynamic: the daemon reports one per wired
+    classifier plus a spare (``filter_input_ports``), so plugging into
+    the spare grows another and one node can hold an arbitrary number of
+    classifiers."""
+
+    def port_kind(self, port: str, direction: str) -> str:
+        if direction == "in" and port.startswith("filter"):
+            return "filter"
+        return "bundle"
+
+    def passes_output(self, from_port: str) -> bool:
+        return True
+
+
+class BundleToAudioNode(TransparentNode):
+    """Bundle in -> single audio stream out.
+
+    A convenience conversion point: it resolves its source bundle to the
+    concrete upstream sources, so the rest of the graph can treat it as
+    one ordinary audio source (put it before a gate/effect, or feed one
+    specific sink).  Wires from a bundle output straight into an ordinary
+    audio input already mean the same thing; this node just makes the
+    conversion explicit and nameable."""
+
+    def port_kind(self, port: str, direction: str) -> str:
+        if direction == "in" and port == "in":
+            return "bundle"
+        return "audio"
+
+
+class BundleMergeNode(TransparentNode):
+    """Audio (or bundle) in -> one bundle out.
+
+    A junction that collects everything wired into its input into a
+    single bundle, so several specific lines can be gathered and then
+    filtered/routed as a set.  Its input is a bus: any number of upstream
+    edges may land on the one socket and their sources are unioned (the
+    same mixing rule the panel ports use)."""
+
+    MIX_INPUTS = True
+
+    def port_kind(self, port: str, direction: str) -> str:
+        return "bundle"
+
+    def allows_multiple_inputs(self) -> bool:
+        return True
+
+
+class BundleSplitNode(TransparentNode):
+    """Bundle in -> one ordinary audio output per member.
+
+    The output sockets are *dynamic*: the daemon resolves the inbound
+    bundle to its live members and reports one port per member (keyed by
+    the member's ``node.name``), so the GUI can draw a socket per line.
+    An edge leaving a member's socket carries exactly that member's
+    stream (resolved by ``nodeName``), so each line can be processed or
+    routed on its own; the ordinary routing then links it to whatever
+    sink it reaches.  A member that goes away simply resolves to nothing
+    until it returns under the same name."""
+
+    def port_kind(self, port: str, direction: str) -> str:
+        if direction == "in" and port == "in":
+            return "bundle"
+        return "audio"
+
+
+# ---------------------------------------------------------------------------
 # Simple backed nodes
 # ---------------------------------------------------------------------------
 
@@ -1368,6 +1638,139 @@ class SplitterNode(_SingleSinkNode):
                          pw_cli_command, settle, description=f"Splitter: {node_id}")
 
 
+class SoundEffectNode(_SingleSinkNode):
+    """A one-shot sound player: an impulse input fires a playback of
+    ``path`` into a private dummy sink whose *monitor* is this node's
+    audio output.
+
+    The dummy is the node's socket, which is the same "the socket is
+    stable, the interior is replaceable" rule the effect sandwich
+    follows: one impulse spawns one ``pw-cat --playback <path> --target
+    <dummy>`` child, the audio lands in the dummy, and every user edge
+    wired to the audio out (the dummy's monitor ports) carries it
+    unchanged - no per-impulse relinking, and no edge is ever attached
+    to a stream that is about to exit.
+
+    ``overlap`` picks the retrigger behaviour: off (the default) stops
+    whatever is still playing first, so a pressed button restarts the
+    sound instead of stacking takes; on lets impulses stack up and mix in
+    the dummy (the node's Stack switch).
+
+    The playback children are deliberately kept out of ``backings``: a
+    player exits on its own the moment the file ends, and a backing that
+    died naturally is exactly what ``dead_backings()`` reports - the node
+    would flash "dead" (and its readiness would flap) every time a sound
+    finished.  They are handed over by ``owned_backings()`` instead, and
+    retired by ``refresh_live()`` on the supervision tick."""
+
+    # The impulse socket.  Its name is "in" (the node's only input), so
+    # edge ids stay the plain ``button->effect`` form; the *kind* is what
+    # makes it an impulse wire.
+    IMPULSE_INPUT = "in"
+
+    # A sound effect is a source the user never selects in an app, so its
+    # dummy stays out of the Pulse device list; the monitor ports are
+    # still created (and still routable) because the class is an
+    # Audio/Sink subclass - see pwmatch.INTERNAL_MEDIA_CLASS.
+    MEDIA_CLASS = pwmatch.INTERNAL_MEDIA_CLASS
+
+    # How long a fresh player gets to be confirmed running before we
+    # declare the file unplayable.  Short: this blocks the client's
+    # command handler, and the two things we are waiting for (the client
+    # connecting, or pw-cat rejecting the file) both land well inside it.
+    PLAYER_SETTLE_S = 0.1
+
+    def __init__(self, node_id, backing_node_name: str, path: str = "",
+                 overlap: bool = False,
+                 pw_cli_command=("pw-cli",), settle: float = 0.3):
+        super().__init__(node_id, backing_node_name, pw_cli_command, settle,
+                         description=f"Sound Effect: {node_id}")
+        self.path = path or ""
+        self.overlap = bool(overlap)
+        self._players: List[OwnedPwProcess] = []
+        # Names are only ever appended to, never reused: a name is what
+        # the live-graph lookup keys on, so recycling one would let a
+        # lagging removal event tear down the fresh player.
+        self._player_seq = 0
+
+    def port_kind(self, port: str, direction: str) -> str:
+        if direction == "in" and port == self.IMPULSE_INPUT:
+            return "impulse"
+        return "audio"
+
+    # -- playing ---------------------------------------------------------
+
+    def on_impulse(self) -> None:
+        """Play ``path`` once (see the class docstring for ``overlap``)."""
+        path = (self.path or "").strip()
+        if not path:
+            logger.warning("Sound effect %r was triggered with no file set", self.id)
+            return
+        self._prune_players()
+        if not self.overlap:
+            self._stop_players()
+        self._start_player(path)
+
+    @property
+    def playing(self) -> int:
+        """How many playback streams are running right now.  Serialized
+        so the GUI can show the node's play count."""
+        return sum(1 for p in self._players if p.is_alive)
+
+    def _start_player(self, path: str) -> None:
+        name = f"{self.backing_node_name}_playback_{self._player_seq}"
+        self._player_seq += 1
+        # node.name is pinned so the stream is identifiable (and reads as
+        # patchbay-owned plumbing - see pwmatch.is_patchbay_owned); the
+        # *file path* is deliberately not put into node.description,
+        # which is a SPA-JSON string where a quote or brace in a filename
+        # would break the command.
+        command = (
+            "pw-cat", "--playback", "--target", self.backing_node_name,
+            "--properties", f'{{ node.name = "{name}" }}',
+            path,
+        )
+        proc = OwnedPwProcess(name, self._pw_cli_command, self.PLAYER_SETTLE_S)
+        if not proc.create(command, quiet=True):
+            logger.warning(
+                "Sound effect %r could not play %r into %r (missing file, an "
+                "unsupported format, or the node isn't up yet)",
+                self.id, path, self.backing_node_name,
+            )
+            return
+        self._players.append(proc)
+
+    def _prune_players(self) -> None:
+        """Forget players whose file has ended."""
+        for proc in list(self._players):
+            if proc.is_alive:
+                continue
+            self._players.remove(proc)
+            proc.destroy()
+
+    def _stop_players(self) -> None:
+        for proc in list(self._players):
+            proc.destroy()
+            self._players.remove(proc)
+
+    def refresh_live(self) -> None:
+        """Per-supervision-tick hook (see PatchSpace.supervise): retire
+        the playback children whose file has ended, so the count the GUI
+        shows can't drift and a long-lived session can't accumulate
+        finished processes."""
+        self._prune_players()
+
+    # -- lifecycle -------------------------------------------------------
+
+    def owned_backings(self) -> List[OwnedPwNode]:
+        """The dummy sink *and* any playback still running.  Handing the
+        players over here (rather than keeping them in ``backings``) is
+        what keeps them out of readiness/health accounting while still
+        making them die with the node - see BackedNode.owned_backings."""
+        players, self._players = self._players, []
+        return super().owned_backings() + players
+
+
 class VirtualSpeakerNode(_SinkVolumeMixin, _SingleSinkNode):
     def __init__(self, node_id, backing_node_name: str, device_label: str = "",
                  device_volume: float = 1.0, volume_locked: bool = True,
@@ -1386,6 +1789,40 @@ class VirtualSpeakerNode(_SinkVolumeMixin, _SingleSinkNode):
         out = super().config_fields()
         out["backing_node_name"] = self.backing_node_name
         return out
+
+
+class BundleOutputNode(OutputNode, _SingleSinkNode):
+    """Terminal for a *sink* bundle: audio in + a set of targets.
+
+    The ``in`` audio port (which may itself be fed by a source bundle)
+    is summed into this node's own private internal null sink, then that
+    sink's monitor feeds every sink the ``bundle`` input resolves to - so
+    one coherent source reaches several outputs (N+M links instead of
+    N*M) and every sink sees a single stable link.  See
+    PatchSpace._bundle_output_links; the ordinary OutputNode edge
+    resolution is skipped for this node.
+
+    The dummy uses the internal non-Pulse media class, so it never shows
+    up as a device in apps."""
+
+    MEDIA_CLASS = pwmatch.INTERNAL_MEDIA_CLASS
+
+    def __init__(self, node_id, backing_node_name: str,
+                 pw_cli_command=("pw-cli",), settle: float = 0.3):
+        _SingleSinkNode.__init__(
+            self, node_id, backing_node_name, pw_cli_command, settle,
+            description=f"Bundle output: {node_id}",
+        )
+
+    def port_kind(self, port: str, direction: str) -> str:
+        if direction == "in" and port == "bundle":
+            return "bundle"
+        return "audio"
+
+    def sink_node_id(self) -> Optional[int]:
+        """The live dummy sink's node id, or None while it comes up."""
+        b = self._find(self.backing_node_name)
+        return b.node_id if b else None
 
 
 class VolumeProcessNode(_SingleSinkNode):
@@ -2834,8 +3271,7 @@ class PatchSpace:
                 ):
                     self._remove_edge_locked(edge.id)
                 if isinstance(node, BackedNode):
-                    doomed.extend(node.backings)
-                    node.backings = []
+                    doomed.extend(node.owned_backings())
                 for key in ((node_id, "structural"), (node_id, "module")):
                     self._repair_gate.forget(key)
         return doomed
@@ -2855,15 +3291,30 @@ class PatchSpace:
             source = self.nodes[from_node]
             from_kind = source.port_kind(from_port, "out")
             to_kind = target.port_kind(to_port, "in")
-            if from_kind != to_kind:
+            # Boolean, filter and impulse wires are control-plane and
+            # pair only with their own kind.  Audio and bundle ports mix
+            # freely either way: a bundle is a set of audio streams, and
+            # one stream is a bundle of one (see the bundle nodes).
+            if (from_kind == "boolean") != (to_kind == "boolean"):
                 raise ValueError(
                     f"cannot connect a {from_kind} output to a {to_kind} input"
                 )
-            if to_kind == "boolean":
+            if (from_kind == "filter") != (to_kind == "filter"):
+                raise ValueError(
+                    f"cannot connect a {from_kind} output to a {to_kind} input"
+                )
+            if (from_kind == "impulse") != (to_kind == "impulse"):
+                raise ValueError(
+                    f"cannot connect a {from_kind} output to a {to_kind} input"
+                )
+            if from_kind not in ("boolean", "filter", "impulse", "bundle", "audio"):
+                raise ValueError(f"unknown port kind {from_kind!r}")
+            if to_kind in ("boolean", "impulse"):
                 # A boolean input is usually a single control signal, not a
                 # mixable bus: exactly one source may drive it.  Panel
                 # boolean ports opt out (ALLOW_MULTIPLE_BOOLEAN) so several
-                # sources can be offered; the first wired one wins.
+                # sources can be offered; the first wired one wins.  An
+                # impulse input is the same - one button drives it.
                 if getattr(target, "ALLOW_MULTIPLE_BOOLEAN", False):
                     pass
                 else:
@@ -2872,17 +3323,26 @@ class PatchSpace:
                             raise ValueError(
                                 f"{to_node}.{to_port} is already driven"
                             )
+            elif to_kind == "filter":
+                # A classifier input is a single control slot, separate
+                # from the node's bundle/audio upstream (a Filter node's
+                # "filter" input).
+                for existing in self._edges_into.get(to_node, []):
+                    if existing.to_port == to_port and self._edge_is_filter(existing):
+                        raise ValueError(f"{to_node}.{to_port} is already driven")
             elif (
                 target.is_transparent()
                 and not target.allows_multiple_inputs()
                 and self._edges_into.get(to_node)
             ):
-                # Only count *audio* upstream edges - a gate's boolean
-                # "ctrl" edge must not look like a second audio input.
+                # Only count bundle/audio upstream edges - a gate's
+                # boolean "ctrl" edge, a Filter's "filter" edge and a
+                # sound effect's impulse edge must not look like a second
+                # audio/bundle input.
                 audio_into = [
                     e
                     for e in self._edges_into.get(to_node, [])
-                    if not self._edge_is_boolean(e)
+                    if not self._edge_is_control(e)
                 ]
                 if audio_into:
                     raise ValueError(
@@ -3036,6 +3496,59 @@ class PatchSpace:
                 self._orphan_disconnects.add(pair)
                 del self._inflight_links[pair]
 
+    def pulse(self, node_id: NodeId) -> List[NodeId]:
+        """Fire an impulse from ``node_id``'s impulse output(s).
+
+        Every impulse input reachable along impulse edges gets exactly one
+        ``on_impulse()``, and the list of nodes that fired is returned.
+        Fan-out is free (any number of edges may leave one output); a node
+        reached by two paths is still triggered once, and a cycle
+        terminates.
+
+        This is a *push*, deliberately outside sync_locked's
+        resolve-then-link pass: an impulse has no value to sample, so
+        there is nothing for a later tick to re-derive (a node that was
+        not running when the pulse happened does not get a delayed one).
+
+        The walk itself runs under the lock, but the triggers do not: a
+        play spawns a child process and must not stall the supervision
+        tick or the graph's own event thread."""
+        with self._lock:
+            reached = self._impulse_targets(node_id)
+        fired: List[NodeId] = []
+        for node in reached:
+            try:
+                node.on_impulse()
+            except Exception as exc:
+                logger.warning("Impulse handler on %r failed: %s", node.id, exc)
+            fired.append(node.id)
+        return fired
+
+    def _impulse_targets(self, node_id: NodeId) -> List[Any]:
+        """Every node reachable from ``node_id`` along impulse edges, in
+        walk order, each once - see pulse()."""
+        targets = []
+        seen: Set[NodeId] = {node_id}
+        stack = [node_id]
+        while stack:
+            current = stack.pop()
+            source = self.nodes.get(current)
+            if source is None:
+                continue
+            for edge in self._edges_out_of.get(current, []):
+                if source.port_kind(edge.from_port, "out") != "impulse":
+                    continue
+                if edge.to_node in seen:
+                    continue
+                seen.add(edge.to_node)
+                target = self.nodes.get(edge.to_node)
+                if target is None:
+                    continue
+                if callable(getattr(target, "on_impulse", None)):
+                    targets.append(target)
+                stack.append(edge.to_node)
+        return targets
+
     # ------------------------------------------------------------------
     # resolving what feeds an edge
     # ------------------------------------------------------------------
@@ -3049,6 +3562,41 @@ class PatchSpace:
             return True
         dst = self.nodes.get(edge.to_node)
         return dst is not None and dst.port_kind(edge.to_port, "in") == "boolean"
+
+    def _edge_is_filter(self, edge: "Edge") -> bool:
+        """Whether `edge` carries a classifier predicate (a Filter node's
+        "filter" input) rather than audio/bundle.  add_edge refuses to
+        pair a filter port with anything else, so checking either end is
+        enough."""
+        src = self.nodes.get(edge.from_node)
+        if src is not None and src.port_kind(edge.from_port, "out") == "filter":
+            return True
+        dst = self.nodes.get(edge.to_node)
+        return dst is not None and dst.port_kind(edge.to_port, "in") == "filter"
+
+    def _edge_is_impulse(self, edge: "Edge") -> bool:
+        """Whether `edge` is a momentary impulse wire rather than audio.
+        Same either-end check as the boolean/filter helpers above."""
+        src = self.nodes.get(edge.from_node)
+        if src is not None and src.port_kind(edge.from_port, "out") == "impulse":
+            return True
+        dst = self.nodes.get(edge.to_node)
+        return dst is not None and dst.port_kind(edge.to_port, "in") == "impulse"
+
+    def _edge_is_control(self, edge: "Edge") -> bool:
+        """Whether `edge` is control-plane - a boolean value, a classifier
+        predicate or an impulse - and therefore never a PipeWire link.
+
+        Everywhere that walks a node's inbound edges looking for its
+        *audio* upstream must filter on this, or a gate's "ctrl" edge, a
+        Filter's "filter" edge or a sound effect's impulse edge would look
+        like a second audio input (and sync_locked would try to resolve
+        audio out of a node that carries none)."""
+        return (
+            self._edge_is_boolean(edge)
+            or self._edge_is_filter(edge)
+            or self._edge_is_impulse(edge)
+        )
 
     def _refresh_boolean_states(self) -> None:
         """Resolve every bool-controlled node's effective state from the
@@ -3170,6 +3718,14 @@ class PatchSpace:
         if isinstance(node, WarpOutNode):
             return self._resolve_warp_audio(node, seen)
         if isinstance(node, TransparentNode):
+            if isinstance(node, BundleSplitNode):
+                # Each dynamic output socket carries exactly one member of
+                # the inbound bundle, keyed by that member's node.name (the
+                # port name the GUI was told about).  A name that no longer
+                # exists simply resolves to nothing.
+                if from_port in ("", None, "in", "out"):
+                    return []
+                return [{"nodeName": from_port}]
             if not node.gate_open():
                 return []
             # A switcher only passes the output its button has selected;
@@ -3178,10 +3734,11 @@ class PatchSpace:
             if not node.passes_output(from_port):
                 return []
             upstream = self._edges_into.get(node_id, [])
-            # Boolean control edges also land here (a gate's "ctrl", a
-            # switcher's "ctrl") but must never be mistaken for the
-            # node's audio upstream.
-            upstream = [e for e in upstream if not self._edge_is_boolean(e)]
+            # Boolean control edges (a gate's "ctrl", a switcher's
+            # "ctrl"), a Filter's classifier edge and an impulse edge land
+            # here too, but must never be mistaken for the node's
+            # bundle/audio upstream.
+            upstream = [e for e in upstream if not self._edge_is_control(e)]
             if not upstream:
                 return []
             # A mixing transparent node (a panel input/output bus) sums
@@ -3202,6 +3759,13 @@ class PatchSpace:
             sources = self._resolve_sources(
                 chosen.from_node, chosen.from_port, seen
             )
+            if isinstance(node, FilterNode):
+                # Narrow the upstream bundle by the classifier wired into
+                # this node's "filter" input, as exact live ids so a chain
+                # of Filters intersects.
+                ids = pwmatch.find_source_nodes(self.graph, sources)
+                ids = self._apply_classifier(node, "source", ids)
+                return [{"id": i} for i in ids]
             if isinstance(node, ExcludeFilterNode):
                 exclude = node.exclude_filter()
                 if exclude is not None:
@@ -3231,6 +3795,223 @@ class PatchSpace:
             if isinstance(node, WarpInNode) and node.warp_name == name:
                 sources.extend(self._resolve_sources(node.id, "in", seen))
         return sources
+
+    # ------------------------------------------------------------------
+    # bundles / classifiers
+    # ------------------------------------------------------------------
+
+    def _classifiers_for(self, filter_node_id: NodeId) -> List["ClassifierNode"]:
+        """Every ClassifierNode wired into a Filter node's filter inputs,
+        in port order.  Empty when nothing is plugged in (the bundle then
+        passes through unchanged)."""
+        by_port: Dict[str, "ClassifierNode"] = {}
+        for edge in self._edges_into.get(filter_node_id, []):
+            if not self._edge_is_filter(edge):
+                continue
+            classifier = self.nodes.get(edge.from_node)
+            if isinstance(classifier, ClassifierNode):
+                by_port[edge.to_port] = classifier
+        return [by_port[port] for port in sorted(by_port)]
+
+    def _apply_classifier(self, filter_node: "FilterNode", side: str,
+                          ids: List[int]) -> List[int]:
+        """Keep the `ids` a Filter node's classifiers all match (AND).  No
+        classifier wired => the bundle passes through; an empty
+        classifier matches nothing."""
+        classifiers = self._classifiers_for(filter_node.id)
+        if not classifiers:
+            return list(ids)
+        kept: List[int] = []
+        live = self.graph.nodes()
+        for node_id in ids:
+            props = dict(
+                (live.get(node_id) or {}).get("info", {}).get("props", {})
+            )
+            props["_node_id"] = node_id
+            if all(c.classify(props, side) for c in classifiers):
+                kept.append(node_id)
+        return kept
+
+    def bundle_side(self, node_id: NodeId,
+                    seen: Optional[Set[NodeId]] = None) -> Optional[str]:
+        """Which side a bundle endpoint produces: "source" (audio can be
+        pulled from its members) or "sink" (audio can be pushed to them),
+        or None when `node_id` is not a bundle endpoint."""
+        node = self.nodes.get(node_id)
+        if isinstance(node, (AllInputsNode, AllAppsNode)):
+            return "source"
+        if isinstance(node, AllOutputsNode):
+            return "sink"
+        if isinstance(node, BundleOutputNode):
+            return "sink"
+        if isinstance(node, FilterNode):
+            if seen is None:
+                seen = set()
+            if node_id in seen:
+                return None
+            seen = seen | {node_id}
+            chosen = self._bundle_upstream(node_id)
+            return self.bundle_side(chosen.from_node, seen) if chosen else None
+        return None
+
+    def _bundle_upstream(self, node_id: NodeId) -> Optional["Edge"]:
+        for edge in self._edges_into.get(node_id, []):
+            if not self._edge_is_boolean(edge) and not self._edge_is_filter(edge):
+                return edge
+        return None
+
+    def filter_input_ports(self, node_id: NodeId) -> List[str]:
+        """The dynamic ``filterN`` input sockets a Filter node shows: one
+        per wired classifier, plus one spare.  Same growth contract as a
+        Merge Bundle's inputs (a bare legacy ``filter`` port counts as
+        the first)."""
+        node = self.nodes.get(node_id)
+        if not isinstance(node, FilterNode):
+            return []
+        used = [
+            e for e in self._edges_into.get(node_id, [])
+            if self._edge_is_filter(e)
+        ]
+        max_index = 0
+        for edge in used:
+            port = edge.to_port or ""
+            if port == "filter":
+                max_index = max(max_index, 1)
+            elif port.startswith("filter") and port[6:].isdigit():
+                max_index = max(max_index, int(port[6:]))
+        count = max(len(used), max_index) + 1
+        return [f"filter{i}" for i in range(1, count + 1)]
+
+    def bundle_input_ports(self, node_id: NodeId) -> List[str]:
+        """The dynamic input sockets a Bundle merge node shows: one per
+        inbound line, plus one spare.  Plugging into the spare makes the
+        next socket appear on the following poll, so the node grows a
+        socket per connection instead of being a single hidden bus.
+        Names are stable (``in1``, ``in2``, ...) because edges reference
+        them by name."""
+        node = self.nodes.get(node_id)
+        if not isinstance(node, BundleMergeNode):
+            return []
+        used = [
+            e
+            for e in self._edges_into.get(node_id, [])
+            if not self._edge_is_boolean(e) and not self._edge_is_filter(e)
+        ]
+        max_index = 0
+        for edge in used:
+            port = edge.to_port or ""
+            if port.startswith("in") and port[2:].isdigit():
+                max_index = max(max_index, int(port[2:]))
+        count = max(len(used), max_index) + 1
+        return [f"in{i}" for i in range(1, count + 1)]
+
+    def bundle_members(
+        self, node_id: NodeId, seen: Optional[Set[Any]] = None
+    ) -> List[dict]:
+        """The live members a bundle endpoint stands for, as
+        ``[{"port": node.name, "label": readable}]``.
+
+        Used to give a Bundle Split node one output socket per line.  A
+        Split resolves through to its upstream bundle; any other bundle
+        endpoint (All Inputs, a Filter chain, a Bundle junction) resolves
+        to its concrete source ids here."""
+        node = self.nodes.get(node_id)
+        if isinstance(node, BundleSplitNode):
+            chosen = self._bundle_upstream(node_id)
+            return self.bundle_members(chosen.from_node, seen) if chosen else []
+        if seen is None:
+            seen = set()
+        if node_id in seen:
+            return []
+        seen = seen | {node_id}
+        live = self.graph.nodes()
+        members: List[dict] = []
+        for member_id in pwmatch.find_source_nodes(
+            self.graph, self._resolve_sources(node_id, "out")
+        ):
+            props = (live.get(member_id) or {}).get("info", {}).get("props", {})
+            name = props.get("node.name") or ""
+            if not name:
+                continue
+            members.append({
+                "port": name,
+                "label": (
+                    props.get("application.name")
+                    or props.get("node.description")
+                    or props.get("node.nick")
+                    or name
+                ),
+            })
+        return members
+
+    def _resolve_bundle_targets(
+        self, node_id: NodeId, seen: Optional[Set[Any]] = None
+    ) -> List[dict]:
+        """The sink-target filter list a sink-side bundle resolves to.
+
+        Mirrors ``_resolve_sources`` for the other direction: preset All
+        Outputs yields every playback/recording sink, and a Filter narrows
+        it to the sinks its classifier matches (as exact ids)."""
+        node = self.nodes.get(node_id)
+        if node is None:
+            return []
+        if seen is None:
+            seen = set()
+        if node_id in seen:
+            return []
+        seen = seen | {node_id}
+        if isinstance(node, AllOutputsNode):
+            return node.sink_filters()
+        if isinstance(node, FilterNode):
+            chosen = self._bundle_upstream(node_id)
+            if chosen is None:
+                return []
+            targets = self._resolve_bundle_targets(chosen.from_node, seen)
+            ids: List[int] = []
+            for filt in targets:
+                ids.extend(pwmatch.find_target_nodes(self.graph, filt))
+            ids = self._apply_classifier(node, "sink", ids)
+            return [{"id": i} for i in ids]
+        return []
+
+    def _bundle_output_links(
+        self, node: "BundleOutputNode"
+    ) -> Dict[EdgeId, Set[Tuple[int, int]]]:
+        """Desired links for a Bundle Output terminal, in two stages:
+        every source feeding its audio "in" is summed into the node's own
+        dummy sink (``:sum``), and the dummy's monitor feeds every sink
+        its ``bundle`` input resolves to (``:feed``).  Both stages are
+        internal links, so the ordinary teardown/backoff bookkeeping
+        keeps them healthy."""
+        graph = self.graph
+        sum_id = f"__internal__:{node.id}:sum"
+        feed_id = f"__internal__:{node.id}:feed"
+        dummy_id = node.sink_node_id()
+        if dummy_id is None:
+            # The dummy hasn't resolved yet: nothing to connect, and
+            # nothing to tear down either (empty desired sets).
+            return {sum_id: set(), feed_id: set()}
+        sources: List[dict] = []
+        targets: List[dict] = []
+        for edge in self._edges_into.get(node.id, []):
+            if self._edge_is_boolean(edge) or self._edge_is_filter(edge):
+                continue
+            if edge.to_port == "bundle":
+                targets.extend(self._resolve_bundle_targets(edge.from_node))
+            else:
+                sources.extend(
+                    self._resolve_sources(edge.from_node, edge.from_port)
+                )
+        summed: Set[Tuple[int, int]] = set()
+        for src_id in pwmatch.find_source_nodes(graph, sources):
+            summed |= pwmatch.resolve_channel_pairs(graph, src_id, dummy_id)
+        feed: Set[Tuple[int, int]] = set()
+        for filt in targets:
+            for tgt_id in pwmatch.find_target_nodes(graph, filt):
+                feed |= pwmatch.resolve_channel_pairs(
+                    graph, dummy_id, tgt_id, filt.get("type")
+                )
+        return {sum_id: summed, feed_id: feed}
 
     # ------------------------------------------------------------------
     # supervision
@@ -3514,7 +4295,32 @@ class PatchSpace:
                         k for k in self._edge_links if k.startswith(prefix)
                     )
                 continue
+            if isinstance(node, BundleOutputNode):
+                # The terminal's "in" (audio) + "bundle" inputs are wired
+                # by one custom pass through its own dummy, not by the
+                # ordinary per-edge source->sink resolution.
+                try:
+                    desired.update(self._bundle_output_links(node))
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to compute bundle-output links for %s "
+                        "(leaving current links in place): %s", node_id, exc,
+                    )
+                    prefix = f"__internal__:{node_id}:"
+                    unresolved.update(
+                        k for k in self._edge_links if k.startswith(prefix)
+                    )
+                    for edge in list(self._edges_into.get(node_id, [])):
+                        unresolved.add(edge.id)
+                continue
             for edge in list(self._edges_into.get(node_id, [])):
+                if self._edge_is_control(edge):
+                    # A boolean value, a classifier predicate or an
+                    # impulse is not audio: there is nothing here to
+                    # resolve into links.  (A sound effect's only input is
+                    # an impulse, so without this every press-drag would
+                    # also try to wire the button into the dummy sink.)
+                    continue
                 try:
                     sink_filters = (
                         node.sink_filters()

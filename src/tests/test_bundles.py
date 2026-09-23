@@ -1,0 +1,600 @@
+"""Bundle wires, classifiers, filters and terminals.
+
+Headless tests over the in-memory FakeGraph from test_pwnodes, plus the
+port-kind/compatibility rules enforced by PatchSpace.add_edge.  No real
+PipeWire is touched (the Bundle Output terminal's dummy is faked)."""
+
+import pytest
+
+from pwmatch import INTERNAL_MEDIA_CLASS
+from pwnodes import (
+    PatchSpace,
+    InputNode,
+    OutputNode,
+    BackedNode,
+    AllInputsNode,
+    AllOutputsNode,
+    AllAppsNode,
+    RegexClassifierNode,
+    MediaClassClassifierNode,
+    FilterNode,
+    BundleMergeNode,
+    BundleSplitNode,
+    BundleToAudioNode,
+    BundleOutputNode,
+)
+
+from tests.test_pwnodes import FakeGraph
+
+
+class SrcNode(InputNode):
+    def __init__(self, node_id, name):
+        super().__init__(node_id)
+        self._name = name
+
+    def source_filters(self):
+        return [{"nodeName": self._name}]
+
+
+class SinkNode(OutputNode):
+    def __init__(self, node_id, name):
+        super().__init__(node_id)
+        self._name = name
+
+    def sink_filters(self):
+        return [{"name": self._name}]
+
+
+class FakeBundleOutput(BundleOutputNode):
+    """BundleOutputNode with a pre-resolved dummy (no real backing
+    process); add_node's ensure_structural is a no-op."""
+
+    def __init__(self, node_id, dummy_id):
+        super().__init__(node_id, f"{node_id}_dummy")
+        self._dummy_id = dummy_id
+
+    def ensure_structural(self):
+        pass
+
+    def structural_ok(self):
+        return True
+
+    def sink_node_id(self):
+        return self._dummy_id
+
+
+def add_duplex(g, node_id, name, media_class=INTERNAL_MEDIA_CLASS):
+    """A node with both playback (in) and monitor (out) ports, standing
+    in for a null-audio-sink dummy in the FakeGraph."""
+    g._nodes[node_id] = {
+        "info": {"props": {"node.name": name, "media.class": media_class}}
+    }
+    out, inn = {}, {}
+    for ch in ("FL", "FR"):
+        pid = g._next_port
+        g._next_port += 1
+        g._ports[pid] = {"info": {"props": {
+            "node.id": node_id, "port.direction": "out",
+            "port.name": f"monitor_{ch}", "audio.channel": ch}}}
+        out[ch] = pid
+        pid2 = g._next_port
+        g._next_port += 1
+        g._ports[pid2] = {"info": {"props": {
+            "node.id": node_id, "port.direction": "in",
+            "port.name": f"playback_{ch}", "audio.channel": ch}}}
+        inn[ch] = pid2
+    return out, inn
+
+
+def make_space(g):
+    space = PatchSpace(g)
+    space.mark_graph_loaded()
+    return space
+
+
+# ---------------------------------------------------------------------------
+# port kinds / compatibility
+# ---------------------------------------------------------------------------
+
+
+def test_port_kinds():
+    assert AllInputsNode("a").port_kind("out", "out") == "bundle"
+    assert AllOutputsNode("a").port_kind("out", "out") == "bundle"
+    f = FilterNode("f")
+    assert f.port_kind("in", "in") == "bundle"
+    assert f.port_kind("out", "out") == "bundle"
+    assert f.port_kind("filter", "in") == "filter"
+    assert RegexClassifierNode("c", "x").port_kind("out", "out") == "filter"
+    assert RegexClassifierNode("c", "x").port_kind("out", "in") == "audio"
+
+
+def test_add_edge_kind_compatibility():
+    g = FakeGraph()
+    g.add_source(1, "app")
+    g.add_sink(2, "sink")
+    space = PatchSpace(g)
+    space.mark_graph_loaded()
+    space.add_node(AllInputsNode("all"))
+    space.add_node(FilterNode("f"))
+    space.add_node(RegexClassifierNode("c", "x"))
+    space.add_node(SinkNode("snk", "sink"))
+    space.add_node(SrcNode("src", "app"))
+
+    # bundle -> bundle and bundle <-> audio are fine.
+    space.add_edge("all", "f")
+    space.add_edge("f", "snk")
+    space.add_edge("all", "src")  # bundle output -> audio input of a source? no-op path
+    space.remove_edge("all->src")
+
+    # filter only pairs with filter.
+    with pytest.raises(ValueError):
+        space.add_edge("snk", "f", to_port="filter")  # audio -> filter
+    with pytest.raises(ValueError):
+        space.add_edge("c", "snk")  # filter -> audio
+    space.add_edge("c", "f", to_port="filter")
+
+
+def test_filter_rejects_a_second_bundle_upstream():
+    g = FakeGraph()
+    space = PatchSpace(g)
+    space.mark_graph_loaded()
+    space.add_node(AllInputsNode("all"))
+    space.add_node(AllAppsNode("apps"))
+    space.add_node(FilterNode("f"))
+    space.add_node(RegexClassifierNode("c", "x"))
+    space.add_edge("all", "f")
+    # A second bundle edge would be a second audio/bundle upstream.
+    with pytest.raises(ValueError):
+        space.add_edge("apps", "f")
+    # But the classifier edge is fine (it is not an audio upstream).
+    space.add_edge("c", "f", to_port="filter")
+
+
+# ---------------------------------------------------------------------------
+# source-side resolution
+# ---------------------------------------------------------------------------
+
+
+def test_all_inputs_filter_regex_routes_only_matching_source():
+    g = FakeGraph()
+    a = g.add_source(10, "alpha", app="alpha")
+    b = g.add_source(11, "beta", app="beta")
+    mic = g.add_source(12, "mic", media_class="Audio/Source")
+    sink = g.add_sink(20, "sink1")
+    s = make_space(g)
+    s.add_node(AllInputsNode("all"))
+    s.add_node(FilterNode("f"))
+    s.add_node(RegexClassifierNode("c", "alpha"))
+    s.add_node(SinkNode("snk", "sink1"))
+    s.add_edge("all", "f")
+    s.add_edge("c", "f", to_port="filter")
+    s.add_edge("f", "snk")
+    s.sync()
+    links = g.linked_pairs()
+    assert (a["FL"], sink["FL"]) in links
+    assert (a["FR"], sink["FR"]) in links
+    assert not any(o == b["FL"] for o, _ in links)
+    assert not any(o == mic["FL"] for o, _ in links)
+
+
+def test_filter_chain_intersects():
+    g = FakeGraph()
+    alpha = g.add_source(10, "alpha", app="alpha")
+    beta = g.add_source(11, "beta", app="beta")
+    sink = g.add_sink(20, "sink1")
+    s = PatchSpace(g)
+    s.mark_graph_loaded()
+    s.add_node(AllAppsNode("apps"))
+    s.add_node(FilterNode("f1"))
+    s.add_node(FilterNode("f2"))
+    s.add_node(RegexClassifierNode("c1", "alpha"))
+    s.add_node(RegexClassifierNode("c2", "beta"))
+    s.add_node(SinkNode("snk", "sink1"))
+    s.add_edge("apps", "f1")
+    s.add_edge("c1", "f1", to_port="filter")
+    s.add_edge("f1", "f2")
+    s.add_edge("c2", "f2", to_port="filter")
+    s.add_edge("f2", "snk")
+    s.sync()
+    # alpha then beta intersect to nothing.
+    assert g.linked_pairs() == set()
+
+
+def test_filter_chain_keeps_the_intersection():
+    g = FakeGraph()
+    beta = g.add_source(11, "beta", app="beta")
+    sink = g.add_sink(20, "sink1")
+    s = PatchSpace(g)
+    s.mark_graph_loaded()
+    s.add_node(AllAppsNode("apps"))
+    s.add_node(FilterNode("f1"))
+    s.add_node(FilterNode("f2"))
+    s.add_node(MediaClassClassifierNode("c1", "Stream/Output/Audio"))
+    s.add_node(RegexClassifierNode("c2", "beta"))
+    s.add_node(SinkNode("snk", "sink1"))
+    s.add_edge("apps", "f1")
+    s.add_edge("c1", "f1", to_port="filter")
+    s.add_edge("f1", "f2")
+    s.add_edge("c2", "f2", to_port="filter")
+    s.add_edge("f2", "snk")
+    s.sync()
+    links = g.linked_pairs()
+    assert (beta["FL"], sink["FL"]) in links
+    assert (beta["FR"], sink["FR"]) in links
+
+
+def test_filter_ands_multiple_classifiers():
+    g = FakeGraph()
+    alpha = g.add_source(10, "alpha", app="alpha")
+    beta = g.add_source(11, "beta", app="beta")
+    sink = g.add_sink(20, "sink1")
+    s = PatchSpace(g)
+    s.mark_graph_loaded()
+    s.add_node(AllAppsNode("apps"))
+    s.add_node(FilterNode("f"))
+    s.add_node(MediaClassClassifierNode("c1", "Stream/Output/Audio"))
+    s.add_node(RegexClassifierNode("c2", "beta"))
+    s.add_node(SinkNode("snk", "sink1"))
+    s.add_edge("apps", "f")
+    s.add_edge("c1", "f", to_port="filter1")
+    s.add_edge("c2", "f", to_port="filter2")
+    s.add_edge("f", "snk")
+    s.sync()
+    links = g.linked_pairs()
+    # Both classifiers must match: only beta (media class + name).
+    assert (beta["FL"], sink["FL"]) in links
+    assert not any(o == alpha["FL"] for o, _ in links)
+
+
+def test_filter_grows_an_input_per_classifier():
+    g = FakeGraph()
+    s = PatchSpace(g)
+    s.mark_graph_loaded()
+    s.add_node(AllAppsNode("apps"))
+    s.add_node(FilterNode("f"))
+    s.add_node(RegexClassifierNode("c1", "a"))
+    s.add_node(RegexClassifierNode("c2", "b"))
+    assert s.filter_input_ports("f") == ["filter1"]
+    s.add_edge("c1", "f", to_port="filter1")
+    assert s.filter_input_ports("f") == ["filter1", "filter2"]
+    s.add_edge("c2", "f", to_port="filter2")
+    assert s.filter_input_ports("f") == ["filter1", "filter2", "filter3"]
+
+
+def test_invert_classifier_complements():
+    g = FakeGraph()
+    alpha = g.add_source(10, "alpha", app="alpha")
+    beta = g.add_source(11, "beta", app="beta")
+    sink = g.add_sink(20, "sink1")
+    s = PatchSpace(g)
+    s.mark_graph_loaded()
+    s.add_node(AllAppsNode("apps"))
+    s.add_node(FilterNode("f"))
+    s.add_node(RegexClassifierNode("c", "alpha", invert=True))
+    s.add_node(SinkNode("snk", "sink1"))
+    s.add_edge("apps", "f")
+    s.add_edge("c", "f", to_port="filter")
+    s.add_edge("f", "snk")
+    s.sync()
+    links = g.linked_pairs()
+    assert (beta["FL"], sink["FL"]) in links
+    assert not any(o == alpha["FL"] for o, _ in links)
+
+
+def test_no_classifier_passes_bundle_through():
+    g = FakeGraph()
+    alpha = g.add_source(10, "alpha", app="alpha")
+    beta = g.add_source(11, "beta", app="beta")
+    sink = g.add_sink(20, "sink1")
+    s = PatchSpace(g)
+    s.mark_graph_loaded()
+    s.add_node(AllAppsNode("apps"))
+    s.add_node(FilterNode("f"))
+    s.add_node(SinkNode("snk", "sink1"))
+    s.add_edge("apps", "f")
+    s.add_edge("f", "snk")
+    s.sync()
+    links = g.linked_pairs()
+    assert (alpha["FL"], sink["FL"]) in links
+    assert (beta["FL"], sink["FL"]) in links
+
+
+def test_bundle_to_audio_passes_sources():
+    g = FakeGraph()
+    alpha = g.add_source(10, "alpha", app="alpha")
+    sink = g.add_sink(20, "sink1")
+    s = PatchSpace(g)
+    s.mark_graph_loaded()
+    s.add_node(AllAppsNode("apps"))
+    s.add_node(BundleToAudioNode("conv"))
+    s.add_node(SinkNode("snk", "sink1"))
+    s.add_edge("apps", "conv")
+    s.add_edge("conv", "snk")
+    s.sync()
+    assert (alpha["FL"], sink["FL"]) in g.linked_pairs()
+
+
+# ---------------------------------------------------------------------------
+# target-side resolution (All Outputs -> Bundle Output terminal)
+# ---------------------------------------------------------------------------
+
+
+def test_bundle_merge_collects_multiple_inputs():
+    g = FakeGraph()
+    alpha = g.add_source(10, "alpha", app="alpha")
+    beta = g.add_source(11, "beta", app="beta")
+    sink = g.add_sink(20, "sink1")
+    s = PatchSpace(g)
+    s.mark_graph_loaded()
+    s.add_node(SrcNode("sa", "alpha"))
+    s.add_node(SrcNode("sb", "beta"))
+    s.add_node(BundleMergeNode("merge"))
+    s.add_node(SinkNode("snk", "sink1"))
+    # Several edges land on the one bus input.
+    s.add_edge("sa", "merge")
+    s.add_edge("sb", "merge")
+    s.add_edge("merge", "snk")
+    s.sync()
+    links = g.linked_pairs()
+    assert (alpha["FL"], sink["FL"]) in links
+    assert (beta["FL"], sink["FL"]) in links
+
+
+def test_bundle_merge_grows_an_input_per_connection():
+    g = FakeGraph()
+    g.add_source(10, "alpha", app="alpha")
+    g.add_source(11, "beta", app="beta")
+    s = PatchSpace(g)
+    s.mark_graph_loaded()
+    s.add_node(SrcNode("sa", "alpha"))
+    s.add_node(SrcNode("sb", "beta"))
+    s.add_node(BundleMergeNode("merge"))
+    # Starts with a single spare socket.
+    assert s.bundle_input_ports("merge") == ["in1"]
+    s.add_edge("sa", "merge", to_port="in1")
+    # Plugging into the spare grows another one.
+    assert s.bundle_input_ports("merge") == ["in1", "in2"]
+    s.add_edge("sb", "merge", to_port="in2")
+    assert s.bundle_input_ports("merge") == ["in1", "in2", "in3"]
+
+
+def test_bundle_split_reports_members_and_routes_one_line():
+    g = FakeGraph()
+    alpha = g.add_source(10, "alpha", app="alpha")
+    beta = g.add_source(11, "beta", app="beta")
+    sink = g.add_sink(20, "sink1")
+    s = PatchSpace(g)
+    s.mark_graph_loaded()
+    s.add_node(AllAppsNode("apps"))
+    s.add_node(BundleSplitNode("split"))
+    s.add_node(SinkNode("snk", "sink1"))
+    s.add_edge("apps", "split")
+    # The daemon reports one member per live source, keyed by node.name.
+    members = s.bundle_members("split")
+    ports = {m["port"] for m in members}
+    assert ports == {"alpha", "beta"}
+    assert all(m["label"] for m in members)
+
+    # A single output line carries only that member.
+    s.add_edge("split", "snk", from_port="alpha")
+    s.sync()
+    links = g.linked_pairs()
+    assert (alpha["FL"], sink["FL"]) in links
+    assert not any(o == beta["FL"] for o, _ in links)
+
+
+def test_bundle_split_unknown_member_resolves_to_nothing():
+    g = FakeGraph()
+    g.add_source(10, "alpha", app="alpha")
+    sink = g.add_sink(20, "sink1")
+    s = PatchSpace(g)
+    s.mark_graph_loaded()
+    s.add_node(AllAppsNode("apps"))
+    s.add_node(BundleSplitNode("split"))
+    s.add_node(SinkNode("snk", "sink1"))
+    s.add_edge("apps", "split")
+    s.add_edge("split", "snk", from_port="ghost")
+    s.sync()
+    assert g.linked_pairs() == set()
+
+
+def test_bundle_side_reports_direction():
+    s = PatchSpace(FakeGraph())
+    s.mark_graph_loaded()
+    s.add_node(AllInputsNode("i"))
+    s.add_node(AllOutputsNode("o"))
+    s.add_node(FilterNode("f"))
+    s.add_node(RegexClassifierNode("c", "x"))
+    s.add_edge("o", "f")
+    s.add_edge("c", "f", to_port="filter")
+    assert s.bundle_side("i") == "source"
+    assert s.bundle_side("o") == "sink"
+    assert s.bundle_side("f") == "sink"
+
+
+def test_all_outputs_filter_and_bundle_output_routes_to_matched_sink():
+    g = FakeGraph()
+    src = g.add_source(10, "app", app="app")
+    speaker = g.add_sink(20, "speaker")
+    headphones = g.add_sink(21, "headphones")
+    dummy_id = 30
+    mon, play = add_duplex(g, dummy_id, "bundle_output_1")
+
+    s = PatchSpace(g)
+    s.mark_graph_loaded()
+    s.add_node(SrcNode("src", "app"))
+    s.add_node(AllOutputsNode("outs"))
+    s.add_node(FilterNode("f"))
+    s.add_node(RegexClassifierNode("c", "speaker"))
+    s.add_node(FakeBundleOutput("bo", dummy_id))
+    s.add_edge("src", "bo")
+    s.add_edge("outs", "f")
+    s.add_edge("c", "f", to_port="filter")
+    s.add_edge("f", "bo", to_port="bundle")
+    s.sync()
+    links = g.linked_pairs()
+    # The source sums into the dummy...
+    assert (src["FL"], play["FL"]) in links
+    assert (src["FR"], play["FR"]) in links
+    # ...and the dummy's monitor feeds only the matched sink.
+    assert (mon["FL"], speaker["FL"]) in links
+    assert (mon["FR"], speaker["FR"]) in links
+    assert not any(i in (headphones["FL"], headphones["FR"]) for _, i in links)
+
+
+def test_bundle_output_without_dummy_has_no_links():
+    g = FakeGraph()
+    g.add_source(10, "app", app="app")
+    g.add_sink(20, "speaker")
+    s = PatchSpace(g)
+    s.mark_graph_loaded()
+    s.add_node(SrcNode("src", "app"))
+    s.add_node(AllOutputsNode("outs"))
+    s.add_node(FakeBundleOutput("bo", None))
+    s.add_edge("src", "bo")
+    s.add_edge("outs", "bo", to_port="bundle")
+    s.sync()
+    assert g.linked_pairs() == set()
+
+
+# ---------------------------------------------------------------------------
+# daemon registry / serialization
+# ---------------------------------------------------------------------------
+
+
+def test_daemon_registers_and_serializes_bundle_types():
+    from main import PatchBayDaemon
+
+    d = PatchBayDaemon()
+    leaf_types = [
+        "all_inputs",
+        "all_outputs",
+        "all_apps",
+        "filter",
+        "bundle",
+        "bundle_split",
+        "bundle_to_audio",
+        "regex_classifier",
+        "media_class_classifier",
+        "description_classifier",
+        "external_only_classifier",
+    ]
+    for node_type in leaf_types:
+        resp = d.handle_command(
+            {"command": "add_node", "node_type": node_type, "node_id": node_type}
+        )
+        assert resp["status"] == "ok", (node_type, resp)
+    nodes = d.handle_command({"command": "get_nodes"})["nodes"]
+    for node_type in leaf_types:
+        assert nodes[node_type]["type"] == node_type
+
+    d.handle_command({
+        "command": "add_node", "node_type": "regex_classifier",
+        "node_id": "c1", "config": {"pattern": "Firefox", "invert": True},
+    })
+    c1 = d.handle_command({"command": "get_nodes"})["nodes"]["c1"]
+    assert c1["pattern"] == "Firefox"
+    assert c1["invert"] is True
+
+
+def test_node_specs_declare_bundle_and_filter_ports():
+    from gui import node_specs
+
+    assert node_specs.port_kind("all_inputs", "out", "out") == "bundle"
+    assert node_specs.port_kind("all_outputs", "out", "out") == "bundle"
+    assert node_specs.port_kind("filter", "in", "in") == "bundle"
+    assert node_specs.port_kind("filter", "out", "out") == "bundle"
+    assert node_specs.port_kind("filter", "filter1", "in") == "filter"
+    assert node_specs.port_kind("filter", "filter9", "in") == "filter"
+    assert node_specs.port_kind("regex_classifier", "out", "out") == "filter"
+    assert node_specs.port_kind("bundle_to_audio", "in", "in") == "bundle"
+    assert node_specs.port_kind("bundle", "in1", "in") == "bundle"
+    # Dynamic merge inputs (in2, ...) are bundles too.
+    assert node_specs.port_kind("bundle", "in7", "in") == "bundle"
+    assert node_specs.port_kind("bundle", "out", "out") == "bundle"
+    assert node_specs.port_kind("bundle_split", "in", "in") == "bundle"
+    # A Split Bundle's member outputs are ordinary audio.
+    assert node_specs.port_kind("bundle_split", "alpha", "out") == "audio"
+    assert node_specs.port_kind("bundle_output", "bundle", "in") == "bundle"
+    # Every new type has a spec and a menu description.
+    for node_type in (
+        "all_inputs", "all_outputs", "all_apps", "filter", "bundle",
+        "bundle_split", "bundle_to_audio", "bundle_output", "regex_classifier",
+        "media_class_classifier", "description_classifier",
+        "external_only_classifier",
+    ):
+        assert node_type in node_specs.NODE_TYPE_SPECS
+        assert node_type in node_specs.NODE_DESCRIPTIONS
+
+
+def test_node_specs_ports_compatible_matches_daemon_rules():
+    from gui import node_specs
+
+    # Bundle <-> audio either way.
+    assert node_specs.ports_compatible("all_inputs", "out", "app_output", "in")
+    assert node_specs.ports_compatible("app_input", "out", "filter", "in")
+    # Filter only with filter.
+    assert node_specs.ports_compatible("regex_classifier", "out", "filter", "filter")
+    assert not node_specs.ports_compatible("regex_classifier", "out", "app_output", "in")
+    # Boolean only with boolean.
+    assert node_specs.ports_compatible("boolean_switch", "out", "gate", "ctrl")
+    assert not node_specs.ports_compatible("all_inputs", "out", "gate", "ctrl")
+
+
+def test_daemon_serializes_merge_bundle_inputs():
+    from main import PatchBayDaemon
+
+    d = PatchBayDaemon()
+    d.handle_command({"command": "add_node", "node_type": "app_input",
+                      "node_id": "src", "config": {"app_name": "x"}})
+    d.handle_command({"command": "add_node", "node_type": "bundle",
+                      "node_id": "m"})
+    d.handle_command({"command": "add_edge", "from_node": "src",
+                      "to_node": "m", "to_port": "in1"})
+    nodes = d.handle_command({"command": "get_nodes"})["nodes"]
+    assert nodes["m"]["bundle_inputs"] == ["in1", "in2"]
+
+
+def test_daemon_serializes_filter_inputs():
+    from main import PatchBayDaemon
+
+    d = PatchBayDaemon()
+    d.handle_command({"command": "add_node", "node_type": "all_apps",
+                      "node_id": "apps"})
+    d.handle_command({"command": "add_node", "node_type": "filter",
+                      "node_id": "f"})
+    d.handle_command({"command": "add_node", "node_type": "regex_classifier",
+                      "node_id": "c", "config": {"pattern": "x"}})
+    d.handle_command({"command": "add_edge", "from_node": "c",
+                      "to_node": "f", "to_port": "filter1"})
+    nodes = d.handle_command({"command": "get_nodes"})["nodes"]
+    assert nodes["f"]["filter_inputs"] == ["filter1", "filter2"]
+
+
+def test_daemon_create_node_builds_bundle_output_without_starting_it():
+    from main import PatchBayDaemon
+
+    d = PatchBayDaemon()
+    node = d._create_node("bundle_output", "bo", {})
+    assert type(node).__name__ == "BundleOutputNode"
+    assert node.backing_node_name
+
+
+def test_daemon_load_migrates_legacy_source_leaf():
+    from main import PatchBayDaemon
+
+    d = PatchBayDaemon()
+    config = {
+        "nodes": {
+            "old_in": {"type": "regex_input", "params": {"pattern": "Firefox"}},
+        },
+        "edges": [],
+        "groups": [],
+    }
+    d._load_session(config, migrate=True)
+    assert "old_in" not in d.space.nodes
+    assert "all_inputs" in d.space.nodes
+    assert any(
+        type(n).__name__ == "RegexClassifierNode" for n in d.space.nodes.values()
+    )
+    assert any(type(n).__name__ == "FilterNode" for n in d.space.nodes.values())

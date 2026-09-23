@@ -17,6 +17,7 @@ place, edges that already exist are left alone.
 import json
 import sys
 
+import migrations
 from patchbay_cli import PatchBayClient
 
 
@@ -24,6 +25,12 @@ def apply_config(config_file):
     """Apply a configuration from a JSON file."""
     with open(config_file) as f:
         config = json.load(f)
+    # Bring an old-schema config forward before replaying it (see
+    # migrations.py) so applying a legacy export creates the current
+    # node shapes instead of re-introducing deprecated ones.
+    config, migration_fixes = migrations.migrate(config)
+    for fix in migration_fixes:
+        print(f"  ~ {fix}")
 
     client = PatchBayClient()
     try:

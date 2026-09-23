@@ -30,6 +30,7 @@ FIELD_LABELS = {
     "description": "Description:",
     "device_label": "Name:",
     "warp_name": "Warp name:",
+    "path": "Sound file:",
 }
 
 # Human-readable labels for the raw PipeWire media.class strings that
@@ -86,6 +87,11 @@ def media_class_choices_for(node_type: str) -> List[tuple]:
     list, since media_class_input is the only other caller today."""
     if node_type == "media_class_output":
         return MEDIA_CLASS_OUTPUT_CHOICES
+    if node_type == "media_class_classifier":
+        # A bundle classifier can run on either side, so offer both
+        # directions' choices (the Filter decides which side it applies
+        # to at resolve time).
+        return MEDIA_CLASS_CHOICES
     return MEDIA_CLASS_INPUT_CHOICES
 
 
@@ -111,9 +117,17 @@ class NodeSpec:
         "settings",
         "boolean_inputs",
         "boolean_outputs",
+        "impulse_inputs",
+        "impulse_outputs",
+        "bundle_inputs",
+        "bundle_outputs",
+        "filter_inputs",
+        "filter_outputs",
         "socket_labels",
         "description",
         "setting_tooltips",
+        "toggle",
+        "indicator",
     )
 
     def __init__(
@@ -126,9 +140,17 @@ class NodeSpec:
         settings: Optional[List[tuple]] = None,
         boolean_inputs: Optional[List[str]] = None,
         boolean_outputs: Optional[List[str]] = None,
+        impulse_inputs: Optional[List[str]] = None,
+        impulse_outputs: Optional[List[str]] = None,
+        bundle_inputs: Optional[List[str]] = None,
+        bundle_outputs: Optional[List[str]] = None,
+        filter_inputs: Optional[List[str]] = None,
+        filter_outputs: Optional[List[str]] = None,
         socket_labels: bool = True,
         description: str = "",
         setting_tooltips: Optional[Dict[str, str]] = None,
+        toggle: Optional[tuple] = None,
+        indicator: Optional[str] = None,
     ):
         self.label = label
         self.inputs = inputs
@@ -153,6 +175,22 @@ class NodeSpec:
         # link).  Every port not listed here is audio.
         self.boolean_inputs = set(boolean_inputs or ())
         self.boolean_outputs = set(boolean_outputs or ())
+        # Ports carrying a momentary *impulse* (a Button's output, a Sound
+        # Effect's input): a dotted-wire event, never a PipeWire link and
+        # never a value - pressing the button pushes it (see pwnodes.py's
+        # PatchSpace.pulse).  Paired only with another impulse port.
+        self.impulse_inputs = set(impulse_inputs or ())
+        self.impulse_outputs = set(impulse_outputs or ())
+        # Ports that carry a *bundle*: a logical set of live endpoints on
+        # one dotted wire (bundle sources / Filter / terminals).  A bundle
+        # port may pair with an ordinary audio port (a single stream is a
+        # bundle of one).  *Filter* ports carry a classifier predicate - a
+        # pure control-plane value, drawn like a bundle but pairable only
+        # with another filter port.
+        self.bundle_inputs = set(bundle_inputs or ())
+        self.bundle_outputs = set(bundle_outputs or ())
+        self.filter_inputs = set(filter_inputs or ())
+        self.filter_outputs = set(filter_outputs or ())
         # None | "gate" | "volume" | "wetdry" | "sensitivity" - which
         # inline control (if any) is drawn on the node body and wired
         # to a daemon command. "gate" is the on/off toggle, "volume"
@@ -166,6 +204,19 @@ class NodeSpec:
         # single string property (if any) is edited via an inline
         # text field + a settings-dialog row.
         self.field = field
+        # Optional (attr, label) for a checkbox drawn on the node body,
+        # above the field/control row - a boolean property the user flips
+        # in place rather than through the Settings dialog (the Sound
+        # Effect's retrigger behaviour).  Costs a row of node height in
+        # patchspace_widget._bottom_control_height; the checkbox is drawn
+        # and hit-tested by that same geometry.
+        self.toggle = toggle
+        # None | "playing" - a live status read-out in the bottom-right of
+        # the node body, beside the field: a coloured dot plus the number
+        # of things currently running (a Sound Effect's playback streams,
+        # from the daemon's per-node `playing`).  Purely a display - there
+        # is nothing to click.
+        self.indicator = indicator
         # Optional list of settings-dialog-only rows, each either a
         # 3-tuple (attr, label, kind) or a 4-tuple (attr, label, kind,
         # extra) when the widget needs more than a label - kind is one
@@ -185,7 +236,11 @@ class NodeSpec:
         """Whether this node type draws something in the bottom area
         that needs extra node height + a socket offset so ports don't
         overlap it."""
-        return self.control is not None or self.field is not None
+        return (
+            self.control is not None
+            or self.field is not None
+            or self.toggle is not None
+        )
 
 
 NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
@@ -223,6 +278,77 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
         boolean_inputs=["ctrl"],
     ),
     "exclude_filter": NodeSpec("Exclude (Regex)", ["in"], ["out"], field="pattern"),
+    # Bundles: a wire that stands for a whole set of endpoints.  All
+    # Inputs / All Apps are *source* bundles (audio can be pulled from
+    # their members); All Outputs is a *sink* bundle (audio can be pushed
+    # to them).  A Filter narrows a bundle by a classifier plugged into
+    # its "filter" input; Bundle -> Audio converts a source bundle back to
+    # one ordinary stream; Bundle Output delivers audio into a sink bundle.
+    "all_inputs": NodeSpec(
+        "All Inputs", [], ["out"],
+        bundle_outputs=["out"],
+    ),
+    "all_outputs": NodeSpec(
+        "All Outputs", [], ["out"],
+        bundle_outputs=["out"],
+    ),
+    "all_apps": NodeSpec(
+        "All Apps", [], ["out"],
+        bundle_outputs=["out"],
+    ),
+    # Filter's classifier inputs are dynamic: it starts with one and
+    # grows a spare each time a classifier is plugged in (the daemon
+    # reports them as filter_inputs), so one Filter ANDs many classifiers.
+    "filter": NodeSpec(
+        "Filter", ["in", "filter1"], ["out"],
+        bundle_inputs=["in"], bundle_outputs=["out"], filter_inputs=["filter1"],
+        socket_labels=True,
+    ),
+    # Merge Bundle's input sockets are dynamic: it starts with one and
+    # grows a spare each time a line is plugged in (the daemon reports
+    # them as bundle_inputs), so several lines/bundles collect into one.
+    "bundle": NodeSpec(
+        "Merge Bundle", ["in1"], ["out"],
+        bundle_inputs=["in1"], bundle_outputs=["out"],
+    ),
+    # Split Bundle's output sockets are dynamic (one per live member), so
+    # its spec declares none; the daemon reports them as bundle_members
+    # and the canvas appends a socket for each.
+    "bundle_split": NodeSpec(
+        "Split Bundle", ["in"], [],
+        bundle_inputs=["in"],
+    ),
+    "bundle_to_audio": NodeSpec(
+        "Bundle -> Audio", ["in"], ["out"],
+        bundle_inputs=["in"],
+    ),
+    "bundle_output": NodeSpec(
+        "Bundle Output", ["in", "bundle"], [],
+        bundle_inputs=["bundle"],
+        socket_labels=True,
+    ),
+    # Classifiers: a pure predicate with a single "filter" output, plugged
+    # into a Filter.  `invert` complements any of them.
+    "regex_classifier": NodeSpec(
+        "Regex", [], ["out"], field="pattern",
+        filter_outputs=["out"],
+        settings=[("invert", "Invert (exclude matches)", "bool")],
+    ),
+    "media_class_classifier": NodeSpec(
+        "Media Class", [], ["out"], field="media_class",
+        filter_outputs=["out"],
+        settings=[("invert", "Invert (exclude matches)", "bool")],
+    ),
+    "description_classifier": NodeSpec(
+        "Description", [], ["out"], field="description",
+        filter_outputs=["out"],
+        settings=[("invert", "Invert (exclude matches)", "bool")],
+    ),
+    "external_only_classifier": NodeSpec(
+        "External Only", [], ["out"],
+        filter_outputs=["out"],
+        settings=[("invert", "Invert (exclude matches)", "bool")],
+    ),
     "volume": NodeSpec("Volume", ["in"], ["out"], control="volume"),
     # Boolean control-signal nodes (gray ports/edges; never a PipeWire
     # link). The On/Off source's button flips a boolean output; the
@@ -324,6 +450,34 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
         boolean_inputs=["in"],
         boolean_outputs=["out"],
         settings=[("description", "Description:", "text")],
+    ),
+    # Impulse: a momentary event rather than a signal.  A Button fires
+    # one (its big gray button pulses green on press); a Sound Effect
+    # reacts to one by playing its file.  Impulse sockets are filled dots
+    # and their wires are short-dashed, and nothing on this wire is ever a
+    # PipeWire link or a value a poll could read back.
+    "button": NodeSpec(
+        "Button",
+        [],
+        ["out"],
+        control="impulse",
+        impulse_outputs=["out"],
+    ),
+    "sound_effect": NodeSpec(
+        "Sound Effect",
+        ["in"],
+        ["out"],
+        field="path",
+        impulse_inputs=["in"],
+        # The Stack switch is on the node body (above the path box); the
+        # green dot + play count beside the path box is the live read-out
+        # (see patchspace_widget._draw_play_indicator).
+        toggle=("overlap", "Stack"),
+        indicator="playing",
+        settings=[
+            ("path", "Sound file:", "text"),
+            ("overlap", "Stack (don't restart)", "bool"),
+        ],
     ),
 }
 
@@ -597,6 +751,30 @@ NODE_DESCRIPTIONS: Dict[str, str] = {
     "description.",
     "description_output": "A destination selected by a text match on its "
     "description.",
+    # Bundles
+    "all_inputs": "A bundle of every source: hardware inputs and app "
+    "playback streams.  Feed it through Filters to pick some of them.",
+    "all_outputs": "A bundle of every destination (hardware outputs and "
+    "app recording streams) to route audio into.",
+    "all_apps": "A bundle of just the app playback streams.",
+    "filter": "Narrows a bundle to the members a classifier plugged into "
+    "its filter input matches.  Chain filters to intersect.",
+    "bundle": "Collects several lines or bundles into one bundle; it grows "
+    "another input each time you plug one in.",
+    "bundle_split": "Takes a bundle apart: one output line per member, so "
+    "each stream can be routed or processed on its own.",
+    "regex_classifier": "A filter that matches by regular expression on the "
+    "node/app name.",
+    "media_class_classifier": "A filter that matches by PipeWire media "
+    "class.",
+    "description_classifier": "A filter that matches by a text match on the "
+    "description.",
+    "external_only_classifier": "A filter that keeps only real apps and "
+    "hardware, stripping PatchBay's own plumbing.",
+    "bundle_to_audio": "Converts a source bundle back into one ordinary "
+    "audio stream (all its members).",
+    "bundle_output": "Delivers the audio wired into it to every destination "
+    "in a sink bundle.",
     # Processing
     "splitter": "Passes audio straight through; useful as a named junction "
     "that several edges can share.",
@@ -657,12 +835,23 @@ NODE_DESCRIPTIONS: Dict[str, str] = {
     "play into.",
     "virtual_mic": "A named virtual microphone other applications can "
     "record from.",
+    # Impulse
+    "button": "A momentary button: press it to fire an impulse down its "
+    "wire. It holds no state - the pulse is the whole signal.",
+    "sound_effect": "Plays an audio file whenever an impulse arrives: give "
+    "it a file and wire its audio out wherever the sound should go.",
 }
 
 # Per-Settings-row hover text, keyed by node type then daemon property name.
 # Rows without an entry fall back to their label text (see
 # show_settings_dialog), so every row has a tooltip.
 SETTING_TOOLTIPS: Dict[str, Dict[str, str]] = {
+    "sound_effect": {
+        "path": "Path to the audio file played on each impulse.",
+        "overlap": "On: a new impulse starts the sound again while the "
+        "current one keeps playing, so they stack. Off: it restarts the "
+        "file.",
+    },
     "echo_cancel": {
         "library_name": "The AEC implementation to load. 'aec/libspa-aec-"
         "webrtc' is the WebRTC echo canceller.",
@@ -747,14 +936,24 @@ for _type, _tips in SETTING_TOOLTIPS.items():
 # ADD_NODE_CATEGORIES below so the two can't drift apart.
 ADD_NODE_CATEGORIES = [
     (
-        "Filters",
+        # Bundles: a wire that stands for a set of endpoints, plus the
+        # classifiers that narrow one.  These replace the old per-leaf
+        # Regex/Media Class/Description input and output filter nodes
+        # (which still load from saved sessions; see migrations.py).
+        "Bundles",
         [
-            ("Regex Input", "regex_input"),
-            ("Media Class Input", "media_class_input"),
-            ("Description Input", "description_input"),
-            ("Regex Output", "regex_output"),
-            ("Media Class Output", "media_class_output"),
-            ("Description Output", "description_output"),
+            ("All Inputs", "all_inputs"),
+            ("All Outputs", "all_outputs"),
+            ("All Apps", "all_apps"),
+            ("Bundle", "bundle"),
+            ("Split Bundle", "bundle_split"),
+            ("Filter", "filter"),
+            ("Regex Classifier", "regex_classifier"),
+            ("Media Class Classifier", "media_class_classifier"),
+            ("Description Classifier", "description_classifier"),
+            ("External Only", "external_only_classifier"),
+            ("Bundle -> Audio", "bundle_to_audio"),
+            ("Bundle Output", "bundle_output"),
         ],
     ),
     (
@@ -777,6 +976,13 @@ ADD_NODE_CATEGORIES = [
             ("OR", "boolean_or"),
             ("XOR", "boolean_xor"),
             ("Bool Splitter", "boolean_splitter"),
+        ],
+    ),
+    (
+        "Impulse",
+        [
+            ("Button", "button"),
+            ("Sound Effect", "sound_effect"),
         ],
     ),
     (
@@ -832,9 +1038,14 @@ ADD_NODE_MENU_ITEMS = [
 # for (or one added to NODE_TYPE_SPECS without a menu entry) falls back
 # to the theme accent.
 CATEGORY_COLOR_NAMES = {
+    "Bundles": "accent_color",
     "Filters": "accent_color",
     "Processing": "success_color",
     "Boolean": "dim_label_color",
+    # An impulse is a fired event, so its node borders share the green the
+    # Button pulses and the play indicator lights with - the one category
+    # colour that reads as "something just happened".
+    "Impulse": "success_color",
     "Warp": "accent_color",
     "Effects": "warning_color",
     "Hardware & Apps": "error_color",
@@ -903,6 +1114,22 @@ NODE_TYPE_ICONS: Dict[str, str] = {
     "patchbay_mic_device": "audio-input-microphone-symbolic",
     "virtual_speaker": "audio-speakers-symbolic",
     "virtual_mic": "audio-input-microphone-symbolic",
+    # All Inputs covers mics, interfaces, virtual mics AND app playback
+    # streams, so it gets a general multimedia glyph rather than a mic.
+    "all_inputs": "applications-multimedia-symbolic",
+    "all_outputs": "audio-speakers-symbolic",
+    "all_apps": "application-x-executable-symbolic",
+    "filter": "edit-find-symbolic",
+    "bundle": "insert-link-symbolic",
+    "bundle_split": "view-list-symbolic",
+    "regex_classifier": "edit-find-symbolic",
+    "media_class_classifier": "view-list-symbolic",
+    "description_classifier": "text-x-generic-symbolic",
+    "external_only_classifier": "system-users-symbolic",
+    "bundle_to_audio": "media-playback-start-symbolic",
+    "bundle_output": "audio-card-symbolic",
+    "button": "media-playback-start-symbolic",
+    "sound_effect": "audio-x-generic-symbolic",
 }
 
 _DEFAULT_ADD_NODE_ICON = "list-add-symbolic"
@@ -936,6 +1163,18 @@ CLASS_NAME_TO_TYPE = {
     "MediaClassOutputNode": "media_class_output",
     "DescriptionInputNode": "description_input",
     "DescriptionOutputNode": "description_output",
+    "AllInputsNode": "all_inputs",
+    "AllOutputsNode": "all_outputs",
+    "AllAppsNode": "all_apps",
+    "FilterNode": "filter",
+    "BundleMergeNode": "bundle",
+    "BundleSplitNode": "bundle_split",
+    "RegexClassifierNode": "regex_classifier",
+    "MediaClassClassifierNode": "media_class_classifier",
+    "DescriptionClassifierNode": "description_classifier",
+    "ExternalOnlyClassifierNode": "external_only_classifier",
+    "BundleToAudioNode": "bundle_to_audio",
+    "BundleOutputNode": "bundle_output",
     "SplitterNode": "splitter",
     "GateNode": "gate",
     "SwitcherNode": "switcher",
@@ -962,6 +1201,8 @@ CLASS_NAME_TO_TYPE = {
     "NormalizeNode": "normalize",
     "EchoCancelNode": "echo_cancel",
     "LightNoiseCancelNode": "light_noise_cancel",
+    "ButtonNode": "button",
+    "SoundEffectNode": "sound_effect",
 }
 
 CLASS_NAME_TO_TYPE.update(
@@ -996,12 +1237,55 @@ def spec_for(node_type: str) -> NodeSpec:
 
 
 def port_kind(node_type: str, port: str, direction: str) -> str:
-    """"audio" or "boolean" for one of `node_type`'s ports.  Shared by
-    socket/edge coloring and by edge-drop validation so the GUI can't
-    create a boolean-to-audio connection the daemon would reject."""
+    """"audio", "boolean", "impulse", "bundle" or "filter" for one of
+    `node_type`'s ports.  Shared by socket/edge coloring and by edge-drop
+    validation so the GUI can't create a connection the daemon would
+    reject."""
     spec = spec_for(node_type)
-    kinds = spec.boolean_inputs if direction == "in" else spec.boolean_outputs
-    return "boolean" if port in kinds else "audio"
+    # A Merge Bundle's inputs are dynamic (in1, in2, ...); the spec only
+    # declares the first, so treat every input on one as a bundle socket.
+    if node_type == "bundle" and direction == "in":
+        return "bundle"
+    # A Filter's classifier inputs are dynamic (filter1, filter2, ...).
+    if node_type == "filter" and direction == "in" and port.startswith("filter"):
+        return "filter"
+    if direction == "in":
+        kinds, bundles, filters, impulses = (
+            spec.boolean_inputs, spec.bundle_inputs, spec.filter_inputs,
+            spec.impulse_inputs,
+        )
+    else:
+        kinds, bundles, filters, impulses = (
+            spec.boolean_outputs, spec.bundle_outputs, spec.filter_outputs,
+            spec.impulse_outputs,
+        )
+    if port in kinds:
+        return "boolean"
+    if port in impulses:
+        return "impulse"
+    if port in filters:
+        return "filter"
+    if port in bundles:
+        return "bundle"
+    return "audio"
+
+
+def ports_compatible(from_type: str, from_port: str, to_type: str,
+                     to_port: str) -> bool:
+    """Whether two ports may be connected, mirroring PatchSpace.add_edge
+    (and the canvas's _ports_compatible): boolean pairs only with boolean,
+    impulse only with impulse and filter only with filter; audio and
+    bundle mix either way (a bundle is a set of streams, one stream is a
+    bundle of one)."""
+    from_kind = port_kind(from_type, from_port, "out")
+    to_kind = port_kind(to_type, to_port, "in")
+    if (from_kind == "boolean") != (to_kind == "boolean"):
+        return False
+    if (from_kind == "impulse") != (to_kind == "impulse"):
+        return False
+    if (from_kind == "filter") != (to_kind == "filter"):
+        return False
+    return True
 
 
 def is_mute_node(node_id) -> bool:

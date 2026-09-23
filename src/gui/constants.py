@@ -72,6 +72,13 @@ NODE_LOADING_ALPHA = 0.45
 NODE_DELETE_MS = 320
 ANIM_TICK_MS = 16
 
+# How long a Button node's face takes to pulse grey -> green -> grey after
+# a press (see PatchSpaceGraphWidget._draw_impulse_button).  The button is
+# momentary and holds no state, so this local flash is the only feedback
+# the press itself gets; the daemon-reported play count on the nodes it
+# drives is what shows the impulse actually landed.
+IMPULSE_FLASH_MS = 320
+
 # How long a freshly-made connection takes to draw itself in from source to
 # target, with a transparent fade at the leading tip (see
 # PatchSpaceGraphWidget._draw_growing_wire).

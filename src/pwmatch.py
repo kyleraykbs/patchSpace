@@ -79,6 +79,53 @@ SOURCE_MEDIA_CLASSES = (
     INTERNAL_SOURCE_MEDIA_CLASS,
 )
 
+# Every node.name prefix this project creates objects under.  Also the
+# basis of is_patchbay_owned() below, which the External Only classifier
+# uses to filter PatchBay's own plumbing out of a bundle.
+PATCHBAY_OWNED_PREFIXES = (
+    "patchbay_",
+    "echo_cancel_node_",
+    "light_noise_cancel_node_",
+    "noise_cancel_node_",
+    "reverb_node_",
+    "normalize_node_",
+    "volume_node_",
+    "volume_mute_",
+    "virtual_speaker_node_",
+    "virtual_mic_node_",
+    "splitter_",
+    "bundle_output_",
+)
+
+# The built-in virtual devices' exact node.names.  Mixed-case and
+# space-y on purpose (they are user-visible devices), and every piece
+# of their plumbing merely *starts with* one of them ("PatchBay_sink",
+# "PatchBay Mic_sink", ...) - hence the prefix match below.
+PATCHBAY_BUILTIN_NAMES = ("PatchBay", "PatchBay Mic")
+
+
+def is_patchbay_owned(props: dict) -> bool:
+    """Whether a live node is one of PatchBay's own objects - a built-in
+    virtual device, an effect dummy/keepalive, a module stream - rather
+    than some external app or hardware device.
+
+    Deliberately generous (any backing prefix, the ``Audio/*/Internal``
+    classes, any name starting with a built-in device name): it backs the
+    External Only classifier, where missing an owned node would leak our
+    plumbing into a "the rest of the world" bundle."""
+    name = props.get("node.name") or ""
+    if props.get("media.class") in (
+        INTERNAL_MEDIA_CLASS,
+        INTERNAL_SOURCE_MEDIA_CLASS,
+    ):
+        return True
+    if name.endswith("_keepalive"):
+        return True
+    if any(name.startswith(prefix) for prefix in PATCHBAY_OWNED_PREFIXES):
+        return True
+    return any(name.startswith(builtin) for builtin in PATCHBAY_BUILTIN_NAMES)
+
+
 # groups[group_name][channel] -> port id
 PortGroups = Dict[str, Dict[str, int]]
 
