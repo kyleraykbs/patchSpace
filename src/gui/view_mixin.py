@@ -35,6 +35,17 @@ class GraphViewMixin:
         scroll.connect("scroll", self._on_scroll_zoom)
         self.add_controller(scroll)
 
+        # Two-finger pinch: a touchscreen, and a trackpad whose pinch the
+        # compositor forwards (Wayland sends it as a zoom gesture, not as
+        # Ctrl+scroll).  `scale` is cumulative since the gesture began, so the
+        # zoom in effect at ::begin is what it is applied to - using the live
+        # zoom instead would compound and run away.
+        self._pinch_start_zoom = 1.0
+        pinch = Gtk.GestureZoom()
+        pinch.connect("begin", self._on_pinch_begin)
+        pinch.connect("scale-changed", self._on_pinch_zoom)
+        self.add_controller(pinch)
+
         key = Gtk.EventControllerKey()
         key.connect("key-pressed", self._on_view_key_pressed)
         self.add_controller(key)
@@ -63,21 +74,41 @@ class GraphViewMixin:
         self.panning = False
         self.set_cursor(None)
 
+    def zoom_about(self, x, y, factor):
+        """Zoom by `factor` keeping whatever is under `(x, y)` there - the one
+        piece of pan/zoom math the wheel and a pinch share."""
+        old_zoom = self.zoom
+        new_zoom = max(ZOOM_MIN, min(ZOOM_MAX, old_zoom * factor))
+        if new_zoom == old_zoom:
+            return False
+        wx, wy = self.to_world(x, y)
+        self.zoom = new_zoom
+        self.pan_x = x - wx * new_zoom
+        self.pan_y = y - wy * new_zoom
+        self.queue_draw()
+        return True
+
     def _on_scroll_zoom(self, controller, dx, dy):
         if dy == 0:
             return False
         factor = ZOOM_STEP if dy < 0 else (1.0 / ZOOM_STEP)
-        old_zoom = self.zoom
-        new_zoom = max(ZOOM_MIN, min(ZOOM_MAX, old_zoom * factor))
-        if new_zoom == old_zoom:
-            return True
-        px, py = self._last_pointer
-        wx, wy = self.to_world(px, py)
-        self.zoom = new_zoom
-        self.pan_x = px - wx * new_zoom
-        self.pan_y = py - wy * new_zoom
-        self.queue_draw()
+        self.zoom_about(self._last_pointer[0], self._last_pointer[1], factor)
         return True
+
+    def _on_pinch_begin(self, gesture, _sequence=None):
+        self._pinch_start_zoom = self.zoom
+
+    def _on_pinch_zoom(self, gesture, scale):
+        """A pinch (or a trackpad's zoom gesture): zoom about the point
+        between the touches, the way the wheel zooms about the pointer."""
+        if not scale or scale <= 0.0:
+            return
+        ok, cx, cy = gesture.get_bounding_box_center()
+        if not ok:
+            # A trackpad zoom gesture has no touches to take a centre from:
+            # fall back to wherever the pointer is.
+            cx, cy = self._last_pointer
+        self.zoom_about(cx, cy, (self._pinch_start_zoom * scale) / self.zoom)
 
     def track_pointer(self, x, y):
         self._last_pointer = (x, y)

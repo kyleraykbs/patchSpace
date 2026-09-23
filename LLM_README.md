@@ -589,6 +589,14 @@ stores the slot), the module's `panels.<name>.color` defaults to `@blue`, and th
 back to a per-name palette color.  The side view's color dot resolves the same way, so it
 shows what the canvas draws.
 
+*Pan and zoom.* `graph_view` (view_mixin.py) owns the shared view math: middle-drag pans,
+`EventControllerScroll` zooms about the pointer, and a `Gtk.GestureZoom` handles a
+two-finger pinch - a touchscreen, or a trackpad whose pinch the compositor forwards.  A pinch's
+`::scale-changed` reports the ratio since the gesture *began*, so `_on_pinch_begin` records the
+zoom it started at and `zoom_about(x, y, factor)` (shared with the wheel) applies the
+difference; using the live zoom would compound.  A trackpad zoom has no touch points, so the
+pointer is the fallback centre.
+
 *Selection.* A selected node's ring is drawn by `_draw_node`, inset inside the body and before
 its sockets, so a port centred on the edge is never covered (the overlay ring used to cross
 every port).

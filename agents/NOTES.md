@@ -282,3 +282,13 @@ write, reload again.  Idempotent, and the root file keeps every node it had.
   the module's panel color defaults to `@blue`, `#3584e4` reads as `@blue`, the side-view dot
   resolves the same way.  `FIELD_BOTTOM_PAD` (10) is the one place the pad below a node's field
   row is defined, for the rect and the height alike.
+
+## Pinch to zoom (2026-09-23)
+
+`view_mixin.py` had scroll-zoom (about the pointer) and middle-drag pan, but **no
+`Gtk.GestureZoom`** - pinching on a touchscreen did nothing.  Added, sharing `zoom_about(x, y,
+factor)` with the wheel.  Two traps: `::scale-changed` is cumulative since the gesture started
+(record the starting zoom in `::begin`, or the zoom compounds), and a trackpad zoom gesture has
+no bounding box (`get_bounding_box_center` fails) so the pointer is the fallback centre.
+Single-finger panning relies on GTK emulating button 1 for touch, which the primary-button drag
+gesture accepts; tested only structurally (no touchscreen here).
