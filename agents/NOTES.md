@@ -502,3 +502,14 @@ gesture accepts; tested only structurally (no touchscreen here).
 * **No live waveform.**  `probe_peaks` is an ffmpeg pass over the whole file,
   so following a take while it records is not worth it at any leash.  A take is
   loaded when it *ends*; other changes go through the 1.5s leash.
+
+* **Clear the data you mean to clear, not the entry that holds it.**  Blanking
+  a clip's waveform while its take recorded was done by dropping the
+  `_clip_waves` entry - which also dropped the timeline's view state (zoom, its
+  drag handles, the selection) kept beside it.  The entry is blanked now
+  (`peaks = []`), not removed.
+* **A flag on one node is not a fact about the graph.**  "Is this file being
+  written?" was asked as `ndata.get("recording")`, which only a Recorder has, so
+  a Clip downstream of one never saw it and kept loading the take live.  Collect
+  the recording take *paths* before the node loop and judge every node against
+  the file it is showing.
