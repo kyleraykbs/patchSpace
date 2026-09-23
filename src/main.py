@@ -104,6 +104,8 @@ from pwnodes import (
     BundleOutputNode,
     SplitterNode,
     SoundEffectNode,
+    SoundNode,
+    SoundPlayerNode,
     ButtonNode,
     PATCHSPACE_VIRTUAL_SINK_NAME,
     PATCHSPACE_VIRTUAL_MIC_NAME,
@@ -349,6 +351,8 @@ NODE_TYPE_REGISTRY: Dict[str, type] = {
     "splitter": SplitterNode,
     "button": ButtonNode,
     "sound_effect": SoundEffectNode,
+    "sound": SoundNode,
+    "sound_player": SoundPlayerNode,
     "gate": GateNode,
     "switcher": SwitcherNode,
     "inverse_switcher": InverseSwitcherNode,
@@ -3784,6 +3788,10 @@ class PatchSpaceDaemon:
             return cls(node_id, backing)
         if cls is ButtonNode:
             return cls(node_id)
+        if cls is SoundPlayerNode:
+            return cls(node_id, backing, g("overlap", False))
+        if cls is SoundNode:
+            return cls(node_id, g("path", ""))
         if cls is SoundEffectNode:
             return cls(
                 node_id,
@@ -5085,6 +5093,12 @@ class PatchSpaceDaemon:
                 # acoustically dead effect) with something stronger than
                 # the neutral "not connected yet" badge. See _node_health.
                 data["health"] = self._node_health(node)
+            if isinstance(node, SoundPlayerNode):
+                data["playing"] = node.playing
+            if isinstance(node, SoundNode):
+                # The file's length, so the node can show it and the Clip
+                # timeline knows how much sound there is to select from.
+                data["duration"] = node.duration
             if isinstance(node, SoundEffectNode):
                 # How many playback streams are live right now, so the
                 # GUI can light the node's play indicator (see

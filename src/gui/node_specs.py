@@ -123,6 +123,8 @@ class NodeSpec:
         "bundle_outputs",
         "filter_inputs",
         "filter_outputs",
+        "sound_inputs",
+        "sound_outputs",
         "socket_labels",
         "description",
         "setting_tooltips",
@@ -148,6 +150,8 @@ class NodeSpec:
         bundle_outputs: Optional[List[str]] = None,
         filter_inputs: Optional[List[str]] = None,
         filter_outputs: Optional[List[str]] = None,
+        sound_inputs: Optional[List[str]] = None,
+        sound_outputs: Optional[List[str]] = None,
         socket_labels: bool = True,
         description: str = "",
         setting_tooltips: Optional[Dict[str, str]] = None,
@@ -195,6 +199,11 @@ class NodeSpec:
         self.bundle_outputs = set(bundle_outputs or ())
         self.filter_inputs = set(filter_inputs or ())
         self.filter_outputs = set(filter_outputs or ())
+        # *Sound* ports carry a sound: a file plus the range of it that plays
+        # (see the Sound and Clip nodes).  Control-plane like a filter - no
+        # audio crosses one - and only ever paired with another sound port.
+        self.sound_inputs = set(sound_inputs or ())
+        self.sound_outputs = set(sound_outputs or ())
         # None | "gate" | "volume" | "wetdry" | "sensitivity" - which
         # inline control (if any) is drawn on the node body and wired
         # to a daemon command. "gate" is the on/off toggle, "volume"
@@ -495,6 +504,34 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
         ["out"],
         control="impulse",
         impulse_outputs=["out"],
+    ),
+    # A *sound*: a file of known length, on its own port kind.  It carries no
+    # audio - it is a reference the Graph turns into playback (see the Sound
+    # Player, which fires it) - so it has no inputs and one sound output, and
+    # the length is reported by the daemon for the Clip timeline.
+    "sound": NodeSpec(
+        "Sound",
+        [],
+        ["out"],
+        sound_outputs=["out"],
+        field="path",
+        picker=True,
+        indicator="duration",
+        settings=[("path", "Sound file:", "text")],
+    ),
+    # A Sound *Player*: the old sound effect's trigger behaviour, but it plays
+    # whatever sound arrives on its sound input (see the Sound and Clip nodes),
+    # so what a button fires is now a graph decision rather than a file path.
+    "sound_player": NodeSpec(
+        "Sound Player",
+        ["in", "sound"],
+        ["out"],
+        impulse_inputs=["in"],
+        sound_inputs=["sound"],
+        # The Stack switch is on the node body (above nothing else it needs);
+        # the green dot + play count is the live read-out (_draw_play_indicator).
+        toggle=("overlap", "Stack"),
+        indicator="playing",
     ),
     "sound_effect": NodeSpec(
         "Sound Effect",
@@ -883,6 +920,12 @@ NODE_DESCRIPTIONS: Dict[str, str] = {
     # Impulse
     "button": "A momentary button: press it to fire an impulse down its "
     "wire. It holds no state - the pulse is the whole signal.",
+    "sound": "A sound: an audio file of known length, on its own port kind.  "
+    "It makes no noise itself - a Sound Player fires it, a Clip node returns "
+    "part of it - so it has no inputs, just a sound output.",
+    "sound_player": "Plays the sound wired into it whenever an impulse "
+    "arrives: a sound input, an impulse input, an audio output.  The Stack "
+    "switch picks whether a new impulse restarts it or stacks another take.",
     "sound_effect": "Plays an audio file whenever an impulse arrives: give "
     "it a file and wire its audio out wherever the sound should go.",
 }
@@ -1032,6 +1075,8 @@ ADD_NODE_CATEGORIES = [
         "Impulse",
         [
             ("Button", "button"),
+            ("Sound", "sound"),
+            ("Sound Player", "sound_player"),
             ("Sound Effect", "sound_effect"),
         ],
     ),
@@ -1182,6 +1227,8 @@ NODE_TYPE_ICONS: Dict[str, str] = {
     "bundle_to_audio": "media-playback-start-symbolic",
     "bundle_output": "audio-card-symbolic",
     "button": "media-playback-start-symbolic",
+    "sound": "audio-x-generic-symbolic",
+    "sound_player": "media-playback-start-symbolic",
     "sound_effect": "audio-x-generic-symbolic",
 }
 
@@ -1258,6 +1305,8 @@ CLASS_NAME_TO_TYPE = {
     "EchoCancelNode": "echo_cancel",
     "LightNoiseCancelNode": "light_noise_cancel",
     "ButtonNode": "button",
+    "SoundNode": "sound",
+    "SoundPlayerNode": "sound_player",
     "SoundEffectNode": "sound_effect",
 }
 
@@ -1293,7 +1342,7 @@ def spec_for(node_type: str) -> NodeSpec:
 
 
 def port_kind(node_type: str, port: str, direction: str) -> str:
-    """"audio", "boolean", "impulse", "bundle" or "filter" for one of
+    """"audio", "boolean", "impulse", "bundle", "filter" or "sound" for one of
     `node_type`'s ports.  Shared by socket/edge coloring and by edge-drop
     validation so the GUI can't create a connection the daemon would
     reject."""
@@ -1306,14 +1355,14 @@ def port_kind(node_type: str, port: str, direction: str) -> str:
     if node_type == "filter" and direction == "in" and port.startswith("filter"):
         return "filter"
     if direction == "in":
-        kinds, bundles, filters, impulses = (
+        kinds, bundles, filters, impulses, sounds = (
             spec.boolean_inputs, spec.bundle_inputs, spec.filter_inputs,
-            spec.impulse_inputs,
+            spec.impulse_inputs, spec.sound_inputs,
         )
     else:
-        kinds, bundles, filters, impulses = (
+        kinds, bundles, filters, impulses, sounds = (
             spec.boolean_outputs, spec.bundle_outputs, spec.filter_outputs,
-            spec.impulse_outputs,
+            spec.impulse_outputs, spec.sound_outputs,
         )
     if port in kinds:
         return "boolean"
@@ -1321,6 +1370,8 @@ def port_kind(node_type: str, port: str, direction: str) -> str:
         return "impulse"
     if port in filters:
         return "filter"
+    if port in sounds:
+        return "sound"
     if port in bundles:
         return "bundle"
     return "audio"
@@ -1340,6 +1391,8 @@ def ports_compatible(from_type: str, from_port: str, to_type: str,
     if (from_kind == "impulse") != (to_kind == "impulse"):
         return False
     if (from_kind == "filter") != (to_kind == "filter"):
+        return False
+    if (from_kind == "sound") != (to_kind == "sound"):
         return False
     return True
 

@@ -75,6 +75,7 @@ import logging
 import os
 import re
 import subprocess
+import tempfile
 import threading
 import time as _time
 from dataclasses import dataclass, field, replace
@@ -1709,10 +1710,68 @@ class SplitterNode(_SingleSinkNode):
                          pw_cli_command, settle, description=f"Splitter: {node_id}")
 
 
-class SoundEffectNode(_SingleSinkNode):
-    """A one-shot sound player: an impulse input fires a playback of
-    ``path`` into a private dummy sink whose *monitor* is this node's
-    audio output.
+#: path -> seconds; see probe_duration.  A file doesn't change length.
+_DURATION_CACHE: Dict[str, float] = {}
+
+
+def probe_duration(path: str) -> float:
+    """How long an audio file is, in seconds, or 0.0 when it can't be read.
+
+    ffprobe handles every format pw-cat can play (and then some), and this is
+    what makes a sound's length *known* rather than discovered when it ends.
+    Cached per path; a missing ffprobe just means no length is shown."""
+    if not path:
+        return 0.0
+    resolved = os.path.expanduser(path.strip())
+    if resolved in _DURATION_CACHE:
+        return _DURATION_CACHE[resolved]
+    duration = 0.0
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=nw=1:nk=1", resolved],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            duration = max(0.0, float((result.stdout or "").strip() or 0.0))
+    except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+        logger.debug("ffprobe couldn't read %r: %s", resolved, exc)
+    _DURATION_CACHE[resolved] = duration
+    return duration
+
+
+class SoundNode(Node):
+    """A sound: a file of known length, carried on a *sound* port.
+
+    It makes no noise and owns no PipeWire object - it is the reference other
+    nodes act on.  The Sound Player fires it when an impulse arrives, and the
+    Clip node returns a *range* of it, which is why the length matters: every
+    node downstream can talk about time in a file that hasn't been opened yet.
+    ``path`` is stored exactly as written (usually a home-relative "~/...") and
+    expanded when it is actually used, like the sound effect's."""
+
+    def __init__(self, node_id, path: str = ""):
+        super().__init__(node_id)
+        self.path = path or ""
+
+    def port_kind(self, port: str, direction: str) -> str:
+        return "sound" if direction == "out" else "audio"
+
+    @property
+    def duration(self) -> float:
+        """The sound's length in seconds (0.0 when unknown)."""
+        return probe_duration(self.path)
+
+
+class SoundPlayerNode(_SingleSinkNode):
+    """Plays a *sound* when an impulse arrives: a sound input, an impulse
+    input, an audio output.
+
+    The sound input carries a file plus the range of it to play (see
+    SoundNode / ClipNode); the impulse fires it into a private dummy sink
+    whose *monitor* is this node's audio output.  No sound is wired and the
+    impulse does nothing - which is why the node reports nothing to play
+    rather than playing something stale.
 
     The dummy is the node's socket, which is the same "the socket is
     stable, the interior is replaceable" rule the effect sandwich
@@ -1727,10 +1786,11 @@ class SoundEffectNode(_SingleSinkNode):
     sound instead of stacking takes; on lets impulses stack up and mix in
     the dummy (the node's Stack switch).
 
-    ``path`` is stored exactly as the user wrote it and may start with
-    ``~`` (the GUI's folder button stores a home-relative path so the
-    value survives a move); the expansion happens at play time, in
-    ``_start_player``.
+    The path comes from the sound upstream of it, stored exactly as the user
+    wrote it (usually a home-relative ``~/...``); the expansion happens at
+    play time, in ``_start_player``.  A range that doesn't cover the whole
+    file is decoded to a temporary WAV with ffmpeg first - pw-cat plays whole
+    files only, and that same decode is what makes any format playable.
 
     The playback children are deliberately kept out of ``backings``: a
     player exits on its own the moment the file ends, and a backing that
@@ -1739,10 +1799,12 @@ class SoundEffectNode(_SingleSinkNode):
     finished.  They are handed over by ``owned_backings()`` instead, and
     retired by ``refresh_live()`` on the supervision tick."""
 
-    # The impulse socket.  Its name is "in" (the node's only input), so
-    # edge ids stay the plain ``button->effect`` form; the *kind* is what
-    # makes it an impulse wire.
+    # The impulse socket.  Its name is "in", so edge ids stay the plain
+    # ``button->player`` form; the *kind* is what makes it an impulse wire.
     IMPULSE_INPUT = "in"
+
+    #: The socket a sound arrives on (a Sound node, or a Clip narrowing one).
+    SOUND_INPUT = "sound"
 
     # A sound effect is a source the user never selects in an app, so its
     # dummy stays out of the Pulse device list; the monitor ports are
@@ -1756,36 +1818,43 @@ class SoundEffectNode(_SingleSinkNode):
     # connecting, or pw-cat rejecting the file) both land well inside it.
     PLAYER_SETTLE_S = 0.1
 
-    def __init__(self, node_id, backing_node_name: str, path: str = "",
+    def __init__(self, node_id, backing_node_name: str,
                  overlap: bool = False,
                  pw_cli_command=("pw-cli",), settle: float = 0.3):
         super().__init__(node_id, backing_node_name, pw_cli_command, settle,
-                         description=f"Sound Effect: {node_id}")
-        self.path = path or ""
+                         description=f"Sound Player: {node_id}")
         self.overlap = bool(overlap)
         self._players: List[OwnedPwProcess] = []
+        #: name -> temporary WAV a clipped playback is reading (see
+        #: _clip_to_temp); removed when its player retires.
+        self._temp_files: Dict[str, str] = {}
         # Names are only ever appended to, never reused: a name is what
         # the live-graph lookup keys on, so recycling one would let a
         # lagging removal event tear down the fresh player.
         self._player_seq = 0
 
     def port_kind(self, port: str, direction: str) -> str:
-        if direction == "in" and port == self.IMPULSE_INPUT:
-            return "impulse"
+        if direction == "in":
+            if port == self.IMPULSE_INPUT:
+                return "impulse"
+            if port == self.SOUND_INPUT:
+                return "sound"
         return "audio"
 
     # -- playing ---------------------------------------------------------
 
-    def on_impulse(self) -> None:
-        """Play ``path`` once (see the class docstring for ``overlap``)."""
-        path = (self.path or "").strip()
-        if not path:
-            logger.warning("Sound effect %r was triggered with no file set", self.id)
+    def on_impulse(self, sound: Optional[dict] = None) -> None:
+        """Play the sound that arrived on the sound input (see the class
+        docstring for ``overlap``).  ``sound`` is what the space resolved for
+        this node: {"path": ..., "start": ..., "end": ...}."""
+        sound = dict(sound or {})
+        if not str(sound.get("path") or "").strip():
+            logger.warning("Player %r was triggered with no sound wired", self.id)
             return
         self._prune_players()
         if not self.overlap:
             self._stop_players()
-        self._start_player(path)
+        self._start_player(sound)
 
     @property
     def playing(self) -> int:
@@ -1793,8 +1862,18 @@ class SoundEffectNode(_SingleSinkNode):
         so the GUI can show the node's play count."""
         return sum(1 for p in self._players if p.is_alive)
 
-    def _start_player(self, path: str) -> None:
+    def _start_player(self, sound: dict) -> None:
+        path = str(sound.get("path") or "").strip()
+        start = float(sound.get("start") or 0.0)
+        end = sound.get("end")
+        end = float(end) if end is not None else None
         name = f"{self.backing_node_name}_playback_{self._player_seq}"
+        if start > 0.0 or end is not None:
+            clipped = self._clip_to_temp(path, start, end)
+            if clipped is None:
+                return
+            path = clipped
+            self._temp_files[name] = clipped
         self._player_seq += 1
         # `~` is expanded here rather than at set time: the stored value
         # stays portable (it round-trips through sessions and panel files
@@ -1817,25 +1896,71 @@ class SoundEffectNode(_SingleSinkNode):
         proc = OwnedPwProcess(name, self._pw_cli_command, self.PLAYER_SETTLE_S)
         if not proc.create(command, quiet=True):
             logger.warning(
-                "Sound effect %r could not play %r into %r (missing file, an "
+                "Player %r could not play %r into %r (missing file, an "
                 "unsupported format, or the node isn't up yet)",
                 self.id, resolved, self.backing_node_name,
             )
+            self._drop_temp(name)
             return
         self._players.append(proc)
 
+    def _clip_to_temp(self, path: str, start: float, end: Optional[float]) -> Optional[str]:
+        """Decode just the selected part of a file to a temporary WAV.
+
+        pw-cat plays whole files, so a Clip's range has to be materialised
+        before it is played.  ffmpeg also decodes the formats pw-cat can't
+        guess, and the file is deleted the moment its player retires."""
+        resolved = os.path.expanduser(path)
+        try:
+            handle = tempfile.NamedTemporaryFile(
+                prefix="patchspace_clip_", suffix=".wav", delete=False
+            )
+            handle.close()
+        except OSError as exc:
+            logger.warning("Couldn't make a clip file: %s", exc)
+            return None
+        command = ["ffmpeg", "-nostdin", "-v", "error"]
+        if start > 0.0:
+            command += ["-ss", f"{start:.3f}"]
+        command += ["-i", resolved]
+        if end is not None:
+            command += ["-t", f"{max(0.0, end - start):.3f}"]
+        command += ["-y", handle.name]
+        try:
+            result = subprocess.run(command, capture_output=True, text=True,
+                                    timeout=30)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            logger.warning("Couldn't cut %r to a clip: %s", resolved, exc)
+            result = None
+        if (result is None or result.returncode != 0
+                or not os.path.exists(handle.name)
+                or os.path.getsize(handle.name) == 0):
+            os.path.exists(handle.name) and os.unlink(handle.name)
+            return None
+        return handle.name
+
+    def _drop_temp(self, name: str) -> None:
+        """Delete a clip's temporary file once its player is gone - the file
+        exists only for that one playback."""
+        path = self._temp_files.pop(name, "")
+        if path and os.path.exists(path):
+            os.unlink(path)
+
     def _prune_players(self) -> None:
-        """Forget players whose file has ended."""
+        """Forget players whose file has ended (and any clip file they were
+        reading)."""
         for proc in list(self._players):
             if proc.is_alive:
                 continue
             self._players.remove(proc)
             proc.destroy()
+            self._drop_temp(proc.name)
 
     def _stop_players(self) -> None:
         for proc in list(self._players):
             proc.destroy()
             self._players.remove(proc)
+            self._drop_temp(proc.name)
 
     def refresh_live(self) -> None:
         """Per-supervision-tick hook (see PatchSpace.supervise): retire
@@ -3602,7 +3727,12 @@ class PatchSpace:
         fired: List[NodeId] = []
         for node in reached:
             try:
-                node.on_impulse()
+                if isinstance(node, SoundPlayerNode):
+                    # What to play is a graph question (the sound wired into
+                    # it), answered here - at the moment of firing.
+                    node.on_impulse(self.resolve_sound(node.id))
+                else:
+                    node.on_impulse()
             except Exception as exc:
                 logger.warning("Impulse handler on %r failed: %s", node.id, exc)
             fired.append(node.id)
@@ -3658,6 +3788,16 @@ class PatchSpace:
         dst = self.nodes.get(edge.to_node)
         return dst is not None and dst.port_kind(edge.to_port, "in") == "filter"
 
+    def _edge_is_sound(self, edge: "Edge") -> bool:
+        """Whether `edge` carries a *sound* (a file plus a range - see
+        SoundNode): a reference, not audio, so like an impulse it never
+        becomes a PipeWire link."""
+        src = self.nodes.get(edge.from_node)
+        dst = self.nodes.get(edge.to_node)
+        if src is not None and src.port_kind(edge.from_port, "out") == "sound":
+            return True
+        return dst is not None and dst.port_kind(edge.to_port, "in") == "sound"
+
     def _edge_is_impulse(self, edge: "Edge") -> bool:
         """Whether `edge` is a momentary impulse wire rather than audio.
         Same either-end check as the boolean/filter helpers above."""
@@ -3679,6 +3819,7 @@ class PatchSpace:
         return (
             self._edge_is_boolean(edge)
             or self._edge_is_filter(edge)
+            or self._edge_is_sound(edge)
             or self._edge_is_impulse(edge)
         )
 
@@ -3859,6 +4000,33 @@ class PatchSpace:
                     ]
             return sources
         return []
+
+    def resolve_sound(self, node_id: NodeId, port: str = "sound",
+                      seen: Optional[Set[NodeId]] = None) -> Optional[dict]:
+        """The sound reaching ``node_id``'s sound input, as
+        ``{"path", "start", "end"}`` - or None when nothing sound-like is
+        wired there.
+
+        A Sound node is the source; anything transparent in between passes it
+        through, and (once a Clip is in the path) narrows the range.  Called at
+        impulse time rather than on a sync: a sound has no value to sample, so
+        it is resolved exactly when it is about to be played."""
+        if seen is None:
+            seen = set()
+        if node_id in seen:
+            return None
+        seen.add(node_id)
+        upstream = [e for e in self.edges.values()
+                    if e.to_node == node_id and e.to_port == port]
+        if not upstream:
+            return None
+        source = self.nodes.get(upstream[0].from_node)
+        if source is None:
+            return None
+        if isinstance(source, SoundNode):
+            return {"path": source.path, "start": 0.0, "end": None}
+        # Anything else between a Sound and the player hands it on unchanged.
+        return self.resolve_sound(source.id, port, seen)
 
     def _resolve_warp_audio(self, warp_out: "WarpOutNode",
                             seen: Set[Any]) -> List[dict]:
@@ -4676,3 +4844,20 @@ class PatchSpace:
 
     def mark_graph_loaded(self) -> None:
         self._graph_loaded = True
+
+
+class SoundEffectNode(SoundPlayerNode):
+    """The pre-split sound effect: it stored its ``path`` itself and had
+    nothing on a sound input.  Kept so saved sessions and panel files still
+    load - new graphs use a Sound node into a Sound Player - and it behaves
+    exactly as it always did: the impulse plays its own file, whole."""
+
+    def __init__(self, node_id, backing_node_name: str, path: str = "",
+                 overlap: bool = False,
+                 pw_cli_command=("pw-cli",), settle: float = 0.3):
+        super().__init__(node_id, backing_node_name, overlap, pw_cli_command,
+                         settle)
+        self.path = path or ""
+
+    def on_impulse(self, sound: Optional[dict] = None) -> None:
+        super().on_impulse({"path": self.path})

@@ -42,6 +42,7 @@ _FALLBACK_BOOLEAN_PORT = (0.55, 0.55, 0.58)
 # colors rather than the audio green/red.
 _FALLBACK_BUNDLE_PORT = (0.55, 0.80, 0.95)
 _FALLBACK_FILTER_PORT = (0.78, 0.62, 0.95)
+_FALLBACK_SOUND_PORT = (0.95, 0.68, 0.35)
 # An impulse is a momentary event, not a stream: a cyan that no other
 # socket kind uses, so a Button's output is unmistakable next to the
 # audio green/red and the boolean grey.
@@ -149,6 +150,10 @@ def theme_palette(widget) -> dict:
         # there).  Yellow/purple stay distinct from accent, success and error.
         "bundle_port": _lookup(widget, "yellow_3", _FALLBACK_BUNDLE_PORT),
         "filter_port": _lookup(widget, "purple_3", _FALLBACK_FILTER_PORT),
+        # A *sound* (a file plus a range - the Sound node's output, what the
+        # Clip node takes and returns) is another control-plane value, so it
+        # gets its own slot: orange, well clear of bundle/filter/audio/boolean.
+        "sound_port": _lookup(widget, "orange_3", _FALLBACK_SOUND_PORT),
         # An impulse is a momentary event, not a stream: the theme's own
         # blue (Adwaita's #3584e4 by default; stylix maps blue_3 to its
         # palette) so it reads as a distinct, vibrant signal and still

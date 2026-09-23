@@ -96,6 +96,9 @@
               python
               pkgs.pipewire
               pkgs.wireplumber
+              # Sound nodes: ffprobe reports a file's length, ffmpeg decodes
+              # one when only part of it is played (see pwnodes.SoundNode).
+              pkgs.ffmpeg-headless
             ];
             text = ''
               export LADSPA_PATH="${ladspaPath}''${LADSPA_PATH:+:$LADSPA_PATH}"

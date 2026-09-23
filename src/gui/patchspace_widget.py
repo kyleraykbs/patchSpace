@@ -131,6 +131,10 @@ BUNDLE_DASH = (5.0, 4.0)
 # dashed bundle of streams.
 IMPULSE_DASH = (2.5, 3.0)
 
+# Dash pattern for a *sound* wire: longer than a bundle's, so a reference to a
+# file never reads as a bundle of streams.
+SOUND_DASH = (9.0, 5.0)
+
 
 def choice_row_visibility(labels, text):
     """Which rows a searchable choice list shows for `text`, and whether the
@@ -2365,6 +2369,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             return pal["bundle_port"]
         if kind == "filter":
             return pal["filter_port"]
+        if kind == "sound":
+            return pal["sound_port"]
         if kind == "impulse":
             return pal["impulse_port"]
         return pal["output_port"] if is_output else pal["input_port"]
@@ -2379,7 +2385,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         it pairs only with another impulse socket, and its wire's short
         dash (see IMPULSE_DASH) is what marks it as an event."""
         r = PatchSpaceGraphWidget.SOCKET_RADIUS
-        if kind in ("bundle", "filter"):
+        if kind == "sound":
+            # A sound is a *box* of time (a file plus a range), so its socket
+            # is a square - distinct from the set-shaped diamonds and the
+            # audio circles.
+            d = r * 1.2
+            cr.rectangle(sx - d, sy - d, 2 * d, 2 * d)
+        elif kind in ("bundle", "filter"):
             d = r * 1.4
             cr.move_to(sx, sy - d)
             cr.line_to(sx + d, sy)
@@ -2401,7 +2413,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             kinds.append(port_kind(src["type"], edge.get("from_port", "out"), "out"))
         if dst is not None:
             kinds.append(port_kind(dst["type"], edge.get("to_port", "in"), "in"))
-        for special in ("filter", "bundle", "boolean", "impulse"):
+        for special in ("sound", "filter", "bundle", "boolean", "impulse"):
             if special in kinds:
                 return special
         return "audio"
@@ -2414,6 +2426,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             return pal["bundle_port"]
         if kind == "filter":
             return pal["filter_port"]
+        if kind == "sound":
+            return pal["sound_port"]
         if kind == "impulse":
             return pal["impulse_port"]
         return pal["link"]
@@ -2426,6 +2440,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         (dashed) bundle of streams."""
         if kind == "impulse":
             return IMPULSE_DASH
+        if kind == "sound":
+            return SOUND_DASH
         if kind in ("bundle", "filter"):
             return BUNDLE_DASH
         return None
@@ -5009,8 +5025,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # rather than the control/field dispatch above.
         if spec.toggle:
             self._draw_toggle_row(cr, pal, nid, node)
-        if spec.indicator:
+        if spec.indicator == "playing":
             self._draw_play_indicator(cr, pal, nid, node)
+        elif spec.indicator == "duration":
+            self._draw_duration_indicator(cr, pal, nid, node)
 
         for i, row_kind in enumerate(self._device_rows(node)):
             self._draw_device_row(cr, pal, nid, node, i, row_kind)
@@ -5866,6 +5884,25 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         cr.arc(dot_x, dot_y, dot_r, 0, 2 * math.pi)
         cr.set_source_rgb(*color)
         cr.fill()
+
+    def _draw_duration_indicator(self, cr, pal, nid, node):
+        """How long the file is, bottom-right - the same slot the player's
+        play count uses, because "a sound of known length" is what a Sound
+        node is."""
+        _dot_x, dot_y, _dot_r, text_right = self._play_indicator_rect(nid)
+        duration = float(node.get("duration", 0.0) or 0.0)
+        seconds = int(round(duration))
+        text = (
+            f"{seconds // 60}:{seconds % 60:02d}" if seconds >= 60
+            else f"{duration:.1f}s"
+        ) if duration > 0 else "?"
+        cr.select_font_face("sans")
+        cr.set_font_size(10)
+        extents = cr.text_extents(text)
+        cr.set_source_rgb(*(pal["subtext"] if duration > 0 else (0.5, 0.5, 0.54)))
+        cr.move_to(text_right - extents.width,
+                   dot_y - extents.height / 2 - extents.y_bearing)
+        cr.show_text(text)
 
     def _impulse_label(self, node):
         """What a Button node's face says: the label the user gave it, or

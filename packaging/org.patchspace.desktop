@@ -2,7 +2,7 @@
 Type=Application
 Name=Patch Space
 GenericName=PipeWire Patchbay
-Comment=Patch the live PipeWire graph: nodes, wires and panels on a canvas
+Comment=Node based operating system controller & tasker
 Exec=patchspace
 Icon=org.patchspace
 Terminal=false
