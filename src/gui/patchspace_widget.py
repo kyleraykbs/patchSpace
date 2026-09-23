@@ -6312,9 +6312,17 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             return
 
         if field == "app_name":
-            # Same for the application names (see on_applications).
+            # Same for the subprocess names (see on_applications).
             self._pending_app_name_select = (node_id, screen_x, screen_y)
             self.client.send({"command": "get_applications"})
+            return
+
+        if field == "app_key":
+            # ...and for the applications themselves (see on_apps), which are
+            # named the way the desktop names them, not the way the audio
+            # subprocess does.
+            self._pending_app_key_select = (node_id, screen_x, screen_y)
+            self.client.send({"command": "get_apps"})
             return
 
         if field == "media_class":
@@ -6454,6 +6462,24 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             popover, screen_x, screen_y, focus_widget=entry or None
         )
         return popover
+
+    def on_apps(self, apps):
+        """The live applications arrived: open the Application classifier's
+        dropdown (keys like "vesktop", "discord")."""
+        pending = getattr(self, "_pending_app_key_select", None)
+        if not pending:
+            return
+        nid, sx, sy = pending
+        self._pending_app_key_select = None
+
+        def on_pick(app_key, nid=nid):
+            self._send_property(nid, "app_key", app_key)
+            GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
+
+        self._show_choice_popover(
+            sx, sy, "Application:", [(a, a) for a in apps], on_pick,
+            search_hint="Search applications",
+        )
 
     def on_titles(self, titles):
         """The live stream titles arrived: open the Title classifier's

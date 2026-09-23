@@ -8,6 +8,7 @@ import pytest
 from pwproc import Backoff
 from pwmatch import INTERNAL_MEDIA_CLASS, SOURCE_MEDIA_CLASSES
 from pwnodes import (
+    AppClassifierNode,
     AppNameClassifierNode,
     TitleClassifierNode,
     PatchSpace,
@@ -75,6 +76,85 @@ def test_app_name_classifier_matches_the_application_name():
     assert not AppNameClassifierNode("c", "").matches({"application.name": "x"}, "source")
 
 
+def test_the_app_scope_is_parsed_from_a_cgroup_line():
+    from pwmatch import app_scope_key
+
+    # The live Vesktop case: its audio subprocess sits in the app's scope.
+    assert app_scope_key(
+        "0::/user.slice/user-1000.slice/user@1000.service/app.slice/"
+        "app-vesktop-3807669.scope"
+    ) == "vesktop"
+    # systemd escapes '-' inside a unit name.
+    assert app_scope_key("0::/x/app-my\\x2dapp-12.scope") == "my-app"
+    # The service form (launched via a user service).
+    assert app_scope_key("0::/x/app-org.telegram.desktop@1000.service") == (
+        "org.telegram.desktop"
+    )
+    # Sessions, user managers and system units are not applications.
+    for line in ("0::/user.slice/user-1000.slice/session-1.scope",
+                 "0::/user.slice/user-1000.slice/user@1000.service",
+                 "0::/system.slice/pipewire.service",
+                 ""):
+        assert app_scope_key(line) == ""
+
+
+def test_app_key_prefers_the_scope_then_the_process():
+    import pwmatch
+    from pwmatch import app_key
+
+    props = {
+        "application.name": "Chromium input",
+        "application.process.binary": "electron",
+        "application.process.id": 3808060,
+    }
+    # The scope wins outright - this is the Vesktop case that started it.
+    original = pwmatch._pid_app_scope
+    pwmatch._pid_app_scope = lambda pid: "vesktop" if pid == 3808060 else ""
+    try:
+        assert app_key(props) == "vesktop"
+    finally:
+        pwmatch._pid_app_scope = original
+
+    # No scope (a process outside an app scope, or no /proc entry): the
+    # process binary, not the pipewire name, then the name, then nothing.
+    assert app_key({"application.process.binary": "electron"}) == "electron"
+    assert app_key({"application.name": "LibreWolf"}) == "LibreWolf"
+    assert app_key({}) == ""
+
+
+def test_app_key_filter_matches_on_the_resolved_application():
+    from pwmatch import matches_source_filter
+
+    # A stream whose process is inside vesktop's scope, reporting only its
+    # audio subprocess's name.
+    props = {"application.name": "Chromium input",
+             "application.process.binary": "electron",
+             "application.process.id": 3808060}
+    import pwmatch
+    original = pwmatch._pid_app_scope
+    pwmatch._pid_app_scope = lambda pid: "vesktop" if pid == 3808060 else ""
+    try:
+        assert matches_source_filter(props, {"appKey": "vesktop"})
+        assert matches_source_filter(props, {"appKey": "VESKTOP"})
+        assert not matches_source_filter(props, {"appKey": "discord"})
+        # An empty key matches nothing, not everything.
+        assert not matches_source_filter(props, {"appKey": ""})
+    finally:
+        pwmatch._pid_app_scope = original
+
+
+def test_app_classifier_matches_by_application():
+    c = AppClassifierNode("c", "electron")
+    assert c.matches({"application.process.binary": "electron"}, "source")
+    assert not c.matches({"application.process.binary": "firefox"}, "source")
+    assert not AppClassifierNode("c", "").matches(
+        {"application.process.binary": "electron"}, "source"
+    )
+    assert AppClassifierNode("c", "electron", invert=True).classify(
+        {"application.process.binary": "firefox"}, "source"
+    )
+
+
 def test_app_name_classifier_exclude_switch_flips_it():
     c = AppNameClassifierNode("c", "Firefox", invert=True)
     assert not c.classify({"application.name": "Firefox"}, "source")
@@ -108,10 +188,16 @@ class FakeGraph:
         app=None,
         media_name=None,
         description=None,
+        binary=None,
+        pid=None,
     ):
         props = {"node.name": name, "media.class": media_class}
         if app:
             props["application.name"] = app
+        if binary:
+            props["application.process.binary"] = binary
+        if pid is not None:
+            props["application.process.id"] = pid
         if media_name is not None:
             props["media.name"] = media_name
         if description is not None:

@@ -350,3 +350,12 @@ gesture accepts; tested only structurally (no touchscreen here).
 * A GTK popover has **no offscreen snapshot** without a realized window (WidgetPaintable
   returns nothing), so the pickers are verified by tests, not by a rendered image;
   `Gsk.RenderNode.draw(cr)` exists for the cairo-canvas side.
+
+* **Application vs Subprocess classifiers.**  `AppNameClassifierNode` ("Subprocess")
+  matches `application.name` - which for apps that delegate audio is the *subprocess*
+  ("Chromium input", "WEBRTC VoiceEngine").  `AppClassifierNode` ("Application") matches
+  `pwmatch.app_key`: the systemd app scope behind the stream's process
+  (`/proc/<pid>/cgroup` -> `app-vesktop-3807669.scope` -> "vesktop"), falling back to the
+  process binary then the application name.  `{"appKey": ...}` is the filter key; the
+  picker gets its list from the daemon's `get_apps`.  Verified against Kyle's live graph:
+  the Vesktop audio-service client (pid 3808060, binary electron) resolves to "vesktop".

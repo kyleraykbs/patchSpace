@@ -31,6 +31,11 @@ Source filters (matched against a candidate source node's props):
   * exclude            list of source-filter dicts, recursively, that a
                        candidate must match NONE of (this is what backs
                        the ExcludeFilter node).
+  * appKey             exact match against the *application* a stream belongs
+                       to, as the desktop names it (see app_key): the systemd
+                       app scope behind the stream's process, so every stream
+                       an app made - including its audio subprocesses -
+                       matches the one key.
 
 Sink filters / targets (matched against a candidate sink node):
 
@@ -49,6 +54,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from functools import lru_cache
 from typing import Dict, List, Optional, Pattern, Set, Tuple
 
@@ -117,6 +123,69 @@ PATCHSPACE_BUILTIN_NAMES = (
 )
 
 
+# systemd names the scope of a launched application ``app-<name>-<pid>.scope``
+# (or ``app-<name>@<uid>.service``), where <name> is the app id the launcher
+# used - the same name the desktop shows for that app's windows.  '-' inside
+# the name is escaped as \x2d, so a plain split on '-' doesn't do it.
+_APP_SCOPE_RE = re.compile(r"app-([^/]+?)(?:-\d+\.scope|@\d+\.service)\s*$")
+_SYSTEMD_ESCAPE_RE = re.compile(r"\\x([0-9a-fA-F]{2})")
+
+
+def app_scope_key(cgroup: str) -> str:
+    """The application name in a process's cgroup text, or "" when the
+    process isn't inside an application scope.
+
+    ``/proc/<pid>/cgroup`` for an app the session launched ends in e.g.
+    ``app-vesktop-3807669.scope``; this returns "vesktop".  Pure, so the
+    parsing is testable without a live process."""
+    match = _APP_SCOPE_RE.search(cgroup or "")
+    if not match:
+        return ""
+    raw = match.group(1)
+    # systemd escapes the characters it can't put in a unit name; '-' is the
+    # one that actually turns up in app ids (com.discordapp.Discord is fine,
+    # a hypothetical "my-app" comes back as "my\x2dapp").
+    return _SYSTEMD_ESCAPE_RE.sub(
+        lambda m: chr(int(m.group(1), 16)), raw
+    )
+
+
+def _pid_app_scope(pid: int) -> str:
+    """The app scope of a live process, cached briefly: pids are reused, so
+    this can't be cached for the lifetime of the daemon."""
+    now = time.monotonic()
+    hit = _PID_SCOPE_CACHE.get(pid)
+    if hit is not None and now - hit[0] < PID_SCOPE_TTL:
+        return hit[1]
+    try:
+        with open(f"/proc/{int(pid)}/cgroup", encoding="utf-8") as fh:
+            key = app_scope_key(fh.read())
+    except (OSError, ValueError, TypeError):
+        key = ""
+    _PID_SCOPE_CACHE[pid] = (now, key)
+    if len(_PID_SCOPE_CACHE) > 512:
+        _PID_SCOPE_CACHE.clear()
+    return key
+
+
+def app_key(props: dict) -> str:
+    """The *application* a live stream belongs to, as the desktop names it.
+
+    PipeWire's own props describe the creator *subprocess*: an Electron app's
+    audio service reports ``application.name`` "Chromium input" and
+    ``application.process.binary`` "electron", while what the user knows is
+    "vesktop" - which is the systemd app scope its process sits in.  So: the
+    scope, else the process binary, else the application name, else "" (a
+    stream that identifies nothing matches no application)."""
+    scope = _pid_app_scope(props.get("application.process.id") or 0)
+    if scope:
+        return scope
+    binary = str(props.get("application.process.binary") or "").strip()
+    if binary:
+        return binary
+    return str(props.get("application.name") or "").strip()
+
+
 def is_patchspace_owned(props: dict) -> bool:
     """Whether a live node is one of Patch Space's own objects - a built-in
     virtual device, an effect dummy/keepalive, a module stream - rather
@@ -137,6 +206,13 @@ def is_patchspace_owned(props: dict) -> bool:
     if any(name.startswith(prefix) for prefix in PATCHSPACE_OWNED_PREFIXES):
         return True
     return any(name.startswith(builtin) for builtin in PATCHSPACE_BUILTIN_NAMES)
+
+
+#: pid -> (monotonic timestamp, app scope name); see _pid_app_scope.
+_PID_SCOPE_CACHE: Dict[int, Tuple[float, str]] = {}
+#: How long one /proc read stays good.  Short: pids are reused, and an app
+#: that just started should show up in the picker promptly.
+PID_SCOPE_TTL = 5.0
 
 
 # groups[group_name][channel] -> port id
@@ -202,6 +278,11 @@ def matches_source_filter(props: dict, filt: dict) -> bool:
         if not _match_regex_or_substring(
             filt.get("nameRegex"), filt.get("name"), _source_haystack(props)
         ):
+            return False
+
+    if filt.get("appKey") is not None:
+        wanted = str(filt.get("appKey") or "").strip().lower()
+        if not wanted or app_key(props).lower() != wanted:
             return False
 
     if filt.get("mediaNameRegex") is not None or filt.get("mediaName") is not None:

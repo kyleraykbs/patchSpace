@@ -17,6 +17,7 @@ from pwnodes import (
     AllAppsNode,
     RegexClassifierNode,
     MediaClassClassifierNode,
+    AppClassifierNode,
     AppNameClassifierNode,
     FilterNode,
     TitleClassifierNode,
@@ -222,6 +223,36 @@ def test_app_name_classifier_selects_the_app():
     s.add_edge("f", "snk")
     s.sync()
     assert {out for out, _ in g.linked_pairs()} == {wanted["FL"], wanted["FR"]}
+
+
+def test_app_classifier_takes_every_stream_the_app_created(monkeypatch):
+    """Vesktop's audio comes from an Electron audio subprocess ("Chromium
+    input") plus, say, a voice-engine stream; one Application value has to
+    match both, where the Subprocess classifier would need each name."""
+    import pwmatch
+
+    monkeypatch.setattr(
+        pwmatch, "_pid_app_scope",
+        lambda pid: {11: "vesktop", 12: "vesktop"}.get(pid, ""),
+    )
+    g = FakeGraph()
+    audio = g.add_source(10, "one", app="Chromium input", binary="electron", pid=11)
+    voice = g.add_source(11, "two", app="WEBRTC VoiceEngine", binary="electron", pid=12)
+    other = g.add_source(12, "three", app="LibreWolf", binary="librewolf", pid=13)
+    sink = g.add_sink(20, "sink1")
+    s = PatchSpace(g)
+    s.mark_graph_loaded()
+    s.add_node(AllAppsNode("apps"))
+    s.add_node(FilterNode("f"))
+    s.add_node(AppClassifierNode("c", "vesktop"))
+    s.add_node(SinkNode("snk", "sink1"))
+    s.add_edge("apps", "f")
+    s.add_edge("c", "f", to_port="filter")
+    s.add_edge("f", "snk")
+    s.sync()
+    linked = {out for out, _ in g.linked_pairs()}
+    assert linked == {audio["FL"], audio["FR"], voice["FL"], voice["FR"]}
+    assert other["FL"] not in linked
 
 
 def test_filter_exclude_switch_flips_the_bundle_between_keep_and_drop():
@@ -705,6 +736,48 @@ def test_daemon_application_classifier_round_trips_its_name():
     assert res.get("status") != "error", res
     assert (d.handle_command({"command": "get_nodes"})["nodes"]["c"]["app_name"]
             == "Spotify")
+
+
+def test_daemon_get_apps_lists_live_applications(monkeypatch):
+    """The Application picker's list: app keys of the live streams, with
+    Patch Space's own plumbing left out."""
+    import pwmatch
+    from main import PatchSpaceDaemon
+
+    g = FakeGraph()
+    g.add_source(10, "one", app="Chromium input", binary="electron", pid=11)
+    g.add_source(11, "two", app="WEBRTC VoiceEngine", binary="electron", pid=12)
+    g.add_source(12, "three", app="LibreWolf", binary="librewolf", pid=13)
+    g.add_source(13, "keepalive", media_class="Stream/Output/Audio",
+                 binary="pw-cat", pid=14)
+    d = PatchSpaceDaemon()
+    d.graph = g
+    monkeypatch.setattr(
+        pwmatch, "_pid_app_scope",
+        lambda pid: {11: "vesktop", 12: "vesktop", 13: "librewolf"}.get(pid, ""),
+    )
+    # pw-cat is Patch Space's own plumbing, not an app.
+    monkeypatch.setattr(
+        pwmatch, "is_patchspace_owned",
+        lambda props: props.get("application.process.binary") == "pw-cat",
+    )
+    resp = d.handle_command({"command": "get_apps"})
+    assert resp["status"] == "ok"
+    assert resp["apps"] == ["librewolf", "vesktop"]
+
+
+def test_daemon_application_classifier_round_trips_its_key():
+    from main import PatchSpaceDaemon
+
+    d = PatchSpaceDaemon()
+    d.handle_command({"command": "add_node", "node_type": "app_classifier",
+                      "node_id": "c", "config": {"app_key": "vesktop"}})
+    assert d.handle_command({"command": "get_nodes"})["nodes"]["c"]["app_key"] == "vesktop"
+    res = d.handle_command({"command": "set_node_property", "node_id": "c",
+                            "property": "app_key", "value": "discord"})
+    assert res.get("status") != "error", res
+    assert (d.handle_command({"command": "get_nodes"})["nodes"]["c"]["app_key"]
+            == "discord")
 
 
 def test_daemon_create_node_builds_bundle_output_without_starting_it():

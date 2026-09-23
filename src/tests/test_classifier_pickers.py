@@ -166,6 +166,26 @@ def test_the_title_field_asks_for_titles_then_opens_the_dropdown():
     }
 
 
+def test_the_application_key_field_asks_for_apps_then_opens_the_dropdown():
+    w, client = _widget(_node("c", "app_classifier", app_key=""))
+    w.show_field_edit("c", 7, 8)
+    assert [c["command"] for c in client.sent] == ["get_apps"]
+
+    calls = []
+    w._show_choice_popover = lambda *a, **kw: calls.append((a, kw))
+    w.on_apps(["discord", "vesktop"])
+    (sx, sy, title, choices, on_pick), kw = calls[0]
+    assert (sx, sy, title) == (7, 8, "Application:")
+    assert choices == [("discord", "discord"), ("vesktop", "vesktop")]
+    assert kw.get("search_hint")
+
+    on_pick("vesktop")
+    assert client.sent[-1] == {
+        "command": "set_node_property", "node_id": "c",
+        "property": "app_key", "value": "vesktop",
+    }
+
+
 def test_the_application_field_asks_for_apps_then_opens_the_dropdown():
     w, client = _widget(_node("c", "app_name_classifier", app_name=""))
     w.show_field_edit("c", 5, 6)

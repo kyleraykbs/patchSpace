@@ -298,13 +298,25 @@ so the GUI/repair can never fabricate a connection the daemon rejects.
 * `AllInputsNode` / `AllAppsNode` (`InputNode`) produce a source bundle from
   `source_filters()`; `AllOutputsNode` (`Node`) produces a sink bundle from
   `sink_filters()`. `bundle_side()` reports which.
-* `ClassifierNode` subclasses (`Regex`/`MediaClass`/`Description`/`Title`/`Application`/
-  `ExternalOnly`) are pure control-plane predicates with one `filter` output; `invert`
-  complements any of them. They are plugged into a Filter node's `filter` input.
-  `TitleClassifierNode` matches a stream's `media.name` - the title a player reports for
-  what it is playing ("YouTube") - and `AppNameClassifierNode` its `application.name`
-  (the substring counterpart of the Regex classifier's `nameRegex`); the others match node
-  names / classes / descriptions.
+* `ClassifierNode` subclasses (`Regex`/`MediaClass`/`Description`/`Title`/`Subprocess`/
+  `Application`/`ExternalOnly`) are pure control-plane predicates with one `filter`
+  output; `invert` complements any of them. They are plugged into a Filter node's
+  `filter` input. `TitleClassifierNode` matches a stream's `media.name` - the title a
+  player reports for what it is playing ("YouTube") - `AppNameClassifierNode`
+  ("Subprocess") its `application.name` (the substring counterpart of the Regex
+  classifier's `nameRegex`); the others match node names / classes / descriptions.
+* **Application vs Subprocess.** PipeWire's props describe the *subprocess* that made a
+  stream, not the app the user knows: Vesktop's audio comes from an Electron audio
+  service reporting `application.name` "Chromium input" and `application.process.binary`
+  "electron". The app itself is named by the systemd *app scope* its process sits in -
+  `/proc/<pid>/cgroup` ends in `app-vesktop-3807669.scope` - which is what
+  `pwmatch.app_key` resolves (scope, else process binary, else application name, else ""
+  for streams that identify nothing; the /proc read is TTL-cached because pids are
+  reused). `AppClassifierNode` ("Application") stores that key and matches on it
+  (`{"appKey": ...}`), so *every* stream the app created matches one value, while
+  `AppNameClassifierNode` ("Subprocess") needs one value per subprocess name. The keys
+  come from the daemon's `get_apps` (live `Stream/*` nodes, patchspace's own plumbing
+  skipped); a stream with no key matches no application.
 * **Fields that are chosen, not typed.** A spec can mark its field `field_choices=True`
   (Title, Application): the node draws a caret in the box so it reads as a dropdown, and
   its editor is `_show_choice_popover(..., search_hint=...)` - the shared list popover

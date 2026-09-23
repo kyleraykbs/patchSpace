@@ -1488,12 +1488,15 @@ class TitleClassifierNode(ClassifierNode):
 
 
 class AppNameClassifierNode(ClassifierNode):
-    """Classifier that matches a member's *application name*.
+    """Classifier that matches a member's *subprocess* name.
 
     Substring, case-insensitive, against PipeWire's ``application.name``
     (falling back to ``node.name``, exactly as the daemon's application list
-    does) - "Firefox", "Spotify".  The substring counterpart of the Regex
-    classifier's ``nameRegex``, and the Application picker's value."""
+    does) - "Firefox", "Spotify", or the subprocess an app delegates to:
+    an Electron app's audio service reports "Chromium input"/"WEBRTC
+    VoiceEngine".  The substring counterpart of the Regex classifier's
+    ``nameRegex``.  Use :class:`AppClassifierNode` to match the *application*
+    those subprocesses belong to."""
 
     def __init__(self, node_id, app_name: str = "", invert: bool = False):
         super().__init__(node_id, invert)
@@ -1503,6 +1506,27 @@ class AppNameClassifierNode(ClassifierNode):
         if not self.app_name:
             return False
         return pwmatch.matches_source_filter(props, {"name": self.app_name})
+
+
+class AppClassifierNode(ClassifierNode):
+    """Classifier that matches every stream an *application* created.
+
+    The value is an application key (``pwmatch.app_key``): the systemd app
+    scope behind the stream's process, i.e. the name the desktop uses for that
+    app - "vesktop", "discord", "librewolf".  That is what makes this the
+    application-level filter: an app whose audio comes from several
+    subprocesses (Electron's audio service, a voice engine, a browser tab
+    process in a flatpak) matches on all of them at once, where the Subprocess
+    classifier would need one value per name."""
+
+    def __init__(self, node_id, app_key: str = "", invert: bool = False):
+        super().__init__(node_id, invert)
+        self.app_key = app_key
+
+    def matches(self, props: dict, side: str) -> bool:
+        if not self.app_key:
+            return False
+        return pwmatch.matches_source_filter(props, {"appKey": self.app_key})
 
 
 class ExternalOnlyClassifierNode(ClassifierNode):

@@ -37,6 +37,7 @@ from collections import deque
 from typing import Any, Dict, Optional
 
 import pwgraph
+import pwmatch
 from pwgraph import PipewireGraph
 from pwproc import Backoff, Ticker
 from pwnodes import (
@@ -83,6 +84,7 @@ from pwnodes import (
     RegexOutputNode,
     MediaClassInputNode,
     MediaClassOutputNode,
+    AppClassifierNode,
     AppNameClassifierNode,
     TitleClassifierNode,
     DescriptionInputNode,
@@ -337,6 +339,7 @@ NODE_TYPE_REGISTRY: Dict[str, type] = {
     "description_classifier": DescriptionClassifierNode,
     "title_classifier": TitleClassifierNode,
     "app_name_classifier": AppNameClassifierNode,
+    "app_classifier": AppClassifierNode,
     "external_only_classifier": ExternalOnlyClassifierNode,
     "filter": FilterNode,
     "bundle": BundleMergeNode,
@@ -433,6 +436,7 @@ _SERIAL_ATTRS = (
     "description",
     "device_name",
     "app_name",
+    "app_key",
     "device_label",
     "device_volume",
     "profile_index",
@@ -3764,6 +3768,8 @@ class PatchSpaceDaemon:
             return cls(node_id, g("title", ""), g("invert", False))
         if cls is AppNameClassifierNode:
             return cls(node_id, g("app_name", ""), g("invert", False))
+        if cls is AppClassifierNode:
+            return cls(node_id, g("app_key", ""), g("invert", False))
         if cls is ExternalOnlyClassifierNode:
             return cls(node_id, g("invert", False))
         if cls is FilterNode:
@@ -4323,6 +4329,10 @@ class PatchSpaceDaemon:
                 node.device_name = value
                 node.resolve_live(None, None)
                 self._try_immediate_resolve(node)
+            elif prop == "app_key" and isinstance(node, AppClassifierNode):
+                # The Application classifier's picker value (an app key, see
+                # pwmatch.app_key).
+                node.app_key = value
             elif prop == "app_name" and isinstance(node, AppNameClassifierNode):
                 # The Application classifier's picker value (the live app
                 # node's own app_name is the branch below).
@@ -4824,6 +4834,22 @@ class PatchSpaceDaemon:
                 titles.add(title)
         return {"status": "ok", "titles": sorted(titles, key=str.lower)}
 
+    def _cmd_get_apps(self, cmd: dict) -> dict:
+        """The applications behind the live audio streams, as the desktop names
+        them (``pwmatch.app_key``), for the Application classifier's picker.
+        Patch Space's own streams are left out - they are plumbing, not apps."""
+        keys = set()
+        for node_data in self.graph.nodes().values():
+            props = node_data.get("info", {}).get("props", {})
+            if not str(props.get("media.class") or "").startswith("Stream/"):
+                continue
+            if pwmatch.is_patchspace_owned(props):
+                continue
+            key = pwmatch.app_key(props)
+            if key:
+                keys.add(key)
+        return {"status": "ok", "apps": sorted(keys, key=str.lower)}
+
     def _cmd_get_logs(self, cmd: dict) -> dict:
         """Recent daemon log lines for the GUI console.  `since` is the
         last sequence number the caller has seen; lines with a higher
@@ -5201,6 +5227,8 @@ class PatchSpaceDaemon:
                 response = self._cmd_get_nodes(cmd)
             elif command == "get_graph":
                 response = self._cmd_get_graph(cmd)
+            elif command == "get_apps":
+                response = self._cmd_get_apps(cmd)
             elif command == "get_titles":
                 response = self._cmd_get_titles(cmd)
             elif command == "get_logs":
