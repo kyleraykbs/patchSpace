@@ -61,8 +61,14 @@ let
       };
       color = mkOption {
         type = types.str;
-        default = "#3584e4";
-        description = "Panel colour (hex).";
+        default = "@blue";
+        description = ''
+          Panel colour: a hex string, or one of the theme's slots as
+          `@blue`/`@green`/`@yellow`/`@red`/`@purple`/`@teal`.  A slot is
+          resolved against the *current* theme every time it is drawn, so a
+          panel coloured `@blue` follows the desktop (stylix recolours those
+          slots) instead of freezing one hex value; the default is `@blue`.
+        '';
       };
       autoLoad = mkOption {
         type = types.bool;

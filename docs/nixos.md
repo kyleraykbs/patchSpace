@@ -119,6 +119,11 @@ Nix-declared nodes arrange themselves).
 | `panelsDir` | path | *internal* | The generated read-only panel directory (the build that validates). |
 | `effectiveConfig` | attrs | *internal* | The merged configuration per panel. |
 
+`panels.<name>.color` (default `@blue`) is a hex **or a theme slot** - `@blue`, `@green`,
+`@yellow`, `@red`, `@purple`, `@teal`.  A slot is resolved against the *current* theme every
+time the panel is drawn, so a panel coloured `@blue` follows the desktop (stylix recolours those
+slots) rather than freezing one hex value.  The GUI's colour pickers store the same slot values.
+
 Per-panel options (`panels.<name>.*`): `label`, `color`, `autoLoad`, `placement`
 (`x`, `y`, `w`, `h`, `anchored`), `imports`, `nodes`, `edges`, `groups`, `children`.
 

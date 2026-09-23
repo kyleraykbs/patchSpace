@@ -111,10 +111,10 @@ logger = logging.getLogger(__name__)
 WIRE_GRID_STEP = 20.0
 
 # A socket stub shorter than this is treated as "no usable sideways exit":
-# it reads as no exit at all, and the cleanup passes (_drop_short_straights /
-# _round_short_ends, both keyed on WIRE_GRID_STEP) merge it away - leaving the
-# wire to hug its own node's border.  Below this the stub is attached as a
-# short leg *after* cleanup instead (or replaced by a perpendicular jog).
+# it reads as no exit at all, and the cleanup pass (_drop_short_straights,
+# keyed on WIRE_GRID_STEP) merges it away - leaving the wire to hug its own
+# node's border.  Below this the stub is attached as a short leg *after*
+# cleanup instead (or replaced by a perpendicular jog).
 MIN_USABLE_STUB = WIRE_GRID_STEP
 
 # Length of the transparent fade at the leading tip while a freshly-made
@@ -150,6 +150,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     SLIDER_MARGIN = 10
     FIELD_HEIGHT = 22
     FIELD_MARGIN = 10
+    #: Space kept below a node's field row (and below the device rows), so the
+    #: field's own border isn't sitting on the node's.  One constant for the
+    #: drawing (`_field_rect`) and the height reservation
+    #: (`_bottom_control_height`) - they used to disagree by two pixels.
+    FIELD_BOTTOM_PAD = 10
     # Extra height a node-body switch row needs (the Sound Effect's
     # Stack switch).  The switch is drawn above the inline field/control
     # row; see _bottom_control_height and _toggle_switch_rect, which
@@ -2137,7 +2142,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         laid out above exactly the same block the control is drawn in."""
         rows = self._device_rows(node)
         if rows:
-            return len(rows) * (self.FIELD_HEIGHT + 4) + 5
+            return (
+                len(rows) * (self.FIELD_HEIGHT + 4) + self.FIELD_BOTTOM_PAD
+            )
         spec = spec_for(node["type"])
         if spec.control == "fallback_onoff":
             # The on/off button is always shown: interactive while
@@ -2154,7 +2161,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             # (for a node with one) the gap and the switch row above it -
             # the node grows by the gap so the switch clears the field.
             extra = self.TOGGLE_ROW_GAP + self.TOGGLE_ROW_HEIGHT
-            return 25 + (extra if spec.toggle else 0)
+            return (
+                self.FIELD_HEIGHT + self.FIELD_BOTTOM_PAD
+                + (extra if spec.toggle else 0)
+            )
         return 0
 
     def _toggle_switch_rect(self, nid):
@@ -2394,7 +2404,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             w -= self.PICKER_SIZE + self.PICKER_GAP
         if spec.indicator:
             w -= self.INDICATOR_WIDTH
-        y = node["y"] + self.node_height(nid) - self.FIELD_HEIGHT - 5
+        y = (
+            node["y"] + self.node_height(nid)
+            - self.FIELD_HEIGHT - self.FIELD_BOTTOM_PAD
+        )
         return (x, y, w, self.FIELD_HEIGHT)
 
     def _path_picker_rect(self, nid):
@@ -2480,6 +2493,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             horizontal_first = abs(dxin) > 1e-6
             first_h = abs(path[0][1] - path[1][1]) < 1e-6
             last_h = abs(path[-2][1] - path[-1][1]) < 1e-6
+            # The exit/entry segments must keep their *direction* as well as
+            # their orientation: a merge that flips the first segment sends
+            # the wire backwards out of the socket, so it runs past the port
+            # and hooks back (the "stubs overshoot each other" case).
+            first_dx = path[1][0] - path[0][0]
+            first_dy = path[1][1] - path[0][1]
+            last_dx = path[-1][0] - path[-2][0]
+            last_dy = path[-1][1] - path[-2][1]
             for j in range(n - 1, i + 1, -1):
                 a, b = path[i], path[j]
                 if abs(a[1] - b[1]) < 1e-6 or abs(a[0] - b[0]) < 1e-6:
@@ -2496,9 +2517,19 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                         a0, a1 = cand[0], cand[1]
                         if (abs(a0[1] - a1[1]) < 1e-6) != first_h:
                             continue
+                        if first_h:
+                            if (a1[0] - a0[0]) * first_dx <= 0:
+                                continue
+                        elif (a1[1] - a0[1]) * first_dy <= 0:
+                            continue
                     if j == n - 1:
                         b0, b1 = cand[-2], cand[-1]
                         if (abs(b0[1] - b1[1]) < 1e-6) != last_h:
+                            continue
+                        if last_h:
+                            if (b1[0] - b0[0]) * last_dx <= 0:
+                                continue
+                        elif (b1[1] - b0[1]) * last_dy <= 0:
                             continue
                     if all(_clear(cand[k], cand[k + 1])
                            for k in range(len(cand) - 1)):
@@ -2559,113 +2590,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 return path
         return pts
 
-    def _smooth_jogs(self, path, obstacles, min_len=WIRE_GRID_STEP):
-        """Run _sigmoid_short_segments until it stops changing anything.
-
-        One pass can leave a short step that only appears once an earlier
-        jog is blended (the blend changes the neighbouring segment lengths),
-        which is why some jogs turned into sigmoids and others didn't."""
-        for _ in range(4):
-            new = self._sigmoid_short_segments(path, obstacles, min_len)
-            if new == path:
-                break
-            path = new
-        return path
-
-    def _sigmoid_short_segments(self, path, obstacles,
-                                min_len=WIRE_GRID_STEP):
-        """Replace a too-short perpendicular jog (a vertical step between two
-        horizontal runs, or rarely the reverse) with a smooth sigmoid.
-
-        Orthogonal routing sometimes has to step a few px up/down when two
-        runs are nearly collinear; a stubby straight segment there reads as a
-        hard little kink, so the step is blended into an S-curve as long as
-        the curve clears the obstacles.  The result is a dense polyline
-        (sampled curve) drawn like any other route."""
-        if len(path) < 4:
-            return path
-        pts = list(path)
-        out = [pts[0]]
-
-        def _clear(a, b):
-            return not segment_blocked(
-                a[0], a[1], b[0], b[1], obstacles, pad=WIRE_PAD
-            )
-
-        i = 1
-        while i < len(pts) - 1:
-            prev = out[-1]
-            a, b = pts[i], pts[i + 1]
-            nxt = pts[i + 2] if i + 2 < len(pts) else None
-            vertical = abs(a[0] - b[0]) < 1e-6 and abs(a[1] - b[1]) > 1e-6
-            horizontal = abs(a[1] - b[1]) < 1e-6 and abs(a[0] - b[0]) > 1e-6
-            short = math.hypot(a[0] - b[0], a[1] - b[1]) < min_len
-            jog = (
-                short and nxt is not None
-                and (
-                    vertical
-                    and abs(prev[1] - a[1]) < 1e-6
-                    and abs(nxt[1] - b[1]) < 1e-6
-                )
-            ) or (
-                short and nxt is not None
-                and horizontal
-                and abs(prev[0] - a[0]) < 1e-6
-                and abs(nxt[0] - b[0]) < 1e-6
-            )
-            if not jog:
-                out.append(a)
-                i += 1
-                continue
-            if vertical:
-                s = min(min_len, abs(prev[0] - a[0]), abs(nxt[0] - b[0]))
-                if s <= 1e-6:
-                    out.append(a)
-                    i += 1
-                    continue
-                dir_a = 1.0 if prev[0] > a[0] else -1.0
-                dir_b = 1.0 if nxt[0] > b[0] else -1.0
-                start = (a[0] + dir_a * s, a[1])
-                end = (b[0] + dir_b * s, b[1])
-            else:
-                s = min(min_len, abs(prev[1] - a[1]), abs(nxt[1] - b[1]))
-                if s <= 1e-6:
-                    out.append(a)
-                    i += 1
-                    continue
-                dir_a = 1.0 if prev[1] > a[1] else -1.0
-                dir_b = 1.0 if nxt[1] > b[1] else -1.0
-                start = (a[0], a[1] + dir_a * s)
-                end = (b[0], b[1] + dir_b * s)
-            # Controls at the original corners give a smooth S with
-            # horizontal/vertical tangents at start/end.
-            p1, p2 = a, b
-            curve = []
-            steps = max(8, int(math.hypot(start[0] - end[0],
-                                          start[1] - end[1]) / 14))
-            for k in range(steps + 1):
-                t = k / steps
-                mt = 1.0 - t
-                w0 = mt * mt * mt
-                w1 = 3 * mt * mt * t
-                w2 = 3 * mt * t * t
-                w3 = t * t * t
-                curve.append((
-                    w0 * start[0] + w1 * p1[0] + w2 * p2[0] + w3 * end[0],
-                    w0 * start[1] + w1 * p1[1] + w2 * p2[1] + w3 * end[1],
-                ))
-            if all(_clear(curve[k], curve[k + 1])
-                   for k in range(len(curve) - 1)):
-                out.append(start)
-                out.extend(curve[1:])
-                i += 2
-            else:
-                out.append(a)
-                i += 1
-        while i < len(pts):
-            out.append(pts[i])
-            i += 1
-        return out
 
     @staticmethod
     def _stubbed_fallback(x1, y1, x2, y2, slen=None):
@@ -3006,16 +2930,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             # across the middle of the gap, sideways into the socket, with
             # every segment in open air.
             core = self._close_pair_z(x1, y1, x2, y2, core) or core
+            # Orthogonal throughout: merge redundant corners, align to the
+            # grid, merge surviving short straights, then drop any retrace.
+            # The sigmoid blending that used to sit between those passes made
+            # a wire read as "weird curvature" (and, where it folded back,
+            # as the wire clipping into itself).
             return self._dehairpin(self._drop_short_straights(
-                self._round_short_ends(
-                    self._smooth_jogs(
-                        self._snap_to_grid(
-                            self._simplify_orthogonal(list(core), obstacles),
-                            obstacles,
-                        ),
-                        smooth_obstacles,
-                    ),
-                    smooth_obstacles,
+                self._snap_to_grid(
+                    self._simplify_orthogonal(list(core), obstacles), obstacles,
                 ),
                 smooth_obstacles,
             ))
@@ -3141,14 +3063,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             if dst_stub and dst_leg is None:
                 path.append((x2, y2))
         cleaned = self._drop_short_straights(
-            self._round_short_ends(
-                self._smooth_jogs(
-                    self._snap_to_grid(
-                        self._simplify_orthogonal(path, obstacles), obstacles
-                    ),
-                    smooth_obstacles,
-                ),
-                smooth_obstacles,
+            self._snap_to_grid(
+                self._simplify_orthogonal(path, obstacles), obstacles
             ),
             smooth_obstacles,
         )
@@ -3178,57 +3094,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             ))
         return pts
 
-    def _round_short_ends(self, path, obstacles, min_len=WIRE_GRID_STEP):
-        """Blend a short socket-adjacent segment into a rounded curve.
-
-        When two sockets are nearly aligned the orthogonal route can only
-        give one end a sub-grid step; that tiny straight reads as a kink.
-        This replaces the corner next to a short first/last segment with a
-        single smooth curve into the socket (checked for clearance)."""
-        pts = list(path)
-        if len(pts) < 3:
-            return pts
-
-        def _clear(a, b):
-            return not segment_blocked(
-                a[0], a[1], b[0], b[1], obstacles, pad=WIRE_PAD
-            )
-
-        # Last segment (into the target socket).
-        if math.hypot(pts[-1][0] - pts[-2][0],
-                      pts[-1][1] - pts[-2][1]) < min_len:
-            q, c, s = pts[-3], pts[-2], pts[-1]
-            pen = math.hypot(c[0] - q[0], c[1] - q[1])
-            if pen > 1e-6:
-                s_len = min(min_len, pen)
-                ux, uy = (c[0] - q[0]) / pen, (c[1] - q[1]) / pen
-                start = (c[0] - ux * s_len, c[1] - uy * s_len)
-                curve = self._sample_cubic(start, c, c, s)
-                if all(_clear(curve[k], curve[k + 1])
-                       for k in range(len(curve) - 1)):
-                    pts = pts[:-2] + [start] + curve[1:]
-
-        # First segment (out of the source socket).
-        if len(pts) >= 3 and math.hypot(
-            pts[1][0] - pts[0][0], pts[1][1] - pts[0][1]
-        ) < min_len:
-            s, c, q = pts[0], pts[1], pts[2]
-            out = math.hypot(q[0] - c[0], q[1] - c[1])
-            if out > 1e-6:
-                s_len = min(min_len, out)
-                ux, uy = (q[0] - c[0]) / out, (q[1] - c[1]) / out
-                end = (c[0] + ux * s_len, c[1] + uy * s_len)
-                curve = self._sample_cubic(s, c, c, end)
-                if all(_clear(curve[k], curve[k + 1])
-                       for k in range(len(curve) - 1)):
-                    pts = [s] + curve[1:] + pts[2:]
-        return pts
 
     def _drop_short_straights(self, path, obstacles, min_len=WIRE_GRID_STEP):
         """Last-resort cleanup: delete any surviving short axis-aligned
-        straight by merging it into its neighbours (which may become a short
-        diagonal - fine, it is inside/next to a smoothed curve).  Keeps the
-        result only where the merged segment stays clear."""
+        straight by merging it into its neighbours, kept only where the joined
+        run stays clear *and* axis-aligned - a diagonal, however short, reads
+        as a weirdly angled straight line rather than a wire."""
         pts = list(path)
         if len(pts) < 3:
             return pts
@@ -3239,14 +3110,15 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             )
 
         def _merge_ok(a, c):
-            # Merging deletes the middle point; the joined segment is allowed
-            # to be a short diagonal, but a long one reads as a "weirdly
-            # angled straight line", so reject that.
+            # Merging deletes the middle point and joins the neighbours.  The
+            # joined run must be clear *and* axis-aligned: a merge that leaves
+            # a diagonal (however short) reads as a weirdly angled straight
+            # line rather than a wire.
             if not _clear(a, c):
                 return False
-            if abs(a[0] - c[0]) < 1e-6 or abs(a[1] - c[1]) < 1e-6:
-                return True
-            return math.hypot(c[0] - a[0], c[1] - a[1]) < 2.0 * WIRE_GRID_STEP
+            return (
+                abs(a[0] - c[0]) < 1e-6 or abs(a[1] - c[1]) < 1e-6
+            )
 
         i = 1
         guard = 0
@@ -5322,22 +5194,59 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             cr.stroke()
         cr.restore()
 
-    #: What the daemon/GUI store for a panel nobody coloured.  A panel at
-    #: this value (or with no colour at all) is drawn in a colour derived
-    #: from the theme instead, so panels follow the desktop palette.
-    DEFAULT_PANEL_COLOR = "#3584e4"
+    #: A stored colour may be a hex, or one of the theme's own slots written
+    #: as `@blue` … `@teal`.  A slot is resolved *every time it is drawn*, so
+    #: a panel coloured `@blue` follows the desktop palette (stylix recolours
+    #: those slots) instead of freezing today's hex - which is what the
+    #: pickers store, and what the module's `color` defaults to.
+    COLOR_SLOTS = {
+        "blue": "blue_3",
+        "green": "green_3",
+        "yellow": "yellow_3",
+        "red": "red_3",
+        "purple": "purple_3",
+        "teal": "teal_3",
+    }
+    DEFAULT_PANEL_COLOR = "@blue"
+    #: What files written before the slots existed carried for "no colour" -
+    #: Adwaita's blue, i.e. what `@blue` means.  Read as `@blue`.
+    LEGACY_DEFAULT_PANEL_COLOR = "#3584e4"
+
+    def _slot_rgb(self, slot, fallback):
+        """A `@slot` value as RGB, from the current theme's palette."""
+        name = self.COLOR_SLOTS.get(slot)
+        if name is None:
+            return fallback
+        return theme_color(self, name, fallback)
+
+    def resolve_color(self, value, default_key):
+        """A stored colour value as RGB: a theme slot (resolved now), a hex
+        used as-is, or - for nothing/the legacy default - a colour derived
+        from `default_key`, so uncoloured things still get a palette colour
+        that varies between them and stays stable across restarts."""
+        raw = (value or "").strip()
+        if not raw or raw.lower() == self.LEGACY_DEFAULT_PANEL_COLOR:
+            # Nothing stored, or what files written before the slots carried
+            # for "the default": both mean the default slot, not "unset" -
+            # a panel with no colour of its own should be the same blue the
+            # module declares, and keep following the theme.
+            raw = self.DEFAULT_PANEL_COLOR
+        if raw.startswith("@"):
+            return self._slot_rgb(
+                raw[1:].lower(), theme_class_color(self, default_key)
+            )
+        return self._hex_to_rgb(raw)
 
     def _panel_rgb(self, pid):
-        """A panel's colour as RGB: the one it carries, or - when it has
-        none, which is the default - one derived from the theme, picked
-        deterministically per panel so they stay distinguishable and stable
-        across restarts."""
+        """A panel's colour as RGB - see `resolve_color`."""
         panel = self.panels.get(pid) or {}
-        raw = (panel.get("color") or "").strip()
-        if raw and raw.lower() != self.DEFAULT_PANEL_COLOR:
-            return self._hex_to_rgb(raw)
         key = panel.get("stem") or panel.get("label") or pid
-        return theme_class_color(self, key)
+        return self.resolve_color(panel.get("color"), key)
+
+    def _group_rgb(self, gid, group):
+        """A group's colour as RGB - see `resolve_color`."""
+        key = group.get("label") or gid or "group"
+        return self.resolve_color(group.get("color"), key)
 
     #: Fallbacks for the colour pickers' presets: Adwaita's defaults for the
     #: named slots used below, for a theme that defines no named colours.
@@ -5354,14 +5263,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         """The colour pickers' presets, taken from the theme's own palette
         slots (Adwaita's, recoloured by stylix), so a colour picked here
         matches the rest of the desktop instead of being six fixed literals."""
-        names = ("blue_3", "green_3", "yellow_3", "red_3", "purple_3", "teal_3")
         out = []
-        for name, fallback in zip(names, self._GROUP_COLOR_FALLBACKS):
-            r, g, b = theme_color(self, name, fallback)
-            out.append("#%02x%02x%02x" % (
-                max(0, min(255, round(r * 255))),
-                max(0, min(255, round(g * 255))),
-                max(0, min(255, round(b * 255))),
+        for slot, name in self.COLOR_SLOTS.items():
+            r, g, b = self._slot_rgb(slot, self._GROUP_COLOR_FALLBACKS[
+                tuple(self.COLOR_SLOTS).index(slot)
+            ])
+            out.append((
+                "@" + slot,
+                (r, g, b),
             ))
         return tuple(out)
 
@@ -6558,8 +6467,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         name_entry.set_text(str(panel.get("label") or self._panel_local(panel_id)))
         content.append(self._labeled_row("Name:", name_entry))
 
+        panel_key = panel.get("stem") or panel.get("label") or pid
         color_picker = ColorPicker(
-            panel.get("color", self.GROUP_COLORS[0]), presets=self._group_colors()
+            panel.get("color") or self.DEFAULT_PANEL_COLOR,
+            presets=self._group_colors(),
+            resolve=lambda v: self.resolve_color(v, panel_key),
         )
         content.append(self._labeled_row("Color:", color_picker))
 
@@ -6582,14 +6494,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                             "command": "edit_panel",
                             "panel_id": panel_id,
                             "label": label,
-                            "color": color_picker.get_hex(),
+                            "color": color_picker.get_value(),
                             "auto_load": autoload.get_active(),
                         }
                     )
                     # Optimistic local update so the header reflects the
                     # change before the next poll.
                     panel["label"] = label
-                    panel["color"] = color_picker.get_hex()
+                    panel["color"] = color_picker.get_value()
                     panel["auto_load"] = autoload.get_active()
                     self._panel_geo_cache.clear()
                     self.queue_draw()
@@ -8220,7 +8132,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 {
                     "gid": gid,
                     "label": group.get("label") or gid,
-                    "color": group.get("color") or self.GROUP_COLORS[0],
+                    "color": group.get("color") or self.DEFAULT_PANEL_COLOR,
                 }
             )
             entry["nodes"] |= set(group.get("nodes", ()))
@@ -9300,7 +9212,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             x1, y1, x2, y2 = bounds
             if not self._rect_visible(x1, y1, x2, y2):
                 continue
-            r, g, b = self._hex_to_rgb(group.get("color"))
+            r, g, b = self._group_rgb(gid, group)
             cr.set_source_rgb(r, g, b)
             cr.set_line_width(1.5)
             cr.set_dash([2.0, 4.0], 0.0)
@@ -9330,7 +9242,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 cr, info["x"], y, info["id_text"], 9, pal["subtext"]
             )
 
-            r, g, b = self._hex_to_rgb(group.get("color"))
+            r, g, b = self._group_rgb(gid, group)
             draw_rounded_rect(
                 cr, info["chip_x"], info["chip_y"], info["chip"], info["chip"], 3
             )
@@ -9505,8 +9417,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # A self-drawn HSV picker (see color_picker.py) rather than
         # Gtk.ColorButton, which aborts on systems with no GSettings
         # schemas.
+        group_key = group.get("label") or gid or "group"
         color_picker = ColorPicker(
-            group.get("color", self.GROUP_COLORS[0]), presets=self._group_colors()
+            group.get("color") or self.DEFAULT_PANEL_COLOR,
+            presets=self._group_colors(),
+            resolve=lambda v: self.resolve_color(v, group_key),
         )
         color_picker.set_tooltip_text("The group's outline / title colour.")
         content.append(self._labeled_row("Color:", color_picker))
@@ -9520,7 +9435,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 new_id = id_entry.get_text().strip()
                 if not new_id or (new_id != gid and new_id in self.groups):
                     return  # empty or duplicate id - leave dialog open
-                new_color = color_picker.get_hex()
+                new_color = color_picker.get_value()
                 self._apply_group_edit(
                     gid, new_id, label_entry.get_text(), new_color
                 )

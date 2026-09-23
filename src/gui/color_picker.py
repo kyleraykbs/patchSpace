@@ -84,9 +84,17 @@ class ColorPicker(Gtk.Box):
     HUE_WIDTH = 18
     MARKER_RADIUS = 6
 
-    def __init__(self, initial: str = "#3584e4", presets=()):
+    def __init__(self, initial: str = "#3584e4", presets=(), resolve=None):
+        """`initial` may be a hex string or one of the theme-slot values the
+        presets use (see `resolve`); `resolve(value)` maps a stored value to
+        RGB, so a caller can keep a panel or group coloured by *slot* - the
+        picker holds that value, not the hex it happens to resolve to, and
+        `get_value()` hands it back unchanged until the user edits the colour
+        by hand."""
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        self._h, self._s, self._v = _rgb_to_hsv(*hex_to_rgb(initial))
+        self._resolve = resolve or hex_to_rgb
+        self._value = initial
+        self._h, self._s, self._v = _rgb_to_hsv(*self._resolve(initial))
         self._updating_entry = False
 
         if presets:
@@ -138,14 +146,21 @@ class ColorPicker(Gtk.Box):
 
     def _build_presets(self, presets):
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        for value in presets:
+        for item in presets:
+            # A preset is either a stored value (a slot like "@blue", or a
+            # hex) or a (value, rgb) pair - the pair form lets the caller say
+            # what the swatch looks like *now* while the button still stores
+            # the slot, so the colour keeps following the theme.
+            if isinstance(item, tuple):
+                value, color = item
+            else:
+                value, color = item, self._resolve(item)
             button = Gtk.Button()
             button.set_has_frame(False)
-            button.set_tooltip_text(value)
+            button.set_tooltip_text(str(value))
             area = Gtk.DrawingArea()
             area.set_content_width(18)
             area.set_content_height(18)
-            color = hex_to_rgb(value)
 
             def _draw(_area, cr, _w, _h, color=color):
                 cr.set_source_rgb(*color)
@@ -153,16 +168,29 @@ class ColorPicker(Gtk.Box):
 
             area.set_draw_func(_draw)
             button.set_child(area)
-            button.connect("clicked", lambda _b, v=value: self.set_hex(v))
+            button.connect("clicked", lambda _b, v=value: self.set_value(v))
             row.append(button)
         return row
 
     # -- public API ------------------------------------------------------
 
     def get_hex(self) -> str:
+        """The concrete colour currently shown, as hex."""
         return rgb_to_hex(_hsv_to_rgb(self._h, self._s, self._v))
 
+    def get_value(self) -> str:
+        """What to store: the value this picker was opened with (a slot like
+        `@blue` keeps following the theme), or a hex once the user changed the
+        colour by hand."""
+        return self._value
+
+    def set_value(self, value: str) -> None:
+        self._value = value
+        self._h, self._s, self._v = _rgb_to_hsv(*self._resolve(value))
+        self._sync_from_state(update_entry=True)
+
     def set_hex(self, value: str) -> None:
+        self._value = value
         self._h, self._s, self._v = _rgb_to_hsv(*hex_to_rgb(value))
         self._sync_from_state(update_entry=True)
 
@@ -177,6 +205,7 @@ class ColorPicker(Gtk.Box):
         y = sy + (oy if ok else 0.0)
         self._s = max(0.0, min(1.0, x / self.SV_WIDTH))
         self._v = max(0.0, min(1.0, 1.0 - y / self.SV_HEIGHT))
+        self._value = self.get_hex()          # edited by hand: no longer a slot
         self._sync_from_state(update_entry=True)
 
     def _apply_hue(self, gesture):
@@ -186,6 +215,7 @@ class ColorPicker(Gtk.Box):
         ok, _ox, oy = gesture.get_offset()
         y = sy + (oy if ok else 0.0)
         self._h = max(0.0, min(1.0, y / self.SV_HEIGHT)) % 1.0
+        self._value = self.get_hex()
         self._sync_from_state(update_entry=True)
 
     def _on_hex_changed(self, entry):
@@ -199,6 +229,7 @@ class ColorPicker(Gtk.Box):
         except ValueError:
             return
         self._h, self._s, self._v = _rgb_to_hsv(*hex_to_rgb(text))
+        self._value = "#" + text.lower()
         self._sv.queue_draw()
         self._hue.queue_draw()
         self._preview.queue_draw()

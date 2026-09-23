@@ -273,10 +273,17 @@ def test_tight_span_stubs_meet_instead_of_overshooting():
     # Two connected nodes closer than two stubs: each side's exit must be
     # capped at half the span (`want`), so the legs meet/leave a gap rather
     # than overshooting each other (which hooked the wire).
+    #
+    # The nodes must not *overlap*: at b's old x=150 they did (a spans 0..180,
+    # b 150..330, and b's input socket sat under a), so the only way round was
+    # past b entirely - the old code "passed" this by letting its cosmetic
+    # passes cut through an endpoint node, which is precisely what those
+    # passes were removed for.  At x=210 there is a real 30px gap, which is
+    # what the cap is for.
     w = _widget()
     nodes = {
         "a": {"type": "volume", "x": 0.0, "y": 0.0, "label": "a"},
-        "b": {"type": "volume", "x": 150.0, "y": 150.0, "label": "b"},
+        "b": {"type": "volume", "x": 210.0, "y": 150.0, "label": "b"},
     }
     edges = {"a->b": {"from_node": "a", "to_node": "b",
                       "to_port": "in", "from_port": "out"}}
@@ -291,6 +298,20 @@ def test_tight_span_stubs_meet_instead_of_overshooting():
     # A small margin for the rounded/elbow cleanup passes.
     assert min(xs) >= min(sx, ex) - want - 5.0
     assert max(xs) <= max(sx, ex) + want + 5.0
+
+    # Each exit is capped at the span-aware stub length and heads *outward*
+    # (never back over the port it just left), and the jog between the two
+    # runs happens inside the gap rather than on either border.
+    assert pts[0] == (sx, pts[0][1])
+    first_len = abs(pts[1][0] - pts[0][0])
+    assert pts[1][0] > pts[0][0], pts           # leaves the output rightwards
+    assert first_len <= want + 1.0, (first_len, want, pts)
+    last_len = abs(pts[-1][0] - pts[-2][0])
+    assert pts[-1] == (ex, pts[-1][1])
+    assert pts[-1][0] > pts[-2][0], pts         # enters the input rightwards
+    assert last_len <= want + 1.0, (last_len, want, pts)
+    jog_x = [a[0] for a, b in zip(pts, pts[1:]) if abs(a[0] - b[0]) < 1e-6]
+    assert jog_x and all(min(sx, ex) < x < max(sx, ex) for x in jog_x), pts
 
 
 def test_stubbed_fallback_always_exits_right_and_enters_left():
@@ -354,13 +375,22 @@ def test_close_pair_wire_jogs_in_the_gap_not_on_a_border():
     assert abs(pts[0][0] - x1) < 0.5 and abs(pts[0][1] - y1) < 0.5
     assert abs(pts[-1][0] - x2) < 0.5 and abs(pts[-1][1] - y2) < 0.5
 
-    # The jog has to happen *in the open gap*: some point of the route must
-    # sit strictly between the two socket columns, at a height strictly
+    # The jog has to happen *in the open gap*: some part of the route must
+    # pass strictly between the two socket columns, at a height strictly
     # between the two socket rows.  Either L (whatever the tie-break picks)
-    # has no such point - its perpendicular run is on a border - so this is
-    # the property that separates "enters the socket" from "stops at the box".
+    # runs along a border instead - so this is the property that separates
+    # "enters the socket" from "stops at the box".
+    #
+    # Segment *midpoints* are sampled as well as the vertices: the route is a
+    # polyline whose run between two corners is one segment, so a property
+    # about where the wire goes has to look inside the segments, not only at
+    # the points the router happens to emit.
     lo, hi = min(x1, x2), max(x1, x2)
+    samples = list(pts) + [
+        ((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0)
+        for a, b in zip(pts, pts[1:])
+    ]
     assert any(
         lo + 0.5 < px < hi - 0.5 and y1 + 0.5 < py < y2 - 0.5
-        for px, py in pts
+        for px, py in samples
     ), pts

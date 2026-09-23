@@ -729,9 +729,19 @@ class MainWindow(Gtk.ApplicationWindow):
         dot.set_size_request(self._PANEL_DOT_W, -1)
         dot.set_halign(Gtk.Align.CENTER)
         dot.set_valign(Gtk.Align.START)
+        # Resolve the panel's colour the same way the canvas does, so a
+        # panel coloured by a theme slot (@blue, ...) shows the colour that
+        # is actually drawn - and follows a theme change.
+        r, g, b = self.ps_widget.resolve_color(
+            entry.get("color"), entry.get("stem") or entry.get("name") or ""
+        )
         dot.set_markup(
             "<span foreground='{}'>\u25cf</span>".format(
-                GLib.markup_escape_text(str(entry.get("color", "#3584e4")))
+                GLib.markup_escape_text("#%02x%02x%02x" % (
+                    max(0, min(255, round(r * 255))),
+                    max(0, min(255, round(g * 255))),
+                    max(0, min(255, round(b * 255))),
+                ))
             )
         )
         row.append(dot)

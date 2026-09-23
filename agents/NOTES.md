@@ -264,3 +264,21 @@ write, reload again.  Idempotent, and the root file keeps every node it had.
   blending a short jog end to end made wires look like they folded back into themselves.
 * Colour pickers' presets come from the theme (`_group_colors`, `blue_3`…`teal_3`), so picking a
   colour matches the desktop; `GROUP_COLORS` stays as the fallback list.
+
+## Wires stay orthogonal; colour slots (2026-09-23)
+
+* The wire pipeline is `_simplify_orthogonal` → `_snap_to_grid` → `_drop_short_straights` →
+  `_dehairpin`.  The sigmoid blending (`_sigmoid_short_segments`/`_smooth_jogs`) and
+  `_round_short_ends` are gone: they made wires read as "weird curvature", and where a blend
+  folded back, as the wire clipping into itself.  `_drop_short_straights` now only merges when
+  the joined run stays *axis-aligned* (no short diagonals).  `_simplify_orthogonal` keeps the
+  first/last segment's *direction*, not just its orientation, so a merge can't send the wire
+  backwards out of its socket (the "stubs overshoot" hook).
+* `tests/test_wire_escape.py::test_tight_span_stubs_meet...` used nodes that *overlapped* in x,
+  so no non-diagonal route could satisfy it - it passed only through the endpoint-node-exempt
+  cosmetic passes.  It now uses a real 30px gap and asserts the stub cap, the outward
+  direction and that the jog is inside the gap.
+* Colours: `@blue`…`@teal` slots resolved per frame (`resolve_color`), pickers store the slot,
+  the module's panel colour defaults to `@blue`, `#3584e4` reads as `@blue`, the side-view dot
+  resolves the same way.  `FIELD_BOTTOM_PAD` (10) is the one place the pad below a node's field
+  row is defined, for the rect and the height alike.

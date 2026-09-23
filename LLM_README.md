@@ -567,18 +567,31 @@ the base rect so ports stay on the content edge. Wire waypoints then snap to the
 half-grid (`WIRE_GRID_STEP = 20`, i.e. half of `draw_grid_background`'s 40px) as best they
 can: `_snap_to_grid` rounds each non-socket segment's perpendicular coordinate and rebuilds
 the corners, keeping socket segments exact and rejecting the snap if it would hit an
-obstacle. A perpendicular jog shorter than the grid step that *has* to be there (a stubby
-vertical step between two horizontal runs, rarely the reverse) is then blended into a
-smooth sigmoid by `_sigmoid_short_segments` (cubic with controls at the corners, sampled;
-only when the curve clears the obstacles). `_smooth_jogs` runs that pass repeatedly until
-nothing changes, because one blend can expose another short step. A short
-*socket-adjacent* first/last step gets the same treatment from `_round_short_ends` (a
-single rounded curve into the socket), and `_drop_short_straights` is a last-resort merge
-of any surviving short straight into its neighbours (which may become a short diagonal,
-fine among the sampled curves). All three clearance-check against obstacles with the two
-endpoint nodes excluded - their sockets sit on the border, so including them would reject
-every blend. The router is pure geometry (no GTK) and unit-tested in
+obstacle. `_dehairpin` then drops any retrace (a point where the polyline doubles back along the
+segment it came in on) - an over-and-back reads as a self-crossing loop.  Wires stay
+**strictly orthogonal** past that: there used to be three cosmetic passes
+(`_sigmoid_short_segments` / `_smooth_jogs` / `_round_short_ends` /
+`_drop_short_straights`) that blended a short step between two runs into a smooth
+sigmoid and would even leave a short diagonal, but they made a wire read as "weird
+curvature" and, where the blend folded back on the path, as the wire clipping into
+itself - so they are gone.  Corner rounding is `draw_square_path`'s job, and it now
+keeps `MIN_STRAIGHT` px of straight run between the two bends sharing a segment, so a
+step stays a step.  The router is pure geometry (no GTK) and unit-tested in
 `tests/test_wire_router.py`.
+
+*Slots.* A stored colour may be a hex **or a theme slot** written `@blue` … `@teal`
+(`PatchSpaceGraphWidget.COLOR_SLOTS`), resolved by `resolve_color` *every time it is drawn* - so
+a panel or group coloured `@blue` follows the desktop palette (stylix recolours those slots)
+instead of freezing one hex, and survives a theme change.  The pickers' presets are those slots
+(`_group_colors` returns `(value, rgb)` pairs: the swatch shows today's colour, the button
+stores the slot), the module's `panels.<name>.color` defaults to `@blue`, and the pre-slot
+`#3584e4` reads as `@blue`.  Empty/default resolves to the default slot; an unknown slot falls
+back to a per-name palette colour.  The side view's colour dot resolves the same way, so it
+shows what the canvas draws.
+
+*Selection.* A selected node's ring is drawn by `_draw_node`, inset inside the body and before
+its sockets, so a port centred on the edge is never covered (the overlay ring used to cross
+every port).
 
 *Colour.* Everything colour-bearing comes from `theme_palette`: the impulse port/button and
 the sliders share the theme's blue (`accent` = `blue_3`, Adwaita's #3584e4 - the *same* slot, so
