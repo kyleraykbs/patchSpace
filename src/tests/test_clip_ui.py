@@ -84,13 +84,21 @@ def test_dragging_a_side_writes_that_time_and_tells_the_daemon():
     _x, y, _w, _h = w._clip_rect("clip1")
     mid_y = y + rh / 2.0
 
-    w.clip_dragging = ("start", "clip1")
+    # A press on the line, then a move: the edge follows the *delta*, so a
+    # press that grazes the line doesn't teleport it (the grab band is a few
+    # pixels - minutes, at a whole-file zoom).
+    w.on_drag_begin(None, w._clip_x_at("clip1", 2.0), mid_y)
+    assert w.clip_dragging == ("start", "clip1")
     w._drag_clip(w._clip_x_at("clip1", 3.5), mid_y)
     assert w.nodes["clip1"]["start"] == pytest.approx(3.5)
     assert client.sent[-1] == {
         "command": "set_node_property", "node_id": "clip1",
         "property": "start", "value": pytest.approx(3.5),
     }
+    # A press *without* a move leaves it exactly where it was.
+    w.on_drag_begin(None, w._clip_x_at("clip1", 4.0), mid_y)
+    w._drag_clip(w._clip_x_at("clip1", 4.0), mid_y)
+    assert w.nodes["clip1"]["start"] == pytest.approx(3.5)
     # It cannot cross the other side.
     w._drag_clip(w._clip_x_at("clip1", 9.0), mid_y)
     assert w.nodes["clip1"]["start"] == pytest.approx(6.0)

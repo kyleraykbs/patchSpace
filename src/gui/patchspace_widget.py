@@ -2226,6 +2226,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             base += 20
         base += self._device_header_bonus(node)
         base += self._header_extra_height(node_id)
+        # A node whose bottom block *opens* with the read-out - the Sound
+        # Player: read-out on top, switch under it - needs the clearance in the
+        # *socket* area.  Growing the block itself moves with the node, leaving
+        # the last socket's label exactly as crowded as before (measured: 6px
+        # between the socket's centre and the block's top, and the label hangs
+        # below it into the Stop button).
+        if self._readout_above_switch(node):
+            base += self.READOUT_LEAD_GAP
         base += self._bottom_control_height(node)
         return base
 
@@ -5619,6 +5627,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     #: Grab knob at the top of each selection line: dragging it *slides* the
     #: selection (dragging the line itself moves just that side).
     CLIP_KNOB = 9.0
+    #: Clearance above a node's read-out when it opens its bottom block (see
+    #: _readout_above_switch), so the row clears the socket labels above it.
+    READOUT_LEAD_GAP = 12.0
     #: Width of each start/end box in the row above.
     CLIP_BOX_W = 64.0
     #: Never zoom in past this many seconds of file on screen.
@@ -6611,6 +6622,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         impulse_hit = self.find_impulse_fallback_at(wx, wy)
         if impulse_hit is not None:
             self.client.send({"command": "impulse", "node_id": impulse_hit})
+            return
+
+        if self.find_clip_knob_at(wx, wy) is not None:
+            # The knobs sit over the boxes; pressing one is a drag, not a
+            # request to edit a time (that is what the box itself is for).
             return
 
         clip_box = self.find_clip_box_at(wx, wy)
@@ -7806,15 +7822,18 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             )
             self.queue_draw()
             return
-        base = float(node.get("source_start", 0.0) or 0.0)
-        seconds = max(0.0, self._clip_time_at(nid, wx) - base)
+        origin_x, origin_seconds = self._clip_drag_origin
+        _rx, _ry, rw, _rh = self._clip_rect(nid)
+        _start, span = self._clip_span(nid)
+        seconds = max(0.0, origin_seconds + (wx - origin_x) / rw * span)
         sel_start, sel_end = self._clip_selection(nid)
+        base = float(node.get("source_start", 0.0) or 0.0)
         if part == "start":
-            seconds = min(seconds, sel_end - base)
+            seconds = min(seconds, sel_end)
         else:
-            seconds = max(seconds, sel_start - base)
-        node[part] = seconds
-        self._send_property(nid, part, seconds)
+            seconds = max(seconds, sel_start)
+        node[part] = seconds - base
+        self._send_property(nid, part, seconds - base)
         self.queue_draw()
 
     def _reset_drag_state(self):
@@ -7933,8 +7952,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
         clip_handle = self.find_clip_handle_at(wx, wy)
         if clip_handle is not None:
-            part, nid = clip_handle
+            # find_clip_handle_at returns (node_id, "start"|"end").
+            nid, part = clip_handle
             self.clip_dragging = (part, nid)
+            # Remember the edge's own time: the grab band is a few pixels wide,
+            # and at a whole-file zoom a few pixels are minutes - moving the
+            # edge to the pointer would teleport it (see _drag_clip).
+            self._clip_drag_origin = (wx, self._clip_selection(nid)[0 if part == "start" else 1])
             self.pinned_nodes.add(nid)
             self.queue_draw()
             return
