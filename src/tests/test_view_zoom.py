@@ -103,3 +103,94 @@ def test_a_pinch_without_touch_points_uses_the_pointer():
     w._on_pinch_zoom(_NoCentre((0.0, 0.0)), 2.0)
     assert w.zoom == pytest.approx(2.0)
     assert w.to_world(300.0, 200.0) == pytest.approx((wx, wy))
+
+
+# ---------------------------------------------------------------- wires ---
+
+def _wire_widget(nodes, edges):
+    gi = pytest.importorskip("gi")
+    gi.require_version("Gtk", "4.0")
+    from gi.repository import Gtk
+    if not Gtk.init_check():
+        pytest.skip("no display available for GTK")
+    from gui.patchspace_widget import PatchSpaceGraphWidget
+
+    w = PatchSpaceGraphWidget(_Client())
+    w.update_from_daemon({"nodes": nodes, "edges": edges, "panels": []})
+    w._route_all_wires()
+    return w
+
+
+def test_a_short_jog_between_nearly_level_sockets_becomes_a_curve():
+    """Two sockets almost level: the router has to step those few pixels
+    somewhere, and a stubby straight step there reads as a hard little kink -
+    so it is blended into a sigmoid (see _sigmoid_short_segments).  The tell
+    is a diagonal hop in an otherwise strictly orthogonal path."""
+    w = _wire_widget(
+        {"a": {"type": "volume", "x": 0.0, "y": 100.0, "label": "a"},
+         "b": {"type": "volume", "x": 400.0, "y": 108.0, "label": "b"}},
+        {"a->b": {"from_node": "a", "to_node": "b",
+                  "to_port": "in", "from_port": "out"}},
+    )
+    pts = w._wire_routes["a->b"]
+    diagonals = [
+        (a, b) for a, b in zip(pts, pts[1:])
+        if abs(a[0] - b[0]) > 1e-6 and abs(a[1] - b[1]) > 1e-6
+    ]
+    assert diagonals, f"the short step stayed a hard kink: {pts}"
+    # …and the curve still starts and ends on the sockets.
+    assert pts[0] == w._socket_position("a", "out", 0)
+    assert pts[-1] == w._socket_position("b", "in", 0)
+
+
+def test_a_wires_bends_all_share_one_radius():
+    """A corner beside a short segment used to round tightly while the corner
+    at the other end of the same wire rounded generously; every bend of a wire
+    is drawn with the same radius now - the smallest that fits them all."""
+    from render_utils import CORNER_RADIUS, square_path_radius
+
+    # Two bends: one with a long run either side, one whose outgoing segment is
+    # short, so per-vertex radii would differ.
+    pts = [(0.0, 0.0), (300.0, 0.0), (300.0, 12.0), (340.0, 12.0)]
+    r = square_path_radius(pts)
+    # The short (12px) segment caps it: (12 - MIN_STRAIGHT) / 2, not 14.
+    assert 0.0 < r < CORNER_RADIUS
+    # A wire with nothing but generous bends gets the full radius.
+    assert square_path_radius([(0.0, 0.0), (300.0, 0.0), (300.0, 300.0)]) == CORNER_RADIUS
+    # And no bends at all rounds nothing.
+    assert square_path_radius([(0.0, 0.0), (300.0, 0.0)]) == 0.0
+
+
+def test_wrapped_text_is_the_same_at_every_zoom():
+    """Text used to wrap at draw time on the zoom-scaled Cairo context, so a
+    marginal word could fit at one zoom and wrap at another (and the wrap
+    could disagree with the height the node reserved).  The break is decided
+    once now, in world units, and the drawn height matches the reserved one
+    whatever the context is scaled by."""
+    import cairo
+    gi = pytest.importorskip("gi")
+    gi.require_version("Gtk", "4.0")
+    from gi.repository import Gtk
+    if not Gtk.init_check():
+        pytest.skip("no display available for GTK")
+    from render_utils import draw_text_wrapped, wrap_text_lines, wrapped_text_height
+
+    w = _widget()
+    text = "Mic Boost Noise Cancel"
+    width, size = 60.0, 12
+
+    lines, _lh = wrap_text_lines(w, text, width, size)
+    assert len(lines) > 1, lines
+    assert "".join(lines).replace(" ", "") == text.replace(" ", "")
+
+    reserved = wrapped_text_height(w, text, width, size)
+    for zoom in (0.5, 1.0, 3.0):
+        surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 400, 400)
+        cr = cairo.Context(surface)
+        cr.scale(zoom, zoom)
+        drawn = draw_text_wrapped(
+            cr, 10.0, 20.0, text, width, size, (1.0, 1.0, 1.0), widget=w
+        )
+        assert drawn == reserved, (zoom, drawn, reserved)
+        # And the same breaks at that zoom.
+        assert wrap_text_lines(w, text, width, size)[0] == lines

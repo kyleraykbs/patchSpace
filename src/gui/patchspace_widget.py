@@ -2936,8 +2936,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             # a wire read as "weird curvature" (and, where it folded back,
             # as the wire clipping into itself).
             return self._dehairpin(self._drop_short_straights(
-                self._snap_to_grid(
-                    self._simplify_orthogonal(list(core), obstacles), obstacles,
+                self._sigmoid_short_segments(
+                    self._snap_to_grid(
+                        self._simplify_orthogonal(list(core), obstacles),
+                        obstacles,
+                    ),
+                    smooth_obstacles,
                 ),
                 smooth_obstacles,
             ))
@@ -3063,8 +3067,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             if dst_stub and dst_leg is None:
                 path.append((x2, y2))
         cleaned = self._drop_short_straights(
-            self._snap_to_grid(
-                self._simplify_orthogonal(path, obstacles), obstacles
+            self._sigmoid_short_segments(
+                self._snap_to_grid(
+                    self._simplify_orthogonal(path, obstacles), obstacles
+                ),
+                smooth_obstacles,
             ),
             smooth_obstacles,
         )
@@ -3095,7 +3102,103 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         return pts
 
 
-    def _drop_short_straights(self, path, obstacles, min_len=WIRE_GRID_STEP):
+    def _sigmoid_short_segments(self, path, obstacles,
+                                min_len=WIRE_GRID_STEP):
+        """Replace a too-short perpendicular jog (a vertical step between two
+        horizontal runs, or rarely the reverse) with a smooth sigmoid.
+
+        Orthogonal routing sometimes has to step a few px up/down when two
+        runs are nearly collinear; a stubby straight segment there reads as a
+        hard little kink, so the step is blended into an S-curve as long as
+        the curve clears the obstacles.  The result is a dense polyline
+        (sampled curve) drawn like any other route."""
+        if len(path) < 4:
+            return path
+        pts = list(path)
+        out = [pts[0]]
+
+        def _clear(a, b):
+            return not segment_blocked(
+                a[0], a[1], b[0], b[1], obstacles, pad=WIRE_PAD
+            )
+
+        i = 1
+        while i < len(pts) - 1:
+            prev = out[-1]
+            a, b = pts[i], pts[i + 1]
+            nxt = pts[i + 2] if i + 2 < len(pts) else None
+            vertical = abs(a[0] - b[0]) < 1e-6 and abs(a[1] - b[1]) > 1e-6
+            horizontal = abs(a[1] - b[1]) < 1e-6 and abs(a[0] - b[0]) > 1e-6
+            short = math.hypot(a[0] - b[0], a[1] - b[1]) < min_len
+            jog = (
+                short and nxt is not None
+                and (
+                    vertical
+                    and abs(prev[1] - a[1]) < 1e-6
+                    and abs(nxt[1] - b[1]) < 1e-6
+                )
+            ) or (
+                short and nxt is not None
+                and horizontal
+                and abs(prev[0] - a[0]) < 1e-6
+                and abs(nxt[0] - b[0]) < 1e-6
+            )
+            if not jog:
+                out.append(a)
+                i += 1
+                continue
+            if vertical:
+                s = min(min_len, abs(prev[0] - a[0]), abs(nxt[0] - b[0]))
+                if s <= 1e-6:
+                    out.append(a)
+                    i += 1
+                    continue
+                dir_a = 1.0 if prev[0] > a[0] else -1.0
+                dir_b = 1.0 if nxt[0] > b[0] else -1.0
+                start = (a[0] + dir_a * s, a[1])
+                end = (b[0] + dir_b * s, b[1])
+            else:
+                s = min(min_len, abs(prev[1] - a[1]), abs(nxt[1] - b[1]))
+                if s <= 1e-6:
+                    out.append(a)
+                    i += 1
+                    continue
+                dir_a = 1.0 if prev[1] > a[1] else -1.0
+                dir_b = 1.0 if nxt[1] > b[1] else -1.0
+                start = (a[0], a[1] + dir_a * s)
+                end = (b[0], b[1] + dir_b * s)
+            # Controls at the original corners give a smooth S with
+            # horizontal/vertical tangents at start/end.
+            p1, p2 = a, b
+            curve = []
+            steps = max(8, int(math.hypot(start[0] - end[0],
+                                          start[1] - end[1]) / 14))
+            for k in range(steps + 1):
+                t = k / steps
+                mt = 1.0 - t
+                w0 = mt * mt * mt
+                w1 = 3 * mt * mt * t
+                w2 = 3 * mt * t * t
+                w3 = t * t * t
+                curve.append((
+                    w0 * start[0] + w1 * p1[0] + w2 * p2[0] + w3 * end[0],
+                    w0 * start[1] + w1 * p1[1] + w2 * p2[1] + w3 * end[1],
+                ))
+            if all(_clear(curve[k], curve[k + 1])
+                   for k in range(len(curve) - 1)):
+                out.append(start)
+                out.extend(curve[1:])
+                i += 2
+            else:
+                out.append(a)
+                i += 1
+        while i < len(pts):
+            out.append(pts[i])
+            i += 1
+        return out
+
+    @staticmethod
+    def _drop_short_straights(path, obstacles, min_len=WIRE_GRID_STEP):
         """Last-resort cleanup: delete any surviving short axis-aligned
         straight by merging it into its neighbours, kept only where the joined
         run stays clear *and* axis-aligned - a diagonal, however short, reads
@@ -4991,7 +5094,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             else:
                 block_h = draw_text_wrapped(
                     cr, x + self.HEADER_SIDE_PAD + left, text_y, text,
-                    max_width, font_size, text_rgb,
+                    max_width, font_size, text_rgb, widget=self,
                 )
             text_y += block_h + self.HEADER_BLOCK_GAP
 
@@ -5108,13 +5211,24 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         return pixbuf
 
     def _draw_node_icon(self, cr, icon_name, x, y, size, rgb):
-        pixbuf = self._node_icon_pixbuf(icon_name, size, rgb)
+        """Draw a symbolic icon at `size` world units, rasterised at the size
+        it will actually occupy on screen (the canvas is zoomed), so a
+        zoomed-in node shows the icon's own pixels instead of an upscaled
+        blur.  The raster size is quantised so the cache doesn't hold a copy
+        per zoom step."""
+        zoom = max(0.05, float(getattr(self, "zoom", 1.0)))
+        px = max(8, int(round(size * zoom / 4.0)) * 4)
+        pixbuf = self._node_icon_pixbuf(icon_name, px, rgb)
         if pixbuf is None:
             return
         cr.save()
-        ox = x + (size - pixbuf.get_width()) / 2.0
-        oy = y + (size - pixbuf.get_height()) / 2.0
-        Gdk.cairo_set_source_pixbuf(cr, pixbuf, ox, oy)
+        # The pixbuf covers `px / zoom` world units; centre that in `size`.
+        drawn = pixbuf.get_width() / zoom
+        ox = x + (size - drawn) / 2.0
+        oy = y + (size - pixbuf.get_height() / zoom) / 2.0
+        cr.translate(ox, oy)
+        cr.scale(1.0 / zoom, 1.0 / zoom)
+        Gdk.cairo_set_source_pixbuf(cr, pixbuf, 0, 0)
         cr.paint()
         cr.restore()
 

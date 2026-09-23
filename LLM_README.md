@@ -567,17 +567,22 @@ the base rect so ports stay on the content edge. Wire waypoints then snap to the
 half-grid (`WIRE_GRID_STEP = 20`, i.e. half of `draw_grid_background`'s 40px) as best they
 can: `_snap_to_grid` rounds each non-socket segment's perpendicular coordinate and rebuilds
 the corners, keeping socket segments exact and rejecting the snap if it would hit an
-obstacle. `_dehairpin` then drops any retrace (a point where the polyline doubles back along the
-segment it came in on) - an over-and-back reads as a self-crossing loop.  Wires stay
-**strictly orthogonal** past that: there used to be three cosmetic passes
-(`_sigmoid_short_segments` / `_smooth_jogs` / `_round_short_ends` /
-`_drop_short_straights`) that blended a short step between two runs into a smooth
-sigmoid and would even leave a short diagonal, but they made a wire read as "weird
-curvature" and, where the blend folded back on the path, as the wire clipping into
-itself - so they are gone.  Corner rounding is `draw_square_path`'s job, and it now
-keeps `MIN_STRAIGHT` px of straight run between the two bends sharing a segment, so a
-step stays a step.  The router is pure geometry (no GTK) and unit-tested in
-`tests/test_wire_router.py`.
+obstacle. `_sigmoid_short_segments` then blends a *short* perpendicular step between two
+parallel runs (a few px, as two nearly-level sockets force) into a smooth S, because a
+stubby straight step there reads as a hard little kink; `_drop_short_straights` is the
+last-resort merge of whatever short straight survives, kept only when the joined run is
+clear *and* axis-aligned.  `_dehairpin` drops any retrace (a point where the polyline
+doubles back along the segment it came in on) - an over-and-back reads as a
+self-crossing loop - and `_simplify_orthogonal` keeps the first/last segment's
+*direction*, not just its orientation, so a merge can never send the wire backwards out
+of its socket.  What is gone is the *repeated* smoothing (`_smooth_jogs`) and
+`_round_short_ends`, which between them could blend a chain of steps into one long
+sigmoid or fold a curve back over the path - the "weird curvature" / "clipping into
+itself" complaints.  Corner rounding is `draw_square_path`'s job, and it uses **one
+radius for every bend of a wire** (`square_path_radius`: the smallest that fits them
+all, never eating a segment's `MIN_STRAIGHT` straight run) - letting each vertex pick
+its own made one corner tight and the next generous, which reads as uneven.  The router
+is pure geometry (no GTK) and unit-tested in `tests/test_wire_router.py`.
 
 *Slots.* A stored color may be a hex **or a theme slot** written `@blue` … `@teal`
 (`PatchSpaceGraphWidget.COLOR_SLOTS`), resolved by `resolve_color` *every time it is drawn* - so
@@ -588,6 +593,15 @@ stores the slot), the module's `panels.<name>.color` defaults to `@blue`, and th
 `#3584e4` reads as `@blue`.  Empty/default resolves to the default slot; an unknown slot falls
 back to a per-name palette color.  The side view's color dot resolves the same way, so it
 shows what the canvas draws.
+
+*Text does not re-wrap when you zoom.* The break is decided once, in world units, by
+`wrap_text_lines` (on the widget's own Pango context, memoised), and `draw_text_wrapped`
+draws those lines - so `wrapped_text_height` and the drawing agree by construction and a
+marginal word can't fit at one zoom and wrap at another (wrapping at draw time happened
+on the zoom-scaled Cairo context).  Same idea for icons: `_draw_node_icon` rasterises a
+symbolic icon at the size it will actually occupy (`size * zoom`, quantised so the cache
+doesn't grow per zoom step) and scales the pixbuf back down, so a zoomed-in node shows
+the icon's own pixels instead of an upscaled blur.
 
 *Pan and zoom.* `graph_view` (view_mixin.py) owns the shared view math: middle-drag pans,
 `EventControllerScroll` zooms about the pointer, and a `Gtk.GestureZoom` handles a

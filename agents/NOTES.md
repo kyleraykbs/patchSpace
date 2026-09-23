@@ -297,3 +297,19 @@ gesture accepts; tested only structurally (no touchscreen here).
   complete configuration (the GUI's own panels are then the graph).  In that case the module
   generates *no* panel files: an empty `main` panel is still a file, and `auto_load` makes the
   daemon adopt it, putting an empty "Main" panel on the canvas.
+
+## Curves, even corners, crisp text/icons (2026-09-23)
+
+* `_sigmoid_short_segments` is back (single pass, not the old `_smooth_jogs` loop):
+  a short perpendicular step between two parallel runs is blended into an S again - that
+  is what a few-pixel jog between nearly-level sockets wants.  `_round_short_ends` stays
+  gone (it was what folded a curve back over the path).  `_drop_short_straights` merges
+  only axis-aligned runs.
+* `draw_square_path` uses `square_path_radius`: **one** radius for every bend of a wire
+  (the smallest that fits them all), instead of each vertex picking its own.
+* `wrap_text_lines` decides the line breaks once, in world units, on the widget's Pango
+  context; `draw_text_wrapped(cr, …, widget=self)` draws those lines.  Before, Pango
+  wrapped at draw time on the zoom-scaled context, so a marginal word could fit at one
+  zoom and wrap at another, and the wrap could disagree with `wrapped_text_height`.
+* `_draw_node_icon` rasterises at `size * zoom` (quantised to 4px steps) and scales back
+  down, so icons are crisp when zoomed in.

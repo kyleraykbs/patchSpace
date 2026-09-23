@@ -227,21 +227,25 @@ def draw_text_unbounded(cr, x, y, text, font_size, color, bold=False):
     PangoCairo.show_layout(cr, layout)
 
 
-def draw_text_wrapped(cr, x, y, text, max_width, font_size, color):
-    """Like draw_text_ellipsized, but wraps onto as many lines as it
-    needs instead of truncating one line with an ellipsis - used for
-    a node's label/id text, which should always be fully readable
-    rather than cut off (see PatchSpaceGraphWidget._draw_header). Word-
-    char wrapping (not plain word wrapping) so a single long unbroken
-    token - a node id like "node_1738699999999" - still wraps instead
-    of overflowing the node's width. Returns the pixel height the
-    drawn text actually occupied, so the caller can stack further
-    lines below it.
+def draw_text_wrapped(cr, x, y, text, max_width, font_size, color,
+                      widget=None):
+    """Draw `text` over as many lines as it needs, returning the height it
+    occupied.
 
-    Callers that need this height *before* drawing (to size the node
-    itself - see node_height()) should use wrapped_text_height()
-    below instead; it computes the identical layout without needing a
-    Cairo context, since node sizing runs outside on_draw."""
+    The line breaks come from `wrap_text_lines` when `widget` is given - the
+    same call the node's *height* is computed from, so the two can't
+    disagree, and the break is identical at every zoom (it is decided in
+    world units, not on the scaled Cairo context).  Without a widget it
+    falls back to Pango's own wrapping on `cr`, which is what every
+    non-canvas caller wants."""
+    if widget is not None:
+        lines, line_height = wrap_text_lines(widget, text, max_width, font_size)
+        if not lines:
+            return 0
+        cr.set_source_rgb(*color)
+        for index, line in enumerate(lines):
+            _draw_line_at(cr, x, y + index * line_height, line, font_size)
+        return line_height * len(lines)
     layout = PangoCairo.create_layout(cr)
     layout.set_text(text, -1)
     layout.set_font_description(Pango.FontDescription.from_string(f"sans {font_size}"))
@@ -254,34 +258,44 @@ def draw_text_wrapped(cr, x, y, text, max_width, font_size, color):
     return layout.get_pixel_size()[1]
 
 
+def _draw_line_at(cr, x, y, text, font_size):
+    """One already-broken line, laid out at world size (so it scales with the
+    zoom like everything else, without re-wrapping)."""
+    layout = PangoCairo.create_layout(cr)
+    layout.set_text(text, -1)
+    layout.set_font_description(Pango.FontDescription.from_string(f"sans {font_size}"))
+    PangoCairo.update_layout(cr, layout)
+    cr.move_to(x, y)
+    PangoCairo.show_layout(cr, layout)
+
+
 # Node sizing calls wrapped_text_height hundreds of times per redraw
 # (node_height -> header/extra height, the group bounds walk, the force
-# layout), always for the same handful of (label, width, font) tuples.
-# Each call built a throwaway Pango layout; profiling a ~35-node graph
-# showed this was ~44% of on_draw's cost.  The height is a pure function
-# of the text and the widget's font setup, so memoise it.  Keyed by
-# id(widget) so the two graph widgets can't bleed into each other; the
-# entry count is bounded so a session that renames nodes constantly can't
-# grow it without limit.
+# layout), always for the same handful of (label, width, font) tuples.  Each
+# call built a throwaway Pango layout; profiling a ~35-node graph showed this
+# was ~44% of on_draw's cost.  The *lines* are a pure function of the text and
+# the widget's font setup, so memoise them (and their line height).  Keyed by
+# id(widget) so the two graph widgets can't bleed into each other; the entry
+# count is bounded so a session that renames nodes constantly can't grow it
+# without limit.
 _WRAPPED_HEIGHT_CACHE: dict = {}
 _WRAPPED_HEIGHT_CACHE_MAX = 8192
 
 
-def wrapped_text_height(widget, text, max_width, font_size):
-    """Pixel height `text` would occupy if drawn with
-    draw_text_wrapped() at the same max_width/font_size - without
-    needing a Cairo context, so this can be called from sizing/layout
-    code (node_height(), the force-layout sizes dict) that runs
-    outside on_draw, where no `cr` exists yet. Uses `widget`'s own
-    Pango context (Gtk.Widget.create_pango_layout()) rather than
-    PangoCairo.create_layout(), which is the only reason this needs a
-    widget and draw_text_wrapped() above doesn't - text metrics come
-    from the same font/fontconfig setup either way, so the two stay
-    in agreement.
+def wrap_text_lines(widget, text, max_width, font_size):
+    """`text` broken into the lines `draw_text_wrapped` will draw, plus the
+    line height - the single source of truth for the break, the drawing and
+    the height a node reserves for it.
 
-    Memoised - see _WRAPPED_HEIGHT_CACHE above."""
+    The break is decided *once*, here, in world units, on the widget's own
+    Pango context.  Letting Pango wrap at draw time instead meant the break
+    happened on the zoom-scaled Cairo context: a marginal word could fit at
+    one zoom and wrap at another, and the wrap could disagree with the height
+    the node had been sized to.
+
+    Memoised - see _WRAPPED_HEIGHT_CACHE above (which caches these lines)."""
     if not text:
-        return 0
+        return [], 0
     key = (id(widget), text, max_width, font_size)
     cached = _WRAPPED_HEIGHT_CACHE.get(key)
     if cached is not None:
@@ -290,11 +304,27 @@ def wrapped_text_height(widget, text, max_width, font_size):
     layout.set_font_description(Pango.FontDescription.from_string(f"sans {font_size}"))
     layout.set_width(int(max_width * Pango.SCALE))
     layout.set_wrap(Pango.WrapMode.WORD_CHAR)
-    height = layout.get_pixel_size()[1]
+    encoded = text.encode("utf-8")
+    lines = [
+        encoded[line.start_index:line.start_index + line.length].decode("utf-8", "replace")
+        for line in layout.get_lines()
+    ]
+    total_h = layout.get_pixel_size()[1]
+    line_height = total_h // max(1, len(lines)) if lines else 0
+    result = (lines, line_height)
     if len(_WRAPPED_HEIGHT_CACHE) >= _WRAPPED_HEIGHT_CACHE_MAX:
         _WRAPPED_HEIGHT_CACHE.clear()
-    _WRAPPED_HEIGHT_CACHE[key] = height
-    return height
+    _WRAPPED_HEIGHT_CACHE[key] = result
+    return result
+
+
+def wrapped_text_height(widget, text, max_width, font_size):
+    """Pixel height `text` would occupy if drawn with draw_text_wrapped() at
+    the same max_width/font_size - without needing a Cairo context, so this
+    can be called from sizing/layout code (node_height(), the force-layout
+    sizes dict) that runs outside on_draw, where no `cr` exists yet."""
+    lines, line_height = wrap_text_lines(widget, text, max_width, font_size)
+    return line_height * len(lines)
 
 
 def draw_bezier_link(cr, x1, y1, x2, y2):
@@ -316,6 +346,34 @@ CORNER_RADIUS = 14.0
 MIN_STRAIGHT = 6.0
 
 
+def square_path_radius(points, radius=CORNER_RADIUS):
+    """The one bend radius a whole wire is drawn with: the smallest that fits
+    every bend (half of each neighbouring segment, and never so large that a
+    segment loses its MIN_STRAIGHT straight run).  0.0 when there is no bend
+    to round."""
+    pts = list(points)
+    if len(pts) < 3:
+        return 0.0
+
+    def _limit(i):
+        ax, ay = pts[i - 1]
+        bx, by = pts[i + 1]
+        vx, vy = pts[i]
+        lin = math.hypot(vx - ax, vy - ay)
+        lout = math.hypot(bx - vx, by - vy)
+        if lin < 1e-6 or lout < 1e-6:
+            return 0.0
+        r = min(lin / 2.0, lout / 2.0)
+        if lin > MIN_STRAIGHT:
+            r = min(r, (lin - MIN_STRAIGHT) / 2.0)
+        if lout > MIN_STRAIGHT:
+            r = min(r, (lout - MIN_STRAIGHT) / 2.0)
+        return r
+
+    limits = [_limit(i) for i in range(1, len(pts) - 1)]
+    return min([radius] + [r for r in limits if r > 0.0])
+
+
 def draw_square_path(cr, points, radius=CORNER_RADIUS):
     """Stroke an axis-aligned polyline as a flowing "squared" wire.
 
@@ -329,6 +387,13 @@ def draw_square_path(cr, points, radius=CORNER_RADIUS):
     pts = list(points)
     if len(pts) < 2:
         return
+
+    # One radius for every bend.  Letting each vertex pick its own meant a
+    # corner beside a short segment rounded tightly while the corner at the
+    # other end of the same wire rounded generously, which reads as uneven -
+    # so the wire takes the smallest radius that fits *all* of its bends.
+    r_uniform = square_path_radius(pts, radius)
+
     cr.move_to(*pts[0])
     for i in range(1, len(pts) - 1):
         ax, ay = pts[i - 1]
@@ -341,14 +406,7 @@ def draw_square_path(cr, points, radius=CORNER_RADIUS):
         if lin < 1e-6 or lout < 1e-6:
             cr.line_to(vx, vy)
             continue
-        # Generous corner: on the ~one-cell segments the router emits this
-        # consumes the whole segment, so consecutive bends join into a
-        # smooth sigmoid instead of leaving a stub of straight line.
-        r = min(radius, lin / 2.0, lout / 2.0)
-        if lin > MIN_STRAIGHT:
-            r = min(r, (lin - MIN_STRAIGHT) / 2.0)
-        if lout > MIN_STRAIGHT:
-            r = min(r, (lout - MIN_STRAIGHT) / 2.0)
+        r = r_uniform
         cr.line_to(vx - inx / lin * r, vy - iny / lin * r)
         cr.curve_to(vx, vy, vx, vy, vx + outx / lout * r, vy + outy / lout * r)
     cr.line_to(*pts[-1])
