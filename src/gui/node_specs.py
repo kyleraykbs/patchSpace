@@ -948,6 +948,11 @@ NODE_DESCRIPTIONS: Dict[str, str] = {
     "recorder": "Records what is wired into it: an audio input, and a sound "
     "output pointing at the take.  Record starts a fresh take (overwriting the "
     "last), Stop finishes it, and the node shows the take's waveform and length.",
+    "sound_dump": "Writes the sound wired into it to a file whenever an "
+    "impulse arrives: a sound input, an impulse input, and no outputs at all.  "
+    "It saves to its folder and name as Opus, so what it writes is small and "
+    "plays anywhere - the sink for a sound, where the Sound Player is the "
+    "source.",
     "sound_player": "Plays the sound wired into it whenever an impulse "
     "arrives: a sound input, an impulse input, an audio output.  The Stack "
     "switch picks whether a new impulse restarts it or stacks another take.",
