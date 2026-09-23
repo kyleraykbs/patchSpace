@@ -11,7 +11,7 @@ their structural/module bring-up and an actual audio round-trip.
 They take a couple of minutes, so they are opt-in: the default
 ``pytest -q`` run skips them.  Run them with
 
-    PATCHBAY_RUN_INTEGRATION=1 python -m pytest -q tests/test_pipewire_integration.py
+    PATCHSPACE_RUN_INTEGRATION=1 python -m pytest -q tests/test_pipewire_integration.py
 
 They are also skipped when pipewire, wireplumber or the DSP plugins
 aren't available.
@@ -44,8 +44,8 @@ pytestmark = [
         reason="needs pipewire + wireplumber",
     ),
     pytest.mark.skipif(
-        os.environ.get("PATCHBAY_RUN_INTEGRATION") != "1",
-        reason="slow live-PipeWire tests; set PATCHBAY_RUN_INTEGRATION=1 to run",
+        os.environ.get("PATCHSPACE_RUN_INTEGRATION") != "1",
+        reason="slow live-PipeWire tests; set PATCHSPACE_RUN_INTEGRATION=1 to run",
     ),
 ]
 
@@ -106,7 +106,7 @@ def pw_instance():
     runtime env for the whole module so every subprocess the production
     code spawns (pw-dump/pw-cli/pw-link/pw-cat/pw-loopback) talks to the
     private instance, then restores it."""
-    rt = tempfile.mkdtemp(prefix="patchbay-it-")
+    rt = tempfile.mkdtemp(prefix="patchspace-it-")
     conf = os.path.join(rt, "pipewire.conf")
     with open(conf, "w") as f:
         f.write(HEADLESS_CONF)
@@ -287,10 +287,10 @@ def test_mic_chain_topology_wires(graph):
 
     # The built-ins the aliases resolve to.
     builtin_mic = pwnodes.VirtualMicNode(
-        "__builtin_mic__", "PatchBay Mic", "PatchBay Mic"
+        "__builtin_mic__", "Patch Space Mic", "Patch Space Mic"
     )
     builtin_sink = pwnodes.VirtualSpeakerNode(
-        "__builtin_sink__", "PatchBay", "PatchBay"
+        "__builtin_sink__", "Patch Space", "Patch Space"
     )
     for builtin in (builtin_mic, builtin_sink):
         space.add_node(builtin, public=False)
@@ -299,12 +299,12 @@ def test_mic_chain_topology_wires(graph):
     # Mic source stand-in (the graph's device_input), and the nodes.
     src = pwnodes.SplitterNode("src", "it_src")
     ec_in = pwnodes.SplitterNode("ec_in", "it_ec_in")
-    speaker = pwnodes.PatchBayDeviceNode("speaker")            # probe source
+    speaker = pwnodes.PatchSpaceDeviceNode("speaker")            # probe source
     echo = pwnodes.EchoCancelNode("echo", "it_echo")
     echo_toggle = pwnodes.InverseSwitcherNode("echo_toggle", output=1)
     legacy_toggle = pwnodes.InverseSwitcherNode("legacy_toggle", output=1)
     volume = pwnodes.VolumeProcessNode("boost", "it_boost")
-    mic_line = pwnodes.PatchBayMicDeviceNode("mic_line")
+    mic_line = pwnodes.PatchSpaceMicDeviceNode("mic_line")
     switch = pwnodes.BooleanSourceNode("force", output=1)
 
     for node in (src, ec_in, speaker, echo, echo_toggle, legacy_toggle,

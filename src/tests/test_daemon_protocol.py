@@ -9,7 +9,7 @@ import sys
 import threading
 import time
 
-from main import PatchBayDaemon
+from main import PatchSpaceDaemon
 from pwnodes import BackedNode, Node
 import main as main_mod
 
@@ -17,7 +17,7 @@ import main as main_mod
 def fresh_daemon():
     # Constructing a daemon only builds the graph monitor object; no
     # pw-dump / pw-cli subprocess is started until start().
-    return PatchBayDaemon()
+    return PatchSpaceDaemon()
 
 
 def test_add_node_and_serialize_leaf_types():
@@ -615,7 +615,7 @@ def test_load_session_wires_finicky_node_inputs_one_at_a_time(monkeypatch):
         d,
         "_create_node",
         lambda node_type, node_id, config: main_mod.NODE_TYPE_REGISTRY[node_type](
-            node_id, config.get("backing_node_name") or f"patchbay_{node_id}"
+            node_id, config.get("backing_node_name") or f"patchspace_{node_id}"
         ),
     )
     bringups = []
@@ -732,7 +732,7 @@ def test_add_node_stages_and_waits_on_finicky_nodes(monkeypatch):
         d,
         "_create_node",
         lambda node_type, node_id, config: main_mod.NODE_TYPE_REGISTRY[node_type](
-            node_id, config.get("backing_node_name") or f"patchbay_{node_id}"
+            node_id, config.get("backing_node_name") or f"patchspace_{node_id}"
         ),
     )
     bringups = []
@@ -816,7 +816,7 @@ def test_load_session_only_reaps_backings_of_new_nodes(monkeypatch):
         d,
         "_create_node",
         lambda node_type, node_id, config: main_mod.NODE_TYPE_REGISTRY[node_type](
-            node_id, config.get("backing_node_name") or f"patchbay_{node_id}"
+            node_id, config.get("backing_node_name") or f"patchspace_{node_id}"
         ),
     )
     monkeypatch.setattr(d, "_bring_node_up", lambda node: True)
@@ -859,21 +859,21 @@ def test_load_session_only_reaps_backings_of_new_nodes(monkeypatch):
 
 def test_speaker_mic_lines_share_builtin_volume_and_lock():
     from pwnodes import (
-        PatchBayDeviceNode,
+        PatchSpaceDeviceNode,
         VirtualMicNode,
         VirtualSpeakerNode,
     )
 
     d = fresh_daemon()
     # Stand in for the daemon's built-in devices (start() creates these).
-    d.builtin_sink = VirtualSpeakerNode("__builtin_sink__", "PatchBay")
-    d.builtin_mic = VirtualMicNode("__builtin_mic__", "PatchBay Mic")
+    d.builtin_sink = VirtualSpeakerNode("__builtin_sink__", "Patch Space")
+    d.builtin_mic = VirtualMicNode("__builtin_mic__", "Patch Space Mic")
 
     for node_id in ("spk1", "spk2"):
         resp = d.handle_command(
             {
                 "command": "add_node",
-                "node_type": "patchbay_device",
+                "node_type": "patchspace_device",
                 "node_id": node_id,
                 "config": {"label": "Speaker Line"},
             }
@@ -883,7 +883,7 @@ def test_speaker_mic_lines_share_builtin_volume_and_lock():
         d.handle_command(
             {
                 "command": "add_node",
-                "node_type": "patchbay_mic_device",
+                "node_type": "patchspace_mic_device",
                 "node_id": "mic1",
                 "config": {"label": "Mic Line"},
             }
@@ -893,7 +893,7 @@ def test_speaker_mic_lines_share_builtin_volume_and_lock():
 
     # Several Speaker Lines coexist and all point at the one built-in
     # sink (same source/sink identities), not separate devices.
-    assert isinstance(d.space.nodes["spk1"], PatchBayDeviceNode)
+    assert isinstance(d.space.nodes["spk1"], PatchSpaceDeviceNode)
     assert d._line_volume_target(d.space.nodes["spk1"]) is d.builtin_sink
     assert d._line_volume_target(d.space.nodes["spk2"]) is d.builtin_sink
     assert d._line_volume_target(d.space.nodes["mic1"]) is d.builtin_mic
@@ -1457,15 +1457,15 @@ def test_validate_session_reports_without_mutating(monkeypatch):
 def test_another_daemon_running_detects_live_listener(monkeypatch, tmp_path):
     """A live listener on the socket counts; a bare leftover socket file
     (crashed run) does not."""
-    path = str(tmp_path / "patchbay.sock")
+    path = str(tmp_path / "patchspace.sock")
     monkeypatch.setattr(main_mod, "SOCKET_PATH", path)
-    assert main_mod.PatchBayDaemon._another_daemon_running() is False
+    assert main_mod.PatchSpaceDaemon._another_daemon_running() is False
 
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     srv.bind(path)
     srv.listen(1)
     try:
-        assert main_mod.PatchBayDaemon._another_daemon_running() is True
+        assert main_mod.PatchSpaceDaemon._another_daemon_running() is True
     finally:
         srv.close()
 
@@ -1473,7 +1473,7 @@ def test_another_daemon_running_detects_live_listener(monkeypatch, tmp_path):
 def test_start_refuses_when_another_daemon_is_listening(monkeypatch, tmp_path):
     """A second daemon must not unlink the live socket and start up; it
     should bail out before touching the graph."""
-    path = str(tmp_path / "patchbay.sock")
+    path = str(tmp_path / "patchspace.sock")
     monkeypatch.setattr(main_mod, "SOCKET_PATH", path)
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     srv.bind(path)
@@ -1488,20 +1488,20 @@ def test_start_refuses_when_another_daemon_is_listening(monkeypatch, tmp_path):
         srv.close()
 
 
-def test_patchbay_socket_env_moves_every_end(monkeypatch, tmp_path):
-    """$PATCHBAY_SOCKET is the one knob that moves the daemon, the GUI and
+def test_patchspace_socket_env_moves_every_end(monkeypatch, tmp_path):
+    """$PATCHSPACE_SOCKET is the one knob that moves the daemon, the GUI and
     the CLI tools together (a service whose socket belongs in
     $XDG_RUNTIME_DIR, a second user, a test instance).  Each module derives
     its default from it at import time - checked in a child interpreter,
     since that is when the env is read."""
-    sock = str(tmp_path / "custom" / "patchbay.sock")
+    sock = str(tmp_path / "custom" / "patchspace.sock")
     src = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     code = (
         "import sys; sys.path[:0] = [{src!r}, {gui!r}];"
-        "import main, patchbay_cli; from gui import constants;"
-        "print(main.SOCKET_PATH, patchbay_cli.SOCKET_PATH, constants.SOCKET_PATH)"
+        "import main, patchspace_cli; from gui import constants;"
+        "print(main.SOCKET_PATH, patchspace_cli.SOCKET_PATH, constants.SOCKET_PATH)"
     ).format(src=src, gui=os.path.join(src, "gui"))
-    env = dict(os.environ, PATCHBAY_SOCKET=sock)
+    env = dict(os.environ, PATCHSPACE_SOCKET=sock)
     result = subprocess.run(
         [sys.executable, "-c", code], env=env, capture_output=True, text=True
     )
@@ -1509,18 +1509,57 @@ def test_patchbay_socket_env_moves_every_end(monkeypatch, tmp_path):
     assert result.stdout.split() == [sock, sock, sock]
 
     # …and without it, the historical default is unchanged.
-    del env["PATCHBAY_SOCKET"]
+    del env["PATCHSPACE_SOCKET"]
     result = subprocess.run(
         [sys.executable, "-c", code], env=env, capture_output=True, text=True
     )
-    assert result.stdout.split() == ["/tmp/patchbay.sock"] * 3
+    assert result.stdout.split() == ["/tmp/patchspace.sock"] * 3
+
+
+def test_pre_rename_paths_are_adopted_once(monkeypatch, tmp_path):
+    """The rename (PatchBay -> Patch Space) moved the panel directory and the
+    session cache.  A machine that has been running the old code must find its
+    graph where it always was: the old contents are copied in, idempotently,
+    and nothing that already exists at the new location is overwritten."""
+    import json
+
+    legacy_panels = tmp_path / "legacy" / "panels"
+    legacy_panels.mkdir(parents=True)
+    (legacy_panels / "kit.json").write_text('{"type": "panel", "config": {}}')
+    legacy_session = tmp_path / "legacy" / "last_session.json"
+    legacy_session.write_text(json.dumps({"nodes": {}, "edges": [], "groups": []}))
+
+    new_panels = tmp_path / "new" / "panels"
+    new_session = tmp_path / "new" / "last_session.json"
+    # A panel that exists under *both* names: the new one wins.
+    new_panels.mkdir(parents=True)
+    (new_panels / "kit.json").write_text('{"type": "panel", "config": {"keep": 1}}')
+
+    monkeypatch.setattr(main_mod, "LEGACY_PANEL_DIR", str(legacy_panels))
+    monkeypatch.setattr(main_mod, "LEGACY_SESSION_CACHE", str(legacy_session))
+    monkeypatch.setattr(main_mod, "SESSION_CACHE_PATH", str(new_session))
+
+    d = fresh_daemon()
+    d.panel_dirs = [(str(new_panels), True)]
+    d.root_panel_path = str(new_session)
+    d._migrate_legacy_paths()
+
+    assert (new_panels / "other.json").exists() is False          # nothing invented
+    assert json.loads((new_panels / "kit.json").read_text())["config"] == {"keep": 1}
+    assert json.loads(new_session.read_text())["nodes"] == {}
+    assert legacy_session.exists()          # copied, not moved
+
+    # Second run is a no-op (both destinations exist now).
+    before = (new_panels / "kit.json").read_text()
+    d._migrate_legacy_paths()
+    assert (new_panels / "kit.json").read_text() == before
 
 
 def test_daemon_serves_the_configured_socket(monkeypatch, tmp_path):
     """The daemon binds whatever SOCKET_PATH says (the module global the
     --socket flag writes), and the one-shot CLI client reaches it there -
     the pair the NixOS/home-manager module will drive."""
-    from patchbay_cli import PatchBayClient
+    from patchspace_cli import PatchSpaceClient
 
     path = str(tmp_path / "service.sock")
     monkeypatch.setattr(main_mod, "SOCKET_PATH", path)
@@ -1533,7 +1572,7 @@ def test_daemon_serves_the_configured_socket(monkeypatch, tmp_path):
         time.sleep(0.02)
     assert os.path.exists(path), "daemon never bound the configured socket"
 
-    client = PatchBayClient(path)
+    client = PatchSpaceClient(path)
     try:
         assert client.add_node("warp_out", "w1")["status"] == "ok"
         exported = client.export_config()["config"]

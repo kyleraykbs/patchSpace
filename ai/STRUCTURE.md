@@ -1,4 +1,4 @@
-# STRUCTURE — how PatchBay's modules connect
+# STRUCTURE — how Patch Space's modules connect
 
 Top-level map of the pieces and the wires between them.  Depth lives in
 `LLM_README.md` (1000+ lines of "why", failure modes and rejected designs) — read that
@@ -7,20 +7,20 @@ before changing anything non-trivial, and read the module docstrings of the file
 ## Processes
 
 ```
-patchbay_gui.py  ──(unix socket, JSON lines, /tmp/patchbay.sock)──  main.py (daemon)
+patchspace_gui.py  ──(unix socket, JSON lines, /tmp/patchspace.sock)──  main.py (daemon)
       │                                                                  │
    GTK4 canvas                                                     pw-dump -m / pw-cli / pw-cat / wpctl
    (src/gui/*)                                                          │
                                                               the real PipeWire graph
 ```
 
-* **The daemon owns the graph.** `PatchBayDaemon` (main.py) is the only writer: it keeps a
+* **The daemon owns the graph.** `PatchSpaceDaemon` (main.py) is the only writer: it keeps a
   model (`PatchSpace`, pwnodes.py) and reconciles it onto live PipeWire objects.
 * **The GUI is a client.** It sends commands and polls `get_nodes` every 400 ms; it applies
   user actions optimistically and each poll is guarded so a stale echo can't undo them.
 * **Panels are files.** `panels.py` stores a nestable container tree; nodes/edges/group
   membership serialize into the panel file that last-common-ancestor owns.  The root panel
-  is the session autosave (`~/.cache/patchbay/last_session.json`).
+  is the session autosave (`~/.cache/patchspace/last_session.json`).
 
 ## Daemon-side layering
 
@@ -28,11 +28,11 @@ patchbay_gui.py  ──(unix socket, JSON lines, /tmp/patchbay.sock)──  main
 |---|---|---|
 | Substrate | `pwproc.py` | Owns real PipeWire objects: `OwnedPwNode` (a pw-cli session holding a created node), `OwnedPwProcess` (pw-cat/pw-loopback), `Backoff`, `Ticker`. |
 | Graph snapshot | `pwgraph.py` | `pw-dump -m` stream → live nodes/ports/links; connect/disconnect; node-created/removed callbacks. |
-| Matching | `pwmatch.py` | Filter dicts → live node ids; port groups → channel pairs; which objects are PatchBay's own. |
+| Matching | `pwmatch.py` | Filter dicts → live node ids; port groups → channel pairs; which objects are Patch Space's own. |
 | Model | `pwnodes.py` | `Node` taxonomy + `PatchSpace` (the reconcile/supervise engine: `sync_locked` = structure, `supervise` = health). |
 | Containers | `panels.py` | Panel tree, namespaced ids, edge ownership (LCA), read-only snapshots, legacy migration. |
 | Daemon | `main.py` | Socket protocol, node factory (`NODE_TYPE_REGISTRY`/`_create_node`), property handling, session load, watchdogs, built-in devices. |
-| Config | `migrations.py`, `session_repair.py`, `apply_config.py`, `export_config.py`, `patchbay_cli.py` | Versioned node migrations; validate/repair a session; CLI import/export. |
+| Config | `migrations.py`, `session_repair.py`, `apply_config.py`, `export_config.py`, `patchspace_cli.py` | Versioned node migrations; validate/repair a session; CLI import/export. |
 
 ## The one big idea
 
@@ -66,7 +66,7 @@ three can't disagree about what may connect.
 
 ## GUI-side map
 
-`patchbay_gui.py` (app) → `main_window.py` (notebook: raw PW tab + editor tab, toolbars,
+`patchspace_gui.py` (app) → `main_window.py` (notebook: raw PW tab + editor tab, toolbars,
 side panels, console, daemon start/adopt) → `patchspace_widget.py` (the editable canvas:
 drawing, hit-testing, gestures, layout, panels, wires) with:
 

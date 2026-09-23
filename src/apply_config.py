@@ -18,7 +18,7 @@ import json
 import sys
 
 import migrations
-from patchbay_cli import PatchBayClient
+from patchspace_cli import PatchSpaceClient
 
 
 def apply_config(config_file):
@@ -32,7 +32,7 @@ def apply_config(config_file):
     for fix in migration_fixes:
         print(f"  ~ {fix}")
 
-    client = PatchBayClient()
+    client = PatchSpaceClient()
     try:
         # Add all nodes
         nodes = config.get("nodes", {})

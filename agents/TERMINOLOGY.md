@@ -9,10 +9,10 @@ that isn't here, ask (and then add it).  When a mapping here is a guess, it is m
 
 | Kyle says | Repo |
 |---|---|
-| "the patchbay" / "patch space" | the whole app: daemon `main.py` + canvas `gui/` |
-| "the daemon" / "the backend" | `main.py`, `PatchBayDaemon` (owns the live PipeWire graph) |
+| "the patchspace" / "patch space" | the whole app: daemon `main.py` + canvas `gui/` |
+| "the daemon" / "the backend" | `main.py`, `PatchSpaceDaemon` (owns the live PipeWire graph) |
 | "the GUI" / "the canvas" | `gui/patchspace_widget.py` (`PatchSpaceGraphWidget`) |
-| "session" / "save" | the root panel file (`~/.cache/patchbay/last_session.json`) |
+| "session" / "save" | the root panel file (`~/.cache/patchspace/last_session.json`) |
 | "panel" | `panels.py` panel: a nestable, file-backed container of nodes |
 
 ## Graph vocabulary

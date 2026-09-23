@@ -1,4 +1,4 @@
-# LLM_README — working notes for AI models on PatchBay
+# LLM_README — working notes for AI models on Patch Space
 
 This file is for future AI agents (and humans) working in this repo. It captures the
 architecture, the process that works here, and — most importantly — the hard-won
@@ -18,7 +18,7 @@ codebase deliberately documents *why* and *what failed before*, not just *what*.
   ~6s**; the GTK canvas tests skip without a display). Tests are headless and do not
   touch real PipeWire.
 - **Run it:** `nix run` (GUI) or `nix run .#daemon` (headless daemon) from the repo root;
-  or, in `nix develop`, `cd src && python main.py` and `cd src/gui && python patchbay_gui.py`.
+  or, in `nix develop`, `cd src && python main.py` and `cd src/gui && python patchspace_gui.py`.
 - **The GUI starts/owns the daemon.** On launch it adopts a daemon that is already
   running, otherwise it starts a background one; it only shuts that daemon down on window
   close if *it* started it. The hamburger menu has Start/Stop/Restart Daemon. See §3.
@@ -33,7 +33,7 @@ codebase deliberately documents *why* and *what failed before*, not just *what*.
 
 ```
 /home/kyle/projects/patch
-├── flake.nix              # packages patchbay + patchbay-daemon, apps, devShell
+├── flake.nix              # packages patchspace + patchspace-daemon, apps, devShell
 ├── flake.lock
 ├── LLM_README.md
 └── src/                   # the whole implementation (former src-rewrite/)
@@ -45,19 +45,19 @@ codebase deliberately documents *why* and *what failed before*, not just *what*.
     ├── pwmatch.py         # matching helpers for external nodes
     ├── migrations.py      # versioned node/config migrations (legacy -> current)
     ├── session_repair.py  # validate/repair a session config (CLI + daemon)
-    ├── patchbay_cli.py    # synchronous one-shot socket client (CLI tools)
+    ├── patchspace_cli.py    # synchronous one-shot socket client (CLI tools)
     ├── apply_config.py    # CLI: apply an exported config
     ├── export_config.py   # CLI: export current config
     ├── tests/             # pytest suite (headless)
     └── gui/               # GTK4 client (flat imports; no __init__.py — namespace pkg)
-        ├── patchbay_gui.py        # GUI entrypoint (Gtk.Application)
+        ├── patchspace_gui.py        # GUI entrypoint (Gtk.Application)
         ├── main_window.py         # MainWindow, LogConsole, toolbar, hamburger, loading overlay
         ├── patchspace_widget.py   # the editable node canvas (big file)
         ├── node_specs.py          # NodeSpec table: ports, inline control, Settings rows
         ├── daemon_control.py      # start/adopt/stop the background daemon
         ├── view_mixin.py          # pan/zoom/undo shared by both graph widgets
         ├── pipewire_widget.py     # raw PipeWire graph view
-        ├── socket_client.py       # async PatchBayClient (background thread)
+        ├── socket_client.py       # async PatchSpaceClient (background thread)
         ├── render_utils.py        # cairo drawing helpers, theme palette
         ├── force_layout.py        # physics layout for nodes
         ├── color_picker.py        # self-drawn HSV picker (no GSettings dependency)
@@ -76,16 +76,16 @@ Note: there is **no `.gitignore` and `__pycache__/*.pyc` files are tracked**. Ig
 
 ```bash
 # from repo root
-nix run                 # builds + runs the GUI (default app = packages.patchbay)
+nix run                 # builds + runs the GUI (default app = packages.patchspace)
 nix run .#daemon        # runs the headless daemon
-nix build .#patchbay .#patchbay-daemon
+nix build .#patchspace .#patchspace-daemon
 ```
 
-- `packages.patchbay` is the GTK client. It is built with `wrapGAppsHook4` +
+- `packages.patchspace` is the GTK client. It is built with `wrapGAppsHook4` +
   `makeWrapper`, so the GTK/Adwaita typelibs, GSettings schemas and XDG data dirs are
-  baked into the wrapper; it also sets `PATCHBAY_DAEMON` (so the GUI knows how to spawn
+  baked into the wrapper; it also sets `PATCHSPACE_DAEMON` (so the GUI knows how to spawn
   the daemon) and `LADSPA_PATH` / `LV2_PATH`.
-- `packages.patchbay-daemon` is the headless daemon (`writeShellApplication`) with
+- `packages.patchspace-daemon` is the headless daemon (`writeShellApplication`) with
   `pipewire`, `wireplumber` and the DSP plugin packages and their env paths.
 
 ### From the dev shell
@@ -97,14 +97,14 @@ nix develop            # provides python, gtk4, adwaita, pipewire, LADSPA_PATH, 
 cd src && python main.py
 
 # GUI (must run from the gui/ dir; imports are flat)
-cd src/gui && python patchbay_gui.py
+cd src/gui && python patchspace_gui.py
 
 # tests
 cd src && python -m pytest -q
 ```
 
-The daemon listens on a Unix socket, `/tmp/patchbay.sock` by default. `--socket PATH` on the
-daemon (or `$PATCHBAY_SOCKET`, which the daemon, the GUI and the CLI tools all read) moves
+The daemon listens on a Unix socket, `/tmp/patchspace.sock` by default. `--socket PATH` on the
+daemon (or `$PATCHSPACE_SOCKET`, which the daemon, the GUI and the CLI tools all read) moves
 it - e.g. into `$XDG_RUNTIME_DIR` for a user service, or so a second daemon can exist
 without tripping the single-instance guard. The GUI talks to it over that socket; it can
 start/adopt the daemon itself (see §3), so you don't have to launch the daemon by hand.
@@ -123,13 +123,13 @@ they exercise geometry.
 
 ### Declarative deployment (NixOS / home-manager)
 
-`nix/module.nix` (exported as `flake.modules.nixos.patchbay`,
-`flake.modules.homeManager.patchbay` and the `nixosModules`/`homeModules` aliases; the
-merge helpers alone are `flake.lib.patchbay`) runs the daemon as a **user** service and
+`nix/module.nix` (exported as `flake.modules.nixos.patchspace`,
+`flake.modules.homeManager.patchspace` and the `nixosModules`/`homeModules` aliases; the
+merge helpers alone are `flake.lib.patchspace`) runs the daemon as a **user** service and
 generates the graph as **read-only panel files**:
 
 ```nix
-services.patchbay = {
+services.patchspace = {
   enable = true;
   imports = [ ./exports/live-session.json ];     # anything export_config.py wrote
   nodes.boom = { type = "sound_effect"; params = { path = "~/sounds/boom.wav"; }; };
@@ -147,27 +147,34 @@ services.patchbay = {
   asserts that after merging). Edges are keyed by the daemon's own edge identity
   (`from->to[:to_port][@from_port]`), so an edge named twice is one edge. Panel vs panel
   is dir-order precedence: the generated store dir is passed `:ro` and *last*.
+* **It does not take over your panel dirs.** Giving the daemon any `--panel-dir` at all
+  *replaces* its built-in default, so the module passes the conventional
+  (`~/.local/share/patchspace/panels`, read-write - where the GUI keeps the panels you make
+  by hand) explicitly, then appends the generated declarative dir **last and read-only**:
+  both are searched, and a panel defined in Nix wins over a file with the same stem anywhere
+  else. Add more with `services.patchspace.panelDirs` (the daemon's own `PATH[:rw|:ro]`
+  form). `rootPanel = null` (the default) leaves the session autosave where the daemon has
+  always put it (`~/.cache/patchspace/last_session.json`), so an existing session keeps
+  loading; set it to keep that state elsewhere.
 * **Generated files** carry `mode = "read-only"` and `auto_load`, so the daemon never writes
   them back, `Reset` in the GUI re-applies exactly what Nix said, and an unreferenced
-  panel is placed at the root on start-up by itself. The root panel (session autosave:
-  placements, hand-made nodes) stays in `stateDir` - config in the store, state in
-  `$XDG_STATE_HOME`.
+  panel is placed at the root on start-up by itself.
 * **Layout.** Nodes keep whatever `x`/`y` the JSON has; nodes with no coordinates are placed
   by the layout. Only nodes the *user* placed are node-anchored, so Nix/imported nodes
   settle by physics inside their panel (which is why `anchored` panels pin the box, not the
   contents - see §3 "Physics").
-* **Two gates, both at build time.** `services.patchbay.nodes.*.type` is an enum of
+* **Two gates, both at build time.** `services.patchspace.nodes.*.type` is an enum of
   `NODE_TYPE_REGISTRY`, so a typo fails evaluation; and every generated panel is run
   through `session_repair --check --strict` (the new strict mode: fail on the *input*
   needing any repair, not only on the repaired config failing). That catches bad ports,
   kind mismatches (an impulse wire into an audio input), duplicate edges, missing endpoints
-  and unknown types - `packages.patchbay-repair` is the CLI that does it. A failing panel
+  and unknown types - `packages.patchspace-repair` is the CLI that does it. A failing panel
   fails the build of the panel dir the daemon loads.
 * **Rebuilds restart the daemon**: the generated dir is a new store path, which changes the
-  unit's `ExecStart`. `services.patchbay.socket` defaults to `null` (the built-in
-  `/tmp/patchbay.sock`); set it and the GUI/CLI need `PATCHBAY_SOCKET` in the session too.
+  unit's `ExecStart`. `services.patchspace.socket` defaults to `null` (the built-in
+  `/tmp/patchspace.sock`); set it and the GUI/CLI need `PATCHSPACE_SOCKET` in the session too.
 
-**Diagnosing UI freezes:** launch the GUI with `PATCHBAY_TRACE_HANG=1`; a watchdog dumps
+**Diagnosing UI freezes:** launch the GUI with `PATCHSPACE_TRACE_HANG=1`; a watchdog dumps
 all thread stacks via `faulthandler` if the main thread stalls >4s.
 
 ---
@@ -325,8 +332,8 @@ An edge is never stored twice; reparenting a node re-homes its incident edges
 automatically because ownership is derived from ids.
 
 *Load dirs* are a list (`--panel-dir PATH[:rw|:ro]`, repeatable, later shadows earlier;
-`PATCHBAY_PANEL_DIR` for the default). The **root panel** is the session autosave
-(`--root-panel`, default `~/.cache/patchbay/last_session.json`) — a legacy
+`PATCHSPACE_PANEL_DIR` for the default). The **root panel** is the session autosave
+(`--root-panel`, default `~/.cache/patchspace/last_session.json`) — a legacy
 `{nodes,edges,groups}` cache and old declarative files are migrated in place on load
 (`_load_panels_tree`).
 
@@ -542,7 +549,7 @@ every blend. The router is pure geometry (no GTK) and unit-tested in
 `tests/test_wire_router.py`.
 
 *Canvas chrome.* The graph background is fully opaque by default. `--canvas-opacity F`
-(`patchbay_gui.py`, 0..1, default 1.0) paints both canvases' background at that alpha; when
+(`patchspace_gui.py`, 0..1, default 1.0) paints both canvases' background at that alpha; when
 < 1 only the *grid* becomes see-through - the window surface and immediate canvas
 containers go transparent while `.opaque-chrome` (headerbar, tab bar, toolbars, side
 panels, console, with a **literal** palette color, not libadwaita's `@window_bg_color`
@@ -848,12 +855,12 @@ instance refuses to start rather than unlinking and stealing the first one's soc
 leaves the victim running but unreachable) — only a stale socket file is reaped.
 
 **Process teardown is batched.** `PatchSpace.detach_nodes()` removes nodes from the model
-and hands back all their backings; `PatchBayDaemon._teardown_public_graph()` / `_cmd_rebuild`
+and hands back all their backings; `PatchSpaceDaemon._teardown_public_graph()` / `_cmd_rebuild`
 destroy them all in parallel, outside the lock, so a graph full of effects costs the single
 slowest process rather than the sum (and the tick/GUI stay responsive).
 
 **GUI:** one `Gtk.Notebook` with the raw PipeWire graph and the PatchSpace editor. It
-shares one `PatchBayClient` connection; `MainWindow.process_responses` (50ms timer)
+shares one `PatchSpaceClient` connection; `MainWindow.process_responses` (50ms timer)
 routes replies. The `LogConsole` deliberately owns a **separate** connection so a burst
 of graph refreshes can't consume/miss its replies. The PatchSpace canvas polls
 `get_nodes` every `REFRESH_INTERVAL_MS` (400ms).
@@ -890,10 +897,10 @@ Each keeps the local value until the daemon reports the same value back, then ha
 control back to the daemon.
 
 ### Packaging changes (flake-parts)
-`flake.nix` defines `packages.patchbay` (GUI) and `packages.patchbay-daemon`, plus
-`apps.default`/`apps.patchbay`/`apps.daemon`. The GUI package must use
+`flake.nix` defines `packages.patchspace` (GUI) and `packages.patchspace-daemon`, plus
+`apps.default`/`apps.patchspace`/`apps.daemon`. The GUI package must use
 `wrapGAppsHook4` so GTK/Adwaita typelibs and GSettings schemas land in the wrapper;
-`PATCHBAY_DAEMON` is what lets the packaged GUI find the daemon binary. There is no
+`PATCHSPACE_DAEMON` is what lets the packaged GUI find the daemon binary. There is no
 `.gitignore`, so `nix build` on a dirty tree is normal.
 
 ### Adding/changing a node property (checklist)
@@ -924,7 +931,7 @@ A new tunable/serialized attribute usually touches all of these:
 
 ### Testing
 - Run from `src/`; `python -m pytest -q`.
-- Daemon tests construct `PatchBayDaemon()` directly (no subprocess starts until
+- Daemon tests construct `PatchSpaceDaemon()` directly (no subprocess starts until
   `start()`), then drive `d.handle_command({...})`.
 - To avoid real PipeWire, monkeypatch `pwnodes.OwnedPwNode` / `pwnodes.OwnedPwProcess`
   with fakes (see `tests/test_sensitivity_hidden.py::FakeCli/FakeProc`).
@@ -937,7 +944,7 @@ This is the cycle to follow for basically any change:
 1. **Read the real code first** (grep/read the exact functions) - don't guess at names or
    behavior. Most regressions came from a wrong assumption about an existing path.
 2. **Reproduce the bug / pin the behavior in a scratch script** before editing: a tiny
-   `PYTHONPATH=. nix develop -c python` script that builds a `PatchBayDaemon()` and drives
+   `PYTHONPATH=. nix develop -c python` script that builds a `PatchSpaceDaemon()` and drives
    `handle_command`/`_write_panels` directly. Run it again after the fix to confirm.
 3. **Make the smallest change** that fixes it, in the established style.
 4. **Syntax gate**: `python -m py_compile <changed files>` (from the dev shell).
@@ -996,7 +1003,7 @@ approach for pure GUI behavior). "It passed pytest" is not proof an effect works
 
 1. **Plugin discovery uses the *daemon's* environment, not the PipeWire server's.** The
    `pw-cli` process the daemon spawns inherits the daemon's `LADSPA_PATH`/`LV2_PATH`. The
-   flake devShell and the `patchbay-daemon` wrapper export these. LADSPA plugins are also
+   flake devShell and the `patchspace-daemon` wrapper export these. LADSPA plugins are also
    probed by absolute `.so` path in `pwnodes.py`; LV2 is found **by URI** (no path
    probing), so the bundle must be on `LV2_PATH`. Run the daemon from `nix develop` or via
    `nix run .#daemon` (or export the paths yourself).
@@ -1056,7 +1063,7 @@ approach for pure GUI behavior). "It passed pytest" is not proof an effect works
 11. **Default promotion must retry, not latch optimistically.** `_assert_defaults` may
     resolve the built-in sink a tick or two before `wpctl set-default` will accept it.
     Record `_set_default_sink_id`/`_set_default_source_id` **only after** `_set_default`
-    returns success, otherwise one transient failure means PatchBay never becomes the
+    returns success, otherwise one transient failure means Patch Space never becomes the
     default while everything looks fine (the sink exists and routes). `_set_default`
     returns bool for exactly this. Each builtin also has a `force_default` flag (mirrored
     from the Speaker/Mic Line node's force button, default on): while on, `_assert_defaults`
@@ -1089,12 +1096,12 @@ approach for pure GUI behavior). "It passed pytest" is not proof an effect works
 
 15. **Standardize per-node setup; don't special-case the declarative path.** Two shared
     helpers own the per-node fixups:
-    - `PatchBayDaemon._apply_node_config(node, config)` — re-adopting an existing node from
+    - `PatchSpaceDaemon._apply_node_config(node, config)` — re-adopting an existing node from
       a config (params with per-type guards, `_adopt_line_volume`, volumes through setters,
       `SensitivityGateNode.set_level`, `apply_device_settings`). Used by **both**
       `_cmd_add_node` and `_load_session`; a raw `setattr` loop in `_load_session` was missing
       the volume/level handling the add path had.
-    - `PatchBayDaemon._standardize_nodes(node_ids)` — post-ownership-change setup
+    - `PatchSpaceDaemon._standardize_nodes(node_ids)` — post-ownership-change setup
       (sensitivity internals, `_try_immediate_resolve`, device settings, live refresh) plus
       the staged `_careful_bring_up` for `_CAREFUL_NODE_TYPES`. The live declarative move
       (`_apply_declarative_membership`) calls it after the rename; a bare `supervise()` there
@@ -1188,3 +1195,30 @@ or well-scoped changes (add a property, fix a bound, add a button), proceed and 
 Also: do not commit unless asked, don't add a `.gitignore`/untrack code as a side effect,
 and do not "simplify" the rationale comments or the effect-sandwich/staging machinery
 without understanding the failure modes recorded in §5.
+
+### Naming, and the pre-rename migration
+
+This project is **Patch Space**; "PatchBay"/"PatchBayDaemon" was its old name. The rename
+touched more than prose, so a few things are *read* under their old names for one release
+and never written under them:
+
+* `PATCHBAY_SOCKET` / `PATCHBAY_PANEL_DIR` / `PATCHBAY_ROOT_PANEL` / `PATCHBAY_DAEMON` are
+  still read as fallbacks by the daemon, the GUI and the CLI (a session that is already
+  running started its daemon with them in the environment). `PATCHSPACE_*` wins if both are
+  set.
+* `~/.local/share/patchbay/panels` and `~/.cache/patchbay/last_session.json` are *copied*
+  into their `patchspace` equivalents once, on load (`PatchSpaceDaemon._migrate_legacy_paths`):
+  only into a location that is missing or lacks the file, and never moved or deleted.
+* `patchbay_*` node names and the old `PatchBay`/`PatchBay Mic` device names stay in
+  `pwmatch.PATCHSPACE_OWNED_PREFIXES`/`PATCHSPACE_BUILTIN_NAMES`, so objects left behind by a
+  pre-rename session are still recognised as ours (reaped at startup, kept out of External
+  Only bundles) instead of lingering as duplicates.
+* The node type keys `patchbay_device`/`patchbay_mic_device` are registered as aliases of
+  `patchspace_device`/`patchspace_mic_device` (after `CLASS_TO_TYPE`, and in
+  `node_specs.NODE_TYPE_SPECS`): an old panel or session loads and renders correctly, and
+  the next export writes the new spelling. `session_repair` validates them too, since it
+  reads the same spec table.
+
+New files must be `git add`ed before `nix` sees them (the flake is a `git+file:` source), and
+a `path:` flake **input** needs `nix flake update <input>` after every edit to the source tree
+(the narHash is baked into the lock).

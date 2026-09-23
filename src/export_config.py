@@ -14,12 +14,12 @@ the "export_config" command.
 import json
 import sys
 
-from patchbay_cli import PatchBayClient
+from patchspace_cli import PatchSpaceClient
 
 
 def export_config(output_file):
     """Fetch the current config from the daemon and write it to disk."""
-    client = PatchBayClient()
+    client = PatchSpaceClient()
     try:
         result = client.export_config()
     finally:

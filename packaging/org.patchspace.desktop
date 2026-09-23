@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Patch Space
+GenericName=PipeWire Patchbay
+Comment=Patch the live PipeWire graph: nodes, wires and panels on a canvas
+Exec=patchspace
+Icon=org.patchspace
+Terminal=false
+Categories=AudioVideo;Audio;
+Keywords=pipewire;patchbay;audio;routing;mixer;nodes;
+StartupNotify=true
+StartupWMClass=org.patchspace

@@ -730,8 +730,8 @@ NODE_TYPE_SPECS.update(
         "device_output": NodeSpec("Hardware Output", ["in"], []),
         "app_input": NodeSpec("App Playback", [], ["out"]),
         "app_output": NodeSpec("App Mic", ["in"], []),
-        "patchbay_device": NodeSpec("Speaker Line", ["in"], ["out"]),
-        "patchbay_mic_device": NodeSpec("Mic Line", ["in"], ["out"]),
+        "patchspace_device": NodeSpec("Speaker Line", ["in"], ["out"]),
+        "patchspace_mic_device": NodeSpec("Mic Line", ["in"], ["out"]),
         "virtual_speaker": NodeSpec(
             "Virtual Speaker", ["in"], ["out"], field="device_label"
         ),
@@ -779,7 +779,7 @@ NODE_DESCRIPTIONS: Dict[str, str] = {
     "description_classifier": "A filter that matches by a text match on the "
     "description.",
     "external_only_classifier": "A filter that keeps only real apps and "
-    "hardware, stripping PatchBay's own plumbing.",
+    "hardware, stripping Patch Space's own plumbing.",
     "bundle_to_audio": "Converts a source bundle back into one ordinary "
     "audio stream (all its members).",
     "bundle_output": "Delivers the audio wired into it to every destination "
@@ -837,8 +837,8 @@ NODE_DESCRIPTIONS: Dict[str, str] = {
     "...).",
     "app_input": "An application's audio output (playback stream).",
     "app_output": "An application's recording input.",
-    "patchbay_device": "A line to the built-in Patch Space speaker device.",
-    "patchbay_mic_device": "A line to the built-in Patch Space microphone "
+    "patchspace_device": "A line to the built-in Patch Space speaker device.",
+    "patchspace_mic_device": "A line to the built-in Patch Space microphone "
     "device.",
     "virtual_speaker": "A named virtual speaker other applications can "
     "play into.",
@@ -1023,8 +1023,8 @@ ADD_NODE_CATEGORIES = [
             ("Hardware Output", "device_output"),
             ("App Playback", "app_input"),
             ("App Mic", "app_output"),
-            ("Speaker Line", "patchbay_device"),
-            ("Mic Line", "patchbay_mic_device"),
+            ("Speaker Line", "patchspace_device"),
+            ("Mic Line", "patchspace_mic_device"),
         ],
     ),
     (
@@ -1121,8 +1121,8 @@ NODE_TYPE_ICONS: Dict[str, str] = {
     "device_output": "audio-speakers-symbolic",
     "app_input": "application-x-executable-symbolic",
     "app_output": "application-x-executable-symbolic",
-    "patchbay_device": "audio-speakers-symbolic",
-    "patchbay_mic_device": "audio-input-microphone-symbolic",
+    "patchspace_device": "audio-speakers-symbolic",
+    "patchspace_mic_device": "audio-input-microphone-symbolic",
     "virtual_speaker": "audio-speakers-symbolic",
     "virtual_mic": "audio-input-microphone-symbolic",
     # All Inputs covers mics, interfaces, virtual mics AND app playback
@@ -1222,8 +1222,8 @@ CLASS_NAME_TO_TYPE.update(
         "DeviceOutputNode": "device_output",
         "AppInputNode": "app_input",
         "AppOutputNode": "app_output",
-        "PatchBayDeviceNode": "patchbay_device",
-        "PatchBayMicDeviceNode": "patchbay_mic_device",
+        "PatchSpaceDeviceNode": "patchspace_device",
+        "PatchSpaceMicDeviceNode": "patchspace_mic_device",
         "VirtualSpeakerNode": "virtual_speaker",
         "VirtualMicNode": "virtual_mic",
     }
@@ -1322,3 +1322,13 @@ def setting_tooltip(node_type: str, attr: str, label: str) -> str:
     """Hover text for one Settings row, falling back to its label so every
     row has something."""
     return spec_for(node_type).setting_tooltips.get(attr, label)
+
+
+# Pre-rename node type keys (PatchBay -> Patch Space): a panel or session
+# written under the old key still renders with the right ports/control instead
+# of falling back to the generic "Unknown" spec.  Nothing emits these keys.
+for _legacy, _canonical in (
+    ("patchbay_device", "patchspace_device"),
+    ("patchbay_mic_device", "patchspace_mic_device"),
+):
+    NODE_TYPE_SPECS[_legacy] = NODE_TYPE_SPECS[_canonical]

@@ -9,7 +9,7 @@ real PipeWire server is touched."""
 import pytest
 
 import pwnodes
-from main import PatchBayDaemon
+from main import PatchSpaceDaemon
 
 
 class FakeCli:
@@ -58,7 +58,7 @@ def _fake_processes(monkeypatch):
 
 
 def fresh_daemon():
-    return PatchBayDaemon()
+    return PatchSpaceDaemon()
 
 
 def _add(d, node_type, node_id, config=None):
@@ -445,7 +445,7 @@ def test_creating_panel_moves_hidden_children_live(tmp_path):
     companions with it, or the gate's signal path breaks."""
     pdir = tmp_path / "panels"
     pdir.mkdir()
-    d = PatchBayDaemon(
+    d = PatchSpaceDaemon(
         panel_dirs=[(str(pdir), True)],
         root_panel_path=str(tmp_path / "root.json"),
     )
@@ -481,7 +481,7 @@ def test_create_panel_runs_standard_careful_setup_for_moved_nodes(tmp_path):
     finicky effect can't be left half-configured or half-wired."""
     pdir = tmp_path / "panels"
     pdir.mkdir()
-    d = PatchBayDaemon(
+    d = PatchSpaceDaemon(
         panel_dirs=[(str(pdir), True)],
         root_panel_path=str(tmp_path / "root.json"),
     )

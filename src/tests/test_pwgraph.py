@@ -90,14 +90,14 @@ def test_reap_stale_returns_count(monkeypatch):
     g = PipewireGraph()
     g._terminate_orphan_helpers = lambda markers: 1
     g._snapshot_stale = lambda *a, **k: ({}, set())
-    assert g.reap_stale_for_names(["patchbay_x"]) == 1
+    assert g.reap_stale_for_names(["patchspace_x"]) == 1
     assert g.reap_stale_for_names([]) == 0
 
     g._terminate_orphan_helpers = lambda markers: 0
-    g._snapshot_stale = lambda *a, **k: ({1: "patchbay_x"}, set())
+    g._snapshot_stale = lambda *a, **k: ({1: "patchspace_x"}, set())
     destroyed = []
     g._destroy_nodes = lambda nodes: destroyed.extend(nodes) or len(nodes)
-    assert g.reap_stale_for_names(["patchbay_x"]) == 1
+    assert g.reap_stale_for_names(["patchspace_x"]) == 1
 
 
 def test_backing_marker_matches_only_exact_or_underscore_siblings():
@@ -156,7 +156,7 @@ def test_snapshot_stale_is_sibling_scoped(monkeypatch):
 
 # The startup crash-recovery sweep does NOT pass exact backing names: it
 # passes the daemon's `_OWNED_PREFIXES` (main.py), which are *prefixes*
-# ending in "_" ("noise_cancel_node_", "echo_cancel_node_", "patchbay_",
+# ending in "_" ("noise_cancel_node_", "echo_cancel_node_", "patchspace_",
 # ...).  A new AI Noise Cancel is only safe to add once those stale
 # objects are reaped, so the marker matcher must keep treating a
 # trailing-underscore marker as a prefix - scoping it with the

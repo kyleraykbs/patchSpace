@@ -2,7 +2,7 @@
 session_repair.py
 
 Validate a Patch Space session config (the JSON shape written by
-``main.PatchBayDaemon._build_export_config`` - ``{"nodes", "edges",
+``main.PatchSpaceDaemon._build_export_config`` - ``{"nodes", "edges",
 "groups"}``) and, optionally, repair the parts that are objectively
 broken.
 
@@ -57,7 +57,7 @@ LEGACY_PORTS = {"a": "on", "b": "off"}
 # flagging (and, when asked, collapsing).  Note this does NOT include
 # virtual_speaker/virtual_mic - those are independent named devices with
 # their own backing, one per node.
-BUILTIN_LINE_TYPES = ("patchbay_device", "patchbay_mic_device")
+BUILTIN_LINE_TYPES = ("patchspace_device", "patchspace_mic_device")
 
 ERROR = "error"
 WARNING = "warning"
@@ -148,14 +148,14 @@ def _builtin_identity(node_type: str, params: dict) -> Optional[str]:
     """A stable key for the built-in device a line node resolves to, or
     None when the type isn't an alias of a built-in.
 
-    Only ``patchbay_device``/``patchbay_mic_device`` are aliases of the
+    Only ``patchspace_device``/``patchspace_mic_device`` are aliases of the
     daemon's single built-in speaker/mic.  ``virtual_speaker``/
     ``virtual_mic`` are separate user-named devices (one backing each),
     so two of those are two real devices, not a duplicate."""
-    if node_type == "patchbay_device":
-        return "PatchBay"
-    if node_type == "patchbay_mic_device":
-        return "PatchBay Mic"
+    if node_type == "patchspace_device":
+        return "Patch Space"
+    if node_type == "patchspace_mic_device":
+        return "Patch Space Mic"
     return None
 
 
@@ -434,7 +434,7 @@ def repair(
 def _collapse_line_nodes(nodes: Dict[str, dict], edges: List[dict], fixes: List[str]) -> None:
     """Drop redundant built-in line nodes, keeping the busiest one.
 
-    A line node (``patchbay_device`` / ``patchbay_mic_device`` / a
+    A line node (``patchspace_device`` / ``patchspace_mic_device`` / a
     virtual speaker/mic) owns no backing - it is only an alias for the
     built-in device - so two of them are two names for one object and
     their edges are summed.  Keeping the node with the most edges and

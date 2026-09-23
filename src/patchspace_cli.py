@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-patchbay_cli.py
+patchspace_cli.py
 
-Minimal synchronous Unix-socket client for the PatchBay daemon,
+Minimal synchronous Unix-socket client for the Patch Space daemon,
 meant for one-shot command-line tools (export_config.py,
 apply_config.py) that send a command and need its response right
-away - unlike socket_client.PatchBayClient, which is built for a GUI
+away - unlike socket_client.PatchSpaceClient, which is built for a GUI
 event loop (background thread, responses queued and drained on a
 GLib timer). This one blocks on each call until exactly one reply
 comes back, which is all a top-to-bottom script needs, and it avoids
@@ -28,12 +28,12 @@ from typing import Any, Dict
 # apply_config.py), and importing across into the gui package would
 # tie its sys.path layout to wherever those scripts happen to be run
 # from. Keep this in sync with SOCKET_PATH in gui/constants.py and
-# main.py if it ever changes - including the $PATCHBAY_SOCKET override,
+# main.py if it ever changes - including the $PATCHSPACE_SOCKET override,
 # which is how all three are moved together.
-SOCKET_PATH = os.environ.get("PATCHBAY_SOCKET") or "/tmp/patchbay.sock"
+SOCKET_PATH = os.environ.get("PATCHSPACE_SOCKET") or "/tmp/patchspace.sock"
 
 
-class PatchBayClient:
+class PatchSpaceClient:
     def __init__(self, path: str = SOCKET_PATH):
         self.path = path
         self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -90,7 +90,7 @@ class PatchBayClient:
         except OSError:
             pass
 
-    def __enter__(self) -> "PatchBayClient":
+    def __enter__(self) -> "PatchSpaceClient":
         return self
 
     def __exit__(self, *exc_info) -> None:

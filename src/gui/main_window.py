@@ -2,7 +2,7 @@
 main_window.py
 
 The application window: a two-tab notebook (raw PipeWire graph +
-PatchSpace editor) sharing one PatchBayClient connection, plus the
+PatchSpace editor) sharing one PatchSpaceClient connection, plus the
 GLib timeout that drains daemon responses and routes each one to
 whichever tab it belongs to.
 """
@@ -33,7 +33,7 @@ from constants import (
     ADD_NODE_PANEL_MIN_WIDTH,
     ADD_NODE_PANEL_MAX_WIDTH,
 )
-from socket_client import PatchBayClient
+from socket_client import PatchSpaceClient
 from daemon_control import DaemonManager
 from pipewire_widget import PipeWireGraphWidget
 from patchspace_widget import PatchSpaceGraphWidget
@@ -41,7 +41,7 @@ from patchspace_widget import PatchSpaceGraphWidget
 logger = logging.getLogger(__name__)
 
 # Wall-clock heartbeat of the GTK main thread, updated by _heartbeat() on
-# a GLib timeout. Only used by the PATCHBAY_TRACE_HANG watchdog below.
+# a GLib timeout. Only used by the PATCHSPACE_TRACE_HANG watchdog below.
 _heartbeat_time = [0.0]
 
 
@@ -54,7 +54,7 @@ def _arm_hang_watchdog() -> None:
     """Diagnostic for the "UI randomly freezes" report (no exception, no
     traceback): a hard hang here is a Python busy-loop on the main
     thread, which never returns control to the GLib loop, so GTK can't
-    tell us anything. Enable with PATCHBAY_TRACE_HANG=1 when launching
+    tell us anything. Enable with PATCHSPACE_TRACE_HANG=1 when launching
     the GUI; a watchdog thread then sends SIGUSR1 (registered via
     faulthandler to dump every thread's stack to stderr) the moment the
     main thread's heartbeat goes stale for more than 4 seconds. The
@@ -90,7 +90,7 @@ class LogConsole(Gtk.Box):
     def __init__(self):
         super().__init__(orientation=Gtk.Orientation.VERTICAL)
         self.add_css_class("opaque-chrome")
-        self.client = PatchBayClient()
+        self.client = PatchSpaceClient()
         self._active = False
         self._since = 0
         self._line_count = 0
@@ -252,7 +252,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.daemon = DaemonManager()
         self.daemon.ensure_started()
         self._daemon_busy = False
-        self.client = PatchBayClient()
+        self.client = PatchSpaceClient()
 
         self.notebook = Gtk.Notebook()
         self.pw_widget = PipeWireGraphWidget(self.client)
@@ -294,7 +294,7 @@ class MainWindow(Gtk.ApplicationWindow):
         # Heartbeat + optional hang watchdog - see _arm_hang_watchdog.
         _heartbeat_time[0] = time.monotonic()
         GLib.timeout_add(200, _heartbeat)
-        if os.environ.get("PATCHBAY_TRACE_HANG"):
+        if os.environ.get("PATCHSPACE_TRACE_HANG"):
             _arm_hang_watchdog()
 
     def _build_patchspace_page(self):
@@ -413,9 +413,9 @@ class MainWindow(Gtk.ApplicationWindow):
         # explicitly (the actions run off the main thread so the wait for
         # the socket never freezes the window - see _daemon_action).
         for label, action, tip in (
-            ("Start Daemon", "start", "Start the background PatchBay daemon"),
-            ("Stop Daemon", "stop", "Stop the background PatchBay daemon"),
-            ("Restart Daemon", "restart", "Restart the background PatchBay daemon"),
+            ("Start Daemon", "start", "Start the background Patch Space daemon"),
+            ("Stop Daemon", "stop", "Stop the background Patch Space daemon"),
+            ("Restart Daemon", "restart", "Restart the background Patch Space daemon"),
         ):
             btn = Gtk.Button(label=label)
             btn.get_child().set_wrap(False)

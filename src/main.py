@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-main.py - Patchbay daemon with a Unix-socket API.
+main.py - Patch Space daemon with a Unix-socket API.
 
 Layout
 ------
@@ -10,13 +10,13 @@ Layout
     with backoff for anything that keeps failing);
   * a single tick thread runs PatchSpace.supervise() every ~0.5s (and
     immediately when a mutating command nudges it);
-  * a Unix socket (``/tmp/patchbay.sock`` by default; ``--socket`` or
-    ``$PATCHBAY_SOCKET`` moves it, e.g. into ``$XDG_RUNTIME_DIR`` for a
+  * a Unix socket (``/tmp/patchspace.sock`` by default; ``--socket`` or
+    ``$PATCHSPACE_SOCKET`` moves it, e.g. into ``$XDG_RUNTIME_DIR`` for a
     service) serves the JSON command API the GUI (gui/) and the CLI
     scripts speak.
 
-The daemon's own built-in virtual sink ("PatchBay") and virtual mic
-("PatchBay Mic") are ordinary hidden VirtualSpeaker/VirtualMic nodes
+The daemon's own built-in virtual sink ("Patch Space") and virtual mic
+("Patch Space Mic") are ordinary hidden VirtualSpeaker/VirtualMic nodes
 added to the PatchSpace - they get exactly the same supervision as
 user-created devices, and their default-device status is captured
 before they are created and restored on shutdown.
@@ -28,6 +28,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import socket
 import threading
 import time
@@ -74,8 +75,8 @@ from pwnodes import (
     DeviceOutputNode,
     AppInputNode,
     AppOutputNode,
-    PatchBayDeviceNode,
-    PatchBayMicDeviceNode,
+    PatchSpaceDeviceNode,
+    PatchSpaceMicDeviceNode,
     RegexInputNode,
     RegexOutputNode,
     MediaClassInputNode,
@@ -98,8 +99,8 @@ from pwnodes import (
     SplitterNode,
     SoundEffectNode,
     ButtonNode,
-    PATCHBAY_VIRTUAL_SINK_NAME,
-    PATCHBAY_VIRTUAL_MIC_NAME,
+    PATCHSPACE_VIRTUAL_SINK_NAME,
+    PATCHSPACE_VIRTUAL_MIC_NAME,
     device_profile_name,
     pick_auto_a2dp_profile,
     _run_wpctl,
@@ -157,8 +158,17 @@ def _install_log_ring() -> None:
 # belongs in $XDG_RUNTIME_DIR) - otherwise the single-instance guard below
 # makes the second one refuse to start.  Same env-var convention as the
 # panel dirs/root panel below; `--socket` overrides it.
-SOCKET_PATH = os.environ.get("PATCHBAY_SOCKET") or "/tmp/patchbay.sock"
-SESSION_CACHE_PATH = os.path.expanduser("~/.cache/patchbay/last_session.json")
+#
+# The pre-rename `PATCHBAY_*` names are still read (below and in the two
+# clients): a session that is already running started its daemon with them in
+# its environment, and a user service written before the rename still sets
+# them.  They are read, never written.
+SOCKET_PATH = (
+    os.environ.get("PATCHSPACE_SOCKET")
+    or os.environ.get("PATCHBAY_SOCKET")
+    or "/tmp/patchspace.sock"
+)
+SESSION_CACHE_PATH = os.path.expanduser("~/.cache/patchspace/last_session.json")
 
 # How often the tick rescans the panel directories for changes.
 PANEL_POLL_S = 1.5
@@ -168,10 +178,44 @@ PANEL_POLL_S = 1.5
 # a directory is writable unless it is a read-only source like a Nix
 # store path.  The root panel is the session autosave file.
 DEFAULT_PANEL_DIR = os.environ.get(
-    "PATCHBAY_PANEL_DIR",
-    os.path.expanduser("~/.local/share/patchbay/panels"),
+    "PATCHSPACE_PANEL_DIR",
+    os.environ.get("PATCHBAY_PANEL_DIR")
+    or os.path.expanduser("~/.local/share/patchspace/panels"),
 )
-DEFAULT_ROOT_PANEL = os.environ.get("PATCHBAY_ROOT_PANEL", SESSION_CACHE_PATH)
+DEFAULT_ROOT_PANEL = os.environ.get(
+    "PATCHSPACE_ROOT_PANEL",
+    os.environ.get("PATCHBAY_ROOT_PANEL") or SESSION_CACHE_PATH,
+)
+
+# Where this project kept its panels and its session before the rename
+# (PatchBay -> Patch Space).  See _migrate_legacy_paths: the old contents are
+# *copied* into the new locations, once, so a machine that has been running
+# the old code finds its graph where it always was - and the old files are
+# left alone rather than moved out from under a second checkout.
+LEGACY_PANEL_DIR = os.path.expanduser("~/.local/share/patchbay/panels")
+LEGACY_SESSION_CACHE = os.path.expanduser("~/.cache/patchbay/last_session.json")
+
+
+def _copy_missing_files(src_dir: str, dst_dir: str) -> int:
+    """Copy every panel file under `src_dir` that `dst_dir` doesn't have.
+
+    Returns how many were copied.  Never overwrites and never deletes: the
+    destination wins on a name clash (it is the canonical location)."""
+    copied = 0
+    for path in panels.list_files(src_dir):
+        stem = panels.file_stem(path)
+        target = os.path.join(dst_dir, stem + panels.PANEL_SUFFIX)
+        if os.path.exists(target):
+            continue
+        try:
+            os.makedirs(dst_dir, exist_ok=True)
+            shutil.copy2(path, target)
+            copied += 1
+        except OSError as exc:
+            logger.warning("Could not migrate panel %r: %s", path, exc)
+    return copied
+
+
 
 # How often the default-device "force" check runs (each check shells out
 # to wpctl to read the live default, so it's throttled well below the
@@ -194,7 +238,7 @@ DEFAULT_CHECK_INTERVAL_S = 2.0
 
 # How long a staged session load will wait for a single backed/effect
 # node to come all the way up (structural + module + every backing
-# resolved in the live graph - see PatchBayDaemon._node_is_ready)
+# resolved in the live graph - see PatchSpaceDaemon._node_is_ready)
 # before giving up on it and moving on anyway. Generous: a filter-chain
 # module loading an LV2/LADSPA plugin from disk is the slowest single
 # step in the whole system.
@@ -281,12 +325,23 @@ NODE_TYPE_REGISTRY: Dict[str, type] = {
     "device_output": DeviceOutputNode,
     "app_input": AppInputNode,
     "app_output": AppOutputNode,
-    "patchbay_device": PatchBayDeviceNode,
-    "patchbay_mic_device": PatchBayMicDeviceNode,
+    "patchspace_device": PatchSpaceDeviceNode,
+    "patchspace_mic_device": PatchSpaceMicDeviceNode,
     "virtual_speaker": VirtualSpeakerNode,
     "virtual_mic": VirtualMicNode,
 }
 CLASS_TO_TYPE = {cls: key for key, cls in NODE_TYPE_REGISTRY.items()}
+
+# Node type keys this project used before the rename (PatchBay -> Patch
+# Space).  Registered as aliases *after* CLASS_TO_TYPE so a panel or session
+# written under the old key still loads (the node keeps working), while
+# everything this daemon reports/serializes uses the canonical key - i.e. an
+# old file is read, then re-exported in the new spelling.
+for _legacy_key, _canonical_key in {
+    "patchbay_device": "patchspace_device",
+    "patchbay_mic_device": "patchspace_mic_device",
+}.items():
+    NODE_TYPE_REGISTRY[_legacy_key] = NODE_TYPE_REGISTRY[_canonical_key]
 
 # Hidden per-Sensitivity-gate gain-staging nodes. A SensitivityGateNode
 # is always bracketed by two daemon-owned VolumeProcessNodes - a pre
@@ -391,7 +446,7 @@ def _apply_layout_attrs(node, config: dict) -> None:
             setattr(node, attr, config[attr])
 
 
-class PatchBayDaemon:
+class PatchSpaceDaemon:
     def __init__(
         self,
         panel_dirs: Optional[List[tuple]] = None,
@@ -479,7 +534,7 @@ class PatchBayDaemon:
     # objects a previous, uncleanly-stopped daemon left behind even when
     # the last-session cache is missing.
     _OWNED_PREFIXES = (
-        "patchbay_",
+        "patchspace_",
         "echo_cancel_node_",
         "light_noise_cancel_node_",
         "noise_cancel_node_",
@@ -493,14 +548,14 @@ class PatchBayDaemon:
     )
 
     def _startup_stale_markers(self) -> list:
-        """Every name a previous patchbay run may have left live objects
+        """Every name a previous patchspace run may have left live objects
         under: the built-in virtual devices, this project's known backing
         prefixes, and the backing_node_names recorded in the last-session
         cache (the exact names a re-import will reuse, so orphaned copies
         must not survive)."""
         markers = list(self._OWNED_PREFIXES) + [
-            PATCHBAY_VIRTUAL_SINK_NAME,
-            PATCHBAY_VIRTUAL_MIC_NAME,
+            PATCHSPACE_VIRTUAL_SINK_NAME,
+            PATCHSPACE_VIRTUAL_MIC_NAME,
         ]
         try:
             with open(SESSION_CACHE_PATH) as f:
@@ -690,14 +745,14 @@ class PatchBayDaemon:
     def _create_builtin_devices(self) -> None:
         with self._lock:
             sink = VirtualSpeakerNode(
-                "__patchbay_builtin_sink__",
-                PATCHBAY_VIRTUAL_SINK_NAME,
-                device_label="PatchBay Virtual Sink",
+                "__patchspace_builtin_sink__",
+                PATCHSPACE_VIRTUAL_SINK_NAME,
+                device_label="Patch Space Virtual Sink",
             )
             mic = VirtualMicNode(
-                "__patchbay_builtin_mic__",
-                PATCHBAY_VIRTUAL_MIC_NAME,
-                device_label="PatchBay Mic",
+                "__patchspace_builtin_mic__",
+                PATCHSPACE_VIRTUAL_MIC_NAME,
+                device_label="Patch Space Mic",
             )
             sink.force_default = True
             mic.force_default = True
@@ -714,7 +769,7 @@ class PatchBayDaemon:
         if self.builtin_mic is not None and self.builtin_mic.backings:
             # The visible Audio/Source is the loopback backing.
             for b in self.builtin_mic.backings:
-                if b.name == PATCHBAY_VIRTUAL_MIC_NAME:
+                if b.name == PATCHSPACE_VIRTUAL_MIC_NAME:
                     mic_id = b.node_id
                     break
         return sink_id, mic_id
@@ -734,17 +789,17 @@ class PatchBayDaemon:
     def _line_volume_target(self, node):
         """The built-in device a Speaker/Mic Line node controls, or None
         when `node` is not a line node."""
-        if isinstance(node, PatchBayDeviceNode):
+        if isinstance(node, PatchSpaceDeviceNode):
             return self.builtin_sink
-        if isinstance(node, PatchBayMicDeviceNode):
+        if isinstance(node, PatchSpaceMicDeviceNode):
             return self.builtin_mic
         return None
 
     def _line_nodes_for(self, target) -> list:
         if target is self.builtin_sink:
-            cls = PatchBayDeviceNode
+            cls = PatchSpaceDeviceNode
         elif target is self.builtin_mic:
-            cls = PatchBayMicDeviceNode
+            cls = PatchSpaceMicDeviceNode
         else:
             return []
         return [n for n in self.space.nodes.values() if isinstance(n, cls)]
@@ -921,7 +976,7 @@ class PatchBayDaemon:
         button):
 
         * **force on** (default): *constantly* re-check the live default
-          and put it back on PatchBay if something moved it - throttled by
+          and put it back on Patch Space if something moved it - throttled by
           ``DEFAULT_CHECK_INTERVAL_S`` so we're not spawning ``wpctl`` on
           every tick.
         * **force off**: the old once-per-resolved-id behaviour - promote
@@ -1045,10 +1100,48 @@ class PatchBayDaemon:
                 out[path] = writable  # later dirs win
         return out
 
+    def _migrate_legacy_paths(self) -> None:
+        """Adopt whatever the pre-rename paths (PatchBay) still hold: the
+        panel directory and the session cache.
+
+        Copied, not moved, and only into a location that is empty or missing
+        the file - so it is idempotent, it can never clobber a panel the
+        user made under the new name, and the old files stay put (a second
+        checkout or an old daemon may still be using them)."""
+        target_dir = next(
+            (d for d, w in self.panel_dirs if d and w), None
+        )
+        if (
+            target_dir
+            and os.path.realpath(target_dir) != os.path.realpath(LEGACY_PANEL_DIR)
+            and os.path.isdir(LEGACY_PANEL_DIR)
+        ):
+            copied = _copy_missing_files(LEGACY_PANEL_DIR, target_dir)
+            if copied:
+                logger.info(
+                    "Migrated %d panel file(s) from %s to %s",
+                    copied, LEGACY_PANEL_DIR, target_dir,
+                )
+        if (
+            self.root_panel_path == SESSION_CACHE_PATH
+            and not os.path.exists(SESSION_CACHE_PATH)
+            and os.path.exists(LEGACY_SESSION_CACHE)
+        ):
+            try:
+                os.makedirs(os.path.dirname(SESSION_CACHE_PATH), exist_ok=True)
+                shutil.copy2(LEGACY_SESSION_CACHE, SESSION_CACHE_PATH)
+                logger.info(
+                    "Migrated the session cache %s -> %s",
+                    LEGACY_SESSION_CACHE, SESSION_CACHE_PATH,
+                )
+            except OSError as exc:
+                logger.warning("Could not migrate the session cache: %s", exc)
+
     def _load_panels_tree(self) -> Dict[str, panels.Panel]:
         """Load the root panel + every reachable panel, migrating the
         legacy shapes in place (a bare session cache, and any old
         declarative files sitting in the panel dirs)."""
+        self._migrate_legacy_paths()
         root_path = self.root_panel_path
         dirs = self._panel_dir_paths()
         raw = panels.read_file(root_path) if root_path else None
@@ -3441,7 +3534,7 @@ class PatchBayDaemon:
         # separator is not valid in a PipeWire node.name, so sanitise the
         # generated default.  Imperative ids are already safe and pass
         # through unchanged.
-        backing = g("backing_node_name") or "patchbay_" + re.sub(
+        backing = g("backing_node_name") or "patchspace_" + re.sub(
             r"[^A-Za-z0-9_.-]", "_", node_id
         )
 
@@ -3587,9 +3680,9 @@ class PatchBayDaemon:
             )
         if cls in (AppInputNode, AppOutputNode):
             return cls(node_id, g("app_name", ""))
-        if cls is PatchBayDeviceNode:
+        if cls is PatchSpaceDeviceNode:
             return cls(node_id, g("device_volume", 1.0), g("volume_locked", True))
-        if cls is PatchBayMicDeviceNode:
+        if cls is PatchSpaceMicDeviceNode:
             return cls(node_id, g("device_volume", 1.0), g("volume_locked", True))
         if cls in (VirtualSpeakerNode, VirtualMicNode):
             return cls(
@@ -3753,7 +3846,7 @@ class PatchBayDaemon:
             # change.
             pre = VolumeProcessNode(
                 pre_id,
-                f"patchbay_{pre_id}",
+                f"patchspace_{pre_id}",
                 initial_volume=1.0,
                 volume_min=1.0,
                 volume_max=1.0,
@@ -3763,7 +3856,7 @@ class PatchBayDaemon:
         if post_id not in self.space.nodes:
             post = VolumeProcessNode(
                 post_id,
-                f"patchbay_{post_id}",
+                f"patchspace_{post_id}",
                 initial_volume=1.0,
                 volume_min=1.0,
                 volume_max=1.0,
@@ -5021,14 +5114,14 @@ def main():
     global SOCKET_PATH
 
     parser = argparse.ArgumentParser(
-        prog="patchbay-daemon", description="Patch Space daemon"
+        prog="patchspace-daemon", description="Patch Space daemon"
     )
     parser.add_argument(
         "--socket",
         default=SOCKET_PATH,
         metavar="PATH",
         help="Unix socket to serve the command API on "
-        "(default: $PATCHBAY_SOCKET, else /tmp/patchbay.sock)",
+        "(default: $PATCHSPACE_SOCKET, else /tmp/patchspace.sock)",
     )
     parser.add_argument(
         "--panel-dir",
@@ -5059,7 +5152,7 @@ def main():
             panel_dirs.append((path, mode == "rw"))
 
     _install_log_ring()
-    daemon = PatchBayDaemon(
+    daemon = PatchSpaceDaemon(
         panel_dirs=panel_dirs,
         root_panel_path=args.root_panel,
     )

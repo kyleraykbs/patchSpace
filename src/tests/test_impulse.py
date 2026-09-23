@@ -12,7 +12,7 @@ import os
 import pytest
 
 import pwnodes
-from main import PatchBayDaemon
+from main import PatchSpaceDaemon
 from gui import node_specs
 from session_repair import ERROR, repair, validate
 
@@ -74,7 +74,7 @@ def _ok(d, **cmd):
 
 def _daemon_with_pair(path="/sounds/clang.wav"):
     """A Button wired to a Sound Effect, with `path` set."""
-    d = PatchBayDaemon()
+    d = PatchSpaceDaemon()
     _ok(d, command="add_node", node_type="button", node_id="btn")
     _ok(
         d,
@@ -95,7 +95,7 @@ def _daemon_with_pair(path="/sounds/clang.wav"):
 
 
 def test_impulse_pairs_only_with_impulse():
-    d = PatchBayDaemon()
+    d = PatchSpaceDaemon()
     for node_id, node_type in (("btn", "button"), ("fx", "sound_effect"),
                                ("vol", "volume")):
         _ok(d, command="add_node", node_type=node_type, node_id=node_id)
@@ -263,7 +263,7 @@ def test_sound_effect_config_round_trips():
     assert params["overlap"] is True
 
     # Replaying that config onto a fresh daemon reproduces the node.
-    d2 = PatchBayDaemon()
+    d2 = PatchSpaceDaemon()
     _ok(
         d2,
         command="add_node",
@@ -279,7 +279,7 @@ def test_a_loaded_session_brings_an_impulse_chain_back(monkeypatch):
     """The impulse wire and the sound effect's settings must survive a
     session save/load - the load path is a different code path from
     add_node (it stages nodes and replays their params)."""
-    d = PatchBayDaemon()
+    d = PatchSpaceDaemon()
     # There is no real graph here: resolve every backing immediately so
     # the load's per-node bring-up doesn't sit out its timeout.
     monkeypatch.setattr(d.graph, "node_id_by_name", lambda name: 1)

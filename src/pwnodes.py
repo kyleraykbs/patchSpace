@@ -105,9 +105,9 @@ def _base_node_name(name: str) -> str:
 # They are ordinary supervised VirtualSpeaker/VirtualMic nodes (added
 # hidden, see PatchSpace.add_node(public=...)) so they get exactly the
 # same supervision as any user-created device.  GUI convenience nodes
-# (patchbay_device / patchbay_mic_device) reference these names.
-PATCHBAY_VIRTUAL_SINK_NAME = "PatchBay"
-PATCHBAY_VIRTUAL_MIC_NAME = "PatchBay Mic"
+# (patchspace_device / patchspace_mic_device) reference these names.
+PATCHSPACE_VIRTUAL_SINK_NAME = "Patch Space"
+PATCHSPACE_VIRTUAL_MIC_NAME = "Patch Space Mic"
 
 # How long a single in-flight link may go unconfirmed by the live graph
 # before PatchSpace gives up waiting on it and moves to the next one.
@@ -144,7 +144,7 @@ def _run_wpctl(*args, timeout: float = 2.0) -> bool:
 def _read_wpctl_volume(node_id) -> Optional[float]:
     """Live volume of a device/node via `wpctl get-volume`, or None when
     it can't be read.  Used to keep an *unlocked* slider in step with
-    changes made outside PatchBay (pactl/wpctl/a desktop applet) instead
+    changes made outside Patch Space (pactl/wpctl/a desktop applet) instead
     of fighting them."""
     try:
         result = subprocess.run(
@@ -422,7 +422,7 @@ class DeviceControlMixin:
     so a Bluetooth reconnect resetting the codec gets corrected.
 
     ``volume_locked`` (default True) gates the volume half of that:
-    locked means the PatchBay value is authoritative and re-asserted
+    locked means the Patch Space value is authoritative and re-asserted
     every tick, overriding anything else that changed the device; a
     one-off push still happens on an explicit user drag regardless.
     Unlocked leaves the device's own volume alone and mirrors it back
@@ -466,7 +466,7 @@ class DeviceControlMixin:
 
     def sync_volume_from_live(self) -> None:
         """While unlocked, adopt the live volume so the slider reflects
-        changes made outside PatchBay instead of fighting them."""
+        changes made outside Patch Space instead of fighting them."""
         if getattr(self, "volume_locked", True):
             return
         live_node_id = getattr(self, "live_node_id", None)
@@ -750,7 +750,7 @@ class BackedNode(Node):
         actually capture that sink's monitor.  Without it PipeWire can't
         satisfy a record targeting a sink and the stream silently falls
         back to the default source - measured live as every effect's
-        ``*_out_keepalive`` tapping ``PatchBay Mic`` instead of its own
+        ``*_out_keepalive`` tapping ``Patch Space Mic`` instead of its own
         dummy (see VirtualMicNode._spawn_loopback, which relies on the
         same property).  Same --properties reasoning as _ensure_feed
         above."""
@@ -769,7 +769,7 @@ class BackedNode(Node):
 
 
 # ---------------------------------------------------------------------------
-# Leaves: filters, devices, apps, patchbay conveniences
+# Leaves: filters, devices, apps, patchspace conveniences
 # ---------------------------------------------------------------------------
 
 
@@ -830,11 +830,11 @@ class DescriptionOutputNode(OutputNode):
         return [{"description": self.description, "type": self.port_type}] if self.description else []
 
 
-class PatchBayDeviceNode(InputNode, OutputNode):
+class PatchSpaceDeviceNode(InputNode, OutputNode):
     """Convenience node for the daemon's built-in virtual sink: usable
     as a target (apps route in) via its sink input, and as a source via
     its monitor ports.  Both identities are exact-name because the mic
-    plumbing uses node.names that merely start with "PatchBay".
+    plumbing uses node.names that merely start with "Patch Space".
 
     There can be several of these ("Speaker Line" nodes) at once; they
     all reference the same built-in sink.      ``device_volume`` /
@@ -854,16 +854,16 @@ class PatchBayDeviceNode(InputNode, OutputNode):
         self.force_default = True
 
     def source_filters(self):
-        return [{"nodeName": PATCHBAY_VIRTUAL_SINK_NAME}]
+        return [{"nodeName": PATCHSPACE_VIRTUAL_SINK_NAME}]
 
     def sink_filters(self):
-        return [{"name": PATCHBAY_VIRTUAL_SINK_NAME}]
+        return [{"name": PATCHSPACE_VIRTUAL_SINK_NAME}]
 
 
-class PatchBayMicDeviceNode(InputNode, OutputNode):
+class PatchSpaceMicDeviceNode(InputNode, OutputNode):
     """Convenience node for the built-in virtual mic.  Routes in via the
     underlying "{name}_sink", picked up downstream from the loopback's
-    Audio/Source (PATCHBAY_VIRTUAL_MIC_NAME).
+    Audio/Source (PATCHSPACE_VIRTUAL_MIC_NAME).
 
     Several may exist at once; they all reference the same built-in mic.
     ``device_volume`` / ``volume_locked`` / ``force_default`` mirror that
@@ -879,10 +879,10 @@ class PatchBayMicDeviceNode(InputNode, OutputNode):
         self.force_default = True
 
     def source_filters(self):
-        return [{"nodeName": PATCHBAY_VIRTUAL_MIC_NAME}]
+        return [{"nodeName": PATCHSPACE_VIRTUAL_MIC_NAME}]
 
     def sink_filters(self):
-        return [{"name": f"{PATCHBAY_VIRTUAL_MIC_NAME}_sink"}]
+        return [{"name": f"{PATCHSPACE_VIRTUAL_MIC_NAME}_sink"}]
 
 
 class DeviceInputNode(InputNode, LiveResolvableNode, DeviceControlMixin):
@@ -1468,12 +1468,12 @@ class DescriptionClassifierNode(ClassifierNode):
 
 
 class ExternalOnlyClassifierNode(ClassifierNode):
-    """Classifier that keeps everything PatchBay doesn't own (real apps
+    """Classifier that keeps everything Patch Space doesn't own (real apps
     and hardware), stripping our own built-ins and plumbing.  See
-    ``pwmatch.is_patchbay_owned``."""
+    ``pwmatch.is_patchspace_owned``."""
 
     def matches(self, props: dict, side: str) -> bool:
-        return not pwmatch.is_patchbay_owned(props)
+        return not pwmatch.is_patchspace_owned(props)
 
 
 class FilterNode(TransparentNode):
@@ -1561,7 +1561,7 @@ class BundleSplitNode(TransparentNode):
 class _SinkVolumeMixin:
     """Volume + lock for a backed node whose backing is a null-audio-sink
     with monitor.channel-volumes (a built-in virtual line such as the
-    PatchBay sink/mic).  The backing's wpctl volume is what a Speaker
+    Patch Space sink/mic).  The backing's wpctl volume is what a Speaker
     Line / Mic Line node's slider drives; the state lives here (the one
     underlying device) and the daemon mirrors it onto each visible line
     node.  Same lock contract as DeviceControlMixin."""
@@ -1734,7 +1734,7 @@ class SoundEffectNode(_SingleSinkNode):
         # not, since there is no shell in the chain to be predictable about.
         resolved = os.path.expanduser(path)
         # node.name is pinned so the stream is identifiable (and reads as
-        # patchbay-owned plumbing - see pwmatch.is_patchbay_owned); the
+        # patchspace-owned plumbing - see pwmatch.is_patchspace_owned); the
         # *file path* is deliberately not put into node.description,
         # which is a SPA-JSON string where a quote or brace in a filename
         # would break the command.

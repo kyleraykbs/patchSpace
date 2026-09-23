@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Icon for the Patch Space GUI: two sockets joined by a wire, in the
+     canvas's own colours (see gui/render_utils.py's palette).  Replace with
+     real artwork whenever there is some - nothing else depends on the
+     shapes, only on the file name, which org.patchspace.desktop's Icon=
+     key refers to. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect x="16" y="16" width="480" height="480" rx="96" fill="#1f1f22" stroke="#3a3a3f" stroke-width="12"/>
+  <path d="M 132 190 C 132 300, 380 212, 380 322" fill="none" stroke="#6ba7fa" stroke-width="26" stroke-linecap="round"/>
+  <circle cx="132" cy="190" r="46" fill="#59c782"/>
+  <circle cx="380" cy="322" r="46" fill="#f07868"/>
+</svg>

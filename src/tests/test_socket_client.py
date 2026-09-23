@@ -13,7 +13,7 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gui"))
 
-from socket_client import PatchBayClient  # noqa: E402
+from socket_client import PatchSpaceClient  # noqa: E402
 
 
 class _FakeDaemon:
@@ -101,7 +101,7 @@ def test_client_actively_connects_without_a_command(tmp_path):
     path = str(tmp_path / "sock")
     daemon = _FakeDaemon(path)
     daemon.start()
-    client = PatchBayClient(path)
+    client = PatchSpaceClient(path)
     try:
         assert _wait(lambda: client.is_connected()), "client never connected"
     finally:
@@ -113,7 +113,7 @@ def test_client_notifies_and_reconnects_after_daemon_restart(tmp_path):
     path = str(tmp_path / "sock")
     daemon = _FakeDaemon(path)
     daemon.start()
-    client = PatchBayClient(path)
+    client = PatchSpaceClient(path)
     states = []
     client.on_connection_changed.append(states.append)
     try:
@@ -140,7 +140,7 @@ def test_command_round_trip_after_connect(tmp_path):
     path = str(tmp_path / "sock")
     daemon = _FakeDaemon(path)
     daemon.start()
-    client = PatchBayClient(path)
+    client = PatchSpaceClient(path)
     try:
         assert _wait(lambda: client.is_connected())
         client.send({"command": "ping"})

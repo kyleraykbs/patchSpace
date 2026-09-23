@@ -38,8 +38,8 @@ path.
 
 **2. Real audio, without touching the user's session.**
 
-> ⚠️ **Do not simply run a second `PatchBayDaemon`**, even against a private PipeWire.
-> `PatchBayDaemon.start()` runs `_cleanup_stale_objects()` → `PipewireGraph._terminate_orphan_helpers`,
+> ⚠️ **Do not simply run a second `PatchSpaceDaemon`**, even against a private PipeWire.
+> `PatchSpaceDaemon.start()` runs `_cleanup_stale_objects()` → `PipewireGraph._terminate_orphan_helpers`,
 > which SIGTERMs every `pw-cat`/`pw-loopback` process on the **machine** whose argv contains a
 > marker name — a *global* /proc scan, not scoped to the instance the daemon is attached to
 > (the `pw-dump` half of the sweep *is* instance-scoped; the argv half is not).  Running a
@@ -60,7 +60,7 @@ pipewire &  ;  wireplumber &
   modules and logs `can't find protocol 'PipeWire:Protocol:Native'`.  Use `XDG_CONFIG_HOME`
   so the package config is still read and only your `.conf.d` override is added.
 * Disable the hardware monitors, or a second WP will fight the user's session over ALSA.
-* Set `main.SOCKET_PATH` to a temp path before `PatchBayDaemon()` so you can never collide
+* Set `main.SOCKET_PATH` to a temp path before `PatchSpaceDaemon()` so you can never collide
   with, or adopt, the user's daemon.
 * A null-audio-sink's **monitor** ports are the audio-source side; measure them with
   `pw-cat --record --target <sink> --properties '{ stream.capture.sink = true }'` (that
@@ -115,23 +115,23 @@ pipewire &  ;  wireplumber &
 
 ## Overridable paths (env, for services)
 
-`PATCHBAY_SOCKET` (daemon `--socket`, GUI, CLI clients all read it), `PATCHBAY_PANEL_DIR`,
-`PATCHBAY_ROOT_PANEL` — the three knobs a service/module needs to keep a daemon per-user
+`PATCHSPACE_SOCKET` (daemon `--socket`, GUI, CLI clients all read it), `PATCHSPACE_PANEL_DIR`,
+`PATCHSPACE_ROOT_PANEL` — the three knobs a service/module needs to keep a daemon per-user
 (socket in `$XDG_RUNTIME_DIR`, panel dirs from the store, root panel in state).
 
 ## The Nix module (nix/)
 
-`nix/module.nix` (one body, `flake.modules.{nixos,homeManager}.patchbay`) runs the daemon as
+`nix/module.nix` (one body, `flake.modules.{nixos,homeManager}.patchspace`) runs the daemon as
 a **user** service and generates read-only panel files into the store; `nix/lib.nix` holds
-the JSON-merge helpers (`flake.lib.patchbay`).  Two gotchas worth remembering:
+the JSON-merge helpers (`flake.lib.patchspace`).  Two gotchas worth remembering:
 
 * NixOS and home-manager spell systemd units differently — `unitConfig`/`serviceConfig`/
   `wantedBy` vs `Unit`/`Service`/`Install`.  Hence the `homeManager ? false` closure arg.
 * A rebuild must restart the daemon: the generated panel dir is a new store path, which
   changes `ExecStart`, which is what makes systemd pick the new config up.
 * Verification recipe (no `nixos-rebuild`!): `pkgs.nixos [ module config ]` and read
-  `config.systemd.user.services.patchbay.serviceConfig.ExecStart` /
-  `config.services.patchbay.panelsDir`; `nix build` that dir to run the validation, and
+  `config.systemd.user.services.patchspace.serviceConfig.ExecStart` /
+  `config.services.patchspace.panelsDir`; `nix build` that dir to run the validation, and
   `nix build .#checks.<system>.module-merge` for the merge-precedence check.  Reach for a
   *worse* config to confirm a gate actually fails — the first version of the validation
   used `| tee`, whose exit status hid the failure entirely.
@@ -152,3 +152,24 @@ reported symptom (nothing to do until one is observed):
   mutates label/description without clearing `_node_h_cache`, so a multi-socket node
   (Echo Cancel, Switcher, Bundle Split, Filter) can draw its box at the old height until
   the next poll clears the cache - self-healing within one poll, cosmetic.
+
+## The rename (PatchBay -> Patch Space) and its migration
+
+"Everywhere" means identifiers, packaging, paths, node-type keys and prose; the pieces that
+are *data* contracts stay readable under the old spelling and are never written under it:
+
+* `PATCHBAY_*` env vars are read as fallbacks (`PATCHSPACE_*` wins); the daemon, GUI and CLI
+  all do this, because a session that is already running exported them.
+* `~/.local/share/patchbay/panels` + `~/.cache/patchbay/last_session.json` are **copied**
+  into their `patchspace` equivalents once, on load, only where the destination is missing
+  (`PatchSpaceDaemon._migrate_legacy_paths`; covered by
+  `test_pre_rename_paths_are_adopted_once`). Never moved, never overwritten.
+* `patchbay_*`/`PatchBay*` names stay in `pwmatch`'s owned-prefix/builtin lists so
+  pre-rename objects are reaped and stay out of External Only bundles.
+* node type keys: `patchbay_device`/`patchbay_mic_device` are aliases (daemon registry after
+  `CLASS_TO_TYPE`, plus `NODE_TYPE_SPECS`) - old files load, new exports are canonical.
+
+Renaming files: `src/patchbay_cli.py` -> `src/patchspace_cli.py`,
+`src/gui/patchbay_gui.py` -> `src/gui/patchspace_gui.py` (flake.nix, tests and docs follow).
+Reminder for module work: after editing this repo, a consumer using a `path:` input needs
+`nix flake update patchspace`, since the narHash is baked into its lock.

@@ -463,9 +463,9 @@ def test_bundle_output_without_dummy_has_no_links():
 
 
 def test_daemon_registers_and_serializes_bundle_types():
-    from main import PatchBayDaemon
+    from main import PatchSpaceDaemon
 
-    d = PatchBayDaemon()
+    d = PatchSpaceDaemon()
     leaf_types = [
         "all_inputs",
         "all_outputs",
@@ -542,9 +542,9 @@ def test_node_specs_ports_compatible_matches_daemon_rules():
 
 
 def test_daemon_serializes_merge_bundle_inputs():
-    from main import PatchBayDaemon
+    from main import PatchSpaceDaemon
 
-    d = PatchBayDaemon()
+    d = PatchSpaceDaemon()
     d.handle_command({"command": "add_node", "node_type": "app_input",
                       "node_id": "src", "config": {"app_name": "x"}})
     d.handle_command({"command": "add_node", "node_type": "bundle",
@@ -556,9 +556,9 @@ def test_daemon_serializes_merge_bundle_inputs():
 
 
 def test_daemon_serializes_filter_inputs():
-    from main import PatchBayDaemon
+    from main import PatchSpaceDaemon
 
-    d = PatchBayDaemon()
+    d = PatchSpaceDaemon()
     d.handle_command({"command": "add_node", "node_type": "all_apps",
                       "node_id": "apps"})
     d.handle_command({"command": "add_node", "node_type": "filter",
@@ -572,18 +572,18 @@ def test_daemon_serializes_filter_inputs():
 
 
 def test_daemon_create_node_builds_bundle_output_without_starting_it():
-    from main import PatchBayDaemon
+    from main import PatchSpaceDaemon
 
-    d = PatchBayDaemon()
+    d = PatchSpaceDaemon()
     node = d._create_node("bundle_output", "bo", {})
     assert type(node).__name__ == "BundleOutputNode"
     assert node.backing_node_name
 
 
 def test_daemon_load_migrates_legacy_source_leaf():
-    from main import PatchBayDaemon
+    from main import PatchSpaceDaemon
 
-    d = PatchBayDaemon()
+    d = PatchSpaceDaemon()
     config = {
         "nodes": {
             "old_in": {"type": "regex_input", "params": {"pattern": "Firefox"}},

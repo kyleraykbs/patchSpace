@@ -154,8 +154,8 @@ def test_repair_keeps_overlapping_groups_by_default():
 def test_validate_flags_duplicate_builtin_line_nodes():
     cfg = _config(
         nodes={
-            "line1": {"type": "patchbay_mic_device", "params": {}},
-            "line2": {"type": "patchbay_mic_device", "params": {}},
+            "line1": {"type": "patchspace_mic_device", "params": {}},
+            "line2": {"type": "patchspace_mic_device", "params": {}},
         },
         edges=[],
     )
@@ -167,8 +167,8 @@ def test_repair_collapse_duplicate_lines_keeps_busiest():
     cfg = _config(
         nodes={
             "src": {"type": "splitter", "params": {}},
-            "line_busy": {"type": "patchbay_mic_device", "params": {}},
-            "line_idle": {"type": "patchbay_mic_device", "params": {}},
+            "line_busy": {"type": "patchspace_mic_device", "params": {}},
+            "line_idle": {"type": "patchspace_mic_device", "params": {}},
         },
         edges=[{"from": "src", "to": "line_busy"}],
     )
@@ -176,7 +176,7 @@ def test_repair_collapse_duplicate_lines_keeps_busiest():
     assert "line_busy" in result.config["nodes"]
     assert "line_idle" not in result.config["nodes"]
     assert result.config["edges"] == [{"from": "src", "to": "line_busy"}]
-    assert any("collapsed duplicate" in f and "PatchBay Mic" in f for f in result.fixes)
+    assert any("collapsed duplicate" in f and "Patch Space Mic" in f for f in result.fixes)
 
 
 def test_virtual_speakers_are_not_treated_as_builtin_duplicates():

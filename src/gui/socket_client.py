@@ -1,7 +1,7 @@
 """
 socket_client.py
 
-Unix-socket client for talking to the PatchBay daemon (main.py).
+Unix-socket client for talking to the Patch Space daemon (main.py).
 
 Keeps a single persistent connection open for the lifetime of the
 client, instead of dialing a fresh AF_UNIX connection for every
@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 RECONNECT_INTERVAL_S = 0.5
 
 
-class PatchBayClient:
+class PatchSpaceClient:
     def __init__(self, path: str = SOCKET_PATH):
         self.path = path
         self.cmd_queue: "queue.Queue" = queue.Queue()

@@ -1,7 +1,7 @@
 """
 daemon_control.py
 
-Lets the GUI own the patchbay daemon's lifecycle.
+Lets the GUI own the patchspace daemon's lifecycle.
 
 The GUI can run against a daemon someone else started (a terminal, a
 system service, another GUI) or start its own background daemon.  The
@@ -38,7 +38,7 @@ STOP_TIMEOUT_S = 6.0
 
 
 def is_daemon_running(timeout: float = 0.25) -> bool:
-    """Whether a patchbay daemon is accepting connections right now."""
+    """Whether a patchspace daemon is accepting connections right now."""
     if not os.path.exists(SOCKET_PATH):
         return False
     try:
@@ -55,14 +55,14 @@ def daemon_command() -> List[str]:
     """The argv that launches the daemon.
 
     Order of preference: an explicit path baked in by the packaged GUI
-    wrapper (``PATCHBAY_DAEMON``), a ``patchbay-daemon`` on ``PATH``, and
+    wrapper (``PATCHSPACE_DAEMON``), a ``patchspace-daemon`` on ``PATH``, and
     finally running the sibling ``main.py`` with this interpreter - which
     is what happens when the GUI is run straight from a checkout (e.g.
     inside ``nix develop``)."""
-    explicit = os.environ.get("PATCHBAY_DAEMON")
+    explicit = os.environ.get("PATCHSPACE_DAEMON")
     if explicit:
         return shlex.split(explicit)
-    found = shutil.which("patchbay-daemon")
+    found = shutil.which("patchspace-daemon")
     if found:
         return [found]
     here = os.path.dirname(os.path.abspath(__file__))
@@ -93,7 +93,7 @@ class DaemonManager:
         start here is marked owned (killed on window close); an adopted
         one is left strictly alone."""
         if self.is_running():
-            logger.info("Adopted an already-running PatchBay daemon")
+            logger.info("Adopted an already-running Patch Space daemon")
             return True
         return self.start()
 
@@ -101,7 +101,7 @@ class DaemonManager:
         if self.is_running():
             return True
         cmd = daemon_command()
-        logger.info("Starting PatchBay daemon: %s", " ".join(cmd))
+        logger.info("Starting Patch Space daemon: %s", " ".join(cmd))
         try:
             self.proc = subprocess.Popen(cmd)
         except OSError as exc:
@@ -111,18 +111,18 @@ class DaemonManager:
         deadline = time.monotonic() + START_TIMEOUT_S
         while time.monotonic() < deadline:
             if self.is_running():
-                logger.info("PatchBay daemon is up (pid %s)", self.proc.pid)
+                logger.info("Patch Space daemon is up (pid %s)", self.proc.pid)
                 return True
             if self.proc.poll() is not None:
                 logger.error(
-                    "PatchBay daemon exited during startup (code %s)",
+                    "Patch Space daemon exited during startup (code %s)",
                     self.proc.returncode,
                 )
                 self.proc = None
                 self.owned = False
                 return False
             time.sleep(0.1)
-        logger.error("PatchBay daemon did not come up within %.0fs", START_TIMEOUT_S)
+        logger.error("Patch Space daemon did not come up within %.0fs", START_TIMEOUT_S)
         return False
 
     def stop(self) -> bool:

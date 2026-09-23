@@ -5,14 +5,14 @@ import json
 import os
 
 import panels
-from main import PatchBayDaemon
+from main import PatchSpaceDaemon
 
 
 def _daemon(tmp_path):
     pdir = tmp_path / "panels"
     pdir.mkdir()
     root = tmp_path / "root.json"
-    d = PatchBayDaemon(
+    d = PatchSpaceDaemon(
         panel_dirs=[(str(pdir), True)],
         root_panel_path=str(root),
     )

@@ -1,5 +1,5 @@
 # NixOS / home-manager module for the Patch Space daemon + a declarative
-# patchbay.
+# patchspace.
 #
 # The shape it produces:
 #
@@ -25,12 +25,12 @@ let
     mkEnableOption mkIf mkOption types literalExpression optionalString
     concatStringsSep;
 
-  cfg = config.services.patchbay;
-  patchbayLib = import ./lib.nix { inherit lib; };
+  cfg = config.services.patchspace;
+  patchspaceLib = import ./lib.nix { inherit lib; };
 
   system = pkgs.stdenv.hostPlatform.system;
-  defaultDaemon = self.packages.${system}.patchbay-daemon;
-  repairTool = self.packages.${system}.patchbay-repair;
+  defaultDaemon = self.packages.${system}.patchspace-daemon;
+  repairTool = self.packages.${system}.patchspace-repair;
 
   # Node type keys the daemon knows (main.py's NODE_TYPE_REGISTRY).  An enum
   # here turns a typo into an evaluation error; the flake's checks assert
@@ -45,7 +45,7 @@ let
     "exclude_filter" "external_only_classifier" "filter" "gate"
     "inverse_switcher" "light_noise_cancel" "media_class_classifier"
     "media_class_input" "media_class_output" "noise_cancel" "normalize"
-    "panel_in" "panel_out" "patchbay_device" "patchbay_mic_device"
+    "panel_in" "panel_out" "patchspace_device" "patchspace_mic_device"
     "regex_classifier" "regex_input" "regex_output" "reverb"
     "sensitivity_gate" "sound_effect" "splitter" "switcher" "virtual_mic"
     "virtual_speaker" "volume" "warp_in" "warp_out"
@@ -176,15 +176,15 @@ let
   };
   panels = cfg.panels // { main = mainPanel; };
 
-  panelConfig = panel: patchbayLib.panelConfig panel;
+  panelConfig = panel: patchspaceLib.panelConfig panel;
 
   # Flat config for the validator (what `session_repair` understands).  Its
   # exit status is the build gate: a bad port, an unknown type, a duplicate
   # edge or an endpoint that doesn't exist fails the build here, not at
   # runtime in the daemon.
   panelCheck = name: panel:
-    let json = pkgs.writeText "patchbay-${name}.json" (builtins.toJSON (panelConfig panel));
-    in pkgs.runCommand "patchbay-check-${name}" {
+    let json = pkgs.writeText "patchspace-${name}.json" (builtins.toJSON (panelConfig panel));
+    in pkgs.runCommand "patchspace-check-${name}" {
       # A package-shaped output (dir + bin/), so it is a valid build input
       # rather than a bare file; the build fails here if the config is bad.
       nativeBuildInputs = [ repairTool ];
@@ -192,23 +192,23 @@ let
       mkdir -p $out/bin
       # No pipe: the validator's exit status *is* this build's verdict, and a
       # pipe would report the last command's status instead.
-      if ! patchbay-repair --check --strict ${json} > $out/report.txt; then
-        echo "--- patchbay config for panel '${name}' is invalid ---" >&2
+      if ! patchspace-repair --check --strict ${json} > $out/report.txt; then
+        echo "--- patchspace config for panel '${name}' is invalid ---" >&2
         cat $out/report.txt >&2
         exit 1
       fi
-      cat > $out/bin/patchbay-check-${name} <<EOF
+      cat > $out/bin/patchspace-check-${name} <<EOF
       #!${pkgs.runtimeShell}
-      exec patchbay-repair --check ${json}
+      exec patchspace-repair --check ${json}
       EOF
-      chmod +x $out/bin/patchbay-check-${name}
+      chmod +x $out/bin/patchspace-check-${name}
     '';
 
   # The panel file the daemon reads.  `mode = read-only` + the `:ro` panel dir
   # is what makes this genuinely declarative: the daemon never writes it back,
   # and `Reset` in the GUI re-applies exactly this content.
   panelFile = name: panel:
-    pkgs.writeText "patchbay-panel-${name}.json" (builtins.toJSON {
+    pkgs.writeText "patchspace-panel-${name}.json" (builtins.toJSON {
       type = "panel";
       mode = "read-only";
       label = panel.label;
@@ -220,7 +220,7 @@ let
       config = (panelConfig panel) // { panels = panel.children; };
     });
 
-  panelsDir = pkgs.runCommand "patchbay-panels" {
+  panelsDir = pkgs.runCommand "patchspace-panels" {
     # The validated config *is* the config the daemon loads: an invalid panel
     # fails the build here rather than half-loading at runtime.
     buildInputs = lib.optionals cfg.validate (lib.mapAttrsToList panelCheck panels);
@@ -232,7 +232,18 @@ let
 
   socketArgs = lib.optionals (cfg.socket != null) [ "--socket" (toString cfg.socket) ];
 
-  panelDirArgs = [ "--panel-dir" "${panelsDir}:ro" ];
+  # The daemon *replaces* its default panel directory as soon as one
+  # `--panel-dir` is given, so the conventional (imperative) directory has to
+  # be passed explicitly here - otherwise enabling this module would hide the
+  # panels the GUI makes by hand.  The generated declarative directory goes
+  # last: later dirs shadow earlier ones, so a panel defined in Nix wins over
+  # a file with the same stem anywhere else.
+  panelDirArgs = lib.concatMap (d: [ "--panel-dir" d ]) cfg.panelDirs
+    ++ [ "--panel-dir" "${panelsDir}:ro" ];
+
+  rootPanelArgs = lib.optionals (cfg.rootPanel != null) [
+    "--root-panel" (toString cfg.rootPanel)
+  ];
 
   # `type` may be omitted on an override (it comes from the import), so the
   # merged result is what has to have one for every node.  Reported as a
@@ -250,15 +261,18 @@ let
   ) (builtins.attrNames panels);
 
   unit = {
-    description = "Patch Space daemon (PipeWire patchbay)";
+    description = "Patch Space daemon (PipeWire patchspace)";
     after = [ "pipewire.service" "wireplumber.service" ];
     wants = [ "pipewire.service" "wireplumber.service" ];
-    execStartPre = "${pkgs.coreutils}/bin/mkdir -p ${cfg.stateDir}";
+    # Only needed when a root panel is configured somewhere the daemon
+    # wouldn't have created for itself (its own default lives under ~/.cache,
+    # which already exists).
+    execStartPre = lib.optionals (cfg.rootPanel != null) [
+      "${pkgs.coreutils}/bin/mkdir -p ${builtins.dirOf (toString cfg.rootPanel)}"
+    ];
     execStart = concatStringsSep " " ([
-      "${cfg.package}/bin/patchbay-daemon"
-    ] ++ socketArgs ++ panelDirArgs ++ [
-      "--root-panel" cfg.rootPanel
-    ] ++ cfg.extraArgs);
+      "${cfg.package}/bin/patchspace-daemon"
+    ] ++ socketArgs ++ panelDirArgs ++ rootPanelArgs ++ cfg.extraArgs);
     restarts = { Restart = "on-failure"; RestartSec = 2; };
     wantedBy = [ "default.target" ];
   };
@@ -270,43 +284,61 @@ in
   # the config it is about to load, and a rebuild lands a *new* store path in
   # ExecStart - which is what restarts the daemon with the new panels.
 
-  options.services.patchbay = {
+  options.services.patchspace = {
     enable = mkEnableOption "the Patch Space daemon (and its declarative panels)";
 
     package = mkOption {
       type = types.package;
       default = defaultDaemon;
-      defaultText = literalExpression "patchbay-daemon from this flake";
+      defaultText = literalExpression "patchspace-daemon from this flake";
       description = "The daemon to run (needs pw-cli/pw-cat/wpctl on PATH).";
     };
 
     socket = mkOption {
       type = types.nullOr types.str;
       default = null;
-      example = "%t/patchbay.sock";
+      example = "%t/patchspace.sock";
       description = ''
         Command-API socket.  `null` keeps the daemon's own default
-        (`/tmp/patchbay.sock`), which is what the GUI and the CLI tools
+        (`/tmp/patchspace.sock`), which is what the GUI and the CLI tools
         connect to out of the box.  Change it and they all need
-        `PATCHBAY_SOCKET` in the session environment - the GUI is a client
+        `PATCHSPACE_SOCKET` in the session environment - the GUI is a client
         and has to be pointed at the same path.
       '';
     };
 
-    stateDir = mkOption {
-      type = types.str;
-      default = "%S/patchbay";
+    panelDirs = mkOption {
+      type = types.listOf types.str;
+      default = [ "%h/.local/share/patchspace/panels:rw" ];
+      example = literalExpression ''
+        [
+          "%h/.local/share/patchspace/panels:rw"
+          "/etc/patchspace/panels:ro"
+        ]
+      '';
       description = ''
-        Where the root panel (the session autosave: placements and nodes made
-        in the GUI) lives.  Config is in the store; this is the state.
+        Panel directories to load, in the daemon's own `PATH[:rw|:ro]` form:
+        searched in order, later dirs shadow earlier ones.  The generated
+        declarative directory is always appended **last and read-only**, so a
+        panel written in Nix wins over a file with the same stem anywhere else.
+
+        The default is the daemon's conventional directory - where the GUI
+        keeps the panels you make by hand - because handing the daemon any
+        `--panel-dir` at all replaces its built-in default.  Pass `[]` to load
+        nothing but the declarative panels.
       '';
     };
 
     rootPanel = mkOption {
-      type = types.str;
-      default = "${cfg.stateDir}/last_session.json";
-      defaultText = literalExpression ''"''${cfg.stateDir}/last_session.json"'';
-      description = "Path of the root panel file.";
+      type = types.nullOr types.str;
+      default = null;
+      description = ''
+        Root panel file: the session autosave (placements, plus any node you
+        added by hand instead of declaring it here).  `null` leaves the daemon's
+        own default (`~/.cache/patchspace/last_session.json`) alone, so the
+        session you have been building in the GUI stays where it is; set it to
+        keep that state somewhere else (e.g. `"%S/patchspace/last_session.json"`).
+      '';
     };
 
     imports = mkOption {
@@ -390,9 +422,9 @@ in
   };
 
   config = mkIf cfg.enable {
-    services.patchbay.panelsDir = panelsDir;
+    services.patchspace.panelsDir = panelsDir;
 
-    systemd.user.services.patchbay =
+    systemd.user.services.patchspace =
       if homeManager then {
         # home-manager names the INI sections directly.
         Unit = {
@@ -401,7 +433,7 @@ in
           Wants = unit.wants;
         };
         Service = {
-          ExecStartPre = [ unit.execStartPre ];
+          ExecStartPre = unit.execStartPre;
           ExecStart = unit.execStart;
           inherit (unit.restarts) Restart RestartSec;
         };
@@ -414,7 +446,7 @@ in
           Wants = unit.wants;
         };
         serviceConfig = {
-          ExecStartPre = [ unit.execStartPre ];
+          ExecStartPre = unit.execStartPre;
           ExecStart = unit.execStart;
           inherit (unit.restarts) Restart RestartSec;
         };
@@ -430,7 +462,7 @@ in
       {
         assertion = typelessNodes == "";
         message = ''
-          services.patchbay declares node(s) with no type, and no import
+          services.patchspace declares node(s) with no type, and no import
           provides one: ${typelessNodes}
         '';
       }
@@ -439,7 +471,7 @@ in
           || mainPanel.edges != [ ] || mainPanel.groups != [ ]
           || mainPanel.children != [ ];
         message = ''
-          services.patchbay is enabled but declares nothing: give it
+          services.patchspace is enabled but declares nothing: give it
           `panels.<name>` (or the top-level `imports`/`nodes`/`edges`) to
           configure.
         '';

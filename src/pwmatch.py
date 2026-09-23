@@ -80,9 +80,15 @@ SOURCE_MEDIA_CLASSES = (
 )
 
 # Every node.name prefix this project creates objects under.  Also the
-# basis of is_patchbay_owned() below, which the External Only classifier
-# uses to filter PatchBay's own plumbing out of a bundle.
-PATCHBAY_OWNED_PREFIXES = (
+# basis of is_patchspace_owned() below, which the External Only classifier
+# uses to filter Patch Space's own plumbing out of a bundle.
+PATCHSPACE_OWNED_PREFIXES = (
+    "patchspace_",
+    # The pre-rename prefix (PatchBay -> Patch Space).  Still listed on
+    # purpose: a session that was running before the rename left objects
+    # named ``patchbay_*`` behind, and they have to be recognised as ours -
+    # otherwise the startup sweep can't reap them and an External Only
+    # bundle starts leaking our own plumbing into "the rest of the world".
     "patchbay_",
     "echo_cancel_node_",
     "light_noise_cancel_node_",
@@ -99,13 +105,20 @@ PATCHBAY_OWNED_PREFIXES = (
 
 # The built-in virtual devices' exact node.names.  Mixed-case and
 # space-y on purpose (they are user-visible devices), and every piece
-# of their plumbing merely *starts with* one of them ("PatchBay_sink",
-# "PatchBay Mic_sink", ...) - hence the prefix match below.
-PATCHBAY_BUILTIN_NAMES = ("PatchBay", "PatchBay Mic")
+# of their plumbing merely *starts with* one of them ("Patch Space_sink",
+# "Patch Space Mic_sink", ...) - hence the prefix match below.
+PATCHSPACE_BUILTIN_NAMES = (
+    "Patch Space",
+    "Patch Space Mic",
+    # Pre-rename device names, same reasoning as the prefix list above: the
+    # old built-in sink/mic may still exist in a session this daemon adopts.
+    "PatchBay",
+    "PatchBay Mic",
+)
 
 
-def is_patchbay_owned(props: dict) -> bool:
-    """Whether a live node is one of PatchBay's own objects - a built-in
+def is_patchspace_owned(props: dict) -> bool:
+    """Whether a live node is one of Patch Space's own objects - a built-in
     virtual device, an effect dummy/keepalive, a module stream - rather
     than some external app or hardware device.
 
@@ -121,9 +134,9 @@ def is_patchbay_owned(props: dict) -> bool:
         return True
     if name.endswith("_keepalive"):
         return True
-    if any(name.startswith(prefix) for prefix in PATCHBAY_OWNED_PREFIXES):
+    if any(name.startswith(prefix) for prefix in PATCHSPACE_OWNED_PREFIXES):
         return True
-    return any(name.startswith(builtin) for builtin in PATCHBAY_BUILTIN_NAMES)
+    return any(name.startswith(builtin) for builtin in PATCHSPACE_BUILTIN_NAMES)
 
 
 # groups[group_name][channel] -> port id

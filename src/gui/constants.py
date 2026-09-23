@@ -1,12 +1,12 @@
 """
 constants.py
-Shared timing / limit constants for the PatchBay GTK client.
+Shared timing / limit constants for the Patch Space GTK client.
 """
 
 import os
 
-SOCKET_PATH = os.environ.get("PATCHBAY_SOCKET") or "/tmp/patchbay.sock"
-# ^ $PATCHBAY_SOCKET (the daemon's --socket/`PATCHBAY_SOCKET`) lets a second
+SOCKET_PATH = os.environ.get("PATCHSPACE_SOCKET") or "/tmp/patchspace.sock"
+# ^ $PATCHSPACE_SOCKET (the daemon's --socket/`PATCHSPACE_SOCKET`) lets a second
 # daemon - another user, a test instance, a systemd user service whose socket
 # belongs in $XDG_RUNTIME_DIR - coexist with the default one.  The GUI both
 # connects to this path and hands it to any daemon it spawns (the child
@@ -17,7 +17,7 @@ SOCKET_PATH = os.environ.get("PATCHBAY_SOCKET") or "/tmp/patchbay.sock"
 # The daemon loads it itself at start-up now (no "Import Last Session"
 # button); declared nodes live in the declarative directories, not here.
 # Kept only in case the GUI ever needs to *display* the path.
-SESSION_CACHE_PATH = os.path.expanduser("~/.cache/patchbay/last_session.json")
+SESSION_CACHE_PATH = os.path.expanduser("~/.cache/patchspace/last_session.json")
 
 REFRESH_INTERVAL_MS = 400
 POLL_RESPONSES_MS = 50
@@ -56,7 +56,7 @@ LAYOUT_SETTLE_EPSILON = 0.05
 # Canvas background opacity, 0..1.  1.0 = fully opaque (default); < 1 paints
 # the graph background at that alpha so the desktop shows faintly through the
 # grid only.  Set from the ``--canvas-opacity`` command-line option
-# (patchbay_gui.py).  When < 1 the window surface and the immediate canvas
+# (patchspace_gui.py).  When < 1 the window surface and the immediate canvas
 # containers are made transparent, the app chrome (headerbar, toolbars, side
 # panels, console) is forced opaque via ``.opaque-chrome`` and the CSD
 # shadow/rounded corners are removed - so only the grid is see-through and

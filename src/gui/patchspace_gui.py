@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-patchbay_gui.py
+patchspace_gui.py
 
-Entrypoint for the PatchBay GTK4 client. Run this against a running
-patchbay daemon (main.py) - it talks to it over the Unix socket at
-constants.SOCKET_PATH (default /tmp/patchbay.sock, or $PATCHBAY_SOCKET).
+Entrypoint for the Patch Space GTK4 client. Run this against a running
+patchspace daemon (main.py) - it talks to it over the Unix socket at
+constants.SOCKET_PATH (default /tmp/patchspace.sock, or $PATCHSPACE_SOCKET).
 """
 import sys
 
@@ -18,7 +18,7 @@ import constants
 from main_window import MainWindow
 
 
-class PatchBayApp(Gtk.Application):
+class PatchSpaceApp(Gtk.Application):
     def __init__(self):
         super().__init__(application_id="org.patchspace")
         # User-facing program name (window titlebar / task switcher).
@@ -75,7 +75,7 @@ def main():
                 file=sys.stderr,
             )
             raise SystemExit(2)
-    app = PatchBayApp()
+    app = PatchSpaceApp()
     app.run(argv)
 
 

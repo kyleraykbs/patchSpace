@@ -7,7 +7,7 @@ long-running ``pw-dump -m`` process.  Also owns the graph-mutation verbs
 objects/helpers from uncleanly-killed previous daemon runs.
 
 Notable simplification over earlier versions: the daemon's built-in
-"PatchBay" sink and "PatchBay Mic" are no longer constructed here.
+"Patch Space" sink and "Patch Space Mic" are no longer constructed here.
 They are ordinary supervised virtual-device nodes like any user-created
 one (see pwnodes.py / main.py), so this module contains no virtual
 sink/mic lifecycle code at all - one less source of state.
@@ -109,7 +109,7 @@ def _name_matches_marker(name: str, marker: str) -> bool:
         can never spill onto a differently named node, and
       * an **owned prefix** - the daemon's ``_OWNED_PREFIXES`` and the
         startup sweep markers built from them, all ending in ``_``
-        (``noise_cancel_node_``, ``patchbay_``, ...).  These are not
+        (``noise_cancel_node_``, ``patchspace_``, ...).  These are not
         backing names, so they must stay a plain prefix match; scoping
         them like a backing name made every owned object invisible to
         the crash-recovery sweep, so a crashed run's stale echo/noise

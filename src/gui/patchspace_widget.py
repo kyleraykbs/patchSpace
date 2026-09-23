@@ -3958,7 +3958,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         below, so a row can never be drawn without also being
         clickable."""
         ntype = node["type"]
-        if ntype in ("patchbay_device", "patchbay_mic_device"):
+        if ntype in ("patchspace_device", "patchspace_mic_device"):
             # Speaker Line / Mic Line nodes always show the shared
             # built-in device's volume + lock.
             return ["volume"]
@@ -3992,7 +3992,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     def _has_force_default(node):
         """Only the built-in sink/mic line nodes carry the force-default
         toggle (hardware devices don't)."""
-        return node.get("type") in ("patchbay_device", "patchbay_mic_device")
+        return node.get("type") in ("patchspace_device", "patchspace_mic_device")
 
     def _volume_row_rects(self, nid):
         """(slider_rect, force_rect_or_None, lock_rect) for `nid`'s volume
@@ -5222,7 +5222,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     def _draw_lock_button(self, cr, x, y, w, h, locked):
         """Small padlock at the right of a volume row.  Filled amber when
-        locked (PatchBay re-asserts its volume every tick), a dim outline
+        locked (Patch Space re-asserts its volume every tick), a dim outline
         when unlocked (the device's own volume is left alone)."""
         color = (0.88, 0.70, 0.30) if locked else (0.5, 0.5, 0.53)
         cx = x + w / 2.0
@@ -9693,7 +9693,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             config["device_label"] = (
                 "Virtual Speaker" if node_type == "virtual_speaker" else "Virtual Mic"
             )
-        elif node_type in ("patchbay_device", "patchbay_mic_device"):
+        elif node_type in ("patchspace_device", "patchspace_mic_device"):
             # No config beyond the generic (de-duplicated) label set
             # above: any number of Speaker/Mic Line nodes may exist and
             # they all reference the same built-in virtual device.

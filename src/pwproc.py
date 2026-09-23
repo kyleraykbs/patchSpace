@@ -1,7 +1,7 @@
 """
 pwproc.py
 
-The low-level building blocks every "node" in the patchbay is made of.
+The low-level building blocks every "node" in the patchspace is made of.
 
 This module deliberately contains *no* knowledge of the patch graph, of
 matching, or of routing.  It is the ownership/supervision substrate:
