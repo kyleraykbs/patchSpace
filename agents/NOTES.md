@@ -368,3 +368,11 @@ gesture accepts; tested only structurally (no touchscreen here).
   why no legacy edge is dropped as a bad port.
 * A `WidgetPaintable` needs the widget allocated; a *GTK popover* still can't be
   snapshotted offscreen.  The canvas renders (cairo) are the way to check node faces.
+
+* **Exclude means silence** (`PatchSpace._sync_silenced`): a Filter with `exclude` on
+  records what it dropped each sync; those streams lose every link patchspace didn't
+  create, and get them back when they are no longer excluded.  Without it, "exclude" only
+  removed the graph's own link and the app kept playing through the session manager's.
+* `Bundle -> Audio` is dummy-backed now (members sum into its internal sink, output = the
+  monitor), so its downstream is stable across bundle changes.  Its backing name default
+  is `bundle_audio_<id>`.

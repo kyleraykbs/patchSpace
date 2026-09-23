@@ -407,10 +407,14 @@ def test_no_classifier_passes_bundle_through():
     assert (beta["FL"], sink["FL"]) in links
 
 
-def test_bundle_to_audio_passes_sources():
+def test_bundle_to_audio_hands_on_through_its_own_sink():
+    """The conversion point resolves to its *own* sink's monitor, not to the
+    bundle's members: that is what makes the wire downstream stable, where
+    changing the members used to re-point it (and re-initialise whatever it
+    fed).  The members are summed into that sink instead."""
     g = FakeGraph()
-    alpha = g.add_source(10, "alpha", app="alpha")
-    sink = g.add_sink(20, "sink1")
+    g.add_source(10, "alpha", app="alpha")
+    g.add_sink(20, "sink1")
     s = PatchSpace(g)
     s.mark_graph_loaded()
     s.add_node(AllAppsNode("apps"))
@@ -418,6 +422,44 @@ def test_bundle_to_audio_passes_sources():
     s.add_node(SinkNode("snk", "sink1"))
     s.add_edge("apps", "conv")
     s.add_edge("conv", "snk")
+
+    assert isinstance(s.nodes["conv"], BackedNode)
+    assert s._resolve_sources("conv", "out", set()) == [
+        {"nodeName": "bundle_audio_conv"}
+    ]
+    # The member still reaches the node's *input* side (the sink it sums into).
+    assert s._resolve_sources("apps", "out", set()) == [
+        {"mediaClassRegex": "^Stream/Output/Audio$"}
+    ]
+
+
+def test_an_excluded_stream_is_taken_off_its_other_links():
+    """A Filter's Exclude switch has to *silence* what it filters out, not just
+    omit it from that one chain: the session manager links every playback stream
+    to the default sink on its own, which is why excluding an app looked like it
+    did nothing.  Flipping the switch back puts those links back."""
+    g = FakeGraph()
+    alpha = g.add_source(10, "alpha", app="alpha")
+    g.add_source(11, "beta", app="beta")
+    sink = g.add_sink(20, "sink1")
+    # The session manager's own link, straight to the default sink.
+    g.connect(alpha["FL"], sink["FL"])
+    g.connect(alpha["FR"], sink["FR"])
+
+    s = PatchSpace(g)
+    s.mark_graph_loaded()
+    s.add_node(AllAppsNode("apps"))
+    s.add_node(FilterNode("f", exclude=True))
+    s.add_node(AppNameClassifierNode("c", "alpha"))
+    s.add_node(SinkNode("snk", "sink1"))
+    s.add_edge("apps", "f")
+    s.add_edge("c", "f", to_port="filter1")
+    s.add_edge("f", "snk")
+
+    s.sync()
+    assert (alpha["FL"], sink["FL"]) not in g.linked_pairs()
+
+    s.nodes["f"].exclude = False
     s.sync()
     assert (alpha["FL"], sink["FL"]) in g.linked_pairs()
 

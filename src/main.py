@@ -3784,7 +3784,7 @@ class PatchSpaceDaemon:
         if cls in (BundleMergeNode, BundleSplitNode):
             return cls(node_id)
         if cls is BundleToAudioNode:
-            return cls(node_id)
+            return cls(node_id, backing)
         if cls is BundleOutputNode:
             return cls(node_id, backing)
         if cls is SplitterNode:

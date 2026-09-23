@@ -1574,22 +1574,6 @@ class FilterNode(TransparentNode):
         return True
 
 
-class BundleToAudioNode(TransparentNode):
-    """Bundle in -> single audio stream out.
-
-    A convenience conversion point: it resolves its source bundle to the
-    concrete upstream sources, so the rest of the graph can treat it as
-    one ordinary audio source (put it before a gate/effect, or feed one
-    specific sink).  Wires from a bundle output straight into an ordinary
-    audio input already mean the same thing; this node just makes the
-    conversion explicit and nameable."""
-
-    def port_kind(self, port: str, direction: str) -> str:
-        if direction == "in" and port == "in":
-            return "bundle"
-        return "audio"
-
-
 class BundleMergeNode(TransparentNode):
     """Audio (or bundle) in -> one bundle out.
 
@@ -2080,6 +2064,36 @@ class VirtualSpeakerNode(_SinkVolumeMixin, _SingleSinkNode):
         out = super().config_fields()
         out["backing_node_name"] = self.backing_node_name
         return out
+
+
+class BundleToAudioNode(_SingleSinkNode):
+    """Bundle in -> single audio stream out, summed through this node's own sink.
+
+    The bundle's members are mixed into a private internal null sink and the
+    node's *output* is that sink's monitor, so the wire downstream never moves:
+    changing which members the bundle holds re-links the upstream side only,
+    where before the downstream was re-pointed at the new members every time
+    (tearing down and re-initialising whatever it fed).  Straight from a bundle
+    into an ordinary audio input means the same thing; this node makes the
+    conversion explicit and gives it one stable socket.
+
+    The dummy uses the internal non-Pulse media class, so it never shows up as
+    a device in apps (same rule as Bundle Output's and the Splitter's)."""
+
+    MEDIA_CLASS = pwmatch.INTERNAL_MEDIA_CLASS
+
+    def __init__(self, node_id, backing_node_name: Optional[str] = None,
+                 pw_cli_command=("pw-cli",), settle: float = 0.3):
+        _SingleSinkNode.__init__(
+            self, node_id, backing_node_name or f"bundle_audio_{node_id}",
+            pw_cli_command, settle,
+            description=f"Bundle audio: {node_id}",
+        )
+
+    def port_kind(self, port: str, direction: str) -> str:
+        if direction == "in" and port in ("bundle", "in"):
+            return "bundle"
+        return "audio"
 
 
 class BundleOutputNode(OutputNode, _SingleSinkNode):
@@ -3436,6 +3450,11 @@ class PatchSpace:
 
         # edge id -> desired pairs connected as of the last sync.
         self._edge_links: Dict[EdgeId, _DesiredLinks] = {}
+        #: Streams a Filter's Exclude switch matched this pass (rebuilt every
+        #: sync) and the foreign links taken down for them (see
+        #: _sync_silenced).
+        self._excluded_streams: Set[NodeId] = set()
+        self._silenced: Dict[NodeId, List[Tuple[int, int]]] = {}
 
         # Paced wire-up (see _apply_desired_links): pairs whose connect
         # has been issued but not yet confirmed by the live graph,
@@ -4104,6 +4123,48 @@ class PatchSpace:
             return sources
         return []
 
+    def _sync_silenced(self) -> None:
+        """Take down the links of a stream a Filter deliberately filtered out.
+
+        The session manager links every playback stream to the default sink by
+        itself, so an Exclude only ever removed *the graph's* link and the app
+        kept playing - "the filter doesn't work".  A stream the Exclude switch
+        matched, and that no patchspace link carries, has its other links
+        disconnected here; they go back the moment it is no longer excluded.
+        """
+        graph = self.graph
+        mine: Set[Tuple[int, int]] = set()
+        for entry in self._edge_links.values():
+            mine |= set(getattr(entry, "pairs", entry) or ())
+        try:
+            pairs = set(graph.linked_pairs())
+        except Exception:                      # a graph without link info
+            return
+
+        # Forget streams that are gone, and put back what is no longer excluded.
+        for node_id in [n for n in self._silenced if n not in self.nodes]:
+            self._silenced.pop(node_id, None)
+        for node_id in [n for n in self._silenced if n not in self._excluded_streams]:
+            for out_port, in_port in self._silenced.pop(node_id):
+                if (out_port, in_port) not in pairs:
+                    graph.connect(out_port, in_port)
+                    logger.info("Stream %r is no longer excluded: link restored",
+                                node_id)
+
+        for node_id in sorted(self._excluded_streams):
+            if node_id in self._silenced:
+                continue
+            ports = {pid for pid, _data in (graph.ports_for_node(node_id) or {}).items()}
+            foreign = [p for p in pairs if p[0] in ports and p not in mine]
+            for pair in foreign:
+                if graph.disconnect(*pair):
+                    self._silenced.setdefault(node_id, []).append(pair)
+            if self._silenced.get(node_id):
+                logger.info(
+                    "Excluded stream %r: %d link(s) taken down",
+                    node_id, len(self._silenced[node_id]),
+                )
+
     def resolve_sound(self, node_id: NodeId, port: str = "sound",
                       seen: Optional[Set[NodeId]] = None) -> Optional[dict]:
         """The sound reaching ``node_id``'s sound input, as
@@ -4212,6 +4273,11 @@ class PatchSpace:
             matched = all(c.classify(props, side) for c in classifiers)
             if matched != exclude:
                 kept.append(node_id)
+            elif exclude:
+                # What this node's Exclude switch filtered out: the graph stops
+                # routing it, and _sync_silenced stops it playing elsewhere
+                # (the session manager's own link to the default sink).
+                self._excluded_streams.add(node_id)
         return kept
 
     def bundle_side(self, node_id: NodeId,
@@ -4648,6 +4714,7 @@ class PatchSpace:
         # (and therefore which audio edges resolve to a source) depends
         # on them.
         self._refresh_boolean_states()
+        self._excluded_streams.clear()
         graph = self.graph
         desired: Dict[EdgeId, Set[Tuple[int, int]]] = {}
         unresolved: Set[EdgeId] = set()
@@ -4772,6 +4839,7 @@ class PatchSpace:
         # fixed order, each waited on before the next (see
         # _apply_desired_links for why).
         self._apply_desired_links(desired)
+        self._sync_silenced()
 
     def _apply_desired_links(self, desired: Dict[EdgeId, Set[Tuple[int, int]]]) -> None:
         """Create the links in `desired` that aren't live yet.

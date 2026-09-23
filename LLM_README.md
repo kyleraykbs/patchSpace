@@ -339,6 +339,16 @@ so the GUI/repair can never fabricate a connection the daemon rejects.
   rounded rect captioned `INCLUDE`/`EXCLUDE`, see `_draw_filter_mode_button`) keeps the
   *complement* of what the classifiers match, so one node covers "only these" and
   "everything but these" without a second node type.
+* `BundleToAudioNode` (`Bundle -> Audio`) sums the bundle's members into its **own**
+  private internal sink and hands on that sink's *monitor*, so the wire downstream never
+  moves when the members change (before it was transparent, so the downstream was
+  re-pointed at the new members and whatever it fed was torn down and re-initialised).
+  `BundleOutputNode` already worked this way for its sink side.
+* **A Filter's Exclude switch silences what it filters out** (`_sync_silenced`): the graph
+  stops routing those members *and* the links they had from elsewhere (the session
+  manager's own link to the default sink, typically) are disconnected, because otherwise
+  "excluded" only removed the graph's link and the app kept playing.  Flipping the switch
+  back reconnects exactly the links it took down - it never touches anything else.
 * `BundleMergeNode` (Merge Bundle) collects several lines/bundles. Its input sockets are
   dynamic: the daemon reports `bundle_input_ports` (one per inbound line plus a spare), so
   plugging into the spare grows another socket; wiring is the usual mixing-bus union.
