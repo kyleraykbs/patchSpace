@@ -6294,6 +6294,24 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             cr.move_to(text_x, text_y)
             cr.show_text(label)
 
+    def _stop_button_rect(self, nid):
+        """The Stop button a playing player shows: on the read-out row, whose
+        right end the dot and count own."""
+        node = self.nodes[nid]
+        _dot_x, dot_y, _dot_r, _text_right = self._play_indicator_rect(nid)
+        h = 16.0
+        return (node["x"] + self.FIELD_MARGIN, dot_y - h / 2.0, 46.0, h)
+
+    def find_stop_button_at(self, x, y):
+        """The playing node whose Stop button is under the pointer."""
+        for nid, node in self._hit_nodes(x, y, require_ready=False):
+            if int(node.get("playing", 0) or 0) <= 0:
+                continue
+            bx, by, bw, bh = self._stop_button_rect(nid)
+            if bx <= x <= bx + bw and by <= y <= by + bh:
+                return nid
+        return None
+
     def _draw_play_indicator(self, cr, pal, nid, node):
         """Live "is it making sound" read-out for a node whose spec
         declares an indicator: a dot at the bottom-right of the node body
@@ -6317,6 +6335,25 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         cr.arc(dot_x, dot_y, dot_r, 0, 2 * math.pi)
         cr.set_source_rgb(*color)
         cr.fill()
+
+        if count > 0:
+            # Something is running: offer to cut it short (a player's children
+            # end by themselves when the file does).
+            bx, by, bw, bh = self._stop_button_rect(nid)
+            draw_rounded_rect(cr, bx, by, bw, bh, 4)
+            cr.set_source_rgb(*pal["field_bg"])
+            cr.fill_preserve()
+            cr.set_source_rgb(*pal["error"])
+            cr.set_line_width(1.2)
+            cr.stroke()
+            label = "Stop"
+            cr.select_font_face("sans")
+            cr.set_font_size(10)
+            extents = cr.text_extents(label)
+            cr.set_source_rgb(*pal["error"])
+            cr.move_to(bx + (bw - extents.width) / 2 - extents.x_bearing,
+                       by + (bh - extents.height) / 2 - extents.y_bearing)
+            cr.show_text(label)
 
     def _draw_duration_indicator(self, cr, pal, nid, node):
         """How long the file is, bottom-right - the same slot the player's
@@ -6504,7 +6541,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             # cursor doesn't flicker.
             return
 
-        if self.find_impulse_fallback_at(wx, wy) is not None:
+        if self.find_stop_button_at(wx, wy) is not None:
+            self.set_cursor(Gdk.Cursor.new_from_name("pointer", None))
+        elif self.find_impulse_fallback_at(wx, wy) is not None:
             self.set_cursor(Gdk.Cursor.new_from_name("pointer", None))
         elif self.find_clip_knob_at(wx, wy) is not None:
             self.set_cursor(Gdk.Cursor.new_from_name("grab", None))
@@ -6559,6 +6598,16 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         wx, wy = self.to_world(x, y)
 
         # Panel reset button (read-only panels) - re-apply the file state.
+        stop_hit = self.find_stop_button_at(wx, wy)
+        if stop_hit is not None:
+            # Nothing to wait for: a stop is immediate, and the poll confirms.
+            node = self.nodes.get(stop_hit)
+            if node is not None:
+                node["playing"] = 0
+            self.client.send({"command": "stop_sound", "node_id": stop_hit})
+            self.queue_draw()
+            return
+
         impulse_hit = self.find_impulse_fallback_at(wx, wy)
         if impulse_hit is not None:
             self.client.send({"command": "impulse", "node_id": impulse_hit})

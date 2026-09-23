@@ -352,3 +352,21 @@ def test_session_repair_flags_a_mismatched_impulse_wire():
         "groups": [],
     }
     assert any(i.code == "port-kind" for i in validate(cfg))
+
+
+def test_stopping_a_player_cuts_it_short():
+    """The Stop button: a fired sound can be cut short, and the count the GUI
+    shows goes back to zero."""
+    d, fx = _daemon_with_pair()
+    _ok(d, command="impulse", node_id="btn")
+    _ok(d, command="impulse", node_id="btn")   # overlap off: restarts
+    assert fx.playing == 1
+
+    resp = _ok(d, command="stop_sound", node_id="fx")
+    assert resp["stopped"] == 1
+    assert fx.playing == 0
+    assert _ok(d, command="get_nodes")["nodes"]["fx"]["playing"] == 0
+
+    # Stopping something that isn't a player is an error, not a crash.
+    assert d.handle_command({"command": "stop_sound", "node_id": "btn"})["status"] == "error"
+    assert d.handle_command({"command": "stop_sound"})["status"] == "error"

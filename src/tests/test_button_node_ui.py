@@ -18,8 +18,11 @@ sys.path.insert(0, os.path.join(
 
 
 class _Client:
+    def __init__(self):
+        self.sent = []
+
     def send(self, cmd):
-        pass
+        self.sent.append(cmd)
 
     def is_connected(self):
         return True
@@ -49,7 +52,8 @@ def _widget(node):
         pytest.skip("no display available for GTK")
     from gui.patchspace_widget import PatchSpaceGraphWidget
 
-    w = PatchSpaceGraphWidget(_Client())
+    client = _Client()
+    w = PatchSpaceGraphWidget(client)
     w.physics_active = False
     w.layout_awake = False
     w.pan_x, w.pan_y, w.zoom = 0.0, 0.0, 1.0
@@ -60,7 +64,7 @@ def _widget(node):
     # the node at alpha 0 and probe the canvas instead of the face.
     w._anim_seen = set(w.nodes)
     w._node_alpha = {nid: 1.0 for nid in w.nodes}
-    return w
+    return w, client
 
 
 def _render_centre_pixel(w, x, y):
@@ -78,7 +82,7 @@ def _render_centre_pixel(w, x, y):
 
 
 def test_the_face_says_trigger_unless_the_node_was_renamed():
-    w = _widget(_button_node())
+    w, _ = _widget(_button_node())
     assert w._impulse_label({"type": "button", "label": "Button"}) == "Trigger"
     assert w._impulse_label({"type": "button", "label": ""}) == "Trigger"
     # A label the user set is theirs to keep.
@@ -86,7 +90,7 @@ def test_the_face_says_trigger_unless_the_node_was_renamed():
 
 
 def test_the_face_changes_color_while_hovered():
-    w = _widget(_button_node())
+    w, _ = _widget(_button_node())
     bx, by, bw, bh = w._gate_rect("b")
     # Inside the face, clear of the caption in the middle.
     probe = (bx + 8, by + bh / 2.0)
@@ -107,7 +111,7 @@ def test_an_unwired_impulse_input_gets_its_own_face():
     player can be tested without a Button - and it goes away once wired."""
     node = _button_node("pl")
     node.update({"type": "sound_player", "label": "Sound Player", "playing": 0})
-    w = _widget(node)
+    w, _ = _widget(node)
     fx, fy, fw, fh = w._impulse_face_rect("pl")
     assert w.find_impulse_fallback_at(fx + fw / 2, fy + fh / 2) == "pl"
 
@@ -117,3 +121,21 @@ def test_an_unwired_impulse_input_gets_its_own_face():
         "to_port": "impulse",
     }
     assert w.find_impulse_fallback_at(fx + fw / 2, fy + fh / 2) is None
+
+
+def test_a_playing_player_offers_a_stop_button():
+    """Stop appears on the read-out row only while something is playing, and
+    pressing it tells the daemon (and clears the count immediately)."""
+    node = _button_node("pl")
+    node.update({"type": "sound_player", "label": "Sound Player", "playing": 2})
+    w, client = _widget(node)
+
+    bx, by, bw, bh = w._stop_button_rect("pl")
+    assert w.find_stop_button_at(bx + bw / 2, by + bh / 2) == "pl"
+
+    w.on_click(None, 1, bx + bw / 2, by + bh / 2)
+    assert client.sent[-1] == {"command": "stop_sound", "node_id": "pl"}
+    assert w.nodes["pl"]["playing"] == 0
+
+    # Nothing playing: no button to press.
+    assert w.find_stop_button_at(bx + bw / 2, by + bh / 2) is None

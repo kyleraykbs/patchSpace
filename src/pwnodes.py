@@ -1922,6 +1922,22 @@ class SoundPlayerNode(_SingleSinkNode):
             self._stop_players()
         self._start_player(sound)
 
+    def stop(self) -> int:
+        """Stop everything this node is playing and return how many streams
+        that was - the Stop button on a player, which is the only way to cut a
+        long sound short once it has been fired."""
+        playing = self.playing
+        self._stop_players()
+        return playing
+
+    def stop(self) -> int:
+        """Stop everything this node is playing and return how many streams that
+        was - the Stop button on a player, which is the only way to cut a long
+        sound short once it has been fired."""
+        playing = self.playing
+        self._stop_players()
+        return playing
+
     @property
     def playing(self) -> int:
         """How many playback streams are running right now.  Serialized

@@ -4255,6 +4255,44 @@ class PatchSpaceDaemon:
             self._dirty = True
             return {"status": "ok"}
 
+    def _cmd_stop_sound(self, cmd: dict) -> dict:
+        """Stop whatever a Sound Player is playing (its Stop button).
+
+        A player's children exit on their own when the file ends, so this is
+        for cutting one short - the count it returns is what the GUI was
+        showing, so a stop that had nothing to stop is visible as a 0."""
+        node_id = cmd.get("node_id")
+        if not node_id:
+            return {"status": "error", "message": "node_id required"}
+        node = self.space.nodes.get(node_id)
+        if not isinstance(node, SoundPlayerNode):
+            return {
+                "status": "error",
+                "message": f"Node {node_id} is not a sound player",
+            }
+        with self._lock:
+            stopped = node.stop()
+        return {"status": "ok", "stopped": stopped}
+
+    def _cmd_stop_sound(self, cmd: dict) -> dict:
+        """Stop whatever a Sound Player is playing (its Stop button).
+
+        A player's children exit on their own when the file ends, so this is
+        for cutting one short - the count it returns is what the GUI was
+        showing, so a stop with nothing to stop reads as a 0."""
+        node_id = cmd.get("node_id")
+        if not node_id:
+            return {"status": "error", "message": "node_id required"}
+        node = self.space.nodes.get(node_id)
+        if not isinstance(node, SoundPlayerNode):
+            return {
+                "status": "error",
+                "message": f"Node {node_id} is not a sound player",
+            }
+        with self._lock:
+            stopped = node.stop()
+        return {"status": "ok", "stopped": stopped}
+
     def _cmd_impulse(self, cmd: dict) -> dict:
         """Fire one impulse out of a Button node (see PatchSpace.pulse).
 
@@ -5255,6 +5293,10 @@ class PatchSpaceDaemon:
                 response = self._cmd_remove_edge(cmd)
             elif command == "set_gate":
                 response = self._cmd_set_gate(cmd)
+            elif command == "stop_sound":
+                response = self._cmd_stop_sound(cmd)
+            elif command == "stop_sound":
+                response = self._cmd_stop_sound(cmd)
             elif command == "impulse":
                 response = self._cmd_impulse(cmd)
             elif command == "set_volume":
