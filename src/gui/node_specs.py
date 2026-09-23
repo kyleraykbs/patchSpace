@@ -128,6 +128,7 @@ class NodeSpec:
         "setting_tooltips",
         "toggle",
         "indicator",
+        "picker",
     )
 
     def __init__(
@@ -151,6 +152,7 @@ class NodeSpec:
         setting_tooltips: Optional[Dict[str, str]] = None,
         toggle: Optional[tuple] = None,
         indicator: Optional[str] = None,
+        picker: bool = False,
     ):
         self.label = label
         self.inputs = inputs
@@ -217,6 +219,11 @@ class NodeSpec:
         # from the daemon's per-node `playing`).  Purely a display - there
         # is nothing to click.
         self.indicator = indicator
+        # Whether the inline field gets a small folder button beside it
+        # that opens the desktop's file chooser (the Sound Effect's path).
+        # The daemon's node stores whatever path that returns - including
+        # the "~"-relative form the widget writes back.
+        self.picker = bool(picker)
         # Optional list of settings-dialog-only rows, each either a
         # 3-tuple (attr, label, kind) or a 4-tuple (attr, label, kind,
         # extra) when the widget needs more than a label - kind is one
@@ -471,9 +478,11 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
         impulse_inputs=["in"],
         # The Stack switch is on the node body (above the path box); the
         # green dot + play count beside the path box is the live read-out
-        # (see patchspace_widget._draw_play_indicator).
+        # (see patchspace_widget._draw_play_indicator), and the folder
+        # button there opens the desktop file chooser.
         toggle=("overlap", "Stack"),
         indicator="playing",
+        picker=True,
         settings=[
             ("path", "Sound file:", "text"),
             ("overlap", "Stack (don't restart)", "bool"),
@@ -847,7 +856,9 @@ NODE_DESCRIPTIONS: Dict[str, str] = {
 # show_settings_dialog), so every row has a tooltip.
 SETTING_TOOLTIPS: Dict[str, Dict[str, str]] = {
     "sound_effect": {
-        "path": "Path to the audio file played on each impulse.",
+        "path": "Path to the audio file played on each impulse. A leading "
+        "~ means your home directory; the folder button beside the box "
+        "picks a file for you.",
         "overlap": "On: a new impulse starts the sound again while the "
         "current one keeps playing, so they stack. Off: it restarts the "
         "file.",

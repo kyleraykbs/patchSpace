@@ -191,9 +191,17 @@ def open_file(
     parent: Optional[Gtk.Window],
     title: str,
     on_path: Callable[[Optional[str]], None],
+    folder: str = "",
+    filters: Optional[List[tuple]] = None,
 ) -> None:
     """Ask the user which existing file to open. Same on_path contract
-    as save_file()."""
+    as save_file().
+
+    ``folder`` (an absolute directory) opens the picker there, so a node
+    with a path already set starts browsing where that file lives.
+    ``filters`` is a list of ``(label, [(glob, ...)])`` - the desktop's
+    own "these file types" dropdown, e.g. ``[("Audio", ["*.wav",
+    "*.flac"])]``; omit it for an unfiltered picker."""
 
     def handle_paths(paths):
         on_path(paths[0] if paths else None)
@@ -202,4 +210,17 @@ def open_file(
         logger.warning("File chooser portal unavailable, falling back: %s", message)
         _manual_path_dialog(parent, title, "_Open", "", on_path)
 
-    _call_portal("OpenFile", title, {}, handle_paths, handle_unavailable)
+    options: dict = {}
+    if folder:
+        # The portal takes a path as a byte array with a trailing NUL.
+        options["current_folder"] = GLib.Variant("ay", folder.encode() + b"\x00")
+    if filters:
+        # a(sa(us)): (label, [(type, pattern)]); type 0 = glob pattern.
+        options["filters"] = GLib.Variant(
+            "a(sa(us))",
+            [
+                (label, [(0, pattern) for pattern in patterns])
+                for label, patterns in filters
+            ],
+        )
+    _call_portal("OpenFile", title, options, handle_paths, handle_unavailable)

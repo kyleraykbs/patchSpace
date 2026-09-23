@@ -164,13 +164,19 @@ each node it reaches (once per node, cycle-safe). `sync_locked` skips control-pl
 draws the socket as a filled dot with a short-dashed wire (`IMPULSE_DASH`). The Sound
 Effect is a `_SingleSinkNode` whose dummy sink is the node's *socket* (its audio out is
 the dummy's monitor); each impulse spawns a short-lived
-`pw-cat --playback <path> --target <dummy>`. Its `overlap` flag (the node's on-body
-**Stack** switch) picks restart-on-retrigger (default) vs stacking takes. Those playback
-children are deliberately *not* `backings` - a player exits when the file ends, and a
-naturally-dead backing is what `dead_backings()`/health call a fault, so they are handed
-over by `BackedNode.owned_backings()` (used by both teardown paths) and retired by
-`refresh_live()` on the supervision tick. `playing` (live player count) is serialized for
-the node's green dot + count read-out.
+`pw-cat --playback <path> --target <dummy>`. Its `path` may start with `~` - stored as
+written (so it stays portable across sessions, panels and machines) and expanded by
+`os.path.expanduser` in `_start_player`, because nothing in pw-cat's argv is a shell. The
+node's folder button (`spec.picker`) opens the desktop portal's file chooser (the same
+`open_file` helper Import uses - against the desktop that *is* the file manager's open
+dialog, restricted to the formats pw-cat/libsndfile can decode) and writes the result back
+home-relative when it is under `$HOME`; a new node's path defaults to `~/`. Its `overlap`
+flag (the node's on-body **Stack** switch) picks restart-on-retrigger (default) vs stacking
+takes. Those playback children are deliberately *not* `backings` - a player exits when the
+file ends, and a naturally-dead backing is what `dead_backings()`/health call a fault, so
+they are handed over by `BackedNode.owned_backings()` (used by both teardown paths) and
+retired by `refresh_live()` on the supervision tick. `playing` (live player count) is
+serialized for the node's green dot + count read-out.
 
 **Effect sandwich (central idea):** every effect is
 ```
@@ -1046,6 +1052,11 @@ approach for pure GUI behavior). "It passed pytest" is not proof an effect works
     plus the count to its left (the Sound Effect's running playback streams, daemon
     `playing`), inside the field row, which gives up `INDICATOR_WIDTH` for it
     (`_field_rect`). Display only - there is nothing to click.
+  - `picker=True` puts a small folder button beside the inline field (between it and the
+    indicator, `_path_picker_rect`) that opens the desktop portal's file chooser via
+    `portal_file_dialog.open_file(..., folder=, filters=)` - the desktop's own file-manager
+    open dialog - and stores the chosen path home-relative (`_home_relative_path`) so the
+    daemon's `~` expansion makes it portable.
 - **Groups merge by local id.** Canvas groups whose id shares a local part (`grp` and
   `file::grp`, or the same id in two declarative files) render as **one** outline with the
   contributing groups' titles **stacked** (each in its own colour), via `_merged_groups()` /

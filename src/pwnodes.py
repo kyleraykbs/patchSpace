@@ -1656,6 +1656,11 @@ class SoundEffectNode(_SingleSinkNode):
     sound instead of stacking takes; on lets impulses stack up and mix in
     the dummy (the node's Stack switch).
 
+    ``path`` is stored exactly as the user wrote it and may start with
+    ``~`` (the GUI's folder button stores a home-relative path so the
+    value survives a move); the expansion happens at play time, in
+    ``_start_player``.
+
     The playback children are deliberately kept out of ``backings``: a
     player exits on its own the moment the file ends, and a backing that
     died naturally is exactly what ``dead_backings()`` reports - the node
@@ -1720,6 +1725,14 @@ class SoundEffectNode(_SingleSinkNode):
     def _start_player(self, path: str) -> None:
         name = f"{self.backing_node_name}_playback_{self._player_seq}"
         self._player_seq += 1
+        # `~` is expanded here rather than at set time: the stored value
+        # stays portable (it round-trips through sessions and panel files
+        # as the user wrote it, usually "~/..."), and pw-cat is handed a
+        # real path - nothing in that argv is a shell, so a literal `~`
+        # would be looked for as a directory of that name.  Only a leading
+        # `~`/`~user` expands (os.path.expanduser); `$VARS` deliberately do
+        # not, since there is no shell in the chain to be predictable about.
+        resolved = os.path.expanduser(path)
         # node.name is pinned so the stream is identifiable (and reads as
         # patchbay-owned plumbing - see pwmatch.is_patchbay_owned); the
         # *file path* is deliberately not put into node.description,
@@ -1728,14 +1741,14 @@ class SoundEffectNode(_SingleSinkNode):
         command = (
             "pw-cat", "--playback", "--target", self.backing_node_name,
             "--properties", f'{{ node.name = "{name}" }}',
-            path,
+            resolved,
         )
         proc = OwnedPwProcess(name, self._pw_cli_command, self.PLAYER_SETTLE_S)
         if not proc.create(command, quiet=True):
             logger.warning(
                 "Sound effect %r could not play %r into %r (missing file, an "
                 "unsupported format, or the node isn't up yet)",
-                self.id, path, self.backing_node_name,
+                self.id, resolved, self.backing_node_name,
             )
             return
         self._players.append(proc)

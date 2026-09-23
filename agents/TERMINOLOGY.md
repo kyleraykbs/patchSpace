@@ -37,6 +37,8 @@ that isn't here, ask (and then add it).  When a mapping here is a guess, it is m
 | "checkbox" / "on off switch type deal" | the segmented two-segment toggle: `_draw_gate_toggle`, `_draw_boolean_toggle`, and the compact `_draw_toggle_row` (a spec's `toggle`) |
 | "the button face / press it" | `ButtonNode`'s face: `control="impulse"`, `_draw_impulse_button` |
 | "path string box" / "text box" | the inline text field: `spec.field` + `_draw_text_field` |
+| "folder icon" / "file picker" / "open my fm" | `spec.picker` → `_draw_path_picker` → the portal chooser (`portal_file_dialog.open_file`), i.e. the desktop's file-manager open dialog |
+| "~/" (in a path) | stored as written, expanded by the daemon at play time (`os.path.expanduser`) |
 | "slider" | `control="volume" / "gain" / "wetdry" / "sensitivity"` |
 | "the green dot / the number" | `spec.indicator="playing"` → `_draw_play_indicator` (`playing` count) |
 | "gear / hamburger / three dots" | settings gear (`show_settings_dialog`), panel hamburger, node menu |

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import cairo
 import json
+import os
 import constants
 import logging
 import math
@@ -163,6 +164,18 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     # Room reserved on the right of a node's inline field for its live
     # status read-out (a dot + count) - see _play_indicator_rect.
     INDICATOR_WIDTH = 30
+    # The folder button a `picker` spec draws in the field row, between the
+    # field and the status read-out (see _path_picker_rect), and the file
+    # types it offers.  The globs are the ones the sound-effect player can
+    # actually open (pw-cat reads through libsndfile + MP3 - see
+    # SoundEffectNode), so an m4a/aac file libsndfile would refuse isn't
+    # the first thing on offer.
+    PICKER_SIZE = 18
+    PICKER_GAP = 5
+    PICKER_FILE_GLOBS = [
+        "*.wav", "*.flac", "*.ogg", "*.oga", "*.opus", "*.mp3", "*.aiff",
+        "*.aif", "*.au", "*.caf", "*.w64", "*.rf64",
+    ]
     # The gate control is a big centered toggle rather than a small
     # checkbox (see _draw_gate_toggle/_gate_rect), so it claims more
     # of the node body than the generic "has_extra_row" bump other
@@ -852,6 +865,53 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 "property": "boost_db",
                 "value": fraction * 30.0,
             }
+        )
+
+    def _home_relative_path(self, path):
+        """`path` with a leading home directory rewritten to ``~``, so a
+        picked file is stored portably (the daemon expands ``~`` at play
+        time).  Anything outside home is left absolute."""
+        home = os.path.expanduser("~")
+        if home and (path == home or path.startswith(home + os.sep)):
+            return "~" + path[len(home):]
+        return path
+
+    def _open_path_picker(self, nid):
+        """Open the desktop's file chooser for a `picker` field (the Sound
+        Effect's path) and store what comes back.
+
+        Uses the same portal helper the Import/Save actions do: on a
+        desktop that is the file manager's own "open file" dialog, which
+        is the only standard way to ask a file manager for a selection.
+        The picker starts in the directory the node already points at
+        (``~`` expanded), and offers the formats the player can decode."""
+        node = self.nodes.get(nid)
+        if node is None:
+            return
+        current = os.path.expanduser(
+            (node.get("meta", {}).get("path") or "").strip()
+        )
+        folder = os.path.dirname(current) if current else ""
+        if folder and not os.path.isdir(folder):
+            folder = ""
+        if not folder:
+            folder = os.path.expanduser("~")
+
+        def on_chosen(path):
+            if not path:
+                return
+            value = self._home_relative_path(path)
+            node["meta"]["path"] = value
+            self._send_property(nid, "path", value)
+            self.queue_draw()
+            GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
+
+        open_file(
+            self.get_root(),
+            "Choose a Sound File",
+            on_chosen,
+            folder=folder,
+            filters=[("Audio", self.PICKER_FILE_GLOBS)],
         )
 
     def _send_impulse(self, node_id):
@@ -2145,17 +2205,30 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     def _field_rect(self, nid):
         """Geometry of a node's inline text field - single source of truth
         shared by drawing (_draw_text_field), hit-testing (find_field_at)
-        and the live status read-out that shares the field's row on the
-        right for a node that has one (see _play_indicator_rect).  The
-        field gives up INDICATOR_WIDTH there instead of sliding under it."""
+        and the two things that share the field's row on the right: the
+        folder button a `picker` spec draws (_path_picker_rect) and the
+        live status read-out (_play_indicator_rect).  The field gives up
+        their widths instead of sliding under them."""
         node = self.nodes[nid]
         spec = spec_for(node["type"])
         x = node["x"] + self.FIELD_MARGIN
         w = self.NODE_WIDTH - 2 * self.FIELD_MARGIN
+        if spec.picker:
+            w -= self.PICKER_SIZE + self.PICKER_GAP
         if spec.indicator:
-            w -= self.INDICATOR_WIDTH + 6
+            w -= self.INDICATOR_WIDTH
         y = node["y"] + self.node_height(nid) - self.FIELD_HEIGHT - 5
         return (x, y, w, self.FIELD_HEIGHT)
+
+    def _path_picker_rect(self, nid):
+        """Geometry of the folder button in a `picker` spec's field row:
+        right of the field, left of the status read-out, vertically
+        centred in the row - derived from _field_rect so it can't drift
+        from the field it belongs to."""
+        fx, fy, fw, fh = self._field_rect(nid)
+        x = fx + fw + self.PICKER_GAP
+        y = fy + (fh - self.PICKER_SIZE) / 2.0
+        return (x, y, float(self.PICKER_SIZE), float(self.PICKER_SIZE))
 
     def _play_indicator_rect(self, nid):
         """(dot_x, dot_y, dot_r, text_right) for a node's live status
@@ -3854,6 +3927,18 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 return nid
         return None
 
+    def find_path_picker_at(self, x, y):
+        """The folder button a `picker` spec draws beside its field
+        (Sound Effect's path).  Geometry comes from _path_picker_rect, so
+        it matches the drawn button."""
+        for nid, node in self._hit_nodes(x, y):
+            if not spec_for(node["type"]).picker:
+                continue
+            px, py, pw, ph = self._path_picker_rect(nid)
+            if px <= x <= px + pw and py <= y <= py + ph:
+                return nid
+        return None
+
     def find_mute_checkbox_at(self, x, y):
         return self._find_bottom_checkbox_at(
             x,
@@ -4647,6 +4732,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self._draw_impulse_button(cr, nid, node)
         elif spec.field:
             self._draw_text_field(cr, nid, self._field_value(node))
+        if spec.picker:
+            self._draw_path_picker(cr, pal, nid)
 
         # The node-body switch and the live status read-out sit with the
         # inline field, not instead of it, so they are keyed off the spec
@@ -5226,6 +5313,24 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             color,
         )
 
+    def _draw_path_picker(self, cr, pal, nid):
+        """The folder button a `picker` spec draws beside its field: a
+        small outlined square with a folder glyph, in the field row.  It
+        opens the desktop's file chooser (portal_file_dialog.open_file),
+        which is the "pick a file" UI the desktop's own file manager
+        provides - the button is a short-cut to it, exactly like the
+        Import action's."""
+        x, y, w, h = self._path_picker_rect(nid)
+        draw_rounded_rect(cr, x, y, w, h, 4)
+        cr.set_source_rgb(0.14, 0.14, 0.15)
+        cr.fill_preserve()
+        cr.set_source_rgb(0.42, 0.42, 0.45)
+        cr.set_line_width(1)
+        cr.stroke()
+        self._draw_node_icon(
+            cr, "folder-open-symbolic", x, y, self.PICKER_SIZE, pal["subtext"]
+        )
+
     def _draw_toggle_row(self, cr, pal, nid, node):
         """The node-body switch declared by ``spec.toggle`` - an
         (attr, label) the user flips in place (the Sound Effect's Stack
@@ -5431,6 +5536,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             or self.find_fallback_toggle_at(wx, wy) is not None
             or self.find_impulse_button_at(wx, wy) is not None
             or self.find_toggle_switch_at(wx, wy) is not None
+            or self.find_path_picker_at(wx, wy) is not None
             or self.find_three_dots_at(wx, wy) is not None
             or self.find_anchor_icon_at(wx, wy) is not None
             or self.find_settings_gear_at(wx, wy) is not None
@@ -5671,6 +5777,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # The volume slider is intentionally NOT started here - it's a
         # drag gesture, not a click, so it's started in
         # on_drag_begin() instead (see the comment there).
+
+        nid = self.find_path_picker_at(wx, wy)
+        if nid is not None:
+            self._open_path_picker(nid)
+            return
 
         nid = self.find_field_at(wx, wy)
         if nid is not None:
@@ -6566,6 +6677,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             or self.find_fallback_toggle_at(wx, wy) is not None
             or self.find_impulse_button_at(wx, wy) is not None
             or self.find_toggle_switch_at(wx, wy) is not None
+            or self.find_path_picker_at(wx, wy) is not None
             or self.find_three_dots_at(wx, wy) is not None
             or self.find_anchor_icon_at(wx, wy) is not None
             or self.find_settings_gear_at(wx, wy) is not None
@@ -9306,6 +9418,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             # it doesn't match what's installed on their system - see
             # NoiseCancelNode/ReverbNode's docstrings in patchSpace.py.
             config["backing_node_name"] = f"{node_type}_{node_id}"
+        elif node_type == "sound_effect":
+            # Start the path at the home directory (the daemon expands a
+            # leading "~" at play time, and the field's folder button
+            # stores what it picks in the same form), so the box reads as
+            # a path you complete rather than an unexplained blank.
+            config["path"] = "~/"
         elif node_type in ("device_input", "device_output"):
             config["device_name"] = ""
         elif node_type in ("app_input", "app_output"):

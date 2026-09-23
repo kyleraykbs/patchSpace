@@ -91,6 +91,21 @@ pipewire &  ;  wireplumber &
 * `session_repair` validates compatibility through `gui/node_specs` (`port_kind`,
   `ports_compatible`) — the GUI tables *are* the validation source of truth.
 
+## File paths on nodes
+
+* A node that stores a file path (the Sound Effect's `path`) keeps the user's string
+  verbatim - `~` included - and expands it at *use* time with `os.path.expanduser`
+  (`SoundEffectNode._start_player`).  Storing absolute paths would break portability
+  across sessions/panels/machines; nothing in pw-cat's argv is a shell, so a literal `~`
+  has to be expanded somewhere.
+* The desktop "pick a file" dialog is `portal_file_dialog.open_file(parent, title, cb,
+  folder=…, filters=[(label, [globs])])` - the XDG FileChooser portal, which on a real
+  desktop is the file manager's own open dialog (there is no API to drive a file manager
+  to *return* a selection).  The widget writes the result back home-relative
+  (`_home_relative_path`) so the two conventions meet.
+* When smoke-testing anything that opens a picker, **stub `patchspace_widget.open_file`**;
+  clicking a real folder button pops a dialog in the user's session.
+
 ## Style expectations here
 
 * Long "why / what failed before" rationale comments are the house style — do not strip

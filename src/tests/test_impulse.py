@@ -7,6 +7,8 @@ each sync.  These tests drive the daemon command layer directly, with the
 pw-cli/pw-cat process classes faked out so no real PipeWire is touched.
 """
 
+import os
+
 import pytest
 
 import pwnodes
@@ -233,6 +235,23 @@ def test_impulse_command_rejects_a_non_button():
     d, _fx = _daemon_with_pair()
     resp = d.handle_command({"command": "impulse", "node_id": "fx"})
     assert resp["status"] == "error"
+
+
+def test_a_tilde_path_is_expanded_at_play_time():
+    """`~` is stored as written (portable across sessions/panels) and
+    expanded only when pw-cat is handed the path - nothing in that argv is
+    a shell, so a literal `~` would be looked up as a directory name."""
+    d, fx = _daemon_with_pair(path="~/sounds/clang.wav")
+    _ok(d, command="impulse", node_id="btn")
+    assert FakeProc.commands[0][-1] == os.path.join(
+        os.path.expanduser("~"), "sounds", "clang.wav"
+    )
+    # The stored value is untouched, and only a *leading* ~ expands.
+    assert fx.path == "~/sounds/clang.wav"
+    _ok(d, command="set_node_property", node_id="fx", property="path",
+        value="/tmp/a~b.wav")
+    _ok(d, command="impulse", node_id="btn")
+    assert FakeProc.commands[1][-1] == "/tmp/a~b.wav"
 
 
 def test_sound_effect_config_round_trips():
