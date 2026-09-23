@@ -111,21 +111,21 @@ def test_a_clip_narrows_the_sound_it_is_given():
     space.add_node(ClipNode("c1", 10.0, 30.0))
     space.add_node(ClipNode("c2", 5.0, 20.0))
     space.add_node(ClipNode("c3", 0.0, 60.0))
-    space.add_edge("snd", "c1", to_port="in")
-    space.add_edge("c1", "c2", to_port="in")
-    space.add_edge("c2", "c3", to_port="in")
+    space.add_edge("snd", "c1", to_port="sound")
+    space.add_edge("c1", "c2", to_port="sound")
+    space.add_edge("c2", "c3", to_port="sound")
     # A clip's *input* is whatever reaches it: the raw sound for the first
     # one, c1's range (10..30) for the second.
-    assert space.resolve_sound("c1", "in") == {
+    assert space.resolve_sound("c1", "sound") == {
         "path": "/sounds/long.wav", "start": 0.0, "end": None,
     }
-    assert space.resolve_sound("c2", "in") == {
+    assert space.resolve_sound("c2", "sound") == {
         "path": "/sounds/long.wav", "start": 10.0, "end": 30.0,
     }
     # A clip's times are seconds into *what it is given*, so c2 asking for
     # 5..20 of c1's 10..30 is 15..30 of the file - and that is what the next
     # node sees.
-    assert space.resolve_sound("c3", "in") == {
+    assert space.resolve_sound("c3", "sound") == {
         "path": "/sounds/long.wav", "start": 15.0, "end": 30.0,
     }
 
@@ -144,3 +144,48 @@ def test_a_waveform_is_reduced_to_peaks(tmp_path):
     assert min(low for low, _high in peaks) < -0.1
     assert probe_peaks(str(tmp_path / "missing.wav")) == []
     assert probe_peaks("") == []
+
+
+def test_a_daemon_clip_sees_the_sound_wired_into_it(tmp_path):
+    """The whole chain, the way the GUI builds it: Sound -> Clip, then the
+    timeline's payload and waveform.
+
+    This is the regression that mattered: the daemon resolved the clip's input
+    under the *old* port name, so the clip reported no source, drew a flat line
+    and a player downstream had nothing to play - while the graph looked
+    perfectly wired.  Wiring through the real port names is what pins it."""
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg not available")
+    from main import PatchSpaceDaemon
+    from tests.test_pwnodes import FakeGraph
+
+    path = tmp_path / "blip.wav"
+    _write_wav(path, seconds=0.6)
+
+    d = PatchSpaceDaemon()
+    d.space.graph = FakeGraph()
+    d.space.mark_graph_loaded()
+    _ok = lambda **cmd: d.handle_command(cmd)  # noqa: E731
+    assert _ok(command="add_node", node_type="sound", node_id="snd")["status"] == "ok"
+    assert _ok(command="add_node", node_type="clip", node_id="clip")["status"] == "ok"
+    assert _ok(command="add_node", node_type="sound_player", node_id="pl")["status"] == "ok"
+    _ok(command="set_node_property", node_id="snd", property="path", value=str(path))
+    assert _ok(command="add_edge", from_node="snd", to_node="clip",
+               to_port="sound")["status"] == "ok"
+    assert _ok(command="add_edge", from_node="clip", to_node="pl",
+               to_port="sound")["status"] == "ok"
+
+    # What the GUI is told about the clip: its source, and the file's length.
+    node = _ok(command="get_nodes")["nodes"]["clip"]
+    assert node["source_path"] == str(path)
+    assert node["duration"] == pytest.approx(0.6, abs=0.05)
+
+    # ...and the waveform it draws the timeline from.
+    peaks = _ok(command="get_peaks", node_id="clip")
+    assert peaks["status"] == "ok"
+    assert peaks["path"] == str(path)
+    assert len(peaks["peaks"]) > 10
+    # A player wired behind the clip resolves the same sound, so it has
+    # something to play when it fires.
+    resolved = d.space.resolve_sound("pl")
+    assert resolved["path"] == str(path)

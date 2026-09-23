@@ -4853,7 +4853,7 @@ class PatchSpaceDaemon:
             if not isinstance(node, ClipNode):
                 return {"status": "ok", "node_id": node_id, "path": "",
                         "duration": 0.0, "peaks": []}
-            sound = self.space.resolve_sound(node_id, "in")
+            sound = self.space.resolve_sound(node_id, "sound")
         path = str((sound or {}).get("path") or "")
         return {
             "status": "ok",
@@ -5119,7 +5119,7 @@ class PatchSpaceDaemon:
             if isinstance(node, ClipNode):
                 # What the clip is showing: the GUI re-asks for the waveform
                 # (get_peaks) whenever this changes.
-                sound = self.space.resolve_sound(node_id, "in") or {}
+                sound = self.space.resolve_sound(node_id, "sound") or {}
                 data["source_path"] = str(sound.get("path") or "")
                 # A clip's own times are seconds into *what it is given*, so
                 # the timeline needs that sound's start to place them on the

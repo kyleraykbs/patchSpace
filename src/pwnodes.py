@@ -4103,10 +4103,21 @@ class PatchSpace:
         if node_id in seen:
             return None
         seen.add(node_id)
-        upstream = [e for e in self.edges.values()
-                    if e.to_node == node_id and e.to_port == port]
-        if not upstream:
+        wanted = [(e) for e in self.edges.values()
+                  if e.to_node == node_id and e.to_port == port]
+        if not wanted:
+            # A caller asking under an old port name ("in", before ports were
+            # named after what they carry) still finds the sound, as long as
+            # the edge is of the right *kind*.
+            wanted = [
+                e for e in self.edges.values()
+                if e.to_node == node_id
+                and self.nodes.get(e.from_node) is not None
+                and self.nodes[e.from_node].port_kind(e.from_port, "out") == "sound"
+            ]
+        if not wanted:
             return None
+        upstream = wanted
         source = self.nodes.get(upstream[0].from_node)
         if source is None:
             return None
@@ -4115,7 +4126,7 @@ class PatchSpace:
         if isinstance(source, ClipNode):
             # A clip narrows whatever reaches it, in the *incoming* file's own
             # time base - so clips stacked behind one another intersect.
-            upstream = self.resolve_sound(source.id, "in", seen)
+            upstream = self.resolve_sound(source.id, "sound", seen)
             if upstream is None:
                 return None
             base = float(upstream.get("start") or 0.0)
