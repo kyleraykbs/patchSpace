@@ -108,6 +108,7 @@ from pwnodes import (
     RecorderNode,
     SoundNode,
     SoundPlayerNode,
+    SoundDumpNode,
     ButtonNode,
     PATCHSPACE_VIRTUAL_SINK_NAME,
     PATCHSPACE_VIRTUAL_MIC_NAME,
@@ -356,6 +357,7 @@ NODE_TYPE_REGISTRY: Dict[str, type] = {
     "recorder": RecorderNode,
     "clip": ClipNode,
     "sound_player": SoundPlayerNode,
+    "sound_dump": SoundDumpNode,
     "gate": GateNode,
     "switcher": SwitcherNode,
     "inverse_switcher": InverseSwitcherNode,
@@ -3825,6 +3827,8 @@ class PatchSpaceDaemon:
             return cls(node_id)
         if cls is SoundPlayerNode:
             return cls(node_id, backing, g("overlap", False))
+        if cls is SoundDumpNode:
+            return cls(node_id, g("folder", "~"), g("name", "sound"))
         if cls is ClipNode:
             return cls(node_id, g("start", 0.0), g("end"))
         if cls is RecorderNode:
@@ -4448,6 +4452,10 @@ class PatchSpaceDaemon:
                 # The Filter node's Include/Exclude switch: on = keep
                 # everything the title box / classifiers do *not* match.
                 node.exclude = bool(value)
+            elif prop in ("folder", "name") and isinstance(node, SoundDumpNode):
+                # Where a Sound Dump writes: its folder and the file's name
+                # (the extension is added when it saves - see target_path).
+                setattr(node, prop, str(value or ""))
             elif prop == "force_default" and self._line_volume_target(node) is not None:
                 # The line nodes share the built-in's force flag; set it on
                 # the built-in and mirror it back onto every line node.
@@ -5259,6 +5267,10 @@ class PatchSpaceDaemon:
                 # acoustically dead effect) with something stronger than
                 # the neutral "not connected yet" badge. See _node_health.
                 data["health"] = self._node_health(node)
+            if isinstance(node, SoundDumpNode):
+                # The last file it wrote, so the node can show it.
+                data["dump_path"] = node.last_path
+                data["duration"] = 0.0
             if isinstance(node, SoundPlayerNode):
                 data["playing"] = node.playing
                 # How far into the sound it is, so the node can show a bar

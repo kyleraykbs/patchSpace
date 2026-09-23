@@ -585,3 +585,35 @@ def test_a_file_being_written_is_not_re_probed_every_poll(tmp_path, monkeypatch)
     take.write_bytes(b"x" * 200)             # it grew: a new revision
     assert pwnodes.probe_duration(str(take)) == pytest.approx(3.0)
     assert len(calls) == 1                   # but not re-probed yet
+
+
+def test_a_sound_dump_writes_what_is_wired_into_it(tmp_path):
+    """A Sound Dump is the sink for a sound: an impulse in, a sound in, and no
+    outputs.  Fired, it encodes what arrives to its folder and name as Opus."""
+    import wave as wave_mod
+
+    src = tmp_path / "in.wav"
+    with wave_mod.open(str(src), "w") as f:
+        f.setnchannels(1)
+        f.setsampwidth(2)
+        f.setframerate(48000)
+        f.writeframes(b"\x00\x00" * 4800)          # a tenth of a second
+
+    node = pwnodes.SoundDumpNode("d", folder=str(tmp_path), name="take 1")
+    assert node.port_kind("sound", "in") == "sound"
+    assert node.port_kind("impulse", "in") == "impulse"
+
+    assert node.target_path == str(tmp_path / "take 1.opus")
+
+    node.on_impulse({"path": str(src)})
+    written = tmp_path / "take 1.opus"
+    assert written.exists() and written.stat().st_size > 0
+    assert node.last_path == str(written)
+
+    # An explicit extension is left alone rather than doubled.
+    node.name = "named.opus"
+    assert node.target_path == str(tmp_path / "named.opus")
+
+    # Nothing wired: nothing written, and no crash.
+    node.on_impulse({})
+    assert node.last_path == str(written)

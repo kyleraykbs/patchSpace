@@ -1834,6 +1834,84 @@ class SoundNode(Node):
         return probe_duration(self.path)
 
 
+class SoundDumpNode(Node):
+    """Writes the sound wired into it to a file when an impulse arrives.
+
+    An impulse in, a sound in, and *no outputs at all*: this is the sink for a
+    sound, the counterpart of the Sound Player.  ``folder`` and ``name`` say
+    where it lands, and the file is encoded to Opus so what it writes is small
+    and plays anywhere.  The extension is added if the name hasn't got one.
+
+    It owns no PipeWire object and nothing about it is audible - it is a button
+    that saves what is wired into it.  A range (a Clip's selection) is honoured
+    by encoding just that part, the same way playback materialises a range."""
+
+    DEFAULT_EXT = "opus"
+    ENCODE_TIMEOUT_S = 30.0
+
+    def __init__(self, node_id, folder: str = "~", name: str = "sound"):
+        super().__init__(node_id)
+        self.folder = folder or "~"
+        self.name = name or "sound"
+        #: The last file written ("" until one is), which the node shows.
+        self.last_path = ""
+
+    def port_kind(self, port: str, direction: str) -> str:
+        if direction == "out":
+            return "impulse"
+        return "sound" if port == "sound" else "impulse"
+
+    @property
+    def target_path(self) -> str:
+        """Where the next dump lands: the folder, the name, and the extension."""
+        name = str(self.name or "sound").strip() or "sound"
+        if not name.endswith("." + self.DEFAULT_EXT):
+            name = f"{name}.{self.DEFAULT_EXT}"
+        return os.path.join(os.path.expanduser(self.folder or "~"), name)
+
+    def on_impulse(self, sound: Optional[dict] = None) -> None:
+        """Save the sound that arrived.  ffmpeg does the encode; a Clip's range
+        is honoured by taking just that part of the file."""
+        sound = dict(sound or {})
+        source = str(sound.get("path") or "").strip()
+        if not source:
+            logger.warning("Dump %r was triggered with no sound wired", self.id)
+            return
+        target = self.target_path
+        folder = os.path.dirname(target)
+        try:
+            os.makedirs(folder, exist_ok=True)
+        except OSError as exc:
+            logger.warning(
+                "Dump %r couldn't create %r: %s", self.id, folder, exc
+            )
+            return
+        command = ["ffmpeg", "-nostdin", "-v", "error", "-y"]
+        start = float(sound.get("start") or 0.0)
+        if start > 0.0:
+            command += ["-ss", f"{start:.3f}"]
+        end = sound.get("end")
+        if end is not None:
+            command += ["-t", f"{max(0.0, float(end) - start):.3f}"]
+        command += ["-i", os.path.expanduser(source), "-c:a", "libopus", target]
+        try:
+            result = subprocess.run(
+                command, capture_output=True, text=True,
+                timeout=self.ENCODE_TIMEOUT_S,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            logger.warning("Dump %r couldn't write %r: %s", self.id, target, exc)
+            return
+        if result.returncode != 0:
+            logger.warning(
+                "Dump %r: ffmpeg couldn't write %r: %s",
+                self.id, target, (result.stderr or "").strip()[:200],
+            )
+            return
+        self.last_path = target
+        logger.info("Dump %r wrote %r", self.id, target)
+
+
 class SoundPlayerNode(_SingleSinkNode):
     """Plays a *sound* when an impulse arrives: a sound input, an impulse
     input, an audio output.

@@ -535,6 +535,21 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
     ),
     # A Recorder: audio in, a *sound* out.  Its body is the take's controls -
     # a Record/Stop button and the waveform of the last take.
+    # A Sound Dump: a sound in, an impulse in, and *no outputs* - the sink
+    # for a sound, where the Sound Player is the source.  It writes what
+    # arrives to its folder/name as Opus when it is fired.
+    "sound_dump": NodeSpec(
+        "Sound Dump",
+        ["sound", "impulse"],
+        [],
+        sound_inputs=["sound"],
+        impulse_inputs=["impulse"],
+        field="name",
+        settings=[
+            ("folder", "Folder:", "text"),
+            ("name", "Name:", "text"),
+        ],
+    ),
     "recorder": NodeSpec(
         "Recorder",
         ["audio"],
@@ -1077,6 +1092,7 @@ ADD_NODE_CATEGORIES = [
             ("Button", "button"),
             ("Sound", "sound"),
             ("Sound Player", "sound_player"),
+            ("Sound Dump", "sound_dump"),
             ("Recorder", "recorder"),
             ("Clip", "clip"),
         ],
@@ -1232,6 +1248,8 @@ NODE_TYPE_ICONS: Dict[str, str] = {
     "clip": "edit-select-all-symbolic",
     "recorder": "media-record-symbolic",
     "sound_player": "media-playback-start-symbolic",
+    # A sound going *out* to a file, rather than coming in from one.
+    "sound_dump": "document-save-symbolic",
 }
 
 _DEFAULT_ADD_NODE_ICON = "list-add-symbolic"
@@ -1309,6 +1327,7 @@ CLASS_NAME_TO_TYPE = {
     "ButtonNode": "button",
     "SoundNode": "sound",
     "SoundPlayerNode": "sound_player",
+    "SoundDumpNode": "sound_dump",
     "RecorderNode": "recorder",
     "ClipNode": "clip",
     "SoundEffectNode": "sound_effect",
