@@ -395,3 +395,7 @@ gesture accepts; tested only structurally (no touchscreen here).
   connected" forever with only a truncated three-line traceback in the log.
   The registry-wide `test_every_node_type_exports_to_json` covers the whole
   class of bug, not just this instance.
+
+* The tick's two independent post-steps (the session autosave and the panel poll)
+  each have their own guard now: sharing one meant a failing export starved the
+  panel poll for as long as it kept failing.

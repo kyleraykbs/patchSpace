@@ -1235,8 +1235,17 @@ class PatchSpaceDaemon:
         # `_dirty` set and save once the reload has finished.
         if self._dirty and not self._panel_reloading:
             self._dirty = False
-            self._auto_export_session()
-        self._poll_panels()
+            # Each of these gets its own guard: they are independent jobs, and a
+            # failure in one must not starve the other (a bad export kept the
+            # panel poll from ever running, while the ticker logged and looped).
+            try:
+                self._auto_export_session()
+            except Exception:
+                logger.exception("session autosave failed")
+        try:
+            self._poll_panels()
+        except Exception:
+            logger.exception("panel poll failed")
 
     # ------------------------------------------------------------------
     # declarative node files
