@@ -71,6 +71,10 @@ MODE_RO = "read-only"
 
 ROOT_ID = ""
 DEFAULT_COLOR = "#3584e4"
+#: Horizontal gap left between an auto-placed panel and the panels it is
+#: placed beside (see main._place_unplaced_panels).
+PLACE_GAP = 80.0
+
 DEFAULT_W = 420.0
 DEFAULT_H = 260.0
 MIN_W = 140.0
@@ -191,6 +195,10 @@ def child_placement(entry) -> Optional[dict]:
 def apply_placement(panel: "Panel", placement: dict) -> None:
     if not isinstance(placement, dict):
         return
+    if placement.get("x") is not None or placement.get("y") is not None:
+        # A geometry on the child reference is a placement like any other:
+        # it is the user's drag, remembered in the parent's file.
+        panel.placed = True
     if placement.get("x") is not None:
         panel.x = float(placement["x"])
     if placement.get("y") is not None:
@@ -228,6 +236,11 @@ class Panel:
     # Load automatically at start-up?  A panel with auto_load False is only
     # instantiated when referenced as a child (or placed by hand).
     auto_load: bool = False
+    # Does x/y come from an explicit placement (the panel file, or the child
+    # reference in the parent)?  A panel with no coordinates at all is
+    # *unplaced*: the daemon drops it in beside the panels that are placed
+    # instead of leaving it at the origin - see main._place_unplaced_panels.
+    placed: bool = False
     config: dict = field(default_factory=dict)
 
     @property
@@ -326,6 +339,16 @@ def placement_from_raw(raw: dict) -> dict:
     p = raw.get("placement")
     if not isinstance(p, dict):
         p = {}
+    # "placed" travels with the parsed placement (and is consumed by
+    # load_panel): it is what distinguishes "this panel was put at the
+    # origin on purpose" from "this panel has never been positioned".
+    explicit = any(
+        source.get("x") is not None
+        for source in (p, raw)
+    ) or any(
+        source.get("y") is not None
+        for source in (p, raw)
+    )
     return {
         "x": float(p.get("x", raw.get("x", 0.0)) or 0.0),
         "y": float(p.get("y", raw.get("y", 0.0)) or 0.0),
@@ -333,6 +356,7 @@ def placement_from_raw(raw: dict) -> dict:
         "h": float(p.get("h", raw.get("h", DEFAULT_H)) or DEFAULT_H),
         "anchored": bool(p.get("anchored", raw.get("anchored", False))),
         "auto_load": bool(raw.get("auto_load", False)),
+        "placed": explicit,
     }
 
 
@@ -397,6 +421,7 @@ def load_panel(path: str, panel_id: str, parent: Optional[str],
                writable: bool, stem: Optional[str] = None) -> Panel:
     raw = read_file(path) or {}
     placement = placement_from_raw(raw)
+    placed = placement.pop("placed", False)
     if not panel_id and stem is None:
         stem = None
     elif stem is None:
@@ -411,6 +436,7 @@ def load_panel(path: str, panel_id: str, parent: Optional[str],
         writable=writable,
         stem=stem,
         config=config_from_raw(raw),
+        placed=placed,
         **placement,
     )
 

@@ -835,3 +835,79 @@ def test_an_auto_load_panel_in_a_read_only_dir_is_adopted(tmp_path):
     tree2 = d._load_panels_tree()
     assert "main" in tree2
     assert root.read_text() == before
+
+
+def test_an_unpositioned_panel_is_placed_beside_the_placed_ones(tmp_path):
+    """A declarative panel need not carry coordinates: the module leaves them
+    unset, and the daemon drops the panel beside the panels that *are* placed
+    - to their right, top-aligned - instead of leaving it at the origin, which
+    is typically nowhere near the graph the user arranged."""
+    rw = tmp_path / "panels"
+    rw.mkdir()
+    root = tmp_path / "root.json"
+    root.write_text(json.dumps({
+        "type": "panel", "label": "root", "color": "#000000", "mode": "read-write",
+        "config": {
+            "nodes": {}, "edges": [], "groups": [],
+            "panels": [{"name": "kit", "stem": "kit",
+                        "placement": {"x": 1000, "y": 400, "w": 300, "h": 200}}],
+        },
+    }))
+    (rw / "kit.json").write_text(json.dumps({
+        "type": "panel", "label": "Kitchen", "color": "#112233", "mode": "read-write",
+        "placement": {"x": 1000, "y": 400, "w": 300, "h": 200},
+        "config": {"nodes": {}, "edges": [], "panels": [], "groups": []},
+    }))
+    # An auto_load panel with no placement of its own, in the read-only dir.
+    ro = tmp_path / "store"
+    ro.mkdir()
+    (ro / "widgets.json").write_text(json.dumps({
+        "type": "panel", "label": "Widgets", "color": "#445566",
+        "mode": "read-only", "auto_load": True,
+        "config": {"nodes": {"w": {"type": "gate", "params": {}}},
+                   "edges": [], "panels": [], "groups": []},
+    }))
+    d = PatchSpaceDaemon(
+        panel_dirs=[(str(rw), True), (str(ro), False)],
+        root_panel_path=str(root),
+    )
+    tree = d._load_panels_tree()
+    placed = tree["kit"]
+    widgets = tree["widgets"]
+    assert widgets.placed, "the unpositioned panel was not placed"
+    assert placed.placed
+    assert widgets.x >= placed.x + placed.w, (widgets.x, placed.x, placed.w)
+    assert widgets.y == placed.y, (widgets.y, placed.y)
+    # …and something placed by hand at the origin is left exactly there.
+    assert (placed.x, placed.y) == (1000.0, 400.0)
+    # The placement is remembered: it is a session value, so the next
+    # autosave writes it into the root panel and the panel stops being
+    # "unplaced" (a user drag does exactly the same thing).
+    assert d._dirty, "the placement was not marked for the session autosave"
+
+
+def test_a_panel_with_its_own_coordinates_is_left_alone(tmp_path):
+    rw = tmp_path / "panels"
+    rw.mkdir()
+    root = tmp_path / "root.json"
+    root.write_text(json.dumps({
+        "type": "panel", "label": "root", "color": "#000000", "mode": "read-write",
+        "config": {"nodes": {}, "edges": [], "groups": [], "panels": ["kit"]},
+    }))
+    (rw / "kit.json").write_text(json.dumps({
+        "type": "panel", "label": "Kitchen", "color": "#112233", "mode": "read-write",
+        "placement": {"x": 7, "y": 9, "w": 300, "h": 200},
+        "config": {"nodes": {}, "edges": [], "panels": [], "groups": []},
+    }))
+    (rw / "other.json").write_text(json.dumps({
+        "type": "panel", "label": "Other", "color": "#654321", "mode": "read-write",
+        "auto_load": True,
+        "config": {"nodes": {}, "edges": [], "panels": [], "groups": []},
+    }))
+    d = PatchSpaceDaemon(
+        panel_dirs=[(str(rw), True)],
+        root_panel_path=str(root),
+    )
+    tree = d._load_panels_tree()
+    assert (tree["kit"].x, tree["kit"].y) == (7.0, 9.0)
+    assert tree["other"].placed and tree["other"].x > 7.0

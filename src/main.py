@@ -1335,7 +1335,51 @@ class PatchSpaceDaemon:
                 }
                 panels.write_file(root_path, fresh)
                 tree = panels.load_tree(root_path, dirs, self._panel_dir_writable())
+        self._place_unplaced_panels(tree)
         return tree
+
+    def _place_unplaced_panels(self, tree: Dict[str, panels.Panel]) -> None:
+        """Drop a top-level panel that has no placement at all *beside* the
+        panels that do, instead of leaving it at the origin.
+
+        This is what makes a declarative panel appear next to the graph the
+        user has arranged rather than in its own empty corner of the canvas: a
+        Nix-generated panel carries no coordinates (the module's placement
+        defaults are unset), so it is placed to the right of the placed
+        panels, top-aligned with the topmost one.  The placement is marked on
+        the panel, which is a session value - so it is remembered, not
+        recomputed on every start, and a panel the user then drags simply
+        stops being unplaced.
+
+        Nested panels keep their parent's frame and are left alone, and a
+        graph with nothing placed yet is left alone too (the next start
+        places it, once there is something to sit beside)."""
+        root = tree.get(panels.ROOT_ID)
+        if root is None:
+            return
+        placed = [
+            panel for pid, panel in tree.items()
+            if pid != panels.ROOT_ID
+            and panel.placed
+            and (panel.parent or panels.ROOT_ID) == panels.ROOT_ID
+        ]
+        if not placed:
+            return
+        right = max(panel.x + panel.w for panel in placed)
+        top = min(panel.y for panel in placed)
+        for pid, panel in tree.items():
+            if pid == panels.ROOT_ID or panel.placed:
+                continue
+            if (panel.parent or panels.ROOT_ID) != panels.ROOT_ID:
+                continue
+            panel.x, panel.y = right + panels.PLACE_GAP, top
+            panel.placed = True
+            logger.info(
+                "Placed unpositioned panel %r at (%.0f, %.0f), beside the "
+                "panels already on the graph", pid, panel.x, panel.y,
+            )
+            right = panel.x + panel.w
+            self._dirty = True
 
     @staticmethod
     def _panel_origin(tree: Dict[str, panels.Panel], panel_id: str) -> tuple:

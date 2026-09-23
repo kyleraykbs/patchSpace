@@ -77,8 +77,23 @@ let
       placement = {
         # types.number, not float: `w = 520` is what anyone writes, and the
         # daemon reads them as plain JSON numbers.
-        x = mkOption { type = types.number; default = 0; };
-        y = mkOption { type = types.number; default = 0; };
+        x = mkOption {
+          type = types.nullOr types.number;
+          default = null;
+          description = ''
+            Left/top of the panel on the canvas.  Left **unset** the panel has
+            no position of its own: the daemon places it beside the panels
+            that do have one (to their right, top-aligned) instead of dropping
+            it at the origin, and remembers that in the root panel - so a
+            declarative panel shows up next to the graph you have arranged.
+            Set it to be explicit about where it goes.
+          '';
+        };
+        y = mkOption {
+          type = types.nullOr types.number;
+          default = null;
+          description = "Top of the panel on the canvas - see `x`.";
+        };
         w = mkOption { type = types.number; default = 420; };
         h = mkOption { type = types.number; default = 260; };
         anchored = mkOption {
@@ -161,7 +176,9 @@ let
     label = "Main";
     color = "#3584e4";
     autoLoad = true;
-    placement = { x = 0; y = 0; w = 420; h = 260; anchored = true; };
+    # `x`/`y` stay null here too: the panel's placement defaults carry the
+    # "no coordinates set" state, not 0/0 (see the generated panel file).
+    placement = { x = null; y = null; w = 420; h = 260; anchored = true; };
     imports = [ ];
     nodes = { };
     edges = [ ];
@@ -278,9 +295,14 @@ let
       label = panel.label;
       color = panel.color;
       auto_load = panel.autoLoad;
-      placement = {
-        inherit (panel.placement) x y w h anchored;
-      };
+      placement =
+        # Only the coordinates someone actually set: an absent one is how the
+        # daemon knows the panel has no position of its own yet.
+        lib.filterAttrs (_: v: v != null) {
+          inherit (panel.placement) x y;
+        } // {
+          inherit (panel.placement) w h anchored;
+        };
       config = (panelConfig panel) // { panels = panel.children; };
     });
 

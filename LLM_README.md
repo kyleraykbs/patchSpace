@@ -1072,6 +1072,16 @@ hand-drawn fallback glyphs were what actually drew, and both the node icons and 
 header buttons looked wrong (a crescent "reset", an angled-rectangle "pencil").  Call
 `render_texture(node)` with the argument omitted.
 
+**An unpositioned panel is placed beside the graph, not at the origin.**  The module leaves a
+panel's `placement.x`/`y` unset (they are `nullOr`), which is also how the file says "this panel
+has never been positioned".  On load the daemon drops such a *top-level* panel to the right of
+the panels that do have a position, top-aligned with the topmost one (`_place_unplaced_panels`,
+`panels.PLACE_GAP`), and marks it `placed` - which is a session value, so it is remembered by
+the ordinary autosave rather than recomputed each start, and a panel the user then drags simply
+stops being unplaced.  Nested panels keep their parent's frame and are left alone; a graph with
+nothing placed yet is left alone too, and gets placed on a later start.  Without this a
+declarative panel appeared in its own empty corner of the canvas, far from everything.
+
 **Panel files are loaded by reference, and the auto-load adoption has to write
 before it reloads.** `panels.load_tree` reads the root panel and then only the
 children it *references* - a panel file that nothing mentions is simply not
