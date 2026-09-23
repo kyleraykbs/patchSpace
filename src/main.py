@@ -36,7 +36,7 @@ from collections import deque
 from typing import Any, Dict, Optional
 
 from pwgraph import PipewireGraph
-from pwproc import Ticker
+from pwproc import Backoff, Ticker
 from pwnodes import (
     PatchSpace,
     Node,
@@ -172,6 +172,15 @@ SESSION_CACHE_PATH = os.path.expanduser("~/.cache/patchspace/last_session.json")
 
 # How often the tick rescans the panel directories for changes.
 PANEL_POLL_S = 1.5
+
+# The PipeWire graph monitor is a child process (`pw-dump -m`).  It exits by
+# itself when PipeWire goes away - most often because PipeWire was restarted,
+# or because this daemon was started before PipeWire was listening at all - so
+# the death is reported to the supervisor (see _on_graph_monitor_error) which
+# restarts it with backoff.  A monitor that dies again within
+# MONITOR_RESTART_GRACE_S of a restart is treated as "the restart didn't
+# stick" and backs off, rather than being respawned every tick.
+MONITOR_RESTART_GRACE_S = 5.0
 
 # Panels: each non-root panel is one file, referenced by stem.  The
 # daemon takes a list of directories to search (later shadows earlier);
@@ -517,6 +526,14 @@ class PatchSpaceDaemon:
         self.graph.on_node_created(self._on_node_created)
         self.graph.on_node_removed(self._on_node_removed)
         self.graph.on_initial_sync(self._on_initial_sync)
+        # Watch the monitor process itself.  Without this, a `pw-dump -m`
+        # that exits (PipeWire restart, or started before PipeWire listened)
+        # leaves the daemon holding a graph model that no longer exists -
+        # and silently doing nothing about it.
+        self.graph.on_error = self._on_graph_monitor_error
+        self._graph_monitor_error: Optional[str] = None
+        self._graph_monitor_restarted_at: float = 0.0
+        self._graph_monitor_backoff = Backoff(initial_s=1.0, max_s=30.0)
         # Wake the supervisor thread whenever PatchSpace wants a nudge.
         self.space.on_change.append(self._wake_ticker)
 
@@ -1057,10 +1074,59 @@ class PatchSpaceDaemon:
     # periodic tick
     # ------------------------------------------------------------------
 
+    def _on_graph_monitor_error(self, exc: Exception) -> None:
+        """The monitor process died (its reader thread reports it here).
+
+        Called from that thread, so this only records the fact and wakes the
+        supervisor; restarting is the tick's job.  A death shortly after a
+        restart means the restart didn't stick (PipeWire still not there), so
+        it counts as a failure and the next attempt backs off.
+        """
+        message = f"{type(exc).__name__}: {exc}"
+        fresh = self._graph_monitor_error is None
+        if fresh:
+            logger.warning(
+                "PipeWire monitor died (%s); the supervisor will restart it",
+                message,
+            )
+        self._graph_monitor_error = message
+        if (
+            self._graph_monitor_restarted_at
+            and time.monotonic() - self._graph_monitor_restarted_at
+            < MONITOR_RESTART_GRACE_S
+        ):
+            self._graph_monitor_backoff.record_failure("monitor")
+        else:
+            self._graph_monitor_backoff.record_success("monitor")
+        self._wake_ticker()
+
+    def _restart_graph_monitor(self) -> None:
+        """Restart a dead monitor, at most once per backoff interval.
+
+        A fresh monitor sends a full dump, which fires the initial-sync
+        callbacks and repopulates the graph model; the normal supervision
+        pass then recreates whatever vanished with the old PipeWire.
+        """
+        if self._graph_monitor_error is None or not self._graph_monitor_backoff.ready(
+            "monitor"
+        ):
+            return
+        try:
+            self.graph.stop()
+            self.graph.start()
+        except Exception as exc:
+            self._graph_monitor_backoff.record_failure("monitor")
+            logger.warning("Could not restart the PipeWire monitor: %s", exc)
+            return
+        self._graph_monitor_restarted_at = time.monotonic()
+        self._graph_monitor_error = None
+        logger.info("PipeWire monitor restarted; re-syncing the graph model")
+
     def _tick(self) -> None:
         if not self._running:
             return
         try:
+            self._restart_graph_monitor()
             self.space.supervise()
             self._assert_defaults()
             self._enforce_volume_locks()

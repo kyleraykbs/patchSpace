@@ -174,6 +174,13 @@ services.patchspace = {
   unit's `ExecStart`. `services.patchspace.socket` defaults to `null` (the built-in
   `/tmp/patchspace.sock`); set it and the GUI/CLI need `PATCHSPACE_SOCKET` in the session too.
 
+* **Ordering against PipeWire.** The unit is `Wants=`/`After=` both
+`pipewire.service` and `wireplumber.service` and `WantedBy=default.target`, so a
+session starts the daemon after PipeWire - and PipeWire's own user units are
+themselves socket-activated (`pipewire.socket`), so a client that arrives early
+just activates it.  The daemon does not depend on that ordering being perfect:
+if it comes up before PipeWire is listening it warns and carries on, and the
+monitor supervision below picks the graph up the moment PipeWire is there.
 **Diagnosing UI freezes:** launch the GUI with `PATCHSPACE_TRACE_HANG=1`; a watchdog dumps
 all thread stacks via `faulthandler` if the main thread stalls >4s.
 
@@ -1000,6 +1007,19 @@ approach for pure GUI behavior). "It passed pytest" is not proof an effect works
 ---
 
 ## 5. Hard-won rules / traps (read before debugging effects)
+
+**The graph monitor is supervised.** The daemon's window onto PipeWire is a
+`pw-dump -m` child; it exits by itself when PipeWire goes away (a PipeWire
+restart, or a daemon that started before PipeWire was up). That used to be a
+silent dead end - `PipewireGraph` reported it through `on_error`, which
+*`main.py` never set*, so the daemon kept a stale graph model and stopped
+tracking reality (and `_start_session`'s 15s wait for the first dump only warns
+and continues). The daemon now installs `on_error`: the death is logged, and
+the supervision tick restarts the monitor, with backoff, gated by
+`MONITOR_RESTART_GRACE_S` (a monitor that dies immediately again is "the
+restart didn't stick", not a fresh problem). A fresh monitor dumps everything,
+which re-fires the initial-sync callbacks and repopulates the model; the normal
+supervision pass then recreates whatever vanished with the old PipeWire.
 
 1. **Plugin discovery uses the *daemon's* environment, not the PipeWire server's.** The
    `pw-cli` process the daemon spawns inherits the daemon's `LADSPA_PATH`/`LV2_PATH`. The

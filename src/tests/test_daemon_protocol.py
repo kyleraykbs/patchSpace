@@ -12,6 +12,7 @@ import time
 from main import PatchSpaceDaemon
 from pwnodes import BackedNode, Node
 import main as main_mod
+from pwgraph import PipewireGraph
 
 
 def fresh_daemon():
@@ -1486,6 +1487,55 @@ def test_start_refuses_when_another_daemon_is_listening(monkeypatch, tmp_path):
         assert d.builtin_sink is None
     finally:
         srv.close()
+
+
+def _wait_until(predicate, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def test_a_dead_pipewire_monitor_is_restarted_with_backoff(monkeypatch):
+    """``pw-dump -m`` exits by itself when PipeWire goes away (a PipeWire
+    restart, or a daemon started before PipeWire listened).  The daemon must
+    notice, restart the monitor - a fresh dump re-syncs the graph model - and
+    back off if the restarted monitor dies again immediately, instead of
+    respawning it every tick."""
+    # One empty batch and out, standing in for "the monitor started, then
+    # PipeWire went away".
+    dump = [sys.executable, "-u", "-c", "print('[]', flush=True)"]
+    monkeypatch.setattr(
+        main_mod, "PipewireGraph", lambda **kw: PipewireGraph(dump_command=dump)
+    )
+    d = fresh_daemon()
+    syncs = []
+    d.graph.on_initial_sync(lambda _graph: syncs.append(1))
+
+    d.graph.start()
+    assert _wait_until(lambda: d._graph_monitor_error is not None), (
+        "the monitor's death never reached the daemon"
+    )
+    assert len(syncs) == 1
+
+    d._restart_graph_monitor()  # what the supervision tick does
+    assert _wait_until(lambda: len(syncs) >= 2), "the monitor was not restarted"
+
+    # The restarted monitor died straight away: the next attempts must be
+    # gated by the backoff (immediately after a restart they are not ready),
+    # and then go through once it expires.
+    assert _wait_until(lambda: d._graph_monitor_error is not None)
+    d._restart_graph_monitor()
+    d._restart_graph_monitor()
+    assert len(syncs) == 2, "restarted in a hot loop"
+
+    deadline = time.monotonic() + 5
+    while len(syncs) < 3 and time.monotonic() < deadline:
+        d._restart_graph_monitor()
+        time.sleep(0.05)
+    assert len(syncs) == 3, "the monitor was never retried after the backoff"
 
 
 def test_patchspace_socket_env_moves_every_end(monkeypatch, tmp_path):
