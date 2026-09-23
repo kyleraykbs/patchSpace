@@ -595,3 +595,13 @@ gesture accepts; tested only structurally (no touchscreen here).
   GUI spec (field + settings), the add menu, the icon map, and the class->type
   map.  Grep for an existing node of the same *shape* (the Sound Player: an
   impulse plus a sound) and mirror every one of them.
+
+* **The bundle presets must exclude our own plumbing.**  A Patch Space keepalive
+  *is* a `Stream/Output/Audio` (it is a pw-cat playback stream), so `All Apps`
+  contained the pipeline's own signal - and a bundle that carries the pipeline's
+  output back into it is a *loop*, which is what made a filter on All Apps look
+  like it "let everything through" and killed the chain.  The source and sink
+  matchers take an `externalOnly` key now (backed by `is_patchspace_owned`, the
+  predicate the External Only classifier already used) and All Apps / All Inputs
+  / All Outputs ask for it.  Mic sinks and virtual speakers were never members:
+  Audio/Source and Audio/Sink are not Stream/Output/Audio.
