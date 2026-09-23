@@ -381,6 +381,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # graph) and the waveform the daemon sent for the sound reaching it
         # (path, duration, peaks).
         self._clip_views: Dict[str, tuple] = {}
+        #: nid -> the node_fingerprint its geometry was measured for.
+        self._node_fp: dict = {}
+        #: nid -> (top, bottom) insets; see _socket_margins.
+        self._socket_margins_cache: dict = {}
         #: (text, font_size, bold) -> pixel size; see _text_size.
         self._text_size_cache: dict = {}
         self._clip_waves: Dict[str, dict] = {}
@@ -1375,11 +1379,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._daemon_loading = loading_now
         selection_before = set(self.selected_nodes)
         anchored_before = set(self.anchored_nodes)
-        # A poll can change a node's label/description/control state (and
-        # therefore its height/width), so drop the dimension cache and let
-        # the next redraw repopulate it.
-        self._node_h_cache.clear()
-        self._node_w_cache.clear()
+        # A poll can change a node's label/description/control state (and so
+        # its height, width and socket margins), but dropping *every* node's
+        # measurements - which this used to do, every 400ms - threw away the
+        # layout of the whole canvas and re-derived it on the next frame.  A
+        # profile put that at around half of a frame's cost.  Each node's
+        # cached geometry is dropped only when what it draws changed; see
+        # _node_fingerprint.
 
         for nid in list(self.nodes.keys()):
             if nid not in daemon_nodes:
@@ -1408,6 +1414,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 self._anim_seen.discard(nid)
 
         for nid, ndata in daemon_nodes.items():
+            fp = self._node_fingerprint(ndata)
+            if self._node_fp.get(nid) != fp:
+                self._node_fp[nid] = fp
+                self._node_h_cache.pop(nid, None)
+                self._node_w_cache.pop(nid, None)
+                self._socket_margins_cache.pop(nid, None)
             ntype = normalize_node_type(ndata.get("type"))
             spec = spec_for(ntype)
             if nid not in self.nodes:
@@ -2363,7 +2375,46 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 total += self.HEADER_BLOCK_GAP
         return total
 
+    @staticmethod
+    def _node_fingerprint(ndata: dict) -> tuple:
+        """Everything a node's *drawing* depends on, as one comparable value.
+
+        Cached geometry (height, width, socket margins) is keyed on this, so
+        caches are dropped exactly when a node's shape can have changed - and
+        not merely when a poll happened.  Position is deliberately absent: a
+        drag moves nodes constantly and changes none of it."""
+        return (
+            ndata.get("type"), ndata.get("label"), ndata.get("description"),
+            ndata.get("ready"), ndata.get("health"), ndata.get("connected"),
+            ndata.get("declarative"), ndata.get("selection_label"),
+            ndata.get("recording"), ndata.get("playing"),
+            ndata.get("volume"), ndata.get("volume_locked"),
+            ndata.get("exclude"), ndata.get("enabled"), ndata.get("output"),
+            ndata.get("gate"), ndata.get("warp_name"), ndata.get("port_name"),
+            ndata.get("path"), ndata.get("duration"), ndata.get("source_path"),
+            tuple(ndata.get("inputs") or ()),
+            tuple(ndata.get("outputs") or ()),
+            tuple(ndata.get("bundle_inputs") or ()),
+            tuple(ndata.get("filter_inputs") or ()),
+            tuple((m.get("port"), m.get("label"))
+                  for m in (ndata.get("bundle_members") or ())),
+        )
+
     def _socket_margins(self, node_id, node):
+        """This node's socket insets, memoised per node.
+
+        The margins walk the node's header text (a wrap and a Pango measure
+        per line), and the draw asks for them once per socket - 220 times a
+        frame for a 95-node session.  They depend only on what the node draws,
+        so the same fingerprint that drops the dimension caches drops this."""
+        cached = self._socket_margins_cache.get(node_id)
+        if cached is not None:
+            return cached
+        margins = self._socket_margins_uncached(node_id, node)
+        self._socket_margins_cache[node_id] = margins
+        return margins
+
+    def _socket_margins_uncached(self, node_id, node):
         """(top, bottom) insets, in node-local pixels, inside which this
         node's socket centres live.
 
