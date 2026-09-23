@@ -4961,23 +4961,24 @@ class PatchSpaceDaemon:
         The GUI draws the timeline from this, so it is asked for when the clip's
         source changes rather than shipped in every poll.  An unwired clip, or
         a file that can't be read, answers with empty peaks - the timeline then
-        draws a flat line."""
+        draws a flat line.
+
+        The decode (ffmpeg over the whole file) runs *outside* the lock: this
+        used to hold it for the recorder branch, so a growing take being read
+        every poll stalled every other command - the GUI's own polls included -
+        behind one decode after another."""
         node_id = cmd.get("node_id")
         with self._lock:
             node = self.space.nodes.get(node_id)
             if isinstance(node, RecorderNode):
                 # A recorder's waveform is of its own take.
                 path = node.take_path
-                return {
-                    "status": "ok", "node_id": node_id, "path": path,
-                    "duration": pwnodes.probe_duration(path),
-                    "peaks": pwnodes.probe_peaks(path),
-                }
-            if not isinstance(node, ClipNode):
+            elif isinstance(node, ClipNode):
+                sound = self.space.resolve_sound(node_id, "sound")
+                path = str((sound or {}).get("path") or "")
+            else:
                 return {"status": "ok", "node_id": node_id, "path": "",
                         "duration": 0.0, "peaks": []}
-            sound = self.space.resolve_sound(node_id, "sound")
-        path = str((sound or {}).get("path") or "")
         return {
             "status": "ok",
             "node_id": node_id,

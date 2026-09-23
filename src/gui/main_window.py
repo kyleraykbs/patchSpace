@@ -1304,11 +1304,28 @@ class MainWindow(Gtk.ApplicationWindow):
             self.log_console.set_active(button.get_active())
 
     def process_responses(self):
-        for resp in self.client.get_responses():
+        # A backlog of polls is a backlog of *the same state*: applying every
+        # one costs a full UI update each and they can only show the newest
+        # last, so only the newest is applied.  Sound waveforms coalesce the
+        # same way (one per node - an older one is of an older file), which is
+        # what kept the sound chain from stacking updates while a take grew.
+        # Everything else is an event and still applies in arrival order.
+        queued = self.client.get_responses()
+        latest_nodes = None
+        latest_peaks = {}
+        events = []
+        for resp in queued:
             if resp.get("status") != "ok":
                 if resp.get("status") == "error":
                     logger.warning("daemon error: %s", resp.get("message"))
                 continue
+            if "nodes" in resp:
+                latest_nodes = resp
+            elif "peaks" in resp:
+                latest_peaks[resp.get("node_id")] = resp
+            else:
+                events.append(resp)
+        for resp in events:
             try:
                 if "graph" in resp:
                     self.pw_widget.update_graph(resp["graph"])
@@ -1340,6 +1357,20 @@ class MainWindow(Gtk.ApplicationWindow):
                     self._refresh_panels_view()
                 elif "nodes" in resp:
                     self.ps_widget.update_from_daemon(resp)
+            except Exception:
+                import traceback
+
+                traceback.print_exc()
+        if latest_nodes is not None:
+            try:
+                self.ps_widget.update_from_daemon(latest_nodes)
+            except Exception:
+                import traceback
+
+                traceback.print_exc()
+        for resp in latest_peaks.values():
+            try:
+                self.ps_widget.on_peaks(resp)
             except Exception:
                 import traceback
 

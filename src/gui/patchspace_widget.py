@@ -381,6 +381,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # graph) and the waveform the daemon sent for the sound reaching it
         # (path, duration, peaks).
         self._clip_views: Dict[str, tuple] = {}
+        #: nid -> when its waveform was last asked for, and whether it was
+        #: recording then.  See SOUND_WAVE_MIN_INTERVAL_MS.
+        self._clip_wave_asked: dict = {}
+        self._sound_recording: dict = {}
+        #: Minimum gap between waveform loads for one node, ms.
+        self.SOUND_WAVE_MIN_INTERVAL_MS = 1500
         #: nid -> the node_fingerprint its geometry was measured for.
         self._node_fp: dict = {}
         #: nid -> (top, bottom) insets; see _socket_margins.
@@ -1413,6 +1419,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 self._node_fade.pop(nid, None)
                 self._anim_seen.discard(nid)
 
+        now = time.monotonic()
         for nid, ndata in daemon_nodes.items():
             fp = self._node_fingerprint(ndata)
             if self._node_fp.get(nid) != fp:
@@ -1597,10 +1604,24 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     source = str(ndata.get("source_path") or "")
                     rev = str(ndata.get("source_rev") or "")
                     known = (self._clip_waves.get(nid) or {}).get("path")
-                    if source and (source != known
-                                   or rev != self._clip_wave_rev.get(nid)) \
+                    stale = bool(source) and (
+                        source != known or rev != self._clip_wave_rev.get(nid)
+                    )
+                    # Loading a waveform costs the daemon an ffmpeg pass over
+                    # the whole file, so a file that keeps changing - a take
+                    # being recorded - is loaded on a leash rather than on
+                    # every poll.  The exception is a take *ending*: that is
+                    # the take the user just made, and it should land at once.
+                    was_recording = self._sound_recording.get(nid)
+                    now_recording = bool(ndata.get("recording", False))
+                    self._sound_recording[nid] = now_recording
+                    take_ended = was_recording is True and not now_recording
+                    due = (now - self._clip_wave_asked.get(nid, 0.0)
+                           >= self.SOUND_WAVE_MIN_INTERVAL_MS / 1000.0)
+                    if stale and (due or take_ended) \
                             and nid not in self._clip_wave_pending:
                         self._clip_wave_pending.add(nid)
+                        self._clip_wave_asked[nid] = now
                         self._clip_wave_rev[nid] = rev
                         self.client.send({"command": "get_peaks", "node_id": nid})
                     elif not source:

@@ -250,6 +250,7 @@ def _recorder_and_clip():
     w = PatchSpaceGraphWidget(client)
     w.physics_active = False
     w.layout_awake = False
+    w.SOUND_WAVE_MIN_INTERVAL_MS = 0        # the leash has its own test
     return w, client
 
 
@@ -334,3 +335,58 @@ def test_a_clip_fed_by_a_recorder_follows_the_take():
     assert len(polls()) == 4              # *both* re-ask, though neither path moved
     answer()
     assert len(polls()) == 4              # steady again
+
+
+def test_waveform_loads_are_leashed_except_when_a_take_ends(monkeypatch):
+    """Loading a waveform costs the daemon an ffmpeg pass over the whole file,
+    so a file that keeps changing - a take being recorded - is loaded on a
+    leash instead of on every poll.  A take *ending* is the exception: that is
+    the take the user just made."""
+    from gui import patchspace_widget as widget_mod
+
+    clock = [1000.0]
+
+    class FakeClock:
+        @staticmethod
+        def monotonic():
+            return clock[0]
+
+        @staticmethod
+        def time():
+            return clock[0]
+
+    monkeypatch.setattr(widget_mod, "time", FakeClock)
+
+    w, client = _recorder_and_clip()
+    w.SOUND_WAVE_MIN_INTERVAL_MS = 1500     # ... and here is that test
+    rec = {"id": "rec1", "type": "recorder", "label": "Recorder", "x": 0.0, "y": 0.0,
+           "ready": True, "connected": True, "declarative": False,
+           "selection_label": "Recorder", "description": "",
+           "source_path": TAKE, "source_rev": "1:1000",
+           "recording": False, "duration": 4.0}
+
+    def polls():
+        w.update_from_daemon({"nodes": {"rec1": dict(rec)}, "edges": {},
+                              "panels": [], "groups": []})
+        return len([c for c in client.sent if c.get("command") == "get_peaks"])
+
+    def answer():
+        w.on_peaks({"node_id": "rec1", "path": TAKE, "duration": 4.0, "peaks": []})
+
+    polls()
+    assert polls() == 1                  # registered, then loaded
+    answer()
+
+    clock[0] += 2.0                      # past the leash
+    rec.update(recording=True, source_rev="2:2000")   # a take wipes the file
+    assert polls() == 2                  # so the first change loads
+    answer()
+    clock[0] += 0.2                      # it grew again, inside the leash
+    rec["source_rev"] = "3:3000"
+    assert polls() == 2                  # ... and this one waits its turn
+
+    clock[0] += 2.0                      # past the leash
+    assert polls() == 3                  # now it loads again
+    answer()
+    rec.update(recording=False, source_rev="4:4000")   # the take ends
+    assert polls() == 4                  # which always lands, whatever the clock
