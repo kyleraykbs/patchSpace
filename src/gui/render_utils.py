@@ -310,6 +310,11 @@ def draw_bezier_link(cr, x1, y1, x2, y2):
 # rarely kicks in.
 CORNER_RADIUS = 14.0
 
+#: Straight run left between the two bends that share a segment.  Without it a
+#: one-cell jog (a wire stepping a few pixels between two nearly level sockets)
+#: was blended end to end and read as a smooth sigmoid rather than a step.
+MIN_STRAIGHT = 6.0
+
 
 def draw_square_path(cr, points, radius=CORNER_RADIUS):
     """Stroke an axis-aligned polyline as a flowing "squared" wire.
@@ -340,6 +345,10 @@ def draw_square_path(cr, points, radius=CORNER_RADIUS):
         # consumes the whole segment, so consecutive bends join into a
         # smooth sigmoid instead of leaving a stub of straight line.
         r = min(radius, lin / 2.0, lout / 2.0)
+        if lin > MIN_STRAIGHT:
+            r = min(r, (lin - MIN_STRAIGHT) / 2.0)
+        if lout > MIN_STRAIGHT:
+            r = min(r, (lout - MIN_STRAIGHT) / 2.0)
         cr.line_to(vx - inx / lin * r, vy - iny / lin * r)
         cr.curve_to(vx, vy, vx, vy, vx + outx / lout * r, vy + outy / lout * r)
     cr.line_to(*pts[-1])

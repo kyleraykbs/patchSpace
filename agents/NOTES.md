@@ -255,3 +255,12 @@ write, reload again.  Idempotent, and the root file keeps every node it had.
   which is why line 0 overlapped the badge and wrapped "Invert" into "Inve"/"rt").
 * The right-hand panels list is 300px and visible by default (the divider is still draggable,
   the toggle and its close button hide it).
+
+## Selection ring, wire bends, themed pickers (2026-09-23)
+
+* A selected node's ring is drawn inside `_draw_node` (2px inset, before the sockets) - the
+  overlay ring crossed every port on the node's edge.  The marquee rectangle is still overlay.
+* `draw_square_path` caps each blend so a segment keeps `MIN_STRAIGHT` (6px) of straight run:
+  blending a short jog end to end made wires look like they folded back into themselves.
+* Colour pickers' presets come from the theme (`_group_colors`, `blue_3`…`teal_3`), so picking a
+  colour matches the desktop; `GROUP_COLORS` stays as the fallback list.

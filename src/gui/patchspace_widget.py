@@ -4513,18 +4513,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             draw_rounded_rect(cr, px, py, side, side, 2.5)
             cr.stroke()
 
-        # Highlight the current marquee selection, then the rubber-band
-        # rectangle itself, above the nodes so both stay visible.
-        for nid in self.selected_nodes:
-            node = self.nodes.get(nid)
-            if node is None or not self._node_revealed(nid):
-                continue
-            draw_rounded_rect(
-                cr, node["x"], node["y"], self.node_width(nid), self.node_height(nid), 8
-            )
-            cr.set_source_rgb(*pal["select"])
-            cr.set_line_width(3)
-            cr.stroke()
+        # (A selected node's ring is drawn by _draw_node - inside its body and
+        # under its sockets, so a port on the edge is never covered.)
 
         # Group labels/ids/colour chips on top of the nodes.
         self._draw_group_headers(cr, pal)
@@ -4894,6 +4884,20 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             cr.set_dash([4.0, 3.0] if is_offline else [2.0, 2.0])
         cr.stroke()
         cr.set_dash([])
+
+        if nid in self.selected_nodes:
+            # The selection ring sits *inside* the body, and is drawn before
+            # the sockets below, so a port centred on the edge is never
+            # covered by it.  It used to be drawn by the overlay pass on top
+            # of the nodes, which crossed every port on the node's edge.
+            inset = 2.0
+            draw_rounded_rect(
+                cr, x + inset, y + inset,
+                node_w - 2 * inset, node_h - 2 * inset, 6,
+            )
+            cr.set_source_rgb(*pal["select"])
+            cr.set_line_width(2.5)
+            cr.stroke()
 
         if node["type"] not in self._PORT_IN_TYPES | self._PORT_OUT_TYPES:
             # The node-type glyph in the header's top-left corner, tinted
@@ -5334,6 +5338,32 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             return self._hex_to_rgb(raw)
         key = panel.get("stem") or panel.get("label") or pid
         return theme_class_color(self, key)
+
+    #: Fallbacks for the colour pickers' presets: Adwaita's defaults for the
+    #: named slots used below, for a theme that defines no named colours.
+    _GROUP_COLOR_FALLBACKS = (
+        (0.208, 0.518, 0.894),   # blue_3
+        (0.200, 0.824, 0.478),   # green_3
+        (0.965, 0.827, 0.176),   # yellow_3
+        (0.878, 0.106, 0.141),   # red_3
+        (0.569, 0.255, 0.675),   # purple_3
+        (0.180, 0.761, 0.494),   # teal_3
+    )
+
+    def _group_colors(self):
+        """The colour pickers' presets, taken from the theme's own palette
+        slots (Adwaita's, recoloured by stylix), so a colour picked here
+        matches the rest of the desktop instead of being six fixed literals."""
+        names = ("blue_3", "green_3", "yellow_3", "red_3", "purple_3", "teal_3")
+        out = []
+        for name, fallback in zip(names, self._GROUP_COLOR_FALLBACKS):
+            r, g, b = theme_color(self, name, fallback)
+            out.append("#%02x%02x%02x" % (
+                max(0, min(255, round(r * 255))),
+                max(0, min(255, round(g * 255))),
+                max(0, min(255, round(b * 255))),
+            ))
+        return tuple(out)
 
     @staticmethod
     def _draw_slider_bar(cr, x, y, w, h, color):
@@ -6529,7 +6559,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         content.append(self._labeled_row("Name:", name_entry))
 
         color_picker = ColorPicker(
-            panel.get("color", self.GROUP_COLORS[0]), presets=self.GROUP_COLORS
+            panel.get("color", self.GROUP_COLORS[0]), presets=self._group_colors()
         )
         content.append(self._labeled_row("Color:", color_picker))
 
@@ -9476,7 +9506,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # Gtk.ColorButton, which aborts on systems with no GSettings
         # schemas.
         color_picker = ColorPicker(
-            group.get("color", self.GROUP_COLORS[0]), presets=self.GROUP_COLORS
+            group.get("color", self.GROUP_COLORS[0]), presets=self._group_colors()
         )
         color_picker.set_tooltip_text("The group's outline / title colour.")
         content.append(self._labeled_row("Color:", color_picker))
