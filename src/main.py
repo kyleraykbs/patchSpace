@@ -4276,7 +4276,7 @@ class PatchSpaceDaemon:
                     "message": f"Node {node_id} is not a recorder",
                 }
             if cmd.get("recording", True):
-                started = node.start()
+                started = node.start_take()
                 if not started:
                     return {
                         "status": "error",
@@ -4284,7 +4284,7 @@ class PatchSpaceDaemon:
                                    "(its sink is not up yet?)",
                     }
             else:
-                node.stop()
+                node.stop_take()
         return {"status": "ok", "node_id": node_id,
                 "recording": node.recording, "path": node.take_path}
 

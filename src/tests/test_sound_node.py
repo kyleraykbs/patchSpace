@@ -19,6 +19,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pwnodes
+from tests.test_impulse import FakeCli, FakeProc
 from pwnodes import SoundNode, probe_duration  # noqa: E402
 
 
@@ -324,3 +325,47 @@ def test_recording_again_overwrites_the_take(tmp_path, monkeypatch):
     # old shape (the path never changes).
     assert take.as_posix() not in pwnodes._DURATION_CACHE
     assert take.as_posix() not in pwnodes._PEAKS_CACHE
+
+
+def test_a_recorders_export_is_json_serialisable(monkeypatch):
+    """The whole point of the parameters: the session has to be writable.
+
+    The recorder's take-controls were named `start`/`stop`, and `start` is a
+    serialized parameter (the Clip's), so the export handed json.dump a bound
+    method - the autosave raised, the supervision loop died with it, and every
+    node sat "not connected" from then on.  One export check catches it."""
+    import json
+    from main import PatchSpaceDaemon
+    from tests.test_pwnodes import FakeGraph
+
+    d = PatchSpaceDaemon()
+    d.space.graph = FakeGraph()
+    d.space.mark_graph_loaded()
+    d.handle_command({"command": "add_node", "node_type": "recorder", "node_id": "rec"})
+    serialised = json.dumps(d._build_export_config())   # must not raise
+    assert "rec" in serialised
+
+
+def test_every_node_type_exports_to_json(monkeypatch):
+    """The session is written as JSON, so anything a node exposes as a
+    parameter has to survive json.dumps.  Walking the whole registry catches
+    the whole class of bug (a method or a live object under a serialized
+    name), not just the one that bit us."""
+    import json
+
+    import pwnodes as pn
+    from main import NODE_TYPE_REGISTRY, PatchSpaceDaemon
+    from tests.test_pwnodes import FakeGraph
+
+    monkeypatch.setattr(pn, "OwnedPwNode", FakeCli)
+    monkeypatch.setattr(pn, "OwnedPwProcess", FakeProc)
+
+    for node_type in sorted(NODE_TYPE_REGISTRY):
+        d = PatchSpaceDaemon()
+        d.space.graph = FakeGraph()
+        d.space.mark_graph_loaded()
+        resp = d.handle_command({"command": "add_node", "node_type": node_type,
+                                 "node_id": f"n_{node_type}"})
+        if resp.get("status") != "ok":
+            continue                      # needs a device/config it hasn't got
+        json.dumps(d._build_export_config())    # must not raise

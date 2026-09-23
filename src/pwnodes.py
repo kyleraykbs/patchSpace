@@ -2167,12 +2167,6 @@ class RecorderNode(_SingleSinkNode):
         return os.path.join(self.RECORD_DIR, f"{safe}.wav")
 
     @property
-    def path(self) -> str:
-        """The take's file - the name a Sound node uses, so anything that
-        resolves a *sound* treats this node the same way."""
-        return self.take_path
-
-    @property
     def recording(self) -> bool:
         return self._recorder is not None and self._recorder.is_alive
 
@@ -2181,7 +2175,7 @@ class RecorderNode(_SingleSinkNode):
         """The take's length in seconds (0.0 while recording or when empty)."""
         return probe_duration(self.take_path) if not self.recording else 0.0
 
-    def start(self) -> bool:
+    def start_take(self) -> bool:
         """Start a take, overwriting the previous one.  False if it wouldn't
         start (no dummy sink yet, no program to record with)."""
         self._prune_recorder()
@@ -2213,7 +2207,7 @@ class RecorderNode(_SingleSinkNode):
         self._recorder = proc
         return True
 
-    def stop(self) -> bool:
+    def stop_take(self) -> bool:
         """Finish the take.  True when something was actually recording."""
         was = self.recording
         proc, self._recorder = self._recorder, None
@@ -4285,8 +4279,12 @@ class PatchSpace:
         source = self.nodes.get(upstream[0].from_node)
         if source is None:
             return None
-        if isinstance(source, (SoundNode, RecorderNode)):
+        if isinstance(source, SoundNode):
             return {"path": source.path, "start": 0.0, "end": None}
+        if isinstance(source, RecorderNode):
+            # A recorder's "file" is its take (and it only exists once one has
+            # been made).
+            return {"path": source.take_path, "start": 0.0, "end": None}
         if isinstance(source, ClipNode):
             # A clip narrows whatever reaches it, in the *incoming* file's own
             # time base - so clips stacked behind one another intersect.

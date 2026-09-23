@@ -385,3 +385,13 @@ gesture accepts; tested only structurally (no touchscreen here).
   *transparent* node has neither, which is why the Filter used to silence an excluded app
   globally instead of just dropping it from its own chain.  See `FilterNode`,
   `BundleToAudioNode`, `BundleOutputNode`, `SplitterNode`, `SoundPlayerNode`.
+
+* **A serialized parameter name must never collide with a method or property.**
+  The export walks `_SERIAL_ATTRS` and hands each value to json; the Recorder's
+  take-controls were called `start`/`stop`, and `start` is a serialized
+  parameter (the Clip's), so the autosave tried to encode a *bound method* - which
+  raises **outside** `_tick`'s try/except, so the failure was not a logged
+  "supervision tick failed" but a dead supervision loop: every node sat "not
+  connected" forever with only a truncated three-line traceback in the log.
+  The registry-wide `test_every_node_type_exports_to_json` covers the whole
+  class of bug, not just this instance.
