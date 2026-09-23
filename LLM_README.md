@@ -555,8 +555,18 @@ endpoint nodes excluded - their sockets sit on the border, so including them wou
 every blend. The router is pure geometry (no GTK) and unit-tested in
 `tests/test_wire_router.py`.
 
+*Entries.* A node's text field, its folder button and a device row's select/codec box draw
+with `theme_palette`'s `field_bg`/`field_fg` (the theme's `view_bg_color`/`view_fg_color` -
+what a real `GtkEntry` uses) and the `node_border` stroke, with `subtext` for the
+"(click to set)" placeholder.  They were a hardcoded neutral near-black, which reads as a
+foreign widget on a themed (stylix-recoloured) card.  The fallbacks in `render_utils` are the
+old literals, so a theme without the named colours is unchanged.
+
 *Canvas chrome.* The graph background is fully opaque by default. `--canvas-opacity F`
-(`patchspace_gui.py`, 0..1, default 1.0) paints both canvases' background at that alpha; when
+(`patchspace_gui.py`, 0..1, default 1.0) - or `$PATCHSPACE_CANVAS_OPACITY`, which the flag
+overrides: the module sets that variable so a window started from the launcher is themed too,
+and `services.patchspace.canvasOpacity` defaults to stylix's application opacity when stylix
+is configured for the scope - paints both canvases' background at that alpha; when
 < 1 only the *grid* becomes see-through - the window surface and immediate canvas
 containers go transparent while `.opaque-chrome` (headerbar, tab bar, toolbars, side
 panels, console, with a **literal** palette color, not libadwaita's `@window_bg_color`
@@ -754,19 +764,31 @@ a pinned panel's local frame, so nodes that arrive unanchored - anything loaded 
 file, an export, or a Nix-generated panel; only nodes the *user* placed are node-anchored -
 settle themselves inside their panel while the box stays put. Because the box auto-fits its
 members, that settling would otherwise grow the box without bound: `_panel_growth_limits`
-caps the fitted box's *size* at the panel's declared placement plus `PANEL_PHYSICS_GROW`
-per side, and `_wall_nodes_into_panels` then holds members inside the *allowed* box (the capped
-size, centred on the fitted box the user is looking at - walling against the fitted box itself
+gives the panel's physics a *room* - its declared placement plus `PANEL_PHYSICS_GROW`
+per side - and `_wall_nodes_into_panels` holds **unanchored** members inside it (the room is
+centred on the fitted box the user is looking at - walling against the fitted box itself
 would forbid the contents from spreading at all), **minus the boxes of neighbouring panels**
 (`_panel_blockers`, ancestors excluded since they contain the panel): a member stops
 `2*PANEL_PADDING` short of a neighbour, so the two fitted boxes can never cross even when neither
 panel may be moved by the panel pass.  The pull is a fraction of the overshoot per
 step (`PANEL_WALL_PULL`) with a clamp to the padded bound as a backstop, and it is applied
 against the box snapshot taken *before* that step's node physics, so the box can't chase its own
-tail.  The cap is on size, not on edges, because the box's origin legitimately follows its
-content - an origin-relative cap ratchets outward a `PANEL_PHYSICS_GROW` per step. Both passes
-are skipped while a drag is in flight (the drag path owns growth then, via
-`_panel_drag_baseline`/`PANEL_DRAG_GROW`).
+tail.  The room is sized from the declared placement rather than from the current box because
+the box's origin legitimately follows its content - an origin-relative size ratchets outward a
+`PANEL_PHYSICS_GROW` per step. Both passes are skipped while a drag is in flight (the drag path
+owns growth then, via `_panel_drag_baseline`/`PANEL_DRAG_GROW`).
+
+**That room is not a cap on the drawn box** (it used to be, and that was a bug): the widget
+never rewrites a panel's `w`/`h`, so the placement is usually just the size the panel was
+*created* with (420x260 for the root, 320x320 for a daemon-made panel).  Clipping the fit to it
+made a panel under-fit its own contents - most visibly a panel with no IO ports, since a ported
+panel's box is pushed out by its port stack anyway, and worst on a parent whose child panels had
+been dragged apart (children can't be walled back in the way a member can).  `_panel_rect_base`
+therefore always encloses the contents: member nodes, child panels (whose boxes are already in
+**canvas** coordinates - nodes carry absolute x/y and `_draw_panel_boxes` draws every rect raw,
+unlike `panel.x`/`panel.y`, which are parent-relative and only folded back by `_panel_absolute`
+for the empty-panel fallback), groups and their titles.  Whatever the box cannot fit, it grows
+for; only the unbounded part - the physics cloud - is bounded, by the wall.
 
 *Reparenting:* dragging a node across a boundary sends `move_nodes`; the daemon
 re-qualifies its id, re-homes its edges (ownership is derived from ids) and re-points

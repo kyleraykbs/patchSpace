@@ -6,6 +6,7 @@ Entrypoint for the Patch Space GTK4 client. Run this against a running
 patchspace daemon (main.py) - it talks to it over the Unix socket at
 constants.SOCKET_PATH (default /tmp/patchspace.sock, or $PATCHSPACE_SOCKET).
 """
+import os
 import sys
 
 import gi
@@ -64,8 +65,40 @@ def _extract_canvas_opacity(argv):
     return cleaned, value
 
 
+#: Set (e.g. by the NixOS/home-manager module, from stylix's application
+#: opacity) to give the canvas a default background opacity.  The command
+#: line still wins; the point of the variable is that a launcher-declared
+#: window doesn't need its own desktop-entry override.
+CANVAS_OPACITY_ENV = "PATCHSPACE_CANVAS_OPACITY"
+
+
+def _resolve_canvas_opacity(argv, environ=None):
+    """The canvas background opacity to apply: ``--canvas-opacity`` if given,
+    else ``$PATCHSPACE_CANVAS_OPACITY``, else None (the built-in default).
+
+    A bad value from the environment is ignored with a warning - it comes
+    from configuration, and refusing to start over it would be worse than
+    drawing an opaque canvas.  A bad *command line* value is still fatal."""
+    environ = os.environ if environ is None else environ
+    cleaned, value = _extract_canvas_opacity(argv)
+    if value is not None:
+        return cleaned, value
+    raw = environ.get(CANVAS_OPACITY_ENV)
+    if raw:
+        try:
+            float(raw)
+        except ValueError:
+            print(
+                f"ignoring {CANVAS_OPACITY_ENV}={raw!r}: expected a number 0..1",
+                file=sys.stderr,
+            )
+            return cleaned, None
+        return cleaned, raw
+    return cleaned, None
+
+
 def main():
-    argv, opacity = _extract_canvas_opacity(sys.argv)
+    argv, opacity = _resolve_canvas_opacity(sys.argv)
     if opacity is not None:
         try:
             constants.CANVAS_BG_ALPHA = max(0.0, min(1.0, float(opacity)))

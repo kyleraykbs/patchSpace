@@ -173,3 +173,23 @@ Renaming files: `src/patchbay_cli.py` -> `src/patchspace_cli.py`,
 `src/gui/patchbay_gui.py` -> `src/gui/patchspace_gui.py` (flake.nix, tests and docs follow).
 Reminder for module work: after editing this repo, a consumer using a `path:` input needs
 `nix flake update patchspace`, since the narHash is baked into its lock.
+
+## Panel fit, entries, and the stylix opacity (2026-09-23)
+
+* **A panel's declared placement is a room for its physics, never a clip on its box.**  The
+  widget only ever writes back x/y, so `w`/`h` is usually the creation default (420x260 root,
+  320x320 daemon-made).  Clipping the auto-fit to it made panels under-fit their contents -
+  obvious on a panel with no IO ports (a ported panel is pushed out by its port stack anyway)
+  and worst for a parent whose children had been dragged apart, since a child panel can't be
+  walled back in the way a member node can.  The box now always encloses members, children,
+  groups and their titles; only the unanchored physics cloud is bounded, by
+  `_wall_nodes_into_panels` against `_panel_growth_limits`.
+* **Coordinates:** nodes carry *canvas* x/y and `_draw_panel_boxes` draws every rect raw, so a
+  panel's box (and its children's boxes) are canvas coordinates too.  `panel.x`/`panel.y` are
+  parent-relative and only get folded by `_panel_absolute`, which is used for the empty-panel
+  fallback (and for dragging).  Do not "fix" the child fold by translating it.
+* **Entry chrome is themed** (`field_bg`/`field_fg` from the theme's view colours) instead of a
+  hardcoded near-black; `theme_palette` falls back to the old literals.
+* **`services.patchspace.canvasOpacity`** defaults to `config.stylix.opacity.applications` (or
+  `null`) and reaches the GUI as `PATCHSPACE_CANVAS_OPACITY` from the session environment; the
+  `--canvas-opacity` flag still wins.

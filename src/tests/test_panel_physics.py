@@ -109,14 +109,23 @@ def test_node_anchored_members_still_hold_still():
 
 
 def test_physics_cannot_balloon_a_panel():
+    """A cloud of unanchored members (what an imported panel's nodes look
+    like) is settled by physics, and the wall keeps them inside the room the
+    panel's placement allows - so the box the user sees stays bounded too."""
     w = _widget(anchored=True, panel_wh=(420.0, 260.0), nodes={
         "p1::a": {"type": "volume", "x": 0.0, "y": 0.0, "label": "a"},
         "p1::b": {"type": "volume", "x": 4000.0, "y": 0.0, "label": "b"},
     })
+    for _ in range(200):
+        w._hierarchical_step()
     _rect = w._panel_rect_base("p1")
     assert _rect is not None
-    assert _rect[2] <= 420.0 + 2 * w.PANEL_PHYSICS_GROW + 1.0
-    assert _rect[3] <= 260.0 + 2 * w.PANEL_PHYSICS_GROW + 1.0
+    # The members are inside the room, so the fitted box is too (plus the
+    # padding it draws around them).
+    room_w = 420.0 + 2 * w.PANEL_PHYSICS_GROW
+    room_h = 260.0 + 2 * w.PANEL_PHYSICS_GROW
+    assert _rect[2] <= room_w + 2 * w.PANEL_PADDING + 1.0, _rect
+    assert _rect[3] <= room_h + 2 * w.PANEL_PADDING + 1.0, _rect
 
 
 def test_two_pinned_neighbours_never_cross():
@@ -167,14 +176,59 @@ def test_the_wall_pulls_members_back_inside_the_box():
         assert ry - 1.0 <= node["y"] <= ry + rh + 1.0, (nid, node["y"], rect)
 
 
-def test_an_unpinned_panel_is_not_capped_by_physics_growth():
-    """The cap is a safety net around the box auto-fit; it must not stop the
-    box from hugging contents that legitimately grow it (a dragged node, a
-    wide layout) beyond the declared placement - PANEL_DRAG_GROW still
-    governs that path."""
+def test_the_fit_is_not_capped_by_the_declared_placement():
+    """The placement (w/h) is a room for the physics, not a limit on the
+    drawn box: it is a value the widget never rewrites, so it is usually just
+    the size the panel was created with.  Contents that legitimately stick
+    out of it - a wide layout, a panel dragged away - must be enclosed, not
+    clipped, or the panel under-fits its own graph."""
     w = _widget(anchored=False, panel_wh=(420.0, 260.0), nodes={
         "p1::a": {"type": "volume", "x": 0.0, "y": 0.0, "label": "a"},
         "p1::b": {"type": "volume", "x": 2000.0, "y": 0.0, "label": "b"},
     })
     rect = w._panel_rect_base("p1")
-    assert rect[2] <= 420.0 + 2 * w.PANEL_PHYSICS_GROW + 1.0
+    assert rect[2] > 420.0 + 2 * w.PANEL_PHYSICS_GROW, rect
+    for nid, node in w.nodes.items():
+        assert rect[0] <= node["x"], (nid, rect)
+        assert node["x"] + w.node_width(nid) <= rect[0] + rect[2] + 1.0, (nid, rect)
+
+
+def test_a_panel_encloses_a_child_panel_that_sits_away_from_it():
+    """A parent folds its children's boxes into its own fit, and those boxes
+    are in canvas coordinates (nodes carry absolute x/y; `_draw_panel_boxes`
+    draws every rect raw).  A child that has moved away from a parent whose
+    placement is still the default 420x260 - the reported under-fit - must
+    still end up inside the parent."""
+    w = _widget(anchored=True, nodes={
+        "p1::a": {"type": "volume", "x": 50.0, "y": 50.0, "label": "a"},
+        "p1::c::b": {"type": "volume", "x": 20.0, "y": 20.0, "label": "b"},
+    }, panels=[
+        {"id": "p1", "parent": "", "label": "P1", "color": "#3584e4",
+         "mode": "read-write", "x": 0.0, "y": 0.0, "w": 420.0, "h": 260.0,
+         "anchored": True, "writable": True, "readonly": False,
+         "children": ["p1::c"]},
+        {"id": "p1::c", "parent": "p1", "label": "C", "color": "#e5a50a",
+         "mode": "read-write", "x": 3000.0, "y": 1500.0, "w": 320.0, "h": 320.0,
+         "anchored": True, "writable": True, "readonly": False,
+         "children": []},
+    ])
+    outer = w._panel_rect_base("p1")
+    cx, cy, cw, ch = w._panel_rect_base("p1::c")
+    assert outer[0] <= cx and outer[1] <= cy, (outer, (cx, cy, cw, ch))
+    assert cx + cw <= outer[0] + outer[2] + 1.0, (outer, (cx, cy, cw, ch))
+    assert cy + ch <= outer[1] + outer[3] + 1.0, (outer, (cx, cy, cw, ch))
+
+
+def test_a_stale_placement_never_clips_a_member():
+    """Panels are created with a default 320x320 placement and the widget
+    never rewrites w/h, so a panel that has since grown has a placement that
+    says nothing about its contents.  A member the user placed (node-
+    anchored) sits where it sits; the box has to enclose it."""
+    w = _widget(anchored=True, panel_wh=(320.0, 320.0), nodes={
+        "p1::a": {"type": "volume", "x": 900.0, "y": 600.0, "label": "a"},
+        "p1::b": {"type": "volume", "x": 20.0, "y": 20.0, "label": "b"},
+    })
+    w.anchored_nodes.add("p1::a")
+    rect = w._panel_rect_base("p1")
+    assert rect[0] + rect[2] >= 900.0 + w.node_width("p1::a") - 1.0, rect
+    assert rect[1] + rect[3] >= 600.0 + w.node_height("p1::a") - 1.0, rect

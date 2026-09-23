@@ -17,6 +17,12 @@ _FALLBACK_BG = (0.137, 0.137, 0.145)
 _FALLBACK_NODE_BG = (0.196, 0.196, 0.208)
 _FALLBACK_NODE_BORDER = (0.36, 0.36, 0.39)
 _FALLBACK_TEXT = (0.93, 0.93, 0.94)
+# Entry-like chrome (a node's text field, a device row's select box).  The
+# theme's view colours are what a real GtkEntry uses, so a themed desktop
+# (stylix recolours these) gets entries that match the rest of the window
+# instead of a fixed near-black box.
+_FALLBACK_VIEW_BG = (0.14, 0.14, 0.15)
+_FALLBACK_VIEW_FG = (0.85, 0.85, 0.86)
 _FALLBACK_SUBTEXT = (0.63, 0.63, 0.66)
 _FALLBACK_INPUT_PORT = (0.35, 0.78, 0.51)
 _FALLBACK_OUTPUT_PORT = (0.94, 0.47, 0.42)
@@ -108,6 +114,8 @@ def theme_palette(widget) -> dict:
         "node_border": _lookup(widget, "borders", _FALLBACK_NODE_BORDER),
         "text": _lookup(widget, "window_fg_color", _FALLBACK_TEXT),
         "subtext": _lookup(widget, "dim_label_color", _FALLBACK_SUBTEXT),
+        "field_bg": _lookup(widget, "view_bg_color", _FALLBACK_VIEW_BG),
+        "field_fg": _lookup(widget, "view_fg_color", _FALLBACK_VIEW_FG),
         "input_port": _FALLBACK_INPUT_PORT,
         "output_port": _FALLBACK_OUTPUT_PORT,
         "boolean_port": _FALLBACK_BOOLEAN_PORT,

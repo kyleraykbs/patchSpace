@@ -4937,7 +4937,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         elif spec.control == "impulse":
             self._draw_impulse_button(cr, nid, node)
         elif spec.field:
-            self._draw_text_field(cr, nid, self._field_value(node))
+            self._draw_text_field(cr, pal, nid, self._field_value(node))
         if spec.picker:
             self._draw_path_picker(cr, pal, nid)
 
@@ -4950,7 +4950,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self._draw_play_indicator(cr, pal, nid, node)
 
         for i, row_kind in enumerate(self._device_rows(node)):
-            self._draw_device_row(cr, nid, node, i, row_kind)
+            self._draw_device_row(cr, pal, nid, node, i, row_kind)
 
         # A node whose Settings dialog has more than the generic
         # ID/label rows (Echo Cancel's module options, Noise Cancel's
@@ -5494,18 +5494,18 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     def _draw_mute_checkbox(self, cr, x, y, node_h, volume):
         self._draw_check_row(cr, x, y, node_h, volume > 0.5, "Pass audio")
 
-    def _draw_text_field(self, cr, nid, value):
+    def _draw_text_field(self, cr, pal, nid, value):
         field_x, field_y, field_w, field_h = self._field_rect(nid)
 
         draw_rounded_rect(cr, field_x, field_y, field_w, field_h, 4)
-        cr.set_source_rgb(0.14, 0.14, 0.15)
+        cr.set_source_rgb(*pal["field_bg"])
         cr.fill_preserve()
-        cr.set_source_rgb(0.42, 0.42, 0.45)
+        cr.set_source_rgb(*pal["node_border"])
         cr.set_line_width(1)
         cr.stroke()
 
         text = value if value else "(click to set)"
-        color = (0.85, 0.85, 0.86) if value else (0.5, 0.5, 0.53)
+        color = pal["field_fg"] if value else pal["subtext"]
         font_size = 10
 
         baseline_y = field_y + (field_h - font_size) // 2
@@ -5528,9 +5528,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         Import action's."""
         x, y, w, h = self._path_picker_rect(nid)
         draw_rounded_rect(cr, x, y, w, h, 4)
-        cr.set_source_rgb(0.14, 0.14, 0.15)
+        cr.set_source_rgb(*pal["field_bg"])
         cr.fill_preserve()
-        cr.set_source_rgb(0.42, 0.42, 0.45)
+        cr.set_source_rgb(*pal["node_border"])
         cr.set_line_width(1)
         cr.stroke()
         self._draw_node_icon(
@@ -5656,7 +5656,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         cr.move_to(text_x, text_y)
         cr.show_text(label_text)
 
-    def _draw_device_row(self, cr, nid, node, row_index, row_kind):
+    def _draw_device_row(self, cr, pal, nid, node, row_index, row_kind):
         row_x, row_y, row_w, row_h = self._device_row_rect(nid, row_index)
 
         if row_kind == "volume":
@@ -5692,12 +5692,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             placeholder = not node.get("codec_label")
 
         draw_rounded_rect(cr, row_x, row_y, row_w, row_h, 4)
-        cr.set_source_rgb(0.14, 0.14, 0.15)
+        cr.set_source_rgb(*pal["field_bg"])
         cr.fill_preserve()
-        cr.set_source_rgb(0.42, 0.42, 0.45)
+        cr.set_source_rgb(*pal["node_border"])
         cr.set_line_width(1)
         cr.stroke()
-        color = (0.5, 0.5, 0.53) if placeholder else (0.85, 0.85, 0.86)
+        color = pal["subtext"] if placeholder else pal["field_fg"]
         draw_text_ellipsized(
             cr, row_x + 6, row_y + (row_h - 10) // 2, text, row_w - 12, 10, color
         )
@@ -8460,16 +8460,20 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         return min(14.0, 40.0 / z)
 
     def _panel_growth_limits(self, pid):
-        """(max_w, max_h) a panel's auto-fit may reach, or (None, None) for
-        a panel with no declared size.
+        """(max_w, max_h) the room a panel's *physics* may spread into, or
+        (None, None) for a panel with no declared size.
 
         Derived from the panel's *placement* width/height - which the widget
         never rewrites (it only ever writes back x/y), so this is a stable
         reference even while the box moves - plus `PANEL_PHYSICS_GROW` per
-        side.  See `_panel_rect_base`: this is what stops a cloud of
-        unanchored nodes being settled by physics from growing its panel
-        without bound, and `_wall_nodes_into_panels` is what then keeps the
-        members inside the capped box."""
+        side.  `_wall_nodes_into_panels` is what enforces it, by pulling
+        unanchored members back inside.
+
+        This is deliberately *not* a cap on the drawn box (see
+        `_panel_rect_base`): the box always has to enclose its contents, and
+        the placement is only the size the panel was created with.  What it
+        bounds is the unbounded part - a cloud of unanchored nodes settled by
+        physics, which the wall keeps inside this room."""
         panel = self.panels.get(pid)
         if panel is None:
             return (None, None)
@@ -8528,6 +8532,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             if cr_rect is None:
                 continue
             cx, cy, cw, ch = cr_rect
+            # No translation here: a panel's box is in *canvas* coordinates
+            # (nodes carry absolute x/y, and `_draw_panel_boxes` draws every
+            # rect raw), unlike `panel.x`/`panel.y`, which are
+            # parent-relative and only folded back in `_panel_absolute` for
+            # the empty-panel fallback below.
+            #
             # The child's *box* right/bottom, remembered before the title
             # fold below shifts `cy` upward - otherwise `cy + ch` would
             # under-count the bottom by the title gap.
@@ -8644,21 +8654,16 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 grow = (side - (bottom - top)) / 2.0
                 top -= grow
                 bottom += grow
-            max_w, max_h = self._panel_growth_limits(pid)
-            # Physics settles members, the box follows them, so cap how far
-            # the *size* may run past the declared placement (an explicit
-            # drag has its own, origin-relative cap above).  Size rather than
-            # edges on purpose: the box's origin legitimately follows its
-            # content, and an origin-relative cap would ratchet outward a
-            # PANEL_PHYSICS_GROW per step.  Shrinking stays free - the box
-            # still hugs its contents - and the min-side floor above wins if
-            # it is larger than the cap.
-            if max_w is not None and right - left > max_w:
-                cx = (left + right) / 2.0
-                left, right = cx - max_w / 2.0, cx + max_w / 2.0
-            if max_h is not None and bottom - top > max_h:
-                cy = (top + bottom) / 2.0
-                top, bottom = cy - max_h / 2.0, cy + max_h / 2.0
+            # No size cap here on purpose.  The declared placement is the
+            # *room physics may spread into* (see `_panel_growth_limits`,
+            # enforced by `_wall_nodes_into_panels`), not a limit on the
+            # drawn box: it is a value the widget never rewrites, so it is
+            # often just the size the panel was created with (420x260 for the
+            # root, 320x320 for a daemon-made panel).  Clipping to it made a
+            # panel under-fit its own contents - visible the moment a panel
+            # had no IO ports to force the box out, and worst on a parent
+            # whose child panels had been dragged apart, since children can't
+            # be walled back in the way members can.
             rect = (left, top, right - left, bottom - top)
         self._panel_geo_cache[pid] = rect
         return rect

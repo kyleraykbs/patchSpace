@@ -10,8 +10,8 @@
 #     daemon can never write them back and `Reset` in the GUI re-applies
 #     exactly what Nix said;
 #   * the session autosave (the "root panel", where placements and hand-made
-#     nodes live) stays in the user's state directory - config in the store,
-#     state in $XDG_STATE_HOME;
+#     nodes live) is left where the daemon keeps it, in the user's cache
+#     directory - config in the store, state with the daemon;
 #   * exported JSON is mixed in per panel (`panels.<name>.imports`) and Nix
 #     merges *on top* of it, per node and per edge (see ./lib.nix);
 #   * every generated panel is validated at build time with the repo's own
@@ -22,7 +22,7 @@
 
 let
   inherit (lib)
-    mkEnableOption mkIf mkOption types literalExpression optionalString
+    mkEnableOption mkIf mkMerge mkOption types literalExpression optionalString
     concatStringsSep;
 
   cfg = config.services.patchspace;
@@ -341,6 +341,24 @@ in
       '';
     };
 
+    canvasOpacity = mkOption {
+      type = types.nullOr (types.numbers.between 0.0 1.0);
+      default = config.stylix.opacity.applications or null;
+      defaultText = literalExpression "config.stylix.opacity.applications";
+      example = 0.9;
+      description = ''
+        Background opacity of the GUI's canvas, 0..1 (1.0 = opaque; lower
+        leaves the desktop showing through the grid, with nodes, panels and
+        wires still drawn opaque).  Handed to the GUI as
+        `PATCHSPACE_CANVAS_OPACITY`, so it applies whether the window is
+        started from the launcher or a shell.
+
+        Defaults to stylix's application opacity when stylix is configured
+        for this scope, so Patch Space follows the theme without being told
+        twice; `null` (no stylix) leaves the GUI's own default of opaque.
+      '';
+    };
+
     imports = mkOption {
       type = types.listOf types.path;
       default = [ ];
@@ -421,61 +439,78 @@ in
     };
   };
 
-  config = mkIf cfg.enable {
-    services.patchspace.panelsDir = panelsDir;
+  config = mkIf cfg.enable (mkMerge [
+    { services.patchspace.panelsDir = panelsDir; }
 
-    systemd.user.services.patchspace =
-      if homeManager then {
-        # home-manager names the INI sections directly.
-        Unit = {
-          Description = unit.description;
-          After = unit.after;
-          Wants = unit.wants;
-        };
-        Service = {
-          ExecStartPre = unit.execStartPre;
-          ExecStart = unit.execStart;
-          inherit (unit.restarts) Restart RestartSec;
-        };
-        Install.WantedBy = unit.wantedBy;
-      } else {
-        # NixOS splits them: unitConfig / serviceConfig / install.
-        unitConfig = {
-          Description = unit.description;
-          After = unit.after;
-          Wants = unit.wants;
-        };
-        serviceConfig = {
-          ExecStartPre = unit.execStartPre;
-          ExecStart = unit.execStart;
-          inherit (unit.restarts) Restart RestartSec;
-        };
-        # NixOS's user units take the new-style `wantedBy`, not
-        # `install.WantedBy` (that one is home-manager's spelling).
-        wantedBy = unit.wantedBy;
+    # The GUI is a client of the daemon, so its window defaults come from the
+    # session environment rather than the unit - and `canvasOpacity` already
+    # follows stylix, so a themed machine needs no extra setting.  Which
+    # option holds the session environment depends on the scope this module
+    # was loaded in.
+    (if homeManager then {
+      home.sessionVariables = mkIf (cfg.canvasOpacity != null) {
+        PATCHSPACE_CANVAS_OPACITY = toString cfg.canvasOpacity;
       };
+    } else {
+      environment.sessionVariables = mkIf (cfg.canvasOpacity != null) {
+        PATCHSPACE_CANVAS_OPACITY = toString cfg.canvasOpacity;
+      };
+    })
 
-    # (A rebuild rewrites the panel files into a *new* store path, which
-    # changes this unit's ExecStart, so the daemon is restarted with the new
-    # config - no in-place reload needed.)
-    assertions = [
-      {
-        assertion = typelessNodes == "";
-        message = ''
-          services.patchspace declares node(s) with no type, and no import
-          provides one: ${typelessNodes}
-        '';
-      }
-      {
-        assertion = mainPanel.nodes != { } || mainPanel.imports != [ ]
-          || mainPanel.edges != [ ] || mainPanel.groups != [ ]
-          || mainPanel.children != [ ];
-        message = ''
-          services.patchspace is enabled but declares nothing: give it
-          `panels.<name>` (or the top-level `imports`/`nodes`/`edges`) to
-          configure.
-        '';
-      }
-    ];
-  };
+    {
+        systemd.user.services.patchspace =
+        if homeManager then {
+          # home-manager names the INI sections directly.
+          Unit = {
+            Description = unit.description;
+            After = unit.after;
+            Wants = unit.wants;
+          };
+          Service = {
+            ExecStartPre = unit.execStartPre;
+            ExecStart = unit.execStart;
+            inherit (unit.restarts) Restart RestartSec;
+          };
+          Install.WantedBy = unit.wantedBy;
+        } else {
+          # NixOS splits them: unitConfig / serviceConfig / install.
+          unitConfig = {
+            Description = unit.description;
+            After = unit.after;
+            Wants = unit.wants;
+          };
+          serviceConfig = {
+            ExecStartPre = unit.execStartPre;
+            ExecStart = unit.execStart;
+            inherit (unit.restarts) Restart RestartSec;
+          };
+          # NixOS's user units take the new-style `wantedBy`, not
+          # `install.WantedBy` (that one is home-manager's spelling).
+          wantedBy = unit.wantedBy;
+        };
+
+      # (A rebuild rewrites the panel files into a *new* store path, which
+      # changes this unit's ExecStart, so the daemon is restarted with the new
+      # config - no in-place reload needed.)
+      assertions = [
+        {
+          assertion = typelessNodes == "";
+          message = ''
+            services.patchspace declares node(s) with no type, and no import
+            provides one: ${typelessNodes}
+          '';
+        }
+        {
+          assertion = mainPanel.nodes != { } || mainPanel.imports != [ ]
+            || mainPanel.edges != [ ] || mainPanel.groups != [ ]
+            || mainPanel.children != [ ];
+          message = ''
+            services.patchspace is enabled but declares nothing: give it
+            `panels.<name>` (or the top-level `imports`/`nodes`/`edges`) to
+            configure.
+          '';
+        }
+      ];
+    }
+  ]);
 }
