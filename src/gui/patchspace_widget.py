@@ -381,6 +381,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # graph) and the waveform the daemon sent for the sound reaching it
         # (path, duration, peaks).
         self._clip_views: Dict[str, tuple] = {}
+        #: (text, font_size, bold) -> pixel size; see _text_size.
+        self._text_size_cache: dict = {}
         self._clip_waves: Dict[str, dict] = {}
         self._clip_wave_pending: set = set()
         #: nid -> the source_rev each node's waveform was last asked *for*, so a
@@ -9392,12 +9394,27 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             return (0.2, 0.5, 0.9)
 
     def _text_size(self, text, font_size, bold=False):
+        """Pixel size of a string in the canvas font.
+
+        Memoised: a frame measures the same handful of label shapes hundreds of
+        times, and every miss builds a fresh Pango layout (a font description
+        parse included) for an answer that cannot change while the font does
+        not."""
+        key = (text or "", font_size, bool(bold))
+        cached = self._text_size_cache.get(key)
+        if cached is not None:
+            return cached
         layout = self.create_pango_layout(text or "")
         weight = "bold " if bold else ""
         layout.set_font_description(
             Pango.FontDescription.from_string(f"sans {weight}{font_size}")
         )
-        return layout.get_pixel_size()
+        size = layout.get_pixel_size()
+        if len(self._text_size_cache) >= 2048:
+            # Labels change as nodes are renamed/retyped; stay bounded.
+            self._text_size_cache.clear()
+        self._text_size_cache[key] = size
+        return size
 
     @staticmethod
     def _group_merge_key(gid):

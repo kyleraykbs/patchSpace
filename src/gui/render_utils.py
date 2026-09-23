@@ -9,6 +9,7 @@ takes what it needs as arguments.
 from __future__ import annotations
 
 import math
+import time as _time
 import zlib
 
 from gi.repository import Gtk, Pango, PangoCairo
@@ -69,18 +70,31 @@ _THEME_COLOR_NAMES = [
 ]
 
 
+#: The last (read-time, key) for _theme_key - see there.
+_THEME_KEY_CACHE: list = [0.0, None]
+
+
 def _theme_key():
-    """A cheap key that changes when the theme / color scheme changes, so
-    named-color lookups can be cached across frames (they were re-queried
-    from GTK dozens of times per frame)."""
+    """A key that changes when the theme / color scheme changes, so named-color
+    lookups can be cached across frames.
+
+    Re-read at most once a second: asking GTK for these properties is not as
+    cheap as it reads - it walked the settings backend on every named colour,
+    and a frame asks for hundreds of them.  A theme switch is still picked up
+    (within the second), which is all the responsiveness it needs."""
+    now = _time.monotonic()
+    if now - _THEME_KEY_CACHE[0] < 1.0:
+        return _THEME_KEY_CACHE[1]
     try:
         settings = Gtk.Settings.get_default()
-        return (
+        key = (
             settings.get_property("gtk-theme-name"),
             settings.get_property("gtk-application-prefer-dark-theme"),
         )
     except Exception:
-        return None
+        key = None
+    _THEME_KEY_CACHE[:] = [now, key]
+    return key
 
 
 _COLOR_CACHE = {}
