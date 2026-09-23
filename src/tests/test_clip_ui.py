@@ -390,3 +390,35 @@ def test_a_take_is_loaded_when_it_ends_not_while_it_records(monkeypatch):
     assert polls() == 2                  # still leashed
     clock[0] += 2.0
     assert polls() == 3                  # past it, loaded
+
+
+def test_a_recording_source_blanks_the_waveform_without_losing_the_timeline():
+    """While a take records, the timeline shows an empty line - but the entry
+    stays: the clip's view state (zoom, its drag handles, the selection) lives
+    beside the waveform, and dropping the entry took all of that with it."""
+    w, client = _recorder_and_clip()
+    TAKE = "/recordings/rec1.wav"
+    rec = {"id": "rec1", "type": "recorder", "label": "Recorder", "x": 0.0, "y": 0.0,
+           "ready": True, "connected": True, "declarative": False,
+           "selection_label": "Recorder", "description": "",
+           "source_path": TAKE, "source_rev": "1:1000",
+           "recording": True, "duration": 0.0}
+    clip = {"id": "clip1", "type": "clip", "label": "Clip", "x": 300.0, "y": 0.0,
+            "ready": True, "connected": True, "declarative": False,
+            "selection_label": "Clip", "description": "",
+            "source_path": TAKE, "source_rev": "1:1000", "start": 0.0, "end": 2.0,
+            "duration": 0.0, "source_start": 0.0}
+
+    w.update_from_daemon({"nodes": {"rec1": dict(rec), "clip1": dict(clip)},
+                          "edges": {}, "panels": [], "groups": []})
+    # The clip is showing the take being written: it has a timeline, and the
+    # waveform in it is empty.
+    w._clip_waves["clip1"] = {"path": TAKE, "duration": 8.0,
+                              "peaks": [(-1.0, 1.0), (-1.0, 1.0)]}
+    w._clip_views["clip1"] = {"start": 0.0, "span": 4.0}
+    w.update_from_daemon({"nodes": {"rec1": dict(rec), "clip1": dict(clip)},
+                          "edges": {}, "panels": [], "groups": []})
+    assert "clip1" in w._clip_waves          # the timeline is still there
+    assert w._clip_waves["clip1"]["peaks"] == []   # but blank
+    assert "clip1" in w._clip_views          # and so is its view state
+    assert not [c for c in client.sent if c.get("command") == "get_peaks"]

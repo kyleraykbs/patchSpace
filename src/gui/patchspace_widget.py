@@ -1419,7 +1419,18 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 self._node_fade.pop(nid, None)
                 self._anim_seen.discard(nid)
 
+        # A take being recorded is a file still being written: nothing showing
+        # it - the Recorder itself, or a Clip (or anything else) downstream of
+        # it - may load it until the take *ends*.  This is keyed on the *file*,
+        # because only the Recorder carries `recording`: a Clip has no way to
+        # know otherwise, which is why the crop kept loading live.
         now = time.monotonic()
+        recording_paths = {
+            str(nd.get("source_path") or "")
+            for nd in daemon_nodes.values()
+            if nd.get("type") == "recorder" and nd.get("recording")
+        }
+        recording_paths.discard("")
         for nid, ndata in daemon_nodes.items():
             fp = self._node_fingerprint(ndata)
             if self._node_fp.get(nid) != fp:
@@ -1608,17 +1619,27 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                         source != known or rev != self._clip_wave_rev.get(nid)
                     )
                     # Loading a waveform costs the daemon an ffmpeg pass over
-                    # the whole file, so a take is *not* followed while it
-                    # records - no live waveform.  It is loaded when the take
-                    # ends (the one the user made), and beyond that a file that
-                    # changes is loaded no oftener than the leash allows.
+                    # the whole file, so a file still being recorded is not
+                    # followed at all - the timeline shows an empty line while
+                    # the take runs, and the waveform lands when it ends.
+                    # Beyond that, a file that changes is loaded no oftener
+                    # than the leash allows.
+                    being_recorded = source in recording_paths
+                    if being_recorded and nid in self._clip_waves:
+                        # Blank it - the previous take's shape is not this one -
+                        # but *keep the entry*: the timeline's view state (zoom,
+                        # the drag handles, the selection) is kept beside it, and
+                        # dropping the entry took those with it.
+                        self._clip_waves[nid]["peaks"] = []
+                        self._clip_waves[nid]["duration"] = 0.0
                     was_recording = self._sound_recording.get(nid)
                     now_recording = bool(ndata.get("recording", False))
                     self._sound_recording[nid] = now_recording
                     take_ended = was_recording is True and not now_recording
                     due = (now - self._clip_wave_asked.get(nid, 0.0)
                            >= self.SOUND_WAVE_MIN_INTERVAL_MS / 1000.0)
-                    if stale and not now_recording and (due or take_ended) \
+                    if stale and source not in recording_paths \
+                            and (due or take_ended) \
                             and nid not in self._clip_wave_pending:
                         self._clip_wave_pending.add(nid)
                         self._clip_wave_asked[nid] = now
