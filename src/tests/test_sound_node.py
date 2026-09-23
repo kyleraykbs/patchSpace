@@ -459,6 +459,11 @@ def test_a_growing_take_is_re_read_not_answered_from_the_cache(tmp_path):
 
     put_seconds(2.0)                                  # the same take, still growing
     assert pwnodes.sound_rev(str(take))
+    # The per-domain floor (see probe_duration) deliberately serves the last
+    # answer while a file is being written, so clear it to test what this is
+    # about: the revision-keyed cache, which must not answer a rewritten file
+    # with the old length.
+    pwnodes._DURATION_LAST.clear()
     assert probe_duration(str(take)) == pytest.approx(2.0, abs=0.05)
 
 
