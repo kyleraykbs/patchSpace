@@ -258,6 +258,14 @@ def test_a_recorder_takes_an_audio_input_and_gives_a_sound(monkeypatch):
 
     _FakeRecorder.commands.clear()
     monkeypatch.setattr(pwnodes, "OwnedPwProcess", _FakeRecorder)
+    # A take reads the node's own sink: that link is now made explicitly,
+    # because pw-cat's --target fell back to the *default source* (the
+    # microphone) whenever it could not bind to the sink.
+    linked = []
+    monkeypatch.setattr(pwnodes, "_recorder_input_ports",
+                        lambda name: [("_FL", f"{name}:input_FL")])
+    monkeypatch.setattr(pwnodes, "_run_pw_link",
+                        lambda out, inp: linked.append((out, inp)) or True)
 
     d = PatchSpaceDaemon()
     d.space.graph = FakeGraph()
@@ -276,8 +284,11 @@ def test_a_recorder_takes_an_audio_input_and_gives_a_sound(monkeypatch):
     assert _ok(command="get_nodes")["nodes"]["rec"]["recording"] is True
     command = _FakeRecorder.commands[0]
     assert command[0] == "pw-cat" and "--record" in command
-    assert command[command.index("--target") + 1] == node.backing_node_name
+    assert "--target" not in command            # nothing to silently fall back from
+    assert any("autoconnect = false" in arg for arg in command)
     assert command[-1] == node.take_path
+    assert linked == [(f"{node.backing_node_name}:monitor_FL",
+                       f"{node.backing_node_name}_recording:input_FL")]
 
     # Stop: the child goes, and the play head reads idle again.
     resp = _ok(command="record", node_id="rec", recording=False)
@@ -387,3 +398,45 @@ def test_source_rev_changes_when_a_take_overwrites_the_file(tmp_path):
 
     take.write_bytes(b"a second, longer take")               # same path, new file
     assert PatchSpaceDaemon._file_rev(str(take)) != first
+
+
+def test_a_take_reads_its_own_sink_and_fails_loudly_when_it_cannot(
+        tmp_path, monkeypatch):
+    """pw-cat with a --target it cannot bind to silently falls back to the
+    *default source* and records the microphone - which is what the take used
+    to do.  It now runs with autoconnect off and is linked to this node's
+    monitor explicitly, and a take that cannot be linked reports failure
+    rather than recording the wrong thing."""
+    monkeypatch.setattr(pwnodes.RecorderNode, "RECORD_DIR", str(tmp_path))
+    node = pwnodes.RecorderNode("rec", backing_node_name="rec_sink")
+    commands = []
+
+    class FakeProc:
+        def __init__(self, *args, **kwargs):
+            self.is_alive = True
+        def create(self, command, quiet=False):
+            commands.append(command)
+            return True
+        def destroy(self):
+            self.is_alive = False
+
+    monkeypatch.setattr(pwnodes, "OwnedPwProcess", FakeProc)
+    monkeypatch.setattr(pwnodes, "_recorder_input_ports",
+                        lambda name: [("_FL", f"{name}:input_FL")])
+
+    linked = []
+    monkeypatch.setattr(pwnodes, "_run_pw_link",
+                        lambda out, inp: linked.append((out, inp)) or True)
+    assert node.start_take() is True
+    assert linked == [("rec_sink:monitor_FL", "rec_sink_recording:input_FL")]
+    assert "--target" not in commands[-1]          # nothing to fall back from
+    assert any("autoconnect = false" in a for a in commands[-1])
+    node.stop_take()
+
+    # No monitor to read: report failure instead of recording silence or
+    # somebody else's stream.
+    monkeypatch.setattr(pwnodes, "_run_pw_link", lambda out, inp: False)
+    assert node.start_take() is False
+    assert node.recording is False
+    monkeypatch.setattr(pwnodes, "_recorder_input_ports", lambda name: [])
+    assert node.start_take() is False

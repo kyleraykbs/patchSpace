@@ -2124,6 +2124,43 @@ class FilterNode(_SingleSinkNode):
         return True
 
 
+def _run_pw_link(output_port: str, input_port: str) -> bool:
+    """Create one link.  "Already linked" counts as success: pw-link exits
+    non-zero for a link that is already there, and callers here want the link
+    to *exist*, not to have made it themselves (see pwgraph's note)."""
+    try:
+        res = subprocess.run(
+            ["pw-link", output_port, input_port],
+            capture_output=True, text=True, timeout=3.0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if res.returncode == 0:
+        return True
+    return "already linked" in (res.stderr or "").lower()
+
+
+def _recorder_input_ports(name: str) -> List[Tuple[str, str]]:
+    """The input ports a recording client exposes, as
+    ``(channel suffix, port id)`` - ``("_FL", "x_recording:input_FL")``.
+
+    Empty until pw-cat has actually started, which is why the linking that
+    uses it retries."""
+    try:
+        out = subprocess.run(
+            ["pw-link", "-i"], capture_output=True, text=True, timeout=2.0
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    prefix = f"{name}:input"
+    return [
+        (line.strip()[len(prefix):], line.strip())
+        for line in out.splitlines()
+        if line.strip().startswith(prefix)
+        and line.strip()[len(prefix):]
+    ]
+
+
 class RecorderNode(_SingleSinkNode):
     """Records what is wired into it: an audio input, and a *sound* out.
 
@@ -2190,11 +2227,18 @@ class RecorderNode(_SingleSinkNode):
             logger.warning("Couldn't clear %r for recording: %s", path, exc)
             return False
         name = f"{self.backing_node_name}_recording"
+        # No ``--target``: pw-cat falls back to the *default source* when the
+        # target doesn't resolve to something it can capture from, and that
+        # silently recorded the microphone instead of this node's input (the
+        # sink is not a source, so the name lookup found nothing to bind to).
+        # Autoconnect is off for the same reason - the take reads this node's
+        # monitor, and only this node's monitor, because we link it below.
         command = (
-            "pw-cat", "--record", "--target", self.backing_node_name,
+            "pw-cat", "--record",
             "--format", self.RECORD_FORMAT, "--rate", str(self.RECORD_RATE),
             "--channels", str(self.RECORD_CHANNELS),
-            "--properties", f'{{ node.name = "{name}" }}',
+            "--properties",
+            f'{{ node.name = "{name}" node.autoconnect = false }}',
             path,
         )
         proc = OwnedPwProcess(name, self._pw_cli_command, 0.1)
@@ -2205,7 +2249,35 @@ class RecorderNode(_SingleSinkNode):
             )
             return False
         self._recorder = proc
+        if not self._link_to_monitor(name):
+            # Nothing to read from: without the link this take would capture
+            # silence at best, and something else at worst.  Say so instead
+            # of reporting a recording that isn't one.
+            logger.warning(
+                "Recorder %r couldn't link its take to %r's monitor",
+                self.id, self.backing_node_name,
+            )
+            self.stop_take()
+            return False
         return True
+
+    def _link_to_monitor(self, name: str) -> bool:
+        """Read this node's own sink: link the take's stream to its monitor.
+
+        Retried - the pw-cat client's ports appear a moment after it starts -
+        and each channel the client exposes is linked to the matching monitor
+        channel.  ``pw-link`` reports "already linked" for a link that is
+        there, which is a success for us."""
+        for _ in range(12):
+            ports = _recorder_input_ports(name)
+            links = [
+                (f"{self.backing_node_name}:monitor{ch}", port)
+                for ch, port in ports
+            ]
+            if links and all(_run_pw_link(out, inp) for out, inp in links):
+                return True
+            _time.sleep(0.05)
+        return False
 
     def stop_take(self) -> bool:
         """Finish the take.  True when something was actually recording."""

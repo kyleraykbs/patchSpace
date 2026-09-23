@@ -437,3 +437,12 @@ gesture accepts; tested only structurally (no touchscreen here).
 * Watch for `seen` sets shared across two functions that each guard with them:
   passing a caller's `seen` into a helper that has already added the node reads
   as a cycle and silently returns "nothing".
+
+* **`pw-cat --record --target <name>` falls back to the *default source*.**
+  A sink is not a capture target, so the recorder - which must read its own
+  sink's monitor - silently recorded the *microphone* instead, and reported
+  success.  The take is now started with `node.autoconnect = false` and linked
+  to the monitor explicitly (`RecorderNode._link_to_monitor`), and a take that
+  cannot be linked *fails* rather than recording the wrong stream.  This was
+  also the recorder's "flakiness": whichever way the name lookup went, the take
+  was either the node's input or the mic.
