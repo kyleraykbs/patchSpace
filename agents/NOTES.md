@@ -460,3 +460,15 @@ gesture accepts; tested only structurally (no touchscreen here).
   95-node session is 13-18ms, i.e. ~60fps, so "the UI freezes" was never
   visible in the steady state - it needs a specific reproduction (which action,
   how long) rather than more guessing.
+
+* **A path is not a file** - the third time this bit in one session (the GUI's
+  waveform re-ask, the daemon's source_rev, and now the sound caches).  A take
+  exists as a *growing* file, so a per-path cache made the first read of a take
+  the answer for the whole take and the timeline sat still until Stop.
+  `probe_duration`/`probe_peaks` are keyed on (path, revision) - mtime and size
+  - and that alone made `forget_sound` (a cache-buster called on stop)
+  redundant, so it is gone.  When a cache is keyed on the wrong thing, the
+  invalidation code it needs is a symptom, not a solution.
+* ffmpeg reads a WAV whose header is not finalised yet (a recording in
+  progress): `probe_peaks` on a live take returns its buckets so far.  That is
+  what makes the waveform fill in as it records.
