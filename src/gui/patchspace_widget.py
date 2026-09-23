@@ -8080,10 +8080,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     def on_drag_update(self, gesture, offset_x, offset_y):
         if self.clip_dragging is not None:
-            self._drag_clip(*self.to_world(
-                self._clip_drag_origin[0] + offset_x,
-                0.0,
-            )[0:1], self.to_world(0.0, 0.0)[1])
+            origin_x = self._clip_drag_origin[0]
+            wx, _wy = self.to_world(origin_x + offset_x, 0.0)
+            self._drag_clip(wx, 0.0)
             return
         if self.dragging_port is not None:
             node = self.nodes.get(self.dragging_port)

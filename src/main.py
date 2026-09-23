@@ -4312,6 +4312,24 @@ class PatchSpaceDaemon:
                         "status": "error",
                         "message": f"Node has no {prop!r} property",
                     }
+            elif prop in ("start", "end") and isinstance(node, ClipNode):
+                # A Clip's selection, dragged on its timeline or typed into one
+                # of its boxes.  ``end = None`` means "to the end of the sound",
+                # which is what the box shows until it is moved.  Without this
+                # branch the daemon rejected the property, so the GUI's own
+                # value was overwritten by the stale one on the next poll and
+                # the selection snapped straight back.
+                if prop == "end" and value is None:
+                    node.end = None
+                else:
+                    try:
+                        seconds = max(0.0, float(value))
+                    except (TypeError, ValueError):
+                        return {
+                            "status": "error",
+                            "message": f"{prop} must be a number of seconds",
+                        }
+                    setattr(node, prop, seconds)
             elif prop == "overlap" and isinstance(node, SoundPlayerNode):
                 # Retrigger behaviour (the node's Stack switch): off
                 # (default) restarts the sound, on lets impulses stack

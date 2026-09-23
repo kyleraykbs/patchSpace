@@ -168,3 +168,22 @@ def test_dragging_a_knob_slides_the_selection():
     w._drag_clip(w._clip_x_at("clip1", 100.0), mid_y)
     assert w.nodes["clip1"]["start"] == pytest.approx(6.0)
     assert w.nodes["clip1"]["end"] == pytest.approx(10.0)
+
+
+def test_a_knob_drag_through_the_gesture_moves_the_selection():
+    """The whole path, not just _drag_clip: press on a knob (the hit-test has to
+    find it), move, release.  This is what "the handles won't move" was - the
+    drag reached the daemon, which rejected the property, so the next poll put
+    the old value back under the pointer."""
+    w, _ = _widget(duration=10.0, start=2.0, end=6.0)
+    kx, ky, kw, kh = w._clip_knob_rect("clip1", "start")
+
+    w.on_drag_begin(None, kx + kw / 2.0, ky + kh / 2.0)
+    assert w.clip_dragging == ("slide", "clip1")
+    w.on_drag_update(None, 60.0, 0.0)
+    assert w.nodes["clip1"]["start"] > 2.5, w.nodes["clip1"]
+    assert w.nodes["clip1"]["end"] == pytest.approx(
+        w.nodes["clip1"]["start"] + 4.0
+    )
+    w.on_drag_end(None, 60.0, 0.0)
+    assert w.clip_dragging is None

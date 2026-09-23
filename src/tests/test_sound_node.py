@@ -189,3 +189,37 @@ def test_a_daemon_clip_sees_the_sound_wired_into_it(tmp_path):
     # something to play when it fires.
     resolved = d.space.resolve_sound("pl")
     assert resolved["path"] == str(path)
+
+
+def test_a_clips_times_are_settable_and_stick():
+    """Dragging a Clip's handles (or typing into a box) has to survive the next
+    poll.  The daemon didn't know the properties, so it answered an error, and
+    the GUI's own value was replaced by the stale one on every refresh - the
+    selection snapped straight back and the handles looked immovable."""
+    from main import PatchSpaceDaemon
+    from tests.test_pwnodes import FakeGraph
+
+    d = PatchSpaceDaemon()
+    d.space.graph = FakeGraph()
+    d.space.mark_graph_loaded()
+    assert d.handle_command(
+        {"command": "add_node", "node_type": "clip", "node_id": "clip"}
+    )["status"] == "ok"
+
+    def set_prop(prop, value):
+        return d.handle_command({"command": "set_node_property", "node_id": "clip",
+                                 "property": prop, "value": value})
+
+    def reported():
+        node = d.handle_command({"command": "get_nodes"})["nodes"]["clip"]
+        return node["start"], node["end"]
+
+    assert set_prop("start", 2.5)["status"] == "ok"
+    assert set_prop("end", 4.0)["status"] == "ok"
+    assert reported() == (2.5, 4.0)
+    # "To the end of the sound" is a real value, not an error.
+    assert set_prop("end", None)["status"] == "ok"
+    assert reported() == (2.5, None)
+    # Garbage is refused rather than stored, and the old value survives.
+    assert set_prop("start", "abc")["status"] == "error"
+    assert reported() == (2.5, None)
