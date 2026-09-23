@@ -544,7 +544,10 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
         [],
         sound_inputs=["sound"],
         impulse_inputs=["impulse"],
-        field="name",
+        # Both fields are text boxes on the node's own body (see the "dump"
+        # control), with a folder button on the first - the settings dialog
+        # carries the same two, so either route works.
+        control="dump",
         settings=[
             ("folder", "Folder:", "text"),
             ("name", "Name:", "text"),

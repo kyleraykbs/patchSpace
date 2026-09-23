@@ -187,6 +187,29 @@ def save_file(
     )
 
 
+def select_folder(
+    parent: Optional[Gtk.Window],
+    title: str,
+    on_path: Callable[[Optional[str]], None],
+    folder: str = "",
+) -> None:
+    """Ask the user for a *directory*: the portal's file chooser in directory
+    mode.  Same on_path contract as save_file()."""
+
+    def handle_paths(paths):
+        on_path(paths[0] if paths else None)
+
+    def handle_unavailable(message):
+        logger.warning("Folder chooser portal unavailable, falling back: %s", message)
+        _manual_path_dialog(parent, title, "_Select", "", on_path)
+
+    options: dict = {"directory": GLib.Variant("b", True)}
+    if folder:
+        # The portal takes a path as a byte array with a trailing NUL.
+        options["current_folder"] = GLib.Variant("ay", folder.encode() + b"\x00")
+    _call_portal("Open", title, options, handle_paths, handle_unavailable)
+
+
 def open_file(
     parent: Optional[Gtk.Window],
     title: str,

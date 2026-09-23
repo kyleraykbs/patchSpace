@@ -100,7 +100,7 @@ from node_specs import (
     icon_for_add_node_type,
     color_name_for_node_type,
 )
-from portal_file_dialog import open_file, save_file
+from portal_file_dialog import open_file, save_file, select_folder
 from color_picker import ColorPicker
 from bool_state import resolve_bool_state_from_poll
 
@@ -1607,6 +1607,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     node["playing"] = ndata.get("playing", 0)
                 if "progress" in ndata:
                     node["progress"] = float(ndata.get("progress") or 0.0)
+                if "folder" in ndata:
+                    node["folder"] = str(ndata.get("folder") or "")
+                if "name" in ndata:
+                    node["name"] = str(ndata.get("name") or "")
+                if "dump_path" in ndata:
+                    node["dump_path"] = str(ndata.get("dump_path") or "")
                 if "overlap" in ndata:
                     overlap = self._accept_bool_echo(
                         nid, "overlap", ndata.get("overlap", False)
@@ -2383,6 +2389,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             # The Clip's timeline owns the bottom of the node and is taller
             # than the button faces.
             return self.CLIP_AREA_HEIGHT
+        if spec.control == "dump":
+            # Two text rows (folder, then name) on the node's own body - see
+            # _dump_row_rect.
+            return (
+                len(self.DUMP_FIELDS) * (self.FIELD_HEIGHT + self.DUMP_ROW_GAP)
+                + self.FIELD_BOTTOM_PAD
+            )
         if spec.control in ("gate", "switcher", "boolean", "impulse",
                             "filter_mode"):
             # The impulse Button's face and the Filter node's Include/Exclude
@@ -2474,6 +2487,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             ndata.get("exclude"), ndata.get("enabled"), ndata.get("output"),
             ndata.get("gate"), ndata.get("warp_name"), ndata.get("port_name"),
             ndata.get("path"), ndata.get("duration"), ndata.get("source_path"),
+            ndata.get("folder"), ndata.get("name"), ndata.get("dump_path"),
             tuple(ndata.get("inputs") or ()),
             tuple(ndata.get("outputs") or ()),
             tuple(ndata.get("bundle_inputs") or ()),
@@ -5566,6 +5580,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self._draw_wetdry_slider(
                 cr, pal, x, y, node_h, node.get("wet_dry", 0.3)
             )
+        elif spec.control == "dump":
+            self._draw_dump_fields(cr, pal, nid, node)
         elif spec.control == "gain":
             # Normalize's boost, drawn as a plain 0..1 slider (fraction
             # of the plugin's 0..30 dB range - see find_gain_slider_at).
@@ -6835,7 +6851,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             # cursor doesn't flicker.
             return
 
-        if self.find_record_button_at(wx, wy) is not None:
+        if (self.find_dump_picker_at(wx, wy) is not None
+                or self.find_dump_field_at(wx, wy) is not None):
+            self.set_cursor(Gdk.Cursor.new_from_name("pointer", None))
+        elif self.find_record_button_at(wx, wy) is not None:
             self.set_cursor(Gdk.Cursor.new_from_name("pointer", None))
         elif self.find_stop_button_at(wx, wy) is not None:
             self.set_cursor(Gdk.Cursor.new_from_name("pointer", None))
@@ -6895,6 +6914,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         wx, wy = self.to_world(x, y)
 
         # Panel reset button (read-only panels) - re-apply the file state.
+        dump_pick = self.find_dump_picker_at(wx, wy)
+        if dump_pick is not None:
+            self._pick_dump_folder(dump_pick)
+            return
+        dump_field = self.find_dump_field_at(wx, wy)
+        if dump_field is not None:
+            self._edit_dump_field(dump_field[0], dump_field[1], x, y)
+            return
         record_hit = self.find_record_button_at(wx, wy)
         if record_hit is not None:
             node = self.nodes.get(record_hit) or {}
@@ -8151,6 +8178,139 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         node[part] = seconds - base
         self._clip_pending_send.add(nid)
         self.queue_draw()
+
+    #: The text rows a Sound Dump shows on its body, top to bottom.
+    DUMP_FIELDS = ("folder", "name")
+
+    #: Gap between those rows, pixels.
+    DUMP_ROW_GAP = 6.0
+
+    def _dump_row_rect(self, nid, which):
+        """Geometry of one of a Sound Dump's field rows.  The folder row gives
+        up room for its button, the way a `picker` spec's field does."""
+        node = self.nodes[nid]
+        row = self.DUMP_FIELDS.index(which)
+        x = node["x"] + self.FIELD_MARGIN
+        w = self.NODE_WIDTH - 2 * self.FIELD_MARGIN
+        if which == "folder":
+            w -= self.PICKER_SIZE + self.PICKER_GAP
+        step = self.FIELD_HEIGHT + self.DUMP_ROW_GAP
+        y = (
+            node["y"] + self.node_height(nid)
+            - self.FIELD_BOTTOM_PAD
+            - (len(self.DUMP_FIELDS) - row) * step
+            + self.DUMP_ROW_GAP
+        )
+        return (x, y, w, self.FIELD_HEIGHT)
+
+    def _dump_picker_rect(self, nid):
+        """The folder button, right of the folder row - derived from it so the
+        two can't drift apart."""
+        fx, fy, fw, fh = self._dump_row_rect(nid, "folder")
+        return (
+            fx + fw + self.PICKER_GAP,
+            fy + (fh - self.PICKER_SIZE) / 2.0,
+            float(self.PICKER_SIZE),
+            float(self.PICKER_SIZE),
+        )
+
+    def _draw_dump_fields(self, cr, pal, nid, node):
+        """A Sound Dump's body: a box for the folder (with a folder button) and
+        a box for the file's name."""
+        for which in self.DUMP_FIELDS:
+            x, y, w, h = self._dump_row_rect(nid, which)
+            draw_rounded_rect(cr, x, y, w, h, 4)
+            cr.set_source_rgb(*pal["field_bg"])
+            cr.fill_preserve()
+            cr.set_source_rgb(*pal["node_border"])
+            cr.set_line_width(1)
+            cr.stroke()
+            text = str(node.get(which) or "")
+            colour = pal["field_fg"] if text else pal["subtext"]
+            draw_text_ellipsized(cr, x + 6, y + (h - 10) // 2,
+                                 text or "(click to set)", w - 12, 10, colour)
+        px, py, pw, ph = self._dump_picker_rect(nid)
+        draw_rounded_rect(cr, px, py, pw, ph, 4)
+        cr.set_source_rgb(*pal["field_bg"])
+        cr.fill_preserve()
+        cr.set_source_rgb(*pal["node_border"])
+        cr.set_line_width(1)
+        cr.stroke()
+        cr.set_source_rgb(*pal["field_fg"])
+        cr.set_line_width(1.6)
+        inset = pw * 0.3
+        cr.move_to(px + inset, py + ph - inset)
+        cr.line_to(px + pw - inset, py + ph - inset)
+        cr.line_to(px + pw - inset, py + inset + 3)
+        cr.move_to(px + inset, py + inset + 3)
+        cr.line_to(px + pw - inset, py + inset + 3)
+        cr.stroke()
+
+    def find_dump_field_at(self, x, y):
+        """(node_id, field) for the Sound Dump field box under the pointer."""
+        for nid, node in self._hit_nodes(x, y, require_ready=False):
+            if spec_for(node["type"]).control != "dump":
+                continue
+            for which in self.DUMP_FIELDS:
+                fx, fy, fw, fh = self._dump_row_rect(nid, which)
+                if fx <= x <= fx + fw and fy <= y <= fy + fh:
+                    return (nid, which)
+        return None
+
+    def find_dump_picker_at(self, x, y):
+        """The Sound Dump whose folder button is under the pointer."""
+        for nid, node in self._hit_nodes(x, y, require_ready=False):
+            if spec_for(node["type"]).control != "dump":
+                continue
+            px, py, pw, ph = self._dump_picker_rect(nid)
+            if px <= x <= px + pw and py <= y <= py + ph:
+                return nid
+        return None
+
+    def _edit_dump_field(self, nid, which, screen_x, screen_y):
+        """Type a Sound Dump's folder or name - the same popover entry a node
+        field uses.  Stored as written, so "~" stays portable and the daemon
+        expands it when it writes."""
+        node = self.nodes.get(nid) or {}
+        popover = Gtk.Popover()
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        box.set_margin_top(6)
+        box.set_margin_bottom(6)
+        box.set_margin_start(6)
+        box.set_margin_end(6)
+        entry = Gtk.Entry()
+        entry.set_text(str(node.get(which) or ""))
+        entry.set_width_chars(18)
+
+        def apply(*_args):
+            value = entry.get_text().strip()
+            node[which] = value
+            self._send_property(nid, which, value)
+            self.queue_draw()
+            popover.popdown()
+
+        entry.connect("activate", apply)
+        box.append(entry)
+        set_btn = Gtk.Button(label="Set")
+        set_btn.connect("clicked", apply)
+        box.append(set_btn)
+        popover.set_child(box)
+        self.popup_context_menu(popover, screen_x, screen_y)
+
+    def _pick_dump_folder(self, nid):
+        """The folder button: a real *directory* chooser (the portal's file
+        chooser in directory mode), falling back to typing."""
+        node = self.nodes.get(nid) or {}
+        current = os.path.expanduser(str(node.get("folder") or "~"))
+
+        def on_path(path):
+            if not path:
+                return
+            node["folder"] = path
+            self._send_property(nid, "folder", path)
+            self.queue_draw()
+
+        select_folder(self.get_root(), "Choose Folder", on_path, folder=current)
 
     def _flush_clip_times(self) -> None:
         """Send whatever a Clip drag settled on, once, when it ends.
@@ -11327,6 +11487,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             "app_name": "",
             "playing": 0,
             "overlap": False,
+            "folder": ndata.get("folder", ""),
+            "name": ndata.get("name", ""),
+            "dump_path": ndata.get("dump_path", ""),
             "connected": False,
             "is_bluetooth": False,
             "selection_label": "",

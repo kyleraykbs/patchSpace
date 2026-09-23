@@ -236,3 +236,43 @@ def test_panel_settings_apply_leaves_the_colour_applied():
     # whole process (see popup_context_menu's _show).
     win.destroy()
     pump(200)
+
+
+def test_a_sound_dump_shows_its_two_fields_on_its_body():
+    """Kyle: "Name and folder for sound dump should appear on the node itself
+    as two textboxes... and just add the directory selector".  The body owns
+    both rows, and the folder row carries the button."""
+    from gui import node_specs
+
+    assert node_specs.spec_for("sound_dump").control == "dump"
+
+    w, client = _widget()
+    w.update_from_daemon({
+        "nodes": {"d1": {
+            "id": "d1", "type": "sound_dump", "label": "Sound Dump",
+            "x": 0.0, "y": 0.0, "ready": True, "connected": True,
+            "declarative": False, "selection_label": "Sound Dump",
+            "description": "", "folder": "~/Dumps", "name": "take 1",
+            "dump_path": ""}},
+        "edges": {}, "panels": [], "groups": []})
+
+    # Two rows on the body, the folder above the name, and the button beside
+    # the folder row - everything derived from one place.
+    fx, fy, fw, fh = w._dump_row_rect("d1", "folder")
+    nx, ny, nw, nh = w._dump_row_rect("d1", "name")
+    assert fy < ny
+    px, py, pw, ph = w._dump_picker_rect("d1")
+    assert px > fx + fw
+    assert (px, py) == (fx + fw + w.PICKER_GAP,
+                        fy + (fh - w.PICKER_SIZE) / 2.0)
+
+    assert w.find_dump_field_at(fx + 2, fy + fh / 2.0) == ("d1", "folder")
+    assert w.find_dump_field_at(nx + 2, ny + nh / 2.0) == ("d1", "name")
+    assert w.find_dump_picker_at(px + pw / 2.0, py + ph / 2.0) == "d1"
+    assert w.find_dump_field_at(px + pw / 2.0, py + ph / 2.0) is None
+    assert w.find_dump_picker_at(fx + 2, fy + fh / 2.0) is None
+
+    # It draws without error, which is what puts them on screen.
+    import cairo
+    surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, 700, 500)
+    w.on_draw(w, cairo.Context(surf), 700, 500)

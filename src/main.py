@@ -497,6 +497,9 @@ _SERIAL_ATTRS = (
     "declarative",
     "path",
     "overlap",
+    # A Sound Dump's own fields, so the node can show them on its body.
+    "folder",
+    "name",
 )
 
 # GUI layout state a node may carry.  Serialized separately (only when
