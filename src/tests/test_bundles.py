@@ -832,3 +832,21 @@ def test_a_filter_hands_on_through_its_own_sink():
     # Its own sink is what the kept members are summed into (the ``:sum``
     # bookkeeping entry exists as soon as the dummy resolves).
     assert set(s._filter_links(s.nodes["f"])) == {f"__internal__:f:sum"}
+
+
+def test_a_split_cycle_does_not_recurse_for_ever():
+    """A Split resolves through its upstream, which can be another Split.  The
+    recursion used to run before the `seen` guard was initialised, so a *cycle*
+    of them (the model allows one, even though the sync refuses to wire it)
+    recursed until Python raised - and that call happens inside get_nodes,
+    which the daemon serves holding its lock."""
+    g = FakeGraph()
+    g.add_source(10, "alpha")
+    s = PatchSpace(g)
+    s.mark_graph_loaded()
+    s.add_node(BundleSplitNode("split1"))
+    s.add_node(BundleSplitNode("split2"))
+    s.add_edge("split2", "split1")      # split1 resolves through split2 ...
+    s.add_edge("split1", "split2")      # ... which resolves through split1
+
+    assert s.bundle_members("split1") == []

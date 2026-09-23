@@ -4443,15 +4443,18 @@ class PatchSpace:
         Split resolves through to its upstream bundle; any other bundle
         endpoint (All Inputs, a Filter chain, a Bundle junction) resolves
         to its concrete source ids here."""
-        node = self.nodes.get(node_id)
-        if isinstance(node, BundleSplitNode):
-            chosen = self._bundle_upstream(node_id)
-            return self.bundle_members(chosen.from_node, seen) if chosen else []
+        # The guard has to come *before* the Split branch below: a Split
+        # resolves through its upstream, which may itself be a Split, and
+        # recursing from there without a `seen` to carry would never stop.
         if seen is None:
             seen = set()
         if node_id in seen:
             return []
         seen = seen | {node_id}
+        node = self.nodes.get(node_id)
+        if isinstance(node, BundleSplitNode):
+            chosen = self._bundle_upstream(node_id)
+            return self.bundle_members(chosen.from_node, seen) if chosen else []
         live = self.graph.nodes()
         members: List[dict] = []
         for member_id in pwmatch.find_source_nodes(
