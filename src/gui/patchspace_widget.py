@@ -11217,6 +11217,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         ntype = normalize_node_type(real_type)
         spec = spec_for(ntype)
         self.nodes[node_id] = {
+            # The id is part of what a node *is*, not just its key: drawing it
+            # (e.g. the bottom control asking whether its impulse input is
+            # wired) reads it back off the dict, so leaving it out made
+            # adding any node with an impulse input fail outright.
+            "id": node_id,
             "type": ntype,
             "x": float(cx),
             "y": float(cy),

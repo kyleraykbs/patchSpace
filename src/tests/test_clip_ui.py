@@ -422,3 +422,22 @@ def test_a_recording_source_blanks_the_waveform_without_losing_the_timeline():
     assert w._clip_waves["clip1"]["peaks"] == []   # but blank
     assert "clip1" in w._clip_views          # and so is its view state
     assert not [c for c in client.sent if c.get("command") == "get_peaks"]
+
+
+def test_adding_a_node_with_an_impulse_input_works():
+    """The optimistic placeholder is a full node dict - including its `id`,
+    which the drawing asks for (the bottom control checks whether the node's
+    impulse input is wired).  Without it, adding a Sound Player - or anything
+    else with an impulse input - raised KeyError and the node never appeared."""
+    w, client = _recorder_and_clip()
+    for ntype in ("sound_player", "recorder", "button", "sound"):
+        w.add_node_at(ntype, 200.0, 200.0)
+    sent = [c for c in client.sent if c.get("command") == "add_node"]
+    assert len(sent) == 4
+    for cmd in sent:
+        nid = cmd["node_id"]
+        assert nid in w.nodes, f"{cmd['node_type']} never appeared"
+        # Drawn, which is what needed the id.
+        w.on_draw(w, __import__("cairo").Context(
+            __import__("cairo").ImageSurface(__import__("cairo").FORMAT_ARGB32, 600, 400)),
+            600, 400)
