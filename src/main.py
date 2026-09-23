@@ -473,6 +473,8 @@ _SERIAL_ATTRS = (
     "predelay",
     "force_default",
     "invert",
+    "title",
+    "exclude",
     "declarative",
     "path",
     "overlap",
@@ -3757,7 +3759,7 @@ class PatchSpaceDaemon:
         if cls is ExternalOnlyClassifierNode:
             return cls(node_id, g("invert", False))
         if cls is FilterNode:
-            return cls(node_id)
+            return cls(node_id, g("title", ""), g("exclude", False))
         if cls in (BundleMergeNode, BundleSplitNode):
             return cls(node_id)
         if cls is BundleToAudioNode:
@@ -4276,6 +4278,7 @@ class PatchSpaceDaemon:
                 "pattern",
                 "media_class",
                 "description",
+                "title",
                 "port_type",
                 "warp_name",
                 "port_name",
@@ -4296,6 +4299,10 @@ class PatchSpaceDaemon:
                 node.overlap = bool(value)
             elif prop == "invert" and isinstance(node, ClassifierNode):
                 node.invert = bool(value)
+            elif prop == "exclude" and isinstance(node, FilterNode):
+                # The Filter node's Include/Exclude switch: on = keep
+                # everything the title box / classifiers do *not* match.
+                node.exclude = bool(value)
             elif prop == "force_default" and self._line_volume_target(node) is not None:
                 # The line nodes share the built-in's force flag; set it on
                 # the built-in and mirror it back onto every line node.

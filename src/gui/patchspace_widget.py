@@ -831,6 +831,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._pending_bool[(nid, "enabled")] = node["enabled"]
         self._send_set_gate(nid, node["enabled"])
 
+    def _toggle_filter_mode(self, nid):
+        """Flip a Filter node's Include/Exclude switch and remember the new
+        value until the daemon echoes it (see _accept_bool_echo)."""
+        node = self.nodes[nid]
+        node["exclude"] = not node.get("exclude", False)
+        self._pending_bool[(nid, "exclude")] = node["exclude"]
+        self._send_property(nid, "exclude", node["exclude"])
+
     def _toggle_switch_state(self, nid):
         """Flip a switcher / On-Off source and remember the new value until
         the daemon echoes it (see _accept_bool_echo)."""
@@ -1407,6 +1415,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     # checkbox's value (absent on every other type).
                     "playing": ndata.get("playing", 0),
                     "overlap": ndata.get("overlap", False),
+                    # The Filter node's Include/Exclude switch (absent on
+                    # every other type).
+                    "exclude": ndata.get("exclude", False),
                     "connected": ndata.get("connected", False),
                     "is_bluetooth": ndata.get("is_bluetooth", False),
                     "selection_label": ndata.get("selection_label", ""),
@@ -1490,6 +1501,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     )
                     if overlap is not None:
                         node["overlap"] = bool(overlap)
+                # Filter: its Include/Exclude switch, same echo guard as the
+                # other boolean body controls (only Filter nodes send it).
+                if "exclude" in ndata:
+                    exclude = self._accept_bool_echo(
+                        nid, "exclude", ndata.get("exclude", False)
+                    )
+                    if exclude is not None:
+                        node["exclude"] = bool(exclude)
                 node["connected"] = ndata.get("connected", False)
                 node["is_bluetooth"] = ndata.get("is_bluetooth", False)
                 node["selection_label"] = ndata.get("selection_label", "")
@@ -2146,6 +2165,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 len(rows) * (self.FIELD_HEIGHT + 4) + self.FIELD_BOTTOM_PAD
             )
         spec = spec_for(node["type"])
+        if spec.control == "filter_mode":
+            # The Filter node's face: its title field row on top of the
+            # Include/Exclude button (which owns the bottom strip).
+            return (
+                self.GATE_AREA_HEIGHT + self.FIELD_HEIGHT + self.FIELD_BOTTOM_PAD
+            )
         if spec.control == "fallback_onoff":
             # The on/off button is always shown: interactive while
             # nothing is wired into the ctrl input, and a read-only white
@@ -2408,6 +2433,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             node["y"] + self.node_height(nid)
             - self.FIELD_HEIGHT - self.FIELD_BOTTOM_PAD
         )
+        if spec.control == "filter_mode":
+            # The Include/Exclude button owns the node's bottom strip, so the
+            # title field sits above it rather than under it.
+            y -= self.GATE_AREA_HEIGHT
         return (x, y, w, self.FIELD_HEIGHT)
 
     def _path_picker_rect(self, nid):
@@ -4063,6 +4092,17 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 return nid
         return None
 
+    def find_filter_mode_at(self, x, y):
+        """The Filter node's Include/Exclude button - same geometry as the
+        gate toggle (see _gate_rect)."""
+        for nid, node in self._hit_nodes(x, y):
+            if spec_for(node["type"]).control != "filter_mode":
+                continue
+            gx, gy, gw, gh = self._gate_rect(nid)
+            if gx <= x <= gx + gw and gy <= y <= gy + gh:
+                return nid
+        return None
+
     def find_switcher_toggle_at(self, x, y):
         for nid, node in self._hit_nodes(x, y):
             if spec_for(node["type"]).control != "switcher":
@@ -4934,6 +4974,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             )
         elif spec.control == "impulse":
             self._draw_impulse_button(cr, nid, node)
+        elif spec.control == "filter_mode":
+            self._draw_filter_mode_button(cr, pal, nid, node.get("exclude", False))
+            self._draw_text_field(cr, pal, nid, self._field_value(node))
         elif spec.field:
             self._draw_text_field(cr, pal, nid, self._field_value(node))
         if spec.picker:
@@ -5550,6 +5593,37 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         cr.move_to(text_x, text_y)
         cr.show_text(label)
 
+    def _draw_filter_mode_button(self, cr, pal, nid, exclude):
+        """The Filter node's Include/Exclude switch - the gate toggle's big
+        rounded rect, captioned with the mode it is in.  Include (the
+        default, the node keeps what matches) fills with the theme's success
+        color; Exclude (it drops them instead) with the theme's error color -
+        the same pair the On/Off button uses for its two states."""
+        x, y, w, h = self._gate_rect(nid)
+        radius = 10
+
+        face = pal["error"] if exclude else pal["success"]
+        fill = face
+        border = tuple(c * 0.65 for c in face)
+        text_color = (0.06, 0.06, 0.08)
+
+        draw_rounded_rect(cr, x, y, w, h, radius)
+        cr.set_source_rgb(*fill)
+        cr.fill_preserve()
+        cr.set_source_rgb(*border)
+        cr.set_line_width(1.5)
+        cr.stroke()
+
+        label = "EXCLUDE" if exclude else "INCLUDE"
+        cr.select_font_face("sans")
+        cr.set_font_size(12)
+        extents = cr.text_extents(label)
+        text_x = x + (w - extents.width) / 2 - extents.x_bearing
+        text_y = y + (h - extents.height) / 2 - extents.y_bearing
+        cr.set_source_rgb(*text_color)
+        cr.move_to(text_x, text_y)
+        cr.show_text(label)
+
     def _draw_switcher_toggle(self, cr, nid, output):
         """Two-segment A/B button for a Switcher node.  The selected
         output is filled green, the inactive one grey, so a glance at
@@ -5886,6 +5960,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             or self.find_volume_lock_at(wx, wy) is not None
             or self.find_mute_checkbox_at(wx, wy) is not None
             or self.find_gate_toggle_at(wx, wy) is not None
+            or self.find_filter_mode_at(wx, wy) is not None
             or self.find_switcher_toggle_at(wx, wy) is not None
             or self.find_boolean_toggle_at(wx, wy) is not None
             or self.find_fallback_toggle_at(wx, wy) is not None
@@ -6076,6 +6151,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         nid = self.find_gate_toggle_at(wx, wy)
         if nid is not None:
             self._toggle_gate_state(nid)
+            self.queue_draw()
+            return
+
+        nid = self.find_filter_mode_at(wx, wy)
+        if nid is not None:
+            self._toggle_filter_mode(nid)
             self.queue_draw()
             return
 
@@ -7036,6 +7117,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         if (
             self.find_mute_checkbox_at(wx, wy) is not None
             or self.find_gate_toggle_at(wx, wy) is not None
+            or self.find_filter_mode_at(wx, wy) is not None
             or self.find_switcher_toggle_at(wx, wy) is not None
             or self.find_boolean_toggle_at(wx, wy) is not None
             or self.find_fallback_toggle_at(wx, wy) is not None

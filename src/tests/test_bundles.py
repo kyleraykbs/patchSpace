@@ -177,6 +177,59 @@ def test_all_inputs_filter_regex_routes_only_matching_source():
     assert not any(o == mic["FL"] for o, _ in links)
 
 
+def test_filter_title_box_matches_the_stream_title():
+    """The Filter node's own box selects by title - the media.name a
+    playing app reports - with no classifier node involved."""
+    g = FakeGraph()
+    watched = g.add_source(10, "watched", app="firefox",
+                           media_name="YouTube - a video")
+    g.add_source(11, "other", app="firefox", media_name="Some other tab")
+    # Same words in the *description*, different title: not a match.
+    g.add_source(12, "titled_elsewhere", app="firefox",
+                 media_name="Nothing here", description="YouTube")
+    sink = g.add_sink(20, "sink1")
+    s = PatchSpace(g)
+    s.mark_graph_loaded()
+    s.add_node(AllAppsNode("apps"))
+    s.add_node(FilterNode("f", title="youtube"))
+    s.add_node(SinkNode("snk", "sink1"))
+    s.add_edge("apps", "f")
+    s.add_edge("f", "snk")
+    s.sync()
+    links = g.linked_pairs()
+    # Case-insensitive substring, on the title only.
+    assert (watched["FL"], sink["FL"]) in links
+    assert {out for out, _ in links} == {watched["FL"], watched["FR"]}
+
+
+def test_filter_exclude_switch_flips_the_bundle_between_keep_and_drop():
+    """One Filter node covers both senses: keep the members that match its
+    title box / classifiers, or - switched to Exclude - everything else."""
+    g = FakeGraph()
+    watched = g.add_source(10, "watched", app="firefox",
+                           media_name="YouTube - a video")
+    other = g.add_source(11, "other", app="firefox",
+                         media_name="Some other tab")
+    sink = g.add_sink(20, "sink1")
+    s = PatchSpace(g)
+    s.mark_graph_loaded()
+    s.add_node(AllAppsNode("apps"))
+    s.add_node(FilterNode("f", title="YouTube"))
+    s.add_node(SinkNode("snk", "sink1"))
+    s.add_edge("apps", "f")
+    s.add_edge("f", "snk")
+
+    def linked_outputs():
+        s.sync()
+        return {out for out, _ in g.linked_pairs()}
+
+    # Include (the default): only the matching title reaches the sink.
+    assert linked_outputs() == {watched["FL"], watched["FR"]}
+    # Exclude: the same node now drops exactly that member.
+    s.nodes["f"].exclude = True
+    assert linked_outputs() == {other["FL"], other["FR"]}
+
+
 def test_filter_chain_intersects():
     g = FakeGraph()
     alpha = g.add_source(10, "alpha", app="alpha")
@@ -569,6 +622,28 @@ def test_daemon_serializes_filter_inputs():
                       "to_node": "f", "to_port": "filter1"})
     nodes = d.handle_command({"command": "get_nodes"})["nodes"]
     assert nodes["f"]["filter_inputs"] == ["filter1", "filter2"]
+
+
+def test_daemon_filter_title_and_switch_survive_set_node_property():
+    """Both controls the GUI sends (the title box and the Include/Exclude
+    switch go out as set_node_property) reach the daemon and are exported."""
+    from main import PatchSpaceDaemon
+
+    d = PatchSpaceDaemon()
+    d.handle_command({"command": "add_node", "node_type": "filter",
+                      "node_id": "f", "config": {"title": "YouTube"}})
+    nodes = d.handle_command({"command": "get_nodes"})["nodes"]
+    assert nodes["f"]["title"] == "YouTube"
+    assert nodes["f"]["exclude"] is False
+
+    for prop, value, expected in (("exclude", True, True),
+                                  ("title", "some track", "some track")):
+        res = d.handle_command({"command": "set_node_property", "node_id": "f",
+                                "property": prop, "value": value})
+        assert res.get("status") != "error", res
+        assert d.handle_command(
+            {"command": "get_nodes"}
+        )["nodes"]["f"][prop] == expected
 
 
 def test_daemon_create_node_builds_bundle_output_without_starting_it():

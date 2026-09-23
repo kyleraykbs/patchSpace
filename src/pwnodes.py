@@ -1490,7 +1490,23 @@ class FilterNode(TransparentNode):
     The filter inputs are dynamic: the daemon reports one per wired
     classifier plus a spare (``filter_input_ports``), so plugging into
     the spare grows another and one node can hold an arbitrary number of
-    classifiers."""
+    classifiers.
+
+    The node also carries its own ``title`` box (case-insensitive substring
+    of a member's ``media.name`` - the title a playing app reports, e.g.
+    "YouTube"), so a plain "keep the app playing <title>" needs no
+    classifier node at all.  The box is another AND term: the node keeps
+    the members that match the title *and* every wired classifier.
+
+    ``exclude`` is the node's Include/Exclude switch.  Off (Include, the
+    default) the node keeps what matches; on (Exclude) it keeps everything
+    *except* what matches - the same predicate, negated, so one node covers
+    "only these" and "everything but these"."""
+
+    def __init__(self, node_id, title: str = "", exclude: bool = False):
+        super().__init__(node_id)
+        self.title = title
+        self.exclude = bool(exclude)
 
     def port_kind(self, port: str, direction: str) -> str:
         if direction == "in" and port.startswith("filter"):
@@ -3828,12 +3844,16 @@ class PatchSpace:
 
     def _apply_classifier(self, filter_node: "FilterNode", side: str,
                           ids: List[int]) -> List[int]:
-        """Keep the `ids` a Filter node's classifiers all match (AND).  No
-        classifier wired => the bundle passes through; an empty
-        classifier matches nothing."""
+        """Keep the `ids` a Filter node passes: its own title box (when set)
+        *and* every wired classifier (AND).  Neither set => the bundle passes
+        through; a wired but empty classifier matches nothing.  With the
+        node's Include/Exclude switch on Exclude, keep the complement
+        instead: everything that does *not* match."""
         classifiers = self._classifiers_for(filter_node.id)
-        if not classifiers:
+        title = (getattr(filter_node, "title", "") or "").strip()
+        if not classifiers and not title:
             return list(ids)
+        exclude = bool(getattr(filter_node, "exclude", False))
         kept: List[int] = []
         live = self.graph.nodes()
         for node_id in ids:
@@ -3841,7 +3861,12 @@ class PatchSpace:
                 (live.get(node_id) or {}).get("info", {}).get("props", {})
             )
             props["_node_id"] = node_id
-            if all(c.classify(props, side) for c in classifiers):
+            matched = all(c.classify(props, side) for c in classifiers)
+            if matched and title:
+                matched = pwmatch.matches_source_filter(
+                    props, {"mediaName": title}
+                )
+            if matched != exclude:
                 kept.append(node_id)
         return kept
 

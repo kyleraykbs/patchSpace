@@ -140,8 +140,15 @@ def theme_palette(widget) -> dict:
         "input_port": _FALLBACK_INPUT_PORT,
         "output_port": _FALLBACK_OUTPUT_PORT,
         "boolean_port": _FALLBACK_BOOLEAN_PORT,
-        "bundle_port": _FALLBACK_BUNDLE_PORT,
-        "filter_port": _FALLBACK_FILTER_PORT,
+        # Bundle and filter wires take their color from the theme's own
+        # palette, so bundle/filter lines follow the desktop instead of being
+        # fixed RGB.  Deliberately *not* the blue/accent slot: a stylix theme
+        # maps the whole numbered palette onto its base16 hues, and there the
+        # blues are the accent - the same color audio wires already use (as
+        # does the impulse, which is why an impulse wire can read as audio
+        # there).  Yellow/purple stay distinct from accent, success and error.
+        "bundle_port": _lookup(widget, "yellow_3", _FALLBACK_BUNDLE_PORT),
+        "filter_port": _lookup(widget, "purple_3", _FALLBACK_FILTER_PORT),
         # An impulse is a momentary event, not a stream: the theme's own
         # blue (Adwaita's #3584e4 by default; stylix maps blue_3 to its
         # palette) so it reads as a distinct, vibrant signal and still

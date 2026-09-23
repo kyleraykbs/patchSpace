@@ -202,9 +202,9 @@ class NodeSpec:
         # hidden pre/post Volume nodes it owns - see that node's
         # comment below).
         self.control = control
-        # None | "pattern" | "media_class" | "description" - which
-        # single string property (if any) is edited via an inline
-        # text field + a settings-dialog row.
+        # None | "pattern" | "media_class" | "description" | "title" -
+        # which single string property (if any) is edited via an inline
+        # text field (the Filter node's title box is one of these).
         self.field = field
         # Optional (attr, label) for a checkbox drawn on the node body,
         # above the field/control row - a boolean property the user flips
@@ -306,10 +306,15 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
     # Filter's classifier inputs are dynamic: it starts with one and
     # grows a spare each time a classifier is plugged in (the daemon
     # reports them as filter_inputs), so one Filter ANDs many classifiers.
+    # The Filter node's face is its two controls: the title box it matches
+    # members against, and the big Include/Exclude button under it
+    # ("filter_mode", the gate toggle's shape with those captions).
     "filter": NodeSpec(
         "Filter", ["in", "filter1"], ["out"],
         bundle_inputs=["in"], bundle_outputs=["out"], filter_inputs=["filter1"],
         socket_labels=True,
+        field="title",
+        control="filter_mode",
     ),
     # Merge Bundle's input sockets are dynamic: it starts with one and
     # grows a spare each time a line is plugged in (the daemon reports
@@ -766,8 +771,10 @@ NODE_DESCRIPTIONS: Dict[str, str] = {
     "all_outputs": "A bundle of every destination (hardware outputs and "
     "app recording streams) to route audio into.",
     "all_apps": "A bundle of just the app playback streams.",
-    "filter": "Narrows a bundle to the members a classifier plugged into "
-    "its filter input matches.  Chain filters to intersect.",
+    "filter": "Narrows a bundle to the members that match: type a title in "
+    "its box (the media.name a playing app reports, e.g. \"YouTube\") "
+    "and/or plug classifiers into its filter input(s).  Its Include/Exclude "
+    "switch keeps everything except those members when set to Exclude.",
     "bundle": "Collects several lines or bundles into one bundle; it grows "
     "another input each time you plug one in.",
     "bundle_split": "Takes a bundle apart: one output line per member, so "

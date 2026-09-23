@@ -60,10 +60,16 @@ class FakeGraph:
         media_class="Stream/Output/Audio",
         channels=("FL", "FR"),
         app=None,
+        media_name=None,
+        description=None,
     ):
         props = {"node.name": name, "media.class": media_class}
         if app:
             props["application.name"] = app
+        if media_name is not None:
+            props["media.name"] = media_name
+        if description is not None:
+            props["node.description"] = description
         self._nodes[node_id] = {"info": {"props": props}}
         out_ports = {}
         for ch in channels:

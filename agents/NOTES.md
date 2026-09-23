@@ -319,3 +319,16 @@ gesture accepts; tested only structurally (no touchscreen here).
   a differently-sized pixbuf per request with a *different* padding fraction (13px for 20px,
   58px for 64px), so the drawn glyph changed size with the zoom.  `icon_placement` derives
   the scale from the pixbuf it got, so the target size is exact regardless.
+
+* **The Filter node is self-sufficient.**  It carries its own `title` box (a
+  case-insensitive substring of `media.name` - what a player calls the thing it is playing)
+  on top of its dynamic `filterN` classifier inputs, and an `exclude` switch drawn as the
+  gate toggle's big button captioned `INCLUDE`/`EXCLUDE`.  A separate Title classifier node
+  type was built first and removed: "only have 1 filter node" - the title is a box on the
+  node, not another node to place.  Property names are `title` and `exclude` (both in
+  `_SERIAL_ATTRS`, both settable through `set_node_property`).
+* **Bundle/filter wire colors are theme lookups** (`yellow_3` / `purple_3`), not literals.
+  Not the blue slot: under stylix the numbered palette is flattened onto base16, so
+  `blue_1`..`blue_5`, `accent_color` and the audio `link` color are all the *same* color -
+  a blue bundle wire would have been indistinguishable from an audio one.  (Same reason the
+  impulse's `blue_3` collides with audio there; reported, not changed.)

@@ -301,12 +301,18 @@ so the GUI/repair can never fabricate a connection the daemon rejects.
   pure control-plane predicates with one `filter` output; `invert` complements any of
   them. They are plugged into a Filter node's `filter` input.
 * `FilterNode` (`TransparentNode`) resolves its bundle input to exact live ids and keeps
-  the members *every* wired classifier matches (AND). Its `filterN` inputs are dynamic
+  the members that match: its own `title` box (case-insensitive substring of the member's
+  `media.name` - the title a playing app reports, e.g. "YouTube") **and** every wired
+  classifier (AND). The box is what makes "keep the app playing <title>" one node instead
+  of a classifier type per thing you might filter by. Its `filterN` inputs are dynamic
   like a Merge Bundle's: the daemon reports `filter_input_ports` (one per wired classifier
-  plus a spare), so one Filter node can hold an arbitrary number of classifiers. No
-  classifier wired passes the bundle through unchanged; a wired-but-empty classifier
+  plus a spare), so one Filter node can hold an arbitrary number of classifiers. No box and
+  no classifier wired passes the bundle through unchanged; a wired-but-empty classifier
   matches nothing (mirroring the old leaves' empty pattern). Returning exact ids is what
-  makes chained Filters *intersect*.
+  makes chained Filters *intersect*. Its `exclude` switch (`Include`/`Exclude`, the big
+  button under the title box - the gate toggle's geometry with those captions, see
+  `_draw_filter_mode_button`) keeps the complement instead: the same predicate, negated,
+  so one node covers "only these" and "everything but these".
 * `BundleMergeNode` (Merge Bundle) collects several lines/bundles. Its input sockets are
   dynamic: the daemon reports `bundle_input_ports` (one per inbound line plus a spare), so
   plugging into the spare grows another socket; wiring is the usual mixing-bus union.
@@ -620,7 +626,11 @@ every port).
 
 *Color.* Everything color-bearing comes from `theme_palette`: the impulse port/button and
 the sliders share the theme's blue (`accent` = `blue_3`, Adwaita's #3584e4 - the *same* slot, so
-"make the sliders that blue" is one lookup, not a second color), a slider's groove is the card
+"make the sliders that blue" is one lookup, not a second color), bundle wires/sockets take
+`yellow_3` and filter ones `purple_3` (deliberately *not* the blue slot: a stylix theme maps
+the whole numbered palette onto its base16 hues, so there the blues *are* the accent - the
+color audio links already use, which is also why an impulse wire reads as audio under
+stylix), a slider's groove is the card
 lifted like an entry field, its handle is the theme's text color, and a **panel with no color
 of its own** (`#3584e4`, the default the daemon stores) is drawn in a color derived per panel
 from the palette via `theme_class_color` - so default panels follow the desktop while panels
