@@ -588,3 +588,10 @@ gesture accepts; tested only structurally (no touchscreen here).
     marked it dirty (see above) - it now waits for a quiet 2s.
   The general rule: anything that *executes* long after it was *sent* is a bug of
   its own, separate from whatever it was sent to do.
+
+* **A new node type has more places to live than it looks.**  `SoundDumpNode`
+  needed: the class, the daemon's registry and constructor, the
+  `set_node_property` dispatch for its own fields, the payload it reports, the
+  GUI spec (field + settings), the add menu, the icon map, and the class->type
+  map.  Grep for an existing node of the same *shape* (the Sound Player: an
+  impulse plus a sound) and mirror every one of them.
