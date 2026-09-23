@@ -214,7 +214,7 @@ class NodeSpec:
         # and hit-tested by that same geometry.
         self.toggle = toggle
         # None | "playing" - a live status read-out in the bottom-right of
-        # the node body, beside the field: a coloured dot plus the number
+        # the node body, beside the field: a colored dot plus the number
         # of things currently running (a Sound Effect's playback streams,
         # from the daemon's per-node `playing`).  Purely a display - there
         # is nothing to click.
@@ -1040,9 +1040,9 @@ ADD_NODE_MENU_ITEMS = [
     item for _category, items in ADD_NODE_CATEGORIES for item in items
 ]
 
-# One stable border colour per node, picked from the running GTK theme
+# One stable border color per node, picked from the running GTK theme
 # (see render_utils.theme_color) rather than hashing the type name.
-# Colour is assigned by the same category the add-node menu groups by,
+# Color is assigned by the same category the add-node menu groups by,
 # so every "Filters" node is the same accent, every "Effects" node the
 # same, and so on - and it never changes between runs or machines the
 # way the old process-salted hash() did.  A type the theme has no name
@@ -1055,7 +1055,7 @@ CATEGORY_COLOR_NAMES = {
     "Boolean": "dim_label_color",
     # An impulse is a fired event, so its node borders share the green the
     # Button pulses and the play indicator lights with - the one category
-    # colour that reads as "something just happened".
+    # color that reads as "something just happened".
     "Impulse": "success_color",
     "Warp": "accent_color",
     "Effects": "warning_color",
@@ -1073,9 +1073,9 @@ NODE_TYPE_COLOR_NAMES = {
 
 
 def color_name_for_node_type(node_type: str) -> str:
-    """GTK theme colour name assigned to `node_type` - see
+    """GTK theme color name assigned to `node_type` - see
     CATEGORY_COLOR_NAMES above.  Falls back to the theme accent for an
-    unknown type so it still gets a consistent colour rather than a
+    unknown type so it still gets a consistent color rather than a
     random one."""
     return NODE_TYPE_COLOR_NAMES.get(node_type, DEFAULT_NODE_COLOR_NAME)
 

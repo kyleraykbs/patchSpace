@@ -563,7 +563,7 @@ class MainWindow(Gtk.ApplicationWindow):
         """A docked, scrollable list of the panel files on the right."""
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         box.add_css_class("side-panel-fill")
-        # Wide enough for a panel name beside the colour dot and the
+        # Wide enough for a panel name beside the color dot and the
         # auto-load/add/delete buttons (~36px each): at 240 the names were
         # cut off.  The divider is draggable, so this is only the default.
         box.set_size_request(300, -1)
@@ -585,7 +585,7 @@ class MainWindow(Gtk.ApplicationWindow):
         box.append(header)
 
         # Column headers, aligned with the per-row controls below: the
-        # colour dot, the panel name, then the auto-load checkbox and the
+        # color dot, the panel name, then the auto-load checkbox and the
         # add/delete buttons.  Each carries a tooltip explaining its column.
         cols = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         cols.set_margin_top(2)
@@ -729,8 +729,8 @@ class MainWindow(Gtk.ApplicationWindow):
         dot.set_size_request(self._PANEL_DOT_W, -1)
         dot.set_halign(Gtk.Align.CENTER)
         dot.set_valign(Gtk.Align.START)
-        # Resolve the panel's colour the same way the canvas does, so a
-        # panel coloured by a theme slot (@blue, ...) shows the colour that
+        # Resolve the panel's color the same way the canvas does, so a
+        # panel colored by a theme slot (@blue, ...) shows the color that
         # is actually drawn - and follows a theme change.
         r, g, b = self.ps_widget.resolve_color(
             entry.get("color"), entry.get("stem") or entry.get("name") or ""
@@ -1061,7 +1061,7 @@ class MainWindow(Gtk.ApplicationWindow):
             int(round(g * 255)),
             int(round(b * 255)),
         )
-        # Side-panel "alt" background: the GTK headerbar/sidebar colour (the
+        # Side-panel "alt" background: the GTK headerbar/sidebar color (the
         # brighter one Firefox uses for its titlebar/active tab), falling
         # back to the window bg lightened a little if the theme lacks it.
         alt = theme_color(self, "headerbar_bg_color", None)
@@ -1232,7 +1232,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._ps_group_button = Gtk.Button(label="Group")
         self._ps_group_button.set_sensitive(False)
         self._ps_group_button.set_tooltip_text(
-            "Wrap the selected nodes in a labelled, coloured group"
+            "Wrap the selected nodes in a labelled, colored group"
         )
         self._ps_group_button.connect(
             "clicked", lambda _b: self.ps_widget.create_group_from_selection()

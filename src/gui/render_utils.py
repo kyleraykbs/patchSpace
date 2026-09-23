@@ -18,18 +18,18 @@ _FALLBACK_NODE_BG = (0.196, 0.196, 0.208)
 _FALLBACK_NODE_BORDER = (0.36, 0.36, 0.39)
 _FALLBACK_TEXT = (0.93, 0.93, 0.94)
 # Entry-like chrome (a node's text field, a device row's select box).  The
-# theme's view colours are what a real GtkEntry uses, so a themed desktop
-# (stylix recolours these) gets entries that match the rest of the window
+# theme's view colors are what a real GtkEntry uses, so a themed desktop
+# (stylix recolors these) gets entries that match the rest of the window
 # instead of a fixed near-black box.
 _FALLBACK_VIEW_BG = (0.14, 0.14, 0.15)
 _FALLBACK_VIEW_FG = (0.85, 0.85, 0.86)
 # The theme's blue, used for anything that should read as "the active value":
 # the impulse port/button and the sliders.  Adwaita's blue_3 is #3584e4; under
 # stylix it is the palette's blue.  The fallback is the blue the sliders always
-# used, for a theme that defines no named colours at all.
+# used, for a theme that defines no named colors at all.
 _FALLBACK_ACCENT = (0.4, 0.7, 0.9)
 # How far a field's background is lifted off the surface behind it (the node
-# card).  Every named "surface" colour a theme offers is the *same* tone as the
+# card).  Every named "surface" color a theme offers is the *same* tone as the
 # card here - window_bg/view_bg are darker still - so an entry that should read
 # as a lighter inset is derived from the card rather than looked up.
 FIELD_BG_LIFT = 0.16
@@ -39,7 +39,7 @@ _FALLBACK_OUTPUT_PORT = (0.94, 0.47, 0.42)
 _FALLBACK_BOOLEAN_PORT = (0.55, 0.55, 0.58)
 # Bundle wires carry a *set* of streams, filter wires a classifier
 # predicate - both are control-plane-ish, so they get distinct cool
-# colours rather than the audio green/red.
+# colors rather than the audio green/red.
 _FALLBACK_BUNDLE_PORT = (0.55, 0.80, 0.95)
 _FALLBACK_FILTER_PORT = (0.78, 0.62, 0.95)
 # An impulse is a momentary event, not a stream: a cyan that no other
@@ -69,8 +69,8 @@ _THEME_COLOR_NAMES = [
 
 
 def _theme_key():
-    """A cheap key that changes when the theme / colour scheme changes, so
-    named-colour lookups can be cached across frames (they were re-queried
+    """A cheap key that changes when the theme / color scheme changes, so
+    named-color lookups can be cached across frames (they were re-queried
     from GTK dozens of times per frame)."""
     try:
         settings = Gtk.Settings.get_default()
@@ -102,9 +102,9 @@ def _lookup(widget, name, fallback):
 
 
 def theme_color(widget, name, fallback):
-    """Public named-colour lookup from the running GTK theme (e.g.
+    """Public named-color lookup from the running GTK theme (e.g.
     "accent_color", "success_color"), so callers can assign stable,
-    theme-consistent colours to specific things instead of hashing an
+    theme-consistent colors to specific things instead of hashing an
     arbitrary string.  Falls back to `fallback` when the theme doesn't
     define `name`."""
     return _lookup(widget, name, fallback)
@@ -113,7 +113,7 @@ def theme_color(widget, name, fallback):
 def _stable_index(text: str, modulo: int) -> int:
     """A process-stable hash of `text` (Python's built-in hash() is
     salted per process, which made the same string pick a different
-    colour every time the app restarted)."""
+    color every time the app restarted)."""
     return zlib.crc32(text.encode("utf-8")) % modulo
 
 
@@ -145,9 +145,9 @@ def theme_palette(widget) -> dict:
         # An impulse is a momentary event, not a stream: the theme's own
         # blue (Adwaita's #3584e4 by default; stylix maps blue_3 to its
         # palette) so it reads as a distinct, vibrant signal and still
-        # follows the desktop's colours.  Falls back to the old cyan.
+        # follows the desktop's colors.  Falls back to the old cyan.
         "impulse_port": _lookup(widget, "blue_3", _FALLBACK_IMPULSE_PORT),
-        # The active-value colour: sliders, and anything else that is "set".
+        # The active-value color: sliders, and anything else that is "set".
         "accent": _lookup(widget, "blue_3", _FALLBACK_ACCENT),
         # A slider's unfilled groove: the card tone lifted the same amount as
         # an entry field, so it reads as an inset rather than a grey bar.

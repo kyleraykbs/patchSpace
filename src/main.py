@@ -2085,7 +2085,7 @@ class PatchSpaceDaemon:
             cur = os.path.dirname(cur)
 
     def _cmd_edit_panel(self, cmd: dict) -> dict:
-        """Change a writable panel's display label and/or colour."""
+        """Change a writable panel's display label and/or color."""
         panel_id = cmd.get("panel_id", "")
         panel = self.panels.get(panel_id)
         if not panel_id or panel is None:

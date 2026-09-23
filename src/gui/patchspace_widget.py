@@ -231,14 +231,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     # Give it a label and it grows back out to NODE_WIDTH to wrap the text.
     SPLITTER_MIN_SIZE = 64
     # Padding a group's dotted box leaves around its member nodes, and
-    # the default colour palette new groups cycle through.
+    # the default color palette new groups cycle through.
     GROUP_PADDING = 26
     # Extra inset per group a group encloses, so a group that surrounds
     # other groups leaves a visible gap instead of drawing its dotted box
     # right on top of theirs.
     GROUP_SPACING = 18
     # Extra clearance a container leaves above an enclosed group's name
-    # block (label/id/colour chip), on top of that block's own height, so
+    # block (label/id/color chip), on top of that block's own height, so
     # a nested group's name never touches or pokes past its container's
     # top edge.  A small deliberate bump, not a full GROUP_SPACING.
     GROUP_NAME_BUMP = 6
@@ -1010,7 +1010,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         placement we flushed, so accepting it would snap the panel (and,
         because moving a panel moves its nodes, drag every node back)
         every refresh.  We hand placement back to the daemon once it
-        echoes exactly what we sent.  Label/colour/mode/membership always
+        echoes exactly what we sent.  Label/color/mode/membership always
         come from the daemon."""
         live = set()
         for p in daemon_panels:
@@ -2315,8 +2315,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     @staticmethod
     def _socket_color(pal, kind, is_output):
-        """The palette colour for a socket of `kind`.  Bundle, filter and
-        impulse sockets are not audio, so they get their own cool colours
+        """The palette color for a socket of `kind`.  Bundle, filter and
+        impulse sockets are not audio, so they get their own cool colors
         instead of the input/output green/red."""
         if kind == "boolean":
             return pal["boolean_port"]
@@ -2334,7 +2334,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         and impulse sockets are circles; a *bundle* (a set of streams on
         one wire) or *filter* (a classifier predicate) socket is a
         diamond, so "this port is not one signal" reads before its wire
-        is drawn.  An impulse is a filled dot of its own colour instead -
+        is drawn.  An impulse is a filled dot of its own color instead -
         it pairs only with another impulse socket, and its wire's short
         dash (see IMPULSE_DASH) is what marks it as an event."""
         r = PatchSpaceGraphWidget.SOCKET_RADIUS
@@ -4337,7 +4337,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 cr.stroke()
                 cr.restore()
 
-        # A tiny panel-colour chip at each node's bottom-left corner while
+        # A tiny panel-color chip at each node's bottom-left corner while
         # the node lives in a non-root panel (root-level nodes get none).
         for nid, node in self.nodes.items():
             if not self._node_revealed(nid):
@@ -4361,7 +4361,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             cr.stroke()
 
         # A nested panel shows which panel it's in with the same tiny chip,
-        # in the *parent* panel's colour, at its bottom-left corner
+        # in the *parent* panel's color, at its bottom-left corner
         # (top-level panels get none, like root-level nodes).
         for pid in self.panels:
             if pid == "":
@@ -4388,7 +4388,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # (A selected node's ring is drawn by _draw_node - inside its body and
         # under its sockets, so a port on the edge is never covered.)
 
-        # Group labels/ids/colour chips on top of the nodes.
+        # Group labels/ids/color chips on top of the nodes.
         self._draw_group_headers(cr, pal)
         # Panel headers/labels/reset/resize on the very top.
         self._draw_panel_headers(cr, pal)
@@ -4708,7 +4708,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         is_offline = not node.get("ready", True)
         # Module died or its interior never connected - see main.py's
         # _node_health. Distinct from is_offline (still coming up):
-        # drawn with the theme's error colour, solid, and a "dead"
+        # drawn with the theme's error color, solid, and a "dead"
         # badge rather than the neutral "not connected yet" one.
         is_dead = node.get("health") == "dead"
         # Structurally up but at least one edge touching it hasn't
@@ -4717,13 +4717,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # double-dash the same border; is_offline already implies
         # "don't trust this node's links yet" on its own.
         is_wiring = (not is_offline) and (nid in self.nodes_pending_wiring)
-        # Stable, category-assigned theme colour - same type always gets
+        # Stable, category-assigned theme color - same type always gets
         # the same border, and it comes from the GTK theme rather than a
         # per-process hash (see node_specs.color_name_for_node_type).
         border_color = theme_color(
             self, color_name_for_node_type(node["type"]), pal["node_border"]
         )
-        # Panel ports visually take on their panel's colour (not stored on
+        # Panel ports visually take on their panel's color (not stored on
         # the node - purely cosmetic).
         port_color = None
         if node["type"] in self._PORT_IN_TYPES | self._PORT_OUT_TYPES:
@@ -4749,8 +4749,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         ):
             # Dashed rather than solid - a glance at the canvas should
             # tell "still coming up"/"still wiring" apart from a
-            # category whose assigned colour happens to be amber
-            # (Hardware & Apps uses the theme's warning colour too).
+            # category whose assigned color happens to be amber
+            # (Hardware & Apps uses the theme's warning color too).
             # A tighter dash for "wiring" than "offline" so the two
             # remain visually distinguishable at a glance too.
             cr.set_dash([4.0, 3.0] if is_offline else [2.0, 2.0])
@@ -4773,7 +4773,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
         if node["type"] not in self._PORT_IN_TYPES | self._PORT_OUT_TYPES:
             # The node-type glyph in the header's top-left corner, tinted
-            # with the node's category colour.  Drawn before the header
+            # with the node's category color.  Drawn before the header
             # text, which _header_line_layout insets to clear it.
             icon_type = "mute" if is_mute_node(nid) else node["type"]
             self._draw_node_icon(
@@ -5054,7 +5054,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     def _node_icon_pixbuf(self, icon_name, size, rgb):
         """Render a symbolic GTK icon to a GdkPixbuf tinted `rgb`, cached
-        per (name, size, colour).  GTK4 has no way to paint a symbolic
+        per (name, size, color).  GTK4 has no way to paint a symbolic
         icon onto a foreign cairo context directly, so the paintable is
         snapshotted and run through a Gsk.CairoRenderer to a texture,
         then decoded to a pixbuf (which cairo *can* draw).  Failures
@@ -5077,11 +5077,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     Gtk.IconLookupFlags.FORCE_SYMBOLIC,
                 )
                 if paintable is not None:
-                    colour = Gdk.RGBA()
-                    colour.red, colour.green, colour.blue = rgb
-                    colour.alpha = 1.0
+                    color = Gdk.RGBA()
+                    color.red, color.green, color.blue = rgb
+                    color.alpha = 1.0
                     snapshot = Gtk.Snapshot.new()
-                    paintable.snapshot_symbolic(snapshot, size, size, [colour])
+                    paintable.snapshot_symbolic(snapshot, size, size, [color])
                     node = snapshot.to_node()
                     if node is not None:
                         renderer = Gsk.CairoRenderer.new()
@@ -5136,7 +5136,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         cr.set_source_rgb(*green)
         cr.arc(cx, cy, 8, 0, 2 * math.pi)
         cr.fill()
-        # Notch teeth out of the rim by punching node-bg-coloured dots
+        # Notch teeth out of the rim by punching node-bg-colored dots
         # around the circumference - reads as a cog without any spokes.
         cr.set_source_rgb(*pal["node_bg"])
         for k in range(8):
@@ -5194,9 +5194,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             cr.stroke()
         cr.restore()
 
-    #: A stored colour may be a hex, or one of the theme's own slots written
+    #: A stored color may be a hex, or one of the theme's own slots written
     #: as `@blue` … `@teal`.  A slot is resolved *every time it is drawn*, so
-    #: a panel coloured `@blue` follows the desktop palette (stylix recolours
+    #: a panel colored `@blue` follows the desktop palette (stylix recolors
     #: those slots) instead of freezing today's hex - which is what the
     #: pickers store, and what the module's `color` defaults to.
     COLOR_SLOTS = {
@@ -5208,7 +5208,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         "teal": "teal_3",
     }
     DEFAULT_PANEL_COLOR = "@blue"
-    #: What files written before the slots existed carried for "no colour" -
+    #: What files written before the slots existed carried for "no color" -
     #: Adwaita's blue, i.e. what `@blue` means.  Read as `@blue`.
     LEGACY_DEFAULT_PANEL_COLOR = "#3584e4"
 
@@ -5220,15 +5220,15 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         return theme_color(self, name, fallback)
 
     def resolve_color(self, value, default_key):
-        """A stored colour value as RGB: a theme slot (resolved now), a hex
-        used as-is, or - for nothing/the legacy default - a colour derived
-        from `default_key`, so uncoloured things still get a palette colour
+        """A stored color value as RGB: a theme slot (resolved now), a hex
+        used as-is, or - for nothing/the legacy default - a color derived
+        from `default_key`, so uncolored things still get a palette color
         that varies between them and stays stable across restarts."""
         raw = (value or "").strip()
         if not raw or raw.lower() == self.LEGACY_DEFAULT_PANEL_COLOR:
             # Nothing stored, or what files written before the slots carried
             # for "the default": both mean the default slot, not "unset" -
-            # a panel with no colour of its own should be the same blue the
+            # a panel with no color of its own should be the same blue the
             # module declares, and keep following the theme.
             raw = self.DEFAULT_PANEL_COLOR
         if raw.startswith("@"):
@@ -5238,18 +5238,18 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         return self._hex_to_rgb(raw)
 
     def _panel_rgb(self, pid):
-        """A panel's colour as RGB - see `resolve_color`."""
+        """A panel's color as RGB - see `resolve_color`."""
         panel = self.panels.get(pid) or {}
         key = panel.get("stem") or panel.get("label") or pid
         return self.resolve_color(panel.get("color"), key)
 
     def _group_rgb(self, gid, group):
-        """A group's colour as RGB - see `resolve_color`."""
+        """A group's color as RGB - see `resolve_color`."""
         key = group.get("label") or gid or "group"
         return self.resolve_color(group.get("color"), key)
 
-    #: Fallbacks for the colour pickers' presets: Adwaita's defaults for the
-    #: named slots used below, for a theme that defines no named colours.
+    #: Fallbacks for the color pickers' presets: Adwaita's defaults for the
+    #: named slots used below, for a theme that defines no named colors.
     _GROUP_COLOR_FALLBACKS = (
         (0.208, 0.518, 0.894),   # blue_3
         (0.200, 0.824, 0.478),   # green_3
@@ -5260,8 +5260,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     )
 
     def _group_colors(self):
-        """The colour pickers' presets, taken from the theme's own palette
-        slots (Adwaita's, recoloured by stylix), so a colour picked here
+        """The color pickers' presets, taken from the theme's own palette
+        slots (Adwaita's, recolored by stylix), so a color picked here
         matches the rest of the desktop instead of being six fixed literals."""
         out = []
         for slot, name in self.COLOR_SLOTS.items():
@@ -5457,7 +5457,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     def _draw_boolean_toggle(self, cr, pal, nid, output, driven=False):
         """On/Off button for the boolean source node - the A/B button's
         shape with On/Off labels.  The active segment is filled with the
-        GTK theme's success colour when On and its error colour when Off,
+        GTK theme's success color when On and its error color when Off,
         so a glance shows the value being broadcast to any gate/switcher
         wired to this node.
 
@@ -6447,7 +6447,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         return (cx - side / 2.0, cy - side / 2.0, side, side)
 
     def show_panel_settings_dialog(self, panel_id):
-        """Change a panel's display name and colour."""
+        """Change a panel's display name and color."""
         panel = self.panels.get(panel_id)
         if panel is None or panel.get("readonly") or not panel.get("writable"):
             self._show_error_dialog("This panel is read-only.")
@@ -8105,7 +8105,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         """{merge_key: merged_group} for the current frame.
 
         A merged group unions the members of every same-local-id group and
-        keeps their individual titles/colours (``titles``) plus the list of
+        keeps their individual titles/colors (``titles``) plus the list of
         real group ids (``gids``).  ``id`` is the primary full id used for
         settings/actions.  Cached per frame alongside the other group
         geometry (cleared at the top of on_draw)."""
@@ -8264,12 +8264,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     def _build_group_header(self, gid, group, top):
         """Geometry of one (possibly merged) group's stacked titles / id /
-        colour chip / +/- block for a given `top` (or the naive top above
+        color chip / +/- block for a given `top` (or the naive top above
         its box when None).  Pure; the collision-resolved top comes from
         _all_group_header_layouts.
 
         A merged group draws every contributing group's title on its own
-        line (each in that group's colour), then a single id line."""
+        line (each in that group's color), then a single id line."""
         bounds = self._group_bounds(gid, group)
         if bounds is None:
             return None
@@ -8289,7 +8289,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             top = y1 - 6 - block_h
         mid_y = top + block_h / 2
         chip = 12
-        # Colour chip, the +/- membership buttons and a settings hamburger
+        # Color chip, the +/- membership buttons and a settings hamburger
         # live on the *right* edge of the group's box, mirroring the panel
         # title row (the hamburger at the very right).
         btn = 15
@@ -8974,7 +8974,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             cr.clip()
             # Backing at the *canvas* opacity (not fully opaque), so a panel
             # is exactly as see-through as the grid behind it - like the
-            # nodes - and the colour tint on top is only for colour-coding.
+            # nodes - and the color tint on top is only for color-coding.
             backing = max(0.0, min(1.0, constants.CANVAS_BG_ALPHA))
             if backing < 1.0:
                 cr.set_source_rgba(*pal["node_bg"], backing)
@@ -9025,7 +9025,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             for key in ("in_bar", "out_bar"):
                 bx1, by1, bx2, by2 = io[key]
                 draw_rounded_rect(cr, bx1, by1, bx2 - bx1, by2 - by1, 4)
-                # Same opacity as the panel body, then the colour wash.
+                # Same opacity as the panel body, then the color wash.
                 backing = max(0.0, min(1.0, constants.CANVAS_BG_ALPHA))
                 if backing < 1.0:
                     cr.set_source_rgba(*pal["node_bg"], backing)
@@ -9055,7 +9055,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             r, g, b = self._panel_rgb(pid)
             font = self._panel_title_font()
             # Title, drawn like a group title (floating above the box, in
-            # the panel's colour, scaling with zoom up to a point).
+            # the panel's color, scaling with zoom up to a point).
             tx1, ty1, _tx2, _ty2 = geo["title"]
             draw_text_unbounded(
                 cr, tx1, ty1,
@@ -9100,8 +9100,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     def _draw_panel_button(self, cr, pal, rect, color, active=False,
                            glyph="hamburger"):
         """One panel action button: a small rounded square with the same
-        outline style as the group +/- buttons (filled node_bg + coloured
-        border, or filled with the colour when active)."""
+        outline style as the group +/- buttons (filled node_bg + colored
+        border, or filled with the color when active)."""
         x1, y1, x2, y2 = rect
         size = x2 - x1
         draw_rounded_rect(cr, x1, y1, size, y2 - y1, 3)
@@ -9229,7 +9229,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             if info is None:
                 continue
             # Stacked titles: each contributing group's label on its own
-            # line, in that group's colour (unbounded, so a title always
+            # line, in that group's color (unbounded, so a title always
             # reads in full - see draw_text_unbounded).
             y = info["top"]
             for title, (_tw, th) in zip(info["titles"], info["line_sizes"]):
@@ -9423,7 +9423,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             presets=self._group_colors(),
             resolve=lambda v: self.resolve_color(v, group_key),
         )
-        color_picker.set_tooltip_text("The group's outline / title colour.")
+        color_picker.set_tooltip_text("The group's outline / title color.")
         content.append(self._labeled_row("Color:", color_picker))
 
         dialog.add_button("Delete", Gtk.ResponseType.REJECT)

@@ -188,7 +188,7 @@ Reminder for module work: after editing this repo, a consumer using a `path:` in
   panel's box (and its children's boxes) are canvas coordinates too.  `panel.x`/`panel.y` are
   parent-relative and only get folded by `_panel_absolute`, which is used for the empty-panel
   fallback (and for dragging).  Do not "fix" the child fold by translating it.
-* **Entry chrome is themed** (`field_bg`/`field_fg` from the theme's view colours) instead of a
+* **Entry chrome is themed** (`field_bg`/`field_fg` from the theme's view colors) instead of a
   hardcoded near-black; `theme_palette` falls back to the old literals.
 * **`services.patchspace.canvasOpacity`** defaults to `config.stylix.opacity.applications` (or
   `null`) and reaches the GUI as `PATCHSPACE_CANVAS_OPACITY` from the session environment; the
@@ -221,7 +221,7 @@ why a declarative graph could be built, validated, passed into the unit and
 still not show up in the GUI).  Fixed to: reload, append to the fresh root,
 write, reload again.  Idempotent, and the root file keeps every node it had.
 
-## Scope composition, icons, and the impulse colour (2026-09-23)
+## Scope composition, icons, and the impulse color (2026-09-23)
 
 * **NixOS and home-manager mirror each other and compose**: one `nix/module.nix`, two
   instantiations.  The home-manager scope reads the NixOS scope via `osConfig` and merges on
@@ -234,7 +234,7 @@ write, reload again.  Idempotent, and the root file keeps every node it had.
   every icon silently fell back to the hand-drawn glyph.  Icons used now:
   `view-refresh-symbolic` (the reset button on read-only panels) and
   `document-edit-symbolic` (the pencil).  Never pass an explicit None viewport.
-* **Impulse port colour** is `blue_3` from the theme (Adwaita's #3584e4; stylix maps it to its
+* **Impulse port color** is `blue_3` from the theme (Adwaita's #3584e4; stylix maps it to its
   palette's blue - which in the current palette is a muted teal).
 
 * **Declarative panels are placed beside the graph**: a panel file with no `placement.x`/`y`
@@ -243,13 +243,13 @@ write, reload again.  Idempotent, and the root file keeps every node it had.
   autosave remembers it (`_place_unplaced_panels`, `panels.PLACE_GAP`).  A user drag is the same
   thing (a geometry on the child reference marks it placed).  Nested panels are left alone.
 
-## Colours follow the theme; header text never breaks mid-word (2026-09-23)
+## Colors follow the theme; header text never breaks mid-word (2026-09-23)
 
 * `theme_palette` gained `accent` (`blue_3`) and `slider_track` (the card lifted like a field).
   The impulse port/button and all sliders share the accent; slider labels/handles are
-  `subtext`/`text`.  A **panel with no colour of its own** (`#3584e4`, what the daemon stores by
-  default) is drawn from the palette per panel via `theme_class_color`; a panel someone coloured
-  keeps its colour.  Never hardcode a colour here - the fallbacks already carry the old literals.
+  `subtext`/`text`.  A **panel with no color of its own** (`#3584e4`, what the daemon stores by
+  default) is drawn from the palette per panel via `theme_class_color`; a panel someone colored
+  keeps its color.  Never hardcode a color here - the fallbacks already carry the old literals.
 * Node width = `max(NODE_WIDTH, _header_needed_width)` (chrome of each line + its widest word),
   and `_header_line_layout` no longer double-subtracts the left icon inset (it was 10px short,
   which is why line 0 overlapped the badge and wrapped "Invert" into "Inve"/"rt").
@@ -262,10 +262,10 @@ write, reload again.  Idempotent, and the root file keeps every node it had.
   overlay ring crossed every port on the node's edge.  The marquee rectangle is still overlay.
 * `draw_square_path` caps each blend so a segment keeps `MIN_STRAIGHT` (6px) of straight run:
   blending a short jog end to end made wires look like they folded back into themselves.
-* Colour pickers' presets come from the theme (`_group_colors`, `blue_3`…`teal_3`), so picking a
-  colour matches the desktop; `GROUP_COLORS` stays as the fallback list.
+* Color pickers' presets come from the theme (`_group_colors`, `blue_3`…`teal_3`), so picking a
+  color matches the desktop; `GROUP_COLORS` stays as the fallback list.
 
-## Wires stay orthogonal; colour slots (2026-09-23)
+## Wires stay orthogonal; color slots (2026-09-23)
 
 * The wire pipeline is `_simplify_orthogonal` → `_snap_to_grid` → `_drop_short_straights` →
   `_dehairpin`.  The sigmoid blending (`_sigmoid_short_segments`/`_smooth_jogs`) and
@@ -278,7 +278,7 @@ write, reload again.  Idempotent, and the root file keeps every node it had.
   so no non-diagonal route could satisfy it - it passed only through the endpoint-node-exempt
   cosmetic passes.  It now uses a real 30px gap and asserts the stub cap, the outward
   direction and that the jog is inside the gap.
-* Colours: `@blue`…`@teal` slots resolved per frame (`resolve_color`), pickers store the slot,
-  the module's panel colour defaults to `@blue`, `#3584e4` reads as `@blue`, the side-view dot
+* Colors: `@blue`…`@teal` slots resolved per frame (`resolve_color`), pickers store the slot,
+  the module's panel color defaults to `@blue`, `#3584e4` reads as `@blue`, the side-view dot
   resolves the same way.  `FIELD_BOTTOM_PAD` (10) is the one place the pad below a node's field
   row is defined, for the rect and the height alike.

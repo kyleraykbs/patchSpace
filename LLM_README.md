@@ -291,7 +291,7 @@ and bundle pair either way (a single stream is a bundle of one), so "route every
 bundle stands for into this sink" is just an edge. The canvas draws bundle/filter sockets
 as diamonds and their wires dotted (and as short dash-stroked rubber bands while
 dragging); `render_utils.theme_palette` gains `bundle_port`/`filter_port`/`impulse_port`
-colours. `gui/node_specs.ports_compatible` and `session_repair` mirror the daemon's rule
+colors. `gui/node_specs.ports_compatible` and `session_repair` mirror the daemon's rule
 so the GUI/repair can never fabricate a connection the daemon rejects.
 
 * `AllInputsNode` / `AllAppsNode` (`InputNode`) produce a source bundle from
@@ -374,7 +374,7 @@ automatically because ownership is derived from ids.
 restart re-apply the file's membership, positions, edges and params. `read-write` (the
 default) reads and writes. The GUI draws a panel as a tinted-grid box (grid shares the
 world grid's origin/spacing so it overlays it). Its title floats just above the box like a
-group's title (panel colour, zoom-scaled font clamped so it stops growing past a point)
+group's title (panel color, zoom-scaled font clamped so it stops growing past a point)
 and is drawn **bold** to read as a heading (`draw_text_unbounded(..., bold=True)`; the
 header geometry measures it bold too).
 Panel boxes and headers share one **paint order**, bottom to top (`_panel_paint_order`):
@@ -386,7 +386,7 @@ A left-drag on the title *or any empty panel background* moves the panel; on the
 the title row are rounded-square buttons in the same outline style as the group +/-
 buttons: the physics-stop (pin/pause) toggle, then a delete (trash) button on writable
 panels (a Reset button on read-only ones), and the **hamburger menu** at the very edge.
-The hamburger opens `Settings\u2026` (writable; rename/recolour via `edit_panel`),
+The hamburger opens `Settings\u2026` (writable; rename/recolor via `edit_panel`),
 `Duplicate\u2026` (asks for a name, then `clone_panel` copies the panel's *current* nodes into
 a new file and reloads so the copy is live), and `Copy as JSON` / `Save to File\u2026`
 (which ask the daemon for the panel's current state via `export_panel`, so they work on
@@ -397,10 +397,10 @@ nodes, child panels (their boxes, their floating title rows, and their straddlin
 ports), and the outlines **and title blocks** of groups owned by the panel
 (all members inside it), so group titles/edges are never clipped. It has a **square
 minimum size** (`PANEL_MIN_SIDE`, centred on the content); there is no manual resize
-handle. Each node living in a non-root panel also gets a tiny panel-coloured chip at its
+handle. Each node living in a non-root panel also gets a tiny panel-colored chip at its
 bottom-left corner (root-level nodes get none), drawn in `on_draw` from
-`_panel_of_node`/the panel's colour. A **nested panel** gets the same chip in its *parent*
-panel's colour (top-level panels get none). While
+`_panel_of_node`/the panel's color. A **nested panel** gets the same chip in its *parent*
+panel's color (top-level panels get none). While
 a node is being dragged, its panel is held at the size it had when the drag began
 (`_panel_drag_baseline`) and may only **grow** toward the node, capped at
 `PANEL_DRAG_GROW` past the baseline - so picking a node up never shrinks the box, nudging
@@ -579,28 +579,28 @@ keeps `MIN_STRAIGHT` px of straight run between the two bends sharing a segment,
 step stays a step.  The router is pure geometry (no GTK) and unit-tested in
 `tests/test_wire_router.py`.
 
-*Slots.* A stored colour may be a hex **or a theme slot** written `@blue` … `@teal`
+*Slots.* A stored color may be a hex **or a theme slot** written `@blue` … `@teal`
 (`PatchSpaceGraphWidget.COLOR_SLOTS`), resolved by `resolve_color` *every time it is drawn* - so
-a panel or group coloured `@blue` follows the desktop palette (stylix recolours those slots)
+a panel or group colored `@blue` follows the desktop palette (stylix recolors those slots)
 instead of freezing one hex, and survives a theme change.  The pickers' presets are those slots
-(`_group_colors` returns `(value, rgb)` pairs: the swatch shows today's colour, the button
+(`_group_colors` returns `(value, rgb)` pairs: the swatch shows today's color, the button
 stores the slot), the module's `panels.<name>.color` defaults to `@blue`, and the pre-slot
 `#3584e4` reads as `@blue`.  Empty/default resolves to the default slot; an unknown slot falls
-back to a per-name palette colour.  The side view's colour dot resolves the same way, so it
+back to a per-name palette color.  The side view's color dot resolves the same way, so it
 shows what the canvas draws.
 
 *Selection.* A selected node's ring is drawn by `_draw_node`, inset inside the body and before
 its sockets, so a port centred on the edge is never covered (the overlay ring used to cross
 every port).
 
-*Colour.* Everything colour-bearing comes from `theme_palette`: the impulse port/button and
+*Color.* Everything color-bearing comes from `theme_palette`: the impulse port/button and
 the sliders share the theme's blue (`accent` = `blue_3`, Adwaita's #3584e4 - the *same* slot, so
-"make the sliders that blue" is one lookup, not a second colour), a slider's groove is the card
-lifted like an entry field, its handle is the theme's text colour, and a **panel with no colour
-of its own** (`#3584e4`, the default the daemon stores) is drawn in a colour derived per panel
+"make the sliders that blue" is one lookup, not a second color), a slider's groove is the card
+lifted like an entry field, its handle is the theme's text color, and a **panel with no color
+of its own** (`#3584e4`, the default the daemon stores) is drawn in a color derived per panel
 from the palette via `theme_class_color` - so default panels follow the desktop while panels
-someone coloured keep exactly what they set. Nothing here is a literal; the fallbacks in
-`render_utils` are the old literals, for a theme that defines no named colours.
+someone colored keep exactly what they set. Nothing here is a literal; the fallbacks in
+`render_utils` are the old literals, for a theme that defines no named colors.
 
 *Header width.* A node's width is `max(NODE_WIDTH, the narrowest width whose header lines fit)`:
 the chrome each line carries (type icon, badge reserves, side padding) plus its **widest single
@@ -614,7 +614,7 @@ with `theme_palette`'s `field_bg` - `card_bg_color` lifted `FIELD_BG_LIFT` towar
 every named *surface* a theme offers is the same tone as the card and `view_bg_color` is
 darker still, so a lighter inset has to be derived - plus the `node_border` stroke, text in
 `field_fg` (`view_fg_color`) and `subtext` for the "(click to set)" placeholder.  They were a
-hardcoded neutral near-black, which reads as a foreign widget on a themed (stylix-recoloured)
+hardcoded neutral near-black, which reads as a foreign widget on a themed (stylix-recolored)
 card; the `view_bg`/`view_fg` fallbacks are the old literals.
 
 *Canvas chrome.* The graph background is fully opaque by default. `--canvas-opacity F`
@@ -625,7 +625,7 @@ containers go transparent while `.opaque-chrome` (headerbar, tab bar, toolbars, 
 panels, console, with a **literal** palette color, not libadwaita's `@window_bg_color`
 which isn't defined here) keeps everything else filled and the CSD shadow/rounded corners
 are removed. Panels and their IO strips draw their `node_bg` backing at the **same
-`CANVAS_BG_ALPHA`** before the colour tint, so a panel is exactly as see-through as the
+`CANVAS_BG_ALPHA`** before the color tint, so a panel is exactly as see-through as the
 grid behind it (just tinted); nodes are fully opaque.
 
 Where that value comes from, in order: the flag, `$PATCHSPACE_CANVAS_OPACITY`, then whatever
@@ -639,7 +639,7 @@ the activation that changed it.  The flag and the environment variable are the *
 and beat the deployment's (`constants.CANVAS_BG_ALPHA_EXPLICIT`). The toolbar is wrapped in a
 full-width opaque strip and the notebook padding/border is zeroed so the padding around
 the grid isn't left transparent. The two side panels use `.side-panel-fill`, painted with
-the theme's `headerbar_bg_color` (the brighter "titlebar/active tab" colour Firefox uses),
+the theme's `headerbar_bg_color` (the brighter "titlebar/active tab" color Firefox uses),
 falling back to a lightened window bg.
 See-through needs the compositor not to fill a border background behind the window; on
 niri add:
@@ -657,11 +657,11 @@ little mouse glyph per row with the left button highlighted for "Pick / pan", th
 for "Pan", the right for "Select".
 
 *Node appearance.* Every non-port node draws its type's symbolic icon in the header's
-top-left corner, tinted with the node's category colour (`nid` decides the "mute" glyph for
+top-left corner, tinted with the node's category color (`nid` decides the "mute" glyph for
 a `mute_`-prefixed volume). GTK4 can't paint a symbolic icon onto a foreign cairo context,
 so `_node_icon_pixbuf` snapshots the `Gtk.IconPaintable`, runs it through a
 `Gsk.CairoRenderer` to a texture, decodes it to a `GdkPixbuf` and caches per
-(name, size, colour); `_header_line_layout` insets the first header line by
+(name, size, color); `_header_line_layout` insets the first header line by
 `NODE_ICON_LEFT_RESERVE` and is shared by `_draw_header` and both height measurements so
 the wrap width can't drift. A node the daemon hasn't finished bringing up (`ready` false) draws at
 `NODE_LOADING_ALPHA` (0.45) and fades to full once ready, and is not a hit target while it
@@ -778,7 +778,7 @@ takes the first wired source (`_resolve_boolean_input`).
 
 *Panels side view.* A docked, scrollable list of panel files lives on the right (the endchild of an outer `Gtk.Paned`), toggled by a button directly under the top-right
 hamburger (`main_window._panels_toggle` / `_build_panels_view`). A column-header row labels
-the controls; each row shows the panel's colour dot, a word-wrapping (WORD_CHAR) label,
+the controls; each row shows the panel's color dot, a word-wrapping (WORD_CHAR) label,
 two dim count lines (nodes above panels, from `list_panel_files`'s `node_count`/`children`),
 then an **Auto**-load checkbox, an **Add** (place) button and a **Del** button. Files may
 live in sub-folders (`panels.list_files` is recursive; `list_panel_files` reports each
@@ -1316,9 +1316,9 @@ supervision pass then recreates whatever vanished with the old PipeWire.
     daemon's `~` expansion makes it portable.
 - **Groups merge by local id.** Canvas groups whose id shares a local part (`grp` and
   `file::grp`, or the same id in two declarative files) render as **one** outline with the
-  contributing groups' titles **stacked** (each in its own colour), via `_merged_groups()` /
+  contributing groups' titles **stacked** (each in its own color), via `_merged_groups()` /
   `_group_merge_key()` — all group geometry, headers, hit-testing and the +/- membership
-  buttons iterate the merged view. The colour chip, the `+`/`-` buttons and a settings
+  buttons iterate the merged view. The color chip, the `+`/`-` buttons and a settings
   hamburger sit on the **right edge** of the group's box (hamburger rightmost; the
   hamburger and clicking the title both open `show_group_settings_dialog`). Exact-member-set
   duplicates are already removed daemon-side

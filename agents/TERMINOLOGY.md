@@ -58,6 +58,6 @@ that isn't here, ask (and then add it).  When a mapping here is a guess, it is m
 
 ## To confirm (guessed, not yet heard from Kyle)
 
-* "chip" → the panel-colour square at a node's bottom-left (`_panel_of_node` chip)?
+* "chip" → the panel-color square at a node's bottom-left (`_panel_of_node` chip)?
 * "the box" → a panel box vs the node box - he has said both; ask which.
 * "stamp" / "water-mark" → the EDIT MODE overlay on a panel in edit mode.

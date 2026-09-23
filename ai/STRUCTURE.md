@@ -71,7 +71,7 @@ side panels, console, daemon start/adopt) → `patchspace_widget.py` (the editab
 drawing, hit-testing, gestures, layout, panels, wires) with:
 
 * `node_specs.py` — the single source of truth for what a node type *is*: ports, kinds,
-  inline controls, settings rows, menu/category/colour/icon/description.
+  inline controls, settings rows, menu/category/color/icon/description.
 * `view_mixin.py` — pan/zoom/undo shared by both canvases; `wire_router.py` — A* orthogonal
   routing; `force_layout.py` — physics; `render_utils.py` — palette + cairo helpers;
   `socket_client.py` — async client thread; `daemon_control.py` — start/adopt/stop;

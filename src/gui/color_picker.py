@@ -1,11 +1,11 @@
 """
 color_picker.py
 
-A small, self-contained HSV colour picker used by the group settings
+A small, self-contained HSV color picker used by the group settings
 dialog.
 
 Deliberately NOT a Gtk.ColorButton / Gtk.ColorChooserDialog: those pull
-in GtkColorDialog, which reads GSettings for its "recent colours" list
+in GtkColorDialog, which reads GSettings for its "recent colors" list
 and hard-aborts the whole process (``No GSettings schemas are installed
 on the system``) on a machine without compiled schemas - a bare Nix
 shell, for instance.  This draws its own saturation/value square and hue
@@ -87,9 +87,9 @@ class ColorPicker(Gtk.Box):
     def __init__(self, initial: str = "#3584e4", presets=(), resolve=None):
         """`initial` may be a hex string or one of the theme-slot values the
         presets use (see `resolve`); `resolve(value)` maps a stored value to
-        RGB, so a caller can keep a panel or group coloured by *slot* - the
+        RGB, so a caller can keep a panel or group colored by *slot* - the
         picker holds that value, not the hex it happens to resolve to, and
-        `get_value()` hands it back unchanged until the user edits the colour
+        `get_value()` hands it back unchanged until the user edits the color
         by hand."""
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         self._resolve = resolve or hex_to_rgb
@@ -150,7 +150,7 @@ class ColorPicker(Gtk.Box):
             # A preset is either a stored value (a slot like "@blue", or a
             # hex) or a (value, rgb) pair - the pair form lets the caller say
             # what the swatch looks like *now* while the button still stores
-            # the slot, so the colour keeps following the theme.
+            # the slot, so the color keeps following the theme.
             if isinstance(item, tuple):
                 value, color = item
             else:
@@ -175,13 +175,13 @@ class ColorPicker(Gtk.Box):
     # -- public API ------------------------------------------------------
 
     def get_hex(self) -> str:
-        """The concrete colour currently shown, as hex."""
+        """The concrete color currently shown, as hex."""
         return rgb_to_hex(_hsv_to_rgb(self._h, self._s, self._v))
 
     def get_value(self) -> str:
         """What to store: the value this picker was opened with (a slot like
         `@blue` keeps following the theme), or a hex once the user changed the
-        colour by hand."""
+        color by hand."""
         return self._value
 
     def set_value(self, value: str) -> None:

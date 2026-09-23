@@ -63,10 +63,10 @@ let
         type = types.str;
         default = "@blue";
         description = ''
-          Panel colour: a hex string, or one of the theme's slots as
+          Panel color: a hex string, or one of the theme's slots as
           `@blue`/`@green`/`@yellow`/`@red`/`@purple`/`@teal`.  A slot is
           resolved against the *current* theme every time it is drawn, so a
-          panel coloured `@blue` follows the desktop (stylix recolours those
+          panel colored `@blue` follows the desktop (stylix recolors those
           slots) instead of freezing one hex value; the default is `@blue`.
         '';
       };
