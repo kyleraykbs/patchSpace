@@ -8153,9 +8153,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     def on_drag_update(self, gesture, offset_x, offset_y):
         if self.clip_dragging is not None:
-            origin_x = self._clip_drag_origin[0]
-            wx, _wy = self.to_world(origin_x + offset_x, 0.0)
-            self._drag_clip(wx, 0.0)
+            # The origin is a *world* x, so the gesture's screen offset has to
+            # be scaled by the zoom before it is added - passing screen
+            # coordinates through to_world() again squared the transform, which
+            # is why a handle barely moved (or flew) at any zoom but 1.
+            origin_world_x = self._clip_drag_origin[0]
+            self._drag_clip(origin_world_x + offset_x / self.zoom, 0.0)
             return
         if self.dragging_port is not None:
             node = self.nodes.get(self.dragging_port)

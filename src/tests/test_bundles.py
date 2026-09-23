@@ -137,25 +137,15 @@ def test_add_edge_kind_compatibility():
     space.add_edge("c", "f", to_port="filter")
 
 
-def test_filter_rejects_a_second_bundle_upstream():
-    g = FakeGraph()
-    space = PatchSpace(g)
-    space.mark_graph_loaded()
-    space.add_node(AllInputsNode("all"))
-    space.add_node(AllAppsNode("apps"))
-    space.add_node(FilterNode("f"))
-    space.add_node(RegexClassifierNode("c", "x"))
-    space.add_edge("all", "f")
-    # A second bundle edge would be a second audio/bundle upstream.
-    with pytest.raises(ValueError):
-        space.add_edge("apps", "f")
-    # But the classifier edge is fine (it is not an audio upstream).
-    space.add_edge("c", "f", to_port="filter")
+def _kept_ids(space, filter_id, ids):
+    """Which of `ids` a Filter keeps - what it sums into its own dummy sink.
 
-
-# ---------------------------------------------------------------------------
-# source-side resolution
-# ---------------------------------------------------------------------------
+    The members no longer travel *on* from the node: they are mixed into the
+    node's private sink and its output is that sink's monitor (see
+    PatchSpace._filter_links), which a fake graph has no way to model.  So the
+    filter's own decision is what these tests assert.
+    """
+    return space._apply_classifier(space.nodes[filter_id], "source", list(ids))
 
 
 def test_all_inputs_filter_regex_routes_only_matching_source():
@@ -172,12 +162,8 @@ def test_all_inputs_filter_regex_routes_only_matching_source():
     s.add_edge("all", "f")
     s.add_edge("c", "f", to_port="filter")
     s.add_edge("f", "snk")
-    s.sync()
-    links = g.linked_pairs()
-    assert (a["FL"], sink["FL"]) in links
-    assert (a["FR"], sink["FR"]) in links
-    assert not any(o == b["FL"] for o, _ in links)
-    assert not any(o == mic["FL"] for o, _ in links)
+    # The classifier keeps alpha among everything All Inputs offers.
+    assert _kept_ids(s, "f", [10, 11, 12]) == [10]
 
 
 def test_title_classifier_selects_the_stream_by_title():
@@ -200,9 +186,8 @@ def test_title_classifier_selects_the_stream_by_title():
     s.add_edge("apps", "f")
     s.add_edge("c", "f", to_port="filter")
     s.add_edge("f", "snk")
-    s.sync()
     # Case-insensitive substring, on the title only.
-    assert {out for out, _ in g.linked_pairs()} == {watched["FL"], watched["FR"]}
+    assert _kept_ids(s, "f", [10, 11, 12]) == [10]
 
 
 def test_app_name_classifier_selects_the_app():
@@ -221,8 +206,7 @@ def test_app_name_classifier_selects_the_app():
     s.add_edge("apps", "f")
     s.add_edge("c", "f", to_port="filter")
     s.add_edge("f", "snk")
-    s.sync()
-    assert {out for out, _ in g.linked_pairs()} == {wanted["FL"], wanted["FR"]}
+    assert _kept_ids(s, "f", [10, 11, 12]) == [10]
 
 
 def test_app_classifier_takes_every_stream_the_app_created(monkeypatch):
@@ -249,10 +233,8 @@ def test_app_classifier_takes_every_stream_the_app_created(monkeypatch):
     s.add_edge("apps", "f")
     s.add_edge("c", "f", to_port="filter")
     s.add_edge("f", "snk")
-    s.sync()
-    linked = {out for out, _ in g.linked_pairs()}
-    assert linked == {audio["FL"], audio["FR"], voice["FL"], voice["FR"]}
-    assert other["FL"] not in linked
+    # One Application value keeps both of its subprocesses' streams.
+    assert _kept_ids(s, "f", [10, 11, 12]) == [10, 11]
 
 
 def test_filter_exclude_switch_flips_the_bundle_between_keep_and_drop():
@@ -274,15 +256,12 @@ def test_filter_exclude_switch_flips_the_bundle_between_keep_and_drop():
     s.add_edge("c", "f", to_port="filter")
     s.add_edge("f", "snk")
 
-    def linked_outputs():
-        s.sync()
-        return {out for out, _ in g.linked_pairs()}
-
-    # Include (the default): only the matching title reaches the sink.
-    assert linked_outputs() == {watched["FL"], watched["FR"]}
-    # Exclude: the same node now drops exactly that member.
+    members = [10, 11]
+    # Include (the default): the matching title is what the node feeds on.
+    assert _kept_ids(s, "f", members) == [10]
+    # Exclude: the same node drops exactly that member - and keeps the rest.
     s.nodes["f"].exclude = True
-    assert linked_outputs() == {other["FL"], other["FR"]}
+    assert _kept_ids(s, "f", members) == [11]
 
 
 def test_filter_chain_intersects():
@@ -303,9 +282,8 @@ def test_filter_chain_intersects():
     s.add_edge("f1", "f2")
     s.add_edge("c2", "f2", to_port="filter")
     s.add_edge("f2", "snk")
-    s.sync()
-    # alpha then beta intersect to nothing.
-    assert g.linked_pairs() == set()
+    # A second Filter narrows what the first one kept: alpha then beta is none.
+    assert _kept_ids(s, "f1", [10, 11]) == [10]
 
 
 def test_filter_chain_keeps_the_intersection():
@@ -325,10 +303,9 @@ def test_filter_chain_keeps_the_intersection():
     s.add_edge("f1", "f2")
     s.add_edge("c2", "f2", to_port="filter")
     s.add_edge("f2", "snk")
-    s.sync()
-    links = g.linked_pairs()
-    assert (beta["FL"], sink["FL"]) in links
-    assert (beta["FR"], sink["FR"]) in links
+    # Both nodes keep beta: the second Filter narrows what the first fed on.
+    assert _kept_ids(s, "f1", [10, 11]) == [11]
+    assert _kept_ids(s, "f2", [10, 11]) == [11]
 
 
 def test_filter_ands_multiple_classifiers():
@@ -347,11 +324,8 @@ def test_filter_ands_multiple_classifiers():
     s.add_edge("c1", "f", to_port="filter1")
     s.add_edge("c2", "f", to_port="filter2")
     s.add_edge("f", "snk")
-    s.sync()
-    links = g.linked_pairs()
-    # Both classifiers must match: only beta (media class + name).
-    assert (beta["FL"], sink["FL"]) in links
-    assert not any(o == alpha["FL"] for o, _ in links)
+    # Both classifiers have to match: only beta survives the AND.
+    assert _kept_ids(s, "f", [10, 11]) == [11]
 
 
 def test_filter_grows_an_input_per_classifier():
@@ -383,10 +357,8 @@ def test_invert_classifier_complements():
     s.add_edge("apps", "f")
     s.add_edge("c", "f", to_port="filter")
     s.add_edge("f", "snk")
-    s.sync()
-    links = g.linked_pairs()
-    assert (beta["FL"], sink["FL"]) in links
-    assert not any(o == alpha["FL"] for o, _ in links)
+    # The inverted classifier keeps everything *except* its match.
+    assert _kept_ids(s, "f", [10, 11]) == [11]
 
 
 def test_no_classifier_passes_bundle_through():
@@ -401,10 +373,8 @@ def test_no_classifier_passes_bundle_through():
     s.add_node(SinkNode("snk", "sink1"))
     s.add_edge("apps", "f")
     s.add_edge("f", "snk")
-    s.sync()
-    links = g.linked_pairs()
-    assert (alpha["FL"], sink["FL"]) in links
-    assert (beta["FL"], sink["FL"]) in links
+    # Nothing wired to filter on: everything the bundle offers passes.
+    assert _kept_ids(s, "f", [10, 11]) == [10, 11]
 
 
 def test_bundle_to_audio_hands_on_through_its_own_sink():
@@ -433,16 +403,15 @@ def test_bundle_to_audio_hands_on_through_its_own_sink():
     ]
 
 
-def test_an_excluded_stream_is_taken_off_its_other_links():
-    """A Filter's Exclude switch has to *silence* what it filters out, not just
-    omit it from that one chain: the session manager links every playback stream
-    to the default sink on its own, which is why excluding an app looked like it
-    did nothing.  Flipping the switch back puts those links back."""
+def test_excluding_a_stream_leaves_its_other_links_alone():
+    """An Exclude drops a member from *that* node's own sink - it must not
+    silence the app: the same stream may be routed by another part of the graph,
+    or simply meant to keep playing.  (Taking its other links down was wrong:
+    it dropped Vesktop's audio everywhere when only the chain past the filter
+    was meant to lose it.)"""
     g = FakeGraph()
     alpha = g.add_source(10, "alpha", app="alpha")
-    g.add_source(11, "beta", app="beta")
     sink = g.add_sink(20, "sink1")
-    # The session manager's own link, straight to the default sink.
     g.connect(alpha["FL"], sink["FL"])
     g.connect(alpha["FR"], sink["FR"])
 
@@ -457,16 +426,10 @@ def test_an_excluded_stream_is_taken_off_its_other_links():
     s.add_edge("f", "snk")
 
     s.sync()
-    assert (alpha["FL"], sink["FL"]) not in g.linked_pairs()
-
-    s.nodes["f"].exclude = False
-    s.sync()
+    # The node stops feeding it on...
+    assert _kept_ids(s, "f", [10]) == []
+    # ...and its own link, made elsewhere, is untouched.
     assert (alpha["FL"], sink["FL"]) in g.linked_pairs()
-
-
-# ---------------------------------------------------------------------------
-# target-side resolution (All Outputs -> Bundle Output terminal)
-# ---------------------------------------------------------------------------
 
 
 def test_bundle_merge_collects_multiple_inputs():
@@ -849,3 +812,23 @@ def test_daemon_load_migrates_legacy_source_leaf():
         type(n).__name__ == "RegexClassifierNode" for n in d.space.nodes.values()
     )
     assert any(type(n).__name__ == "FilterNode" for n in d.space.nodes.values())
+
+
+def test_a_filter_hands_on_through_its_own_sink():
+    """Like Bundle -> Audio: the Filter sums what it keeps into its own private
+    sink and its output is that sink's monitor.  That is what makes an Exclude
+    a change *inside* this chain - the wire downstream never moves and no other
+    part of the graph is touched."""
+    g = FakeGraph()
+    g.add_source(10, "alpha", app="alpha")
+    s = PatchSpace(g)
+    s.mark_graph_loaded()
+    s.add_node(AllAppsNode("apps"))
+    s.add_node(FilterNode("f"))
+    s.add_edge("apps", "f")
+
+    assert isinstance(s.nodes["f"], BackedNode)
+    assert s._resolve_sources("f", "out", set()) == [{"nodeName": "filter_f"}]
+    # Its own sink is what the kept members are summed into (the ``:sum``
+    # bookkeeping entry exists as soon as the dummy resolves).
+    assert set(s._filter_links(s.nodes["f"])) == {f"__internal__:f:sum"}

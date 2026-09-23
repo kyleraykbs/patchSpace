@@ -195,3 +195,25 @@ def test_a_knob_drag_through_the_gesture_moves_the_selection():
     )
     w.on_drag_end(None, 60.0, 0.0)
     assert w.clip_dragging is None
+
+
+def test_a_handle_drag_is_scaled_by_the_canvas_zoom():
+    """The drag offset arrives in screen pixels; the times are in world units,
+    so it has to be divided by the zoom.  Testing only at zoom 1 hid this: the
+    transform cancelled and the bug looked like "the handle doesn't move"."""
+    w, _ = _widget(duration=10.0, start=2.0, end=6.0)
+    w.zoom = 2.5
+    w.pan_x, w.pan_y = -120.0, 40.0
+
+    kx, ky, kw, kh = w._clip_knob_rect("clip1", "start")
+    sx, sy = kx * w.zoom + w.pan_x, ky * w.zoom + w.pan_y
+    w.on_drag_begin(None, sx + kw * w.zoom / 2, sy + kh * w.zoom / 2)
+    assert w.clip_dragging == ("slide", "clip1")
+
+    # 50 screen pixels at zoom 2.5 is 20 world units, i.e. 20/ (span) of the
+    # file: the selection must move by exactly that much time.
+    _rx, _ry, rw, _rh = w._clip_rect("clip1")
+    _start, span = w._clip_span("clip1")
+    w.on_drag_update(None, 50.0, 0.0)
+    moved = w.nodes["clip1"]["start"] - 2.0
+    assert moved == pytest.approx(20.0 / rw * span, rel=0.02)

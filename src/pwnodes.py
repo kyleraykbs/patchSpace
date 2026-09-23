@@ -1540,40 +1540,6 @@ class ExternalOnlyClassifierNode(ClassifierNode):
         return not pwmatch.is_patchspace_owned(props)
 
 
-class FilterNode(TransparentNode):
-    """Bundle in + one or more classifiers in -> filtered bundle out.
-
-    The bundle input carries a set of endpoints; each ``filterN`` input
-    carries a classifier's predicate.  The node resolves the incoming
-    bundle to its exact live members and keeps the ones *every* wired
-    classifier matches (AND - adding classifiers narrows, exactly like
-    chaining Filter nodes).  With no classifier wired the bundle passes
-    through unchanged; a *wired but empty* classifier matches nothing,
-    mirroring the legacy leaves an empty pattern used to match nothing.
-
-    The filter inputs are dynamic: the daemon reports one per wired
-    classifier plus a spare (``filter_input_ports``), so plugging into
-    the spare grows another and one node can hold an arbitrary number of
-    classifiers.
-
-    ``exclude`` is the node's Include/Exclude switch.  Off (Include, the
-    default) the node keeps what matches; on (Exclude) it keeps everything
-    *except* what matches - the same predicate, negated, so one node covers
-    "only these" and "everything but these"."""
-
-    def __init__(self, node_id, exclude: bool = False):
-        super().__init__(node_id)
-        self.exclude = bool(exclude)
-
-    def port_kind(self, port: str, direction: str) -> str:
-        if direction == "in" and port.startswith("filter"):
-            return "filter"
-        return "bundle"
-
-    def passes_output(self, from_port: str) -> bool:
-        return True
-
-
 class BundleMergeNode(TransparentNode):
     """Audio (or bundle) in -> one bundle out.
 
@@ -1676,6 +1642,11 @@ class _SingleSinkNode(BackedNode):
         return b is not None and (
             not b.owns_process or (b.is_alive and not b.stuck(self.RESOLVE_GRACE_S))
         )
+
+    def sink_node_id(self) -> Optional[int]:
+        """The live dummy sink's node id, or None while it comes up."""
+        b = self._find(self.backing_node_name)
+        return b.node_id if b else None
 
     def ensure_structural(self) -> None:
         self._prune_dead()
@@ -2096,6 +2067,54 @@ class BundleToAudioNode(_SingleSinkNode):
         return "audio"
 
 
+class FilterNode(_SingleSinkNode):
+    """Bundle in + one or more classifiers in -> filtered bundle out.
+
+    The bundle input carries a set of endpoints; each ``filterN`` input
+    carries a classifier's predicate.  The node resolves the incoming
+    bundle to its exact live members and keeps the ones *every* wired
+    classifier matches (AND - adding classifiers narrows, exactly like
+    chaining Filter nodes).  With no classifier wired the bundle passes
+    through unchanged; a *wired but empty* classifier matches nothing,
+    mirroring the legacy leaves an empty pattern used to match nothing.
+
+    The filter inputs are dynamic: the daemon reports one per wired
+    classifier plus a spare (``filter_input_ports``), so plugging into
+    the spare grows another and one node can hold an arbitrary number of
+    classifiers.
+
+    ``exclude`` is the node's Include/Exclude switch.  Off (Include, the
+    default) the node keeps what matches; on (Exclude) it keeps everything
+    *except* what matches - the same predicate, negated, so one node covers
+    "only these" and "everything but these".
+
+    The node sums what it keeps into its own private internal sink and its
+    output *is* that sink's monitor (see PatchSpace._filter_links), so a member
+    the switch drops simply stops being fed here: it disappears from this chain
+    and nowhere else, and the wire downstream never moves.  (Silencing the app
+    globally was wrong - the same stream may well be routed by another part of
+    the graph, or meant to keep playing normally.)"""
+
+    MEDIA_CLASS = pwmatch.INTERNAL_MEDIA_CLASS
+
+    def __init__(self, node_id, exclude: bool = False,
+                 backing_node_name: Optional[str] = None,
+                 pw_cli_command=("pw-cli",), settle: float = 0.3):
+        _SingleSinkNode.__init__(
+            self, node_id, backing_node_name or f"filter_{node_id}",
+            pw_cli_command, settle, description=f"Filter: {node_id}",
+        )
+        self.exclude = bool(exclude)
+
+    def port_kind(self, port: str, direction: str) -> str:
+        if direction == "in" and port.startswith("filter"):
+            return "filter"
+        return "bundle"
+
+    def passes_output(self, from_port: str) -> bool:
+        return True
+
+
 class BundleOutputNode(OutputNode, _SingleSinkNode):
     """Terminal for a *sink* bundle: audio in + a set of targets.
 
@@ -2123,11 +2142,6 @@ class BundleOutputNode(OutputNode, _SingleSinkNode):
         if direction == "in" and port == "bundle":
             return "bundle"
         return "audio"
-
-    def sink_node_id(self) -> Optional[int]:
-        """The live dummy sink's node id, or None while it comes up."""
-        b = self._find(self.backing_node_name)
-        return b.node_id if b else None
 
 
 class VolumeProcessNode(_SingleSinkNode):
@@ -3450,11 +3464,6 @@ class PatchSpace:
 
         # edge id -> desired pairs connected as of the last sync.
         self._edge_links: Dict[EdgeId, _DesiredLinks] = {}
-        #: Streams a Filter's Exclude switch matched this pass (rebuilt every
-        #: sync) and the foreign links taken down for them (see
-        #: _sync_silenced).
-        self._excluded_streams: Set[NodeId] = set()
-        self._silenced: Dict[NodeId, List[Tuple[int, int]]] = {}
 
         # Paced wire-up (see _apply_desired_links): pairs whose connect
         # has been issued but not yet confirmed by the live graph,
@@ -4123,48 +4132,6 @@ class PatchSpace:
             return sources
         return []
 
-    def _sync_silenced(self) -> None:
-        """Take down the links of a stream a Filter deliberately filtered out.
-
-        The session manager links every playback stream to the default sink by
-        itself, so an Exclude only ever removed *the graph's* link and the app
-        kept playing - "the filter doesn't work".  A stream the Exclude switch
-        matched, and that no patchspace link carries, has its other links
-        disconnected here; they go back the moment it is no longer excluded.
-        """
-        graph = self.graph
-        mine: Set[Tuple[int, int]] = set()
-        for entry in self._edge_links.values():
-            mine |= set(getattr(entry, "pairs", entry) or ())
-        try:
-            pairs = set(graph.linked_pairs())
-        except Exception:                      # a graph without link info
-            return
-
-        # Forget streams that are gone, and put back what is no longer excluded.
-        for node_id in [n for n in self._silenced if n not in self.nodes]:
-            self._silenced.pop(node_id, None)
-        for node_id in [n for n in self._silenced if n not in self._excluded_streams]:
-            for out_port, in_port in self._silenced.pop(node_id):
-                if (out_port, in_port) not in pairs:
-                    graph.connect(out_port, in_port)
-                    logger.info("Stream %r is no longer excluded: link restored",
-                                node_id)
-
-        for node_id in sorted(self._excluded_streams):
-            if node_id in self._silenced:
-                continue
-            ports = {pid for pid, _data in (graph.ports_for_node(node_id) or {}).items()}
-            foreign = [p for p in pairs if p[0] in ports and p not in mine]
-            for pair in foreign:
-                if graph.disconnect(*pair):
-                    self._silenced.setdefault(node_id, []).append(pair)
-            if self._silenced.get(node_id):
-                logger.info(
-                    "Excluded stream %r: %d link(s) taken down",
-                    node_id, len(self._silenced[node_id]),
-                )
-
     def resolve_sound(self, node_id: NodeId, port: str = "sound",
                       seen: Optional[Set[NodeId]] = None) -> Optional[dict]:
         """The sound reaching ``node_id``'s sound input, as
@@ -4273,11 +4240,6 @@ class PatchSpace:
             matched = all(c.classify(props, side) for c in classifiers)
             if matched != exclude:
                 kept.append(node_id)
-            elif exclude:
-                # What this node's Exclude switch filtered out: the graph stops
-                # routing it, and _sync_silenced stops it playing elsewhere
-                # (the session manager's own link to the default sink).
-                self._excluded_streams.add(node_id)
         return kept
 
     def bundle_side(self, node_id: NodeId,
@@ -4421,6 +4383,30 @@ class PatchSpace:
             ids = self._apply_classifier(node, "sink", ids)
             return [{"id": i} for i in ids]
         return []
+
+    def _filter_links(self, node: "FilterNode") -> Dict[EdgeId, Set[Tuple[int, int]]]:
+        """Desired links for a Filter: the members its classifiers keep, summed
+        into the node's own dummy sink.
+
+        Excluding a member therefore drops it from *this* chain only - it stops
+        being fed into the dummy, and everything downstream (which reads the
+        dummy's monitor) never has to change."""
+        sum_id = f"__internal__:{node.id}:sum"
+        dummy_id = node.sink_node_id()
+        if dummy_id is None:
+            # The dummy hasn't resolved yet: nothing to connect or tear down.
+            return {sum_id: set()}
+        sources: List[dict] = []
+        for edge in self._edges_into.get(node.id, []):
+            if self._edge_is_boolean(edge) or self._edge_is_filter(edge):
+                continue
+            sources.extend(self._resolve_sources(edge.from_node, edge.from_port))
+        ids = pwmatch.find_source_nodes(self.graph, sources)
+        ids = self._apply_classifier(node, "source", ids)
+        summed: Set[Tuple[int, int]] = set()
+        for src_id in ids:
+            summed |= pwmatch.resolve_channel_pairs(self.graph, src_id, dummy_id)
+        return {sum_id: summed}
 
     def _bundle_output_links(
         self, node: "BundleOutputNode"
@@ -4714,7 +4700,6 @@ class PatchSpace:
         # (and therefore which audio edges resolve to a source) depends
         # on them.
         self._refresh_boolean_states()
-        self._excluded_streams.clear()
         graph = self.graph
         desired: Dict[EdgeId, Set[Tuple[int, int]]] = {}
         unresolved: Set[EdgeId] = set()
@@ -4743,6 +4728,11 @@ class PatchSpace:
                     unresolved.update(
                         k for k in self._edge_links if k.startswith(prefix)
                     )
+                continue
+            if isinstance(node, FilterNode):
+                # Its kept members are summed into its own dummy; its output is
+                # that dummy's monitor, so the downstream never moves.
+                desired.update(self._filter_links(node))
                 continue
             if isinstance(node, BundleOutputNode):
                 # The terminal's "in" (audio) + "bundle" inputs are wired
@@ -4839,7 +4829,6 @@ class PatchSpace:
         # fixed order, each waited on before the next (see
         # _apply_desired_links for why).
         self._apply_desired_links(desired)
-        self._sync_silenced()
 
     def _apply_desired_links(self, desired: Dict[EdgeId, Set[Tuple[int, int]]]) -> None:
         """Create the links in `desired` that aren't live yet.
