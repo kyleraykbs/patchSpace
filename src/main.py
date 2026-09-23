@@ -5240,6 +5240,9 @@ class PatchSpaceDaemon:
                 data["health"] = self._node_health(node)
             if isinstance(node, SoundPlayerNode):
                 data["playing"] = node.playing
+                # How far into the sound it is, so the node can show a bar
+                # rather than only a count (see SoundPlayerNode.progress).
+                data["progress"] = node.progress
             if isinstance(node, ClipNode):
                 # What the clip is showing: the GUI re-asks for the waveform
                 # (get_peaks) whenever the path *or the file behind it* changes

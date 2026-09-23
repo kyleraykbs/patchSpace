@@ -535,3 +535,21 @@ gesture accepts; tested only structurally (no touchscreen here).
   (`_record_button_rect` gives the coordinates, `on_click` drives it), not just
   the state it manages: the state-level tests all passed while the button did
   nothing at all.
+
+* **A deferred popup must not run against a torn-down widget tree.**  The suite
+  segfaulted, and the faulthandler pointed at `popup_context_menu`'s deferred
+  `_show`: the idle it schedules can outlive the window or canvas it was
+  requested from, and `popover.popup()` on a popover that is no longer rooted is
+  not a warning in GTK - the tree behind it has been freed.  Both the popover's
+  and the canvas's root are checked now.  This is the shape of "it crashes
+  everything at random", and it is timing-dependent, which is why hand-driven
+  event sequences never reproduced it: only pumping a real main loop after a
+  teardown did.
+* **An optimistic UI action must apply every field it owns.**  The panel colour
+  dialog applied the colour and the auto-load flag only when the *name* field
+  was non-empty, so an empty name silently discarded them ("Apply does nothing").
+  Both settings dialogs now keep the name/id they have and apply the rest.
+* Per-node caches are dropped with the node, not left behind: geometry,
+  fingerprint, waveform, view state, asked-at, recording flag, pending
+  positions, effect slider, physics velocity.  A node reusing a freed id would
+  otherwise inherit the previous one's shape.

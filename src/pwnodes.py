@@ -1869,6 +1869,9 @@ class SoundPlayerNode(_SingleSinkNode):
                          description=f"Sound Player: {node_id}")
         self.overlap = bool(overlap)
         self._players: List[OwnedPwProcess] = []
+        #: proc -> (started_at, span_seconds) for the live plays, so the GUI can
+        #: show how far into the sound it is (see `progress`).
+        self._play_spans: Dict[Any, Tuple[float, float]] = {}
         #: name -> temporary WAV a clipped playback is reading (see
         #: _clip_to_temp); removed when its player retires.
         self._temp_files: Dict[str, str] = {}
@@ -1963,6 +1966,10 @@ class SoundPlayerNode(_SingleSinkNode):
             self._drop_temp(name)
             return
         self._players.append(proc)
+        # Progress is an estimate from when this child started - pw-cat reports
+        # no position, and a bar a few milliseconds out is invisible.  The span
+        # is measured once here so a poll never has to probe the file.
+        self._play_spans[proc] = (_time.monotonic(), self._sound_span(sound))
 
     def _clip_to_temp(self, path: str, start: float, end: Optional[float]) -> Optional[str]:
         """Decode just the selected part of a file to a temporary WAV.
@@ -2006,6 +2013,29 @@ class SoundPlayerNode(_SingleSinkNode):
         if path and os.path.exists(path):
             os.unlink(path)
 
+    def _sound_span(self, sound: dict) -> float:
+        """How long the part of a sound being played lasts, in seconds."""
+        start = float(sound.get("start") or 0.0)
+        end = sound.get("end")
+        if end is None:
+            duration = probe_duration(str(sound.get("path") or ""))
+            end = duration if duration > 0 else 0.0
+        return max(0.001, float(end) - start)
+
+    @property
+    def progress(self) -> float:
+        """How far the sound being played has got, 0..1 (0.0 when idle).
+
+        The newest live play is the one the user just fired, so that is what
+        the bar follows."""
+        live = [
+            span for proc, span in self._play_spans.items() if proc.is_alive
+        ]
+        if not live:
+            return 0.0
+        started, span = live[-1]
+        return max(0.0, min(1.0, (_time.monotonic() - started) / span))
+
     def _prune_players(self) -> None:
         """Forget players whose file has ended (and any clip file they were
         reading)."""
@@ -2013,6 +2043,7 @@ class SoundPlayerNode(_SingleSinkNode):
             if proc.is_alive:
                 continue
             self._players.remove(proc)
+            self._play_spans.pop(proc, None)
             proc.destroy()
             self._drop_temp(proc.name)
 
@@ -2020,6 +2051,7 @@ class SoundPlayerNode(_SingleSinkNode):
         for proc in list(self._players):
             proc.destroy()
             self._players.remove(proc)
+            self._play_spans.pop(proc, None)
             self._drop_temp(proc.name)
 
     def refresh_live(self) -> None:

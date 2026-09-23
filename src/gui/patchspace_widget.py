@@ -1603,6 +1603,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 # nodes that have them, so nothing else gains dead state.
                 if "playing" in ndata:
                     node["playing"] = ndata.get("playing", 0)
+                if "progress" in ndata:
+                    node["progress"] = float(ndata.get("progress") or 0.0)
                 if "overlap" in ndata:
                     overlap = self._accept_bool_echo(
                         nid, "overlap", ndata.get("overlap", False)
@@ -6612,6 +6614,18 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         cr.fill()
 
         if count > 0:
+            # How far into the sound it is, as a bar across the node's foot -
+            # the count says *that* it is playing, this says how much is left.
+            progress = max(0.0, min(1.0, float(node.get("progress") or 0.0)))
+            nx, ny = node["x"], node["y"]
+            nw, nh = self.node_width(nid), self.node_height(nid)
+            bar_x, bar_w = nx + self.FIELD_MARGIN, nw - 2 * self.FIELD_MARGIN
+            bar_y = ny + nh - 7.0
+            self._draw_slider_bar(cr, bar_x, bar_y, bar_w, 3, pal["slider_track"])
+            if progress > 0.0:
+                self._draw_slider_bar(
+                    cr, bar_x, bar_y, bar_w * progress, 3, pal["success"]
+                )
             # Something is running: offer to cut it short (a player's children
             # end by themselves when the file does).
             bx, by, bw, bh = self._stop_button_rect(nid)

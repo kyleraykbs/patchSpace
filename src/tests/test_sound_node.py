@@ -460,3 +460,54 @@ def test_a_growing_take_is_re_read_not_answered_from_the_cache(tmp_path):
     put_seconds(2.0)                                  # the same take, still growing
     assert pwnodes.sound_rev(str(take))
     assert probe_duration(str(take)) == pytest.approx(2.0, abs=0.05)
+
+
+def test_a_player_reports_how_far_into_the_sound_it_is(monkeypatch):
+    """The node draws a progress bar, so the player has to say how far in it
+    is.  pw-cat reports no position, so it is an estimate from when the child
+    started, measured against the length of the *range* being played - and it
+    reads 0 when nothing is playing."""
+    clock = [1000.0]
+
+    class FakeClock:
+        @staticmethod
+        def monotonic():
+            return clock[0]
+
+        @staticmethod
+        def time():
+            return clock[0]
+
+    monkeypatch.setattr(pwnodes, "_time", FakeClock)
+    monkeypatch.setattr(pwnodes, "probe_duration", lambda path: 10.0)
+
+    class FakeProc:
+        def __init__(self, *args, **kwargs):
+            self.is_alive = True
+            self.name = "fake"
+        def create(self, command, quiet=False):
+            return True
+        def destroy(self):
+            self.is_alive = False
+
+    monkeypatch.setattr(pwnodes, "OwnedPwProcess", FakeProc)
+    node = pwnodes.SoundPlayerNode("pl", backing_node_name="pl_sink")
+    assert node.progress == 0.0                     # nothing playing yet
+
+    node.on_impulse({"path": "~/x.wav", "start": 0.0, "end": None})
+    assert node.progress == pytest.approx(0.0, abs=0.01)
+
+    clock[0] += 5.0
+    assert node.progress == pytest.approx(0.5, abs=0.01)
+
+    clock[0] += 10.0
+    assert node.progress == 1.0                     # clamped at the end
+
+    # A clip's range is what it is measured against, not the whole file.
+    monkeypatch.setattr(node, "_clip_to_temp", lambda path, start, end: path)
+    node.on_impulse({"path": "~/x.wav", "start": 2.0, "end": 4.0})
+    clock[0] += 1.0
+    assert node.progress == pytest.approx(0.5, abs=0.02)
+
+    node._stop_players()
+    assert node.progress == 0.0
