@@ -83,6 +83,20 @@ def test_the_title_box_sits_above_the_button_inside_the_node():
     assert top <= field[1] and button[1] + button[3] <= bottom, (field, button)
 
 
+def test_the_empty_title_box_says_what_it_sets():
+    """An empty box reading "(click to set)" looks like it belongs to the
+    socket above it; the Filter node's box names itself - briefly, since the
+    field ellipsizes."""
+    w, _ = _widget(_filter_node(title=""))
+    assert w._field_text("f", w._field_value(w.nodes["f"])) == "title"
+    # Once set it shows the title, and other nodes keep the generic prompt.
+    w2, _ = _widget(_filter_node())
+    assert w2._field_text("f", w2._field_value(w2.nodes["f"])) == "YouTube"
+    w3, _ = _widget({"f": dict(_filter_node(), type="regex_classifier",
+                               pattern="", label="Regex")})
+    assert w3._field_text("f", "") == "(click to set)"
+
+
 def test_the_button_is_clickable_and_the_box_is_not_under_it():
     w, _ = _widget(_filter_node())
     bx, by = _centre(w._gate_rect("f"))

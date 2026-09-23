@@ -5717,6 +5717,18 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     def _draw_mute_checkbox(self, cr, x, y, node_h, volume):
         self._draw_check_row(cr, x, y, node_h, volume > 0.5, "Pass audio")
 
+    def _field_text(self, nid, value):
+        """What an inline field draws: its value, or - when empty - the
+        placeholder that says what the field is for.  A spec can name its own
+        (`field_placeholder`: the Filter node's box is "a title"), else the
+        generic prompt."""
+        if value:
+            return value
+        return (
+            spec_for(self.nodes[nid]["type"]).field_placeholder
+            or "(click to set)"
+        )
+
     def _draw_text_field(self, cr, pal, nid, value):
         field_x, field_y, field_w, field_h = self._field_rect(nid)
 
@@ -5727,7 +5739,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         cr.set_line_width(1)
         cr.stroke()
 
-        text = value if value else "(click to set)"
+        text = self._field_text(nid, value)
         color = pal["field_fg"] if value else pal["subtext"]
         font_size = 10
 

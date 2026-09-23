@@ -127,6 +127,7 @@ class NodeSpec:
         "description",
         "setting_tooltips",
         "toggle",
+        "field_placeholder",
         "indicator",
         "picker",
     )
@@ -151,6 +152,7 @@ class NodeSpec:
         description: str = "",
         setting_tooltips: Optional[Dict[str, str]] = None,
         toggle: Optional[tuple] = None,
+        field_placeholder: Optional[str] = None,
         indicator: Optional[str] = None,
         picker: bool = False,
     ):
@@ -206,6 +208,11 @@ class NodeSpec:
         # which single string property (if any) is edited via an inline
         # text field (the Filter node's title box is one of these).
         self.field = field
+        # Optional placeholder for the empty inline field, so a box whose
+        # meaning isn't obvious from the node's caption says what it sets
+        # (the Filter node's title box).  None => the generic
+        # "(click to set)".  Keep it short: the field ellipsizes.
+        self.field_placeholder = field_placeholder
         # Optional (attr, label) for a checkbox drawn on the node body,
         # above the field/control row - a boolean property the user flips
         # in place rather than through the Settings dialog (the Sound
@@ -314,6 +321,10 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
         bundle_inputs=["in"], bundle_outputs=["out"], filter_inputs=["filter1"],
         socket_labels=True,
         field="title",
+        # Short on purpose: the box ellipsizes, so a placeholder has to fit
+        # the narrowest node it can appear on ("title", like a form label)
+        # rather than the generic "(click to set)" prompt.
+        field_placeholder="title",
         control="filter_mode",
     ),
     # Merge Bundle's input sockets are dynamic: it starts with one and
