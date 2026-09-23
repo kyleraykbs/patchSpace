@@ -266,6 +266,13 @@ def _desc(props: dict) -> str:
 def matches_source_filter(props: dict, filt: dict) -> bool:
     """Does a candidate source node (by its live props) satisfy one
     source-filter entry?"""
+    if filt.get("externalOnly") and is_patchspace_owned(props):
+        # The "everything that isn't ours" presets.  Without this, Patch
+        # Space's own keepalives - which *are* Stream/Output/Audio - are
+        # members of All Apps, so a filter there is fed the pipeline's own
+        # plumbing, and a bundle carrying that back into an output is a loop.
+        return False
+
     filt_id = filt.get("id")
     if filt_id is not None and filt_id != props.get("_node_id"):
         return False
@@ -335,6 +342,10 @@ def find_source_nodes(graph, filters: List[dict]) -> List[int]:
 def matches_sink_target(node_id: int, props: dict, target: dict) -> bool:
     """Like matches_source_filter, but for sink targets: ``name`` is an
     EXACT match on node.name."""
+    if target.get("externalOnly") and is_patchspace_owned(props):
+        # As with find_source_nodes: All Outputs must not offer our own sinks
+        # and dummy monitors as destinations.
+        return False
     if not any(target.get(k) is not None for k in _TARGET_IDENTITY_KEYS):
         return False
 

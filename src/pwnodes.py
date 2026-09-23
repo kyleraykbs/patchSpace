@@ -1368,7 +1368,11 @@ class AllInputsNode(InputNode):
         return "source"
 
     def source_filters(self):
-        return [{"mediaClassRegex": "^Audio/Source$|^Stream/Output/Audio$"}]
+        # External only: our own keepalives and internals are not "inputs".
+        return [{
+            "mediaClassRegex": "^Audio/Source$|^Stream/Output/Audio$",
+            "externalOnly": True,
+        }]
 
 
 class AllAppsNode(InputNode):
@@ -1382,7 +1386,10 @@ class AllAppsNode(InputNode):
         return "source"
 
     def source_filters(self):
-        return [{"mediaClassRegex": "^Stream/Output/Audio$"}]
+        # External only: a Patch Space keepalive is a Stream/Output/Audio too,
+        # so without this All Apps included the node's own plumbing - and a
+        # bundle carrying the pipeline's own output back into it is a loop.
+        return [{"mediaClassRegex": "^Stream/Output/Audio$", "externalOnly": True}]
 
 
 class AllOutputsNode(Node):
@@ -1401,8 +1408,8 @@ class AllOutputsNode(Node):
 
     def sink_filters(self):
         return [
-            {"mediaClassRegex": "^Audio/Sink$"},
-            {"mediaClassRegex": "^Stream/Input/Audio$"},
+            {"mediaClassRegex": "^Audio/Sink$", "externalOnly": True},
+            {"mediaClassRegex": "^Stream/Input/Audio$", "externalOnly": True},
         ]
 
 

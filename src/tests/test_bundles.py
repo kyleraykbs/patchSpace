@@ -399,7 +399,7 @@ def test_bundle_to_audio_hands_on_through_its_own_sink():
     ]
     # The member still reaches the node's *input* side (the sink it sums into).
     assert s._resolve_sources("apps", "out", set()) == [
-        {"mediaClassRegex": "^Stream/Output/Audio$"}
+        {"mediaClassRegex": "^Stream/Output/Audio$", "externalOnly": True}
     ]
 
 
@@ -971,3 +971,68 @@ def test_a_filter_with_no_classifiers_passes_the_whole_bundle():
     links = g.linked_pairs()
     assert (alpha["FL"], dummy["FL"]) in links
     assert (beta["FL"], dummy["FL"]) in links
+
+
+def test_all_apps_leaves_out_patchspace_own_streams():
+    """Patch Space's own keepalives *are* Stream/Output/Audio, so All Apps
+    included the pipeline's own plumbing - and a bundle carrying the pipeline's
+    output back into it is a loop (Kyle: "all apps shouldn't include patchspace
+    internal nodes and patchspace pw-cat instances, that's what was causing my
+    issue")."""
+    g = FakeGraph()
+    real = g.add_source(10, "Firefox", app="firefox")
+    ours = g.add_source(11, "patchspace_node_1_keepalive", app="pw-cat")
+    s = PatchSpace(g)
+    s.mark_graph_loaded()
+    s.add_node(AllAppsNode("apps"))
+
+    members = {m["port"] for m in s.bundle_members("apps")}
+    assert "Firefox" in members
+    assert "patchspace_node_1_keepalive" not in members
+
+
+def test_all_inputs_and_all_outputs_leave_them_out_too():
+    """The same rule for the other two presets: our own internals are not
+    "the world" on either side."""
+    g = FakeGraph()
+    g.add_source(10, "Firefox", app="firefox")
+    g.add_source(11, "patchspace_node_1_keepalive", app="pw-cat")
+    g.add_sink(20, "sink1")
+    g.add_sink(21, "patchspace_node_2_keepalive")
+    s = PatchSpace(g)
+    s.mark_graph_loaded()
+    s.add_node(AllInputsNode("ins"))
+    s.add_node(AllOutputsNode("outs"))
+
+    ins = {m["port"] for m in s.bundle_members("ins")}
+    assert "Firefox" in ins
+    assert "patchspace_node_1_keepalive" not in ins
+
+    # Sinks resolve through the other matcher (a bundle of *destinations*, not
+    # members), so check it where it lives.
+    import pwmatch
+    live = g.nodes()
+    keepalive = {"mediaClassRegex": "^Audio/Sink$", "externalOnly": True}
+    ours = dict(live[21]["info"]["props"])
+    theirs = dict(live[20]["info"]["props"])
+    assert not pwmatch.matches_sink_target(21, ours, keepalive)
+    assert pwmatch.matches_sink_target(20, theirs, keepalive)
+
+
+def test_all_apps_is_apps_only():
+    """Kyle: "All Apps should specifically be *apps*, not mic sinks or virt
+    speakers or anything like that, it should just be apps."  A mic is
+    Audio/Source and a virtual speaker is Audio/Sink, so the media class keeps
+    those out; what leaked in was Patch Space's own keepalive - a pw-cat
+    playback stream, which *is* Stream/Output/Audio."""
+    g = FakeGraph()
+    g.add_source(10, "Firefox", app="firefox")
+    g.add_source(11, "patchspace_bleh_keepalive", app="pw-cat")
+    g.add_source(12, "mic", media_class="Audio/Source")            # a mic
+    g.add_sink(20, "virtspeaker")                                   # a virt sink
+    s = PatchSpace(g)
+    s.mark_graph_loaded()
+    s.add_node(AllAppsNode("apps"))
+
+    members = {m["port"] for m in s.bundle_members("apps")}
+    assert members == {"Firefox"}, members
