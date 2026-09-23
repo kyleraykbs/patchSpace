@@ -5335,6 +5335,18 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         key = panel.get("stem") or panel.get("label") or pid
         return theme_class_color(self, key)
 
+    @staticmethod
+    def _draw_slider_bar(cr, x, y, w, h, color):
+        """One slider bar - the groove or the filled part of it: still a
+        rectangle, with slightly rounded ends (clamped to the bar's own
+        height and length so a nearly-empty fill stays a bar, not a blob)."""
+        if w <= 0:
+            return
+        radius = min(h / 2.0, 2.0, w / 2.0)
+        cr.set_source_rgb(*color)
+        draw_rounded_rect(cr, x, y, w, h, radius)
+        cr.fill()
+
     def _draw_wetdry_slider(self, cr, pal, x, y, node_h, mix):
         """Reverb's dry/wet mix as an inline slider on the node body
         (0 = fully dry, 1 = fully wet), styled like the volume slider
@@ -5349,13 +5361,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         cr.move_to(slider_x, slider_y - 3)
         cr.show_text("dry/wet")
 
-        cr.set_source_rgb(*pal["slider_track"])
-        cr.rectangle(slider_x, slider_y, slider_width, 4)
-        cr.fill()
-
-        cr.set_source_rgb(*pal["accent"])
-        cr.rectangle(slider_x, slider_y, slider_width * mix, 4)
-        cr.fill()
+        self._draw_slider_bar(
+            cr, slider_x, slider_y, slider_width, 4, pal["slider_track"]
+        )
+        self._draw_slider_bar(
+            cr, slider_x, slider_y, slider_width * mix, 4, pal["accent"]
+        )
 
         handle_x = slider_x + slider_width * mix
         cr.arc(handle_x, slider_y + 2, 6, 0, 2 * math.pi)
@@ -5383,13 +5394,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         cr.move_to(slider_x, slider_y - 3)
         cr.show_text("sensitivity")
 
-        cr.set_source_rgb(*pal["slider_track"])
-        cr.rectangle(slider_x, slider_y, slider_width, 4)
-        cr.fill()
-
-        cr.set_source_rgb(*pal["accent"])
-        cr.rectangle(slider_x, slider_y, slider_width * frac, 4)
-        cr.fill()
+        self._draw_slider_bar(
+            cr, slider_x, slider_y, slider_width, 4, pal["slider_track"]
+        )
+        self._draw_slider_bar(
+            cr, slider_x, slider_y, slider_width * frac, 4, pal["accent"]
+        )
 
         handle_x = slider_x + slider_width * frac
         cr.arc(handle_x, slider_y + 2, 6, 0, 2 * math.pi)
@@ -5406,13 +5416,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         slider_width = self.NODE_WIDTH - 2 * self.SLIDER_MARGIN
         slider_x = x + self.SLIDER_MARGIN
 
-        cr.set_source_rgb(*pal["slider_track"])
-        cr.rectangle(slider_x, slider_y, slider_width, 4)
-        cr.fill()
-
-        cr.set_source_rgb(*pal["accent"])
-        cr.rectangle(slider_x, slider_y, slider_width * volume, 4)
-        cr.fill()
+        self._draw_slider_bar(
+            cr, slider_x, slider_y, slider_width, 4, pal["slider_track"]
+        )
+        self._draw_slider_bar(
+            cr, slider_x, slider_y, slider_width * volume, 4, pal["accent"]
+        )
 
         handle_x = slider_x + slider_width * volume
         cr.arc(handle_x, slider_y + 2, 6, 0, 2 * math.pi)
@@ -5740,12 +5749,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     cr, fx, fy, fw, fh, bool(node.get("force_default", True))
                 )
             volume = node.get("device_volume", 1.0)
-            cr.set_source_rgb(*pal["slider_track"])
-            cr.rectangle(sx, sy + sh / 2 - 2, sw, 4)
-            cr.fill()
-            cr.set_source_rgb(*pal["accent"])
-            cr.rectangle(sx, sy + sh / 2 - 2, sw * volume, 4)
-            cr.fill()
+            self._draw_slider_bar(
+                cr, sx, sy + sh / 2 - 2, sw, 4, pal["slider_track"]
+            )
+            self._draw_slider_bar(
+                cr, sx, sy + sh / 2 - 2, sw * volume, 4, pal["accent"]
+            )
             handle_x = sx + sw * volume
             cr.arc(handle_x, sy + sh / 2, 6, 0, 2 * math.pi)
             cr.set_source_rgb(*pal["text"])
