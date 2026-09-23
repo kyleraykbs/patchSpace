@@ -1127,6 +1127,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         physics (see `_hierarchical_step`): walling against a box computed
         from the new positions would chase its own tail.
 
+        The room is the panel's allowed box (its capped size) *minus*
+        neighbouring panels' boxes, so a member is never settled into a
+        neighbour - which is what stops two pinned neighbours (neither of
+        which the panel pass may move) from growing into each other.
+
         Skipped for nodes/ports that are pinned at the node level, and for
         the root panel (it has no box).  Returns the largest distance it
         moved a node, for the caller's settle detection."""
@@ -1153,6 +1158,35 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 ry, rh = cy - max_h / 2.0, max_h
             left, top = rx + pad, ry + pad
             right, bottom = rx + rw - pad, ry + rh - pad
+            # Neighbouring panels own their space (see _panel_blockers): cut
+            # the room back so a member can't be settled into one.  Since a
+            # panel's fitted box is its content plus PANEL_PADDING, stopping
+            # the content 2*PANEL_PADDING short of the neighbour's box leaves
+            # one full padding of air between the two *boxes* - which is what
+            # keeps two pinned neighbours (neither of which the panel pass
+            # may move) from ever crossing, instead of merely growing into
+            # each other.
+            for bx, by, bw, bh in self._panel_blockers(pid, rooms):
+                bl, bt = bx - 2.0 * pad, by - 2.0 * pad
+                br, bb = bx + bw + 2.0 * pad, by + bh + 2.0 * pad
+                if right <= bl or left >= br or bottom <= bt or top >= bb:
+                    continue
+                # Cut along the axis that loses the least room.
+                keep_left, keep_right = bl - left, right - br
+                keep_top, keep_bottom = bt - top, bottom - bb
+                if max(keep_left, keep_right) >= max(keep_top, keep_bottom):
+                    if keep_left >= keep_right:
+                        right = bl
+                    else:
+                        left = br
+                elif keep_top >= keep_bottom:
+                    bottom = bt
+                else:
+                    top = bb
+            if right - left < 1.0 or bottom - top < 1.0:
+                # Squeezed into nothing by neighbours: leave the members
+                # where physics put them rather than clamping to a sliver.
+                continue
             for nid in self._panel_direct_nodes(pid):
                 if nid in self.anchored_nodes or nid in self.pinned_nodes:
                     continue
@@ -1185,6 +1219,28 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     node["y"] = min(max(node["y"], top), bottom - h)
                 moved = max(moved, abs(node["x"] - ox) + abs(node["y"] - oy))
         return moved
+
+    def _panel_blockers(self, pid, rooms):
+        """The boxes of the *other* panels a member of `pid` must stay out
+        of: every panel except itself and its ancestors (an ancestor
+        *contains* this panel, so treating it as an obstacle would erase the
+        room entirely).
+
+        Child panels are blockers on purpose - a parent's nodes should not be
+        settled on top of a sub-panel - and siblings are what keeps two
+        pinned neighbours from growing into each other (neither can be moved
+        by the panel pass, so the room itself has to respect the boundary).
+
+        ``rooms`` is the pre-step box snapshot, so this never recurses into
+        computing another panel's box from positions that are mid-step."""
+        out = []
+        for qid, rect in rooms.items():
+            if rect is None or qid == pid or not qid:
+                continue
+            if pid and pid.startswith(qid + "::"):
+                continue  # qid is an ancestor of pid
+            out.append(rect)
+        return out
 
     def _panel_direct_nodes(self, panel_id):
         """A panel's *own* nodes only - descendants belong to their own

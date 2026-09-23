@@ -29,7 +29,7 @@ class _Client:
         return True
 
 
-def _widget(anchored=True, panel_wh=(420.0, 260.0), nodes=None):
+def _widget(anchored=True, panel_wh=(420.0, 260.0), nodes=None, panels=None):
     gi = pytest.importorskip("gi")
     gi.require_version("Gtk", "4.0")
     from gi.repository import Gtk
@@ -50,22 +50,30 @@ def _widget(anchored=True, panel_wh=(420.0, 260.0), nodes=None):
         "p1::a": {"type": "volume", "x": 100.0, "y": 100.0, "label": "a"},
         "p1::b": {"type": "volume", "x": 130.0, "y": 100.0, "label": "b"},
     }
-    w.update_from_daemon({
-        "nodes": payload,
-        "edges": {
-            "p1::a->p1::b": {
-                "from_node": "p1::a", "to_node": "p1::b",
-                "to_port": "in", "from_port": "out",
-            }
-        },
-        "panels": [{
+    edges = {
+        f"{a}->{b}": {"from_node": a, "to_node": b,
+                      "to_port": "in", "from_port": "out"}
+        for a, b in _chain(sorted(payload))
+    }
+    if panels is None:
+        panels = [{
             "id": "p1", "parent": "", "label": "P1", "color": "#3584e4",
             "mode": "read-write", "x": 100.0, "y": 100.0,
             "w": panel_wh[0], "h": panel_wh[1],
             "anchored": anchored, "writable": True, "readonly": False,
-        }],
-    })
+        }]
+    w.update_from_daemon({"nodes": payload, "edges": edges, "panels": panels})
     return w
+
+
+def _chain(order):
+    """Consecutive pairs of ids sharing a panel - enough wiring for the
+    layout to have forces to resolve."""
+    out = []
+    for prev, nxt in zip(order, order[1:]):
+        if prev.rsplit("::", 1)[0] == nxt.rsplit("::", 1)[0]:
+            out.append((prev, nxt))
+    return out
 
 
 def _positions(w, prefix="p1::"):
@@ -109,6 +117,40 @@ def test_physics_cannot_balloon_a_panel():
     assert _rect is not None
     assert _rect[2] <= 420.0 + 2 * w.PANEL_PHYSICS_GROW + 1.0
     assert _rect[3] <= 260.0 + 2 * w.PANEL_PHYSICS_GROW + 1.0
+
+
+def test_two_pinned_neighbours_never_cross():
+    """Neither panel may be moved by the panel pass (both pinned), so
+    containment has to come from the room itself: members stop short of the
+    neighbour, and the two fitted boxes can't overlap however hard physics
+    pushes their contents apart."""
+    w = _widget(anchored=True, nodes={
+        "p1::a": {"type": "volume", "x": 150.0, "y": 300.0, "label": "a"},
+        "p1::b": {"type": "volume", "x": 400.0, "y": 300.0, "label": "b"},
+        "p2::a": {"type": "volume", "x": 520.0, "y": 300.0, "label": "a"},
+        "p2::b": {"type": "volume", "x": 560.0, "y": 300.0, "label": "b"},
+    }, panels=[
+        {"id": "p1", "parent": "", "label": "P1", "color": "#3584e4",
+         "mode": "read-write", "x": 150.0, "y": 200.0, "w": 420.0, "h": 260.0,
+         "anchored": True, "writable": True, "readonly": False},
+        {"id": "p2", "parent": "", "label": "P2", "color": "#e5a50a",
+         "mode": "read-write", "x": 560.0, "y": 200.0, "w": 420.0, "h": 260.0,
+         "anchored": True, "writable": True, "readonly": False},
+    ])
+
+    for _ in range(200):
+        w._hierarchical_step()
+
+    a, b = w._panel_rect_base("p1"), w._panel_rect_base("p2")
+    assert not (
+        a[0] < b[0] + b[2] and b[0] < a[0] + a[2]
+        and a[1] < b[1] + b[3] and b[1] < a[1] + a[3]
+    ), (a, b)
+    # …and every member is still inside its own panel's box.
+    for nid, node in w.nodes.items():
+        r = w._panel_rect_base(nid.rsplit("::", 1)[0])
+        assert r[0] - 1.0 <= node["x"] <= r[0] + r[2] + 1.0, (nid, node["x"], r)
+        assert r[1] - 1.0 <= node["y"] <= r[1] + r[3] + 1.0, (nid, node["y"], r)
 
 
 def test_the_wall_pulls_members_back_inside_the_box():

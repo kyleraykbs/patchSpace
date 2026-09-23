@@ -686,7 +686,10 @@ members, that settling would otherwise grow the box without bound: `_panel_growt
 caps the fitted box's *size* at the panel's declared placement plus `PANEL_PHYSICS_GROW`
 per side, and `_wall_nodes_into_panels` then holds members inside the *allowed* box (the capped
 size, centred on the fitted box the user is looking at - walling against the fitted box itself
-would forbid the contents from spreading at all).  The pull is a fraction of the overshoot per
+would forbid the contents from spreading at all), **minus the boxes of neighbouring panels**
+(`_panel_blockers`, ancestors excluded since they contain the panel): a member stops
+`2*PANEL_PADDING` short of a neighbour, so the two fitted boxes can never cross even when neither
+panel may be moved by the panel pass.  The pull is a fraction of the overshoot per
 step (`PANEL_WALL_PULL`) with a clamp to the padded bound as a backstop, and it is applied
 against the box snapshot taken *before* that step's node physics, so the box can't chase its own
 tail.  The cap is on size, not on edges, because the box's origin legitimately follows its
