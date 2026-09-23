@@ -297,22 +297,24 @@ so the GUI/repair can never fabricate a connection the daemon rejects.
 * `AllInputsNode` / `AllAppsNode` (`InputNode`) produce a source bundle from
   `source_filters()`; `AllOutputsNode` (`Node`) produces a sink bundle from
   `sink_filters()`. `bundle_side()` reports which.
-* `ClassifierNode` subclasses (`Regex`/`MediaClass`/`Description`/`ExternalOnly`) are
-  pure control-plane predicates with one `filter` output; `invert` complements any of
-  them. They are plugged into a Filter node's `filter` input.
+* `ClassifierNode` subclasses (`Regex`/`MediaClass`/`Description`/`Title`/`ExternalOnly`)
+  are pure control-plane predicates with one `filter` output; `invert` complements any of
+  them. They are plugged into a Filter node's `filter` input. `TitleClassifierNode` is
+  the one that matches a stream's `media.name` - the title a player reports for what it
+  is playing ("YouTube") - which is what "select apps by their title" means here; the
+  others match node names / classes / descriptions.
 * `FilterNode` (`TransparentNode`) resolves its bundle input to exact live ids and keeps
-  the members that match: its own `title` box (case-insensitive substring of the member's
-  `media.name` - the title a playing app reports, e.g. "YouTube") **and** every wired
-  classifier (AND). The box is what makes "keep the app playing <title>" one node instead
-  of a classifier type per thing you might filter by. Its `filterN` inputs are dynamic
+  the members *every* wired classifier matches (AND). Its `filterN` inputs are dynamic
   like a Merge Bundle's: the daemon reports `filter_input_ports` (one per wired classifier
-  plus a spare), so one Filter node can hold an arbitrary number of classifiers. No box and
-  no classifier wired passes the bundle through unchanged; a wired-but-empty classifier
+  plus a spare), so one Filter node can hold an arbitrary number of classifiers. No
+  classifier wired passes the bundle through unchanged; a wired-but-empty classifier
   matches nothing (mirroring the old leaves' empty pattern). Returning exact ids is what
-  makes chained Filters *intersect*. Its `exclude` switch (`Include`/`Exclude`, the big
-  button under the title box - the gate toggle's geometry with those captions, see
-  `_draw_filter_mode_button`) keeps the complement instead: the same predicate, negated,
-  so one node covers "only these" and "everything but these".
+  makes chained Filters *intersect*. The node carries **no field of its own** - selecting
+  by title is the Title classifier's job, plugged in like the rest; its only body control
+  is the Include/Exclude switch. That switch (`exclude`; drawn as the gate toggle's big
+  rounded rect captioned `INCLUDE`/`EXCLUDE`, see `_draw_filter_mode_button`) keeps the
+  *complement* of what the classifiers match, so one node covers "only these" and
+  "everything but these" without a second node type.
 * `BundleMergeNode` (Merge Bundle) collects several lines/bundles. Its input sockets are
   dynamic: the daemon reports `bundle_input_ports` (one per inbound line plus a spare), so
   plugging into the spare grows another socket; wiring is the usual mixing-bus union.

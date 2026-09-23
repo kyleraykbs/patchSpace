@@ -48,7 +48,8 @@ let
     "media_class_input" "media_class_output" "noise_cancel" "normalize"
     "panel_in" "panel_out" "patchspace_device" "patchspace_mic_device"
     "regex_classifier" "regex_input" "regex_output" "reverb"
-    "sensitivity_gate" "sound_effect" "splitter" "switcher" "virtual_mic"
+    "sensitivity_gate" "sound_effect" "splitter" "switcher"
+    "title_classifier" "virtual_mic"
     "virtual_speaker" "volume" "warp_in" "warp_out"
   ];
 

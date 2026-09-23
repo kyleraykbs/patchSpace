@@ -2165,21 +2165,17 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 len(rows) * (self.FIELD_HEIGHT + 4) + self.FIELD_BOTTOM_PAD
             )
         spec = spec_for(node["type"])
-        if spec.control == "filter_mode":
-            # The Filter node's face: its title field row on top of the
-            # Include/Exclude button (which owns the bottom strip).
-            return (
-                self.GATE_AREA_HEIGHT + self.FIELD_HEIGHT + self.FIELD_BOTTOM_PAD
-            )
         if spec.control == "fallback_onoff":
             # The on/off button is always shown: interactive while
             # nothing is wired into the ctrl input, and a read-only white
             # state indicator once a boolean signal drives the node.
             return self.GATE_AREA_HEIGHT
-        if spec.control in ("gate", "switcher", "boolean", "impulse"):
-            # The impulse Button's face is the same big rounded rect the
-            # gate toggle draws (see _gate_rect / _draw_impulse_button),
-            # so it claims the same height.
+        if spec.control in ("gate", "switcher", "boolean", "impulse",
+                            "filter_mode"):
+            # The impulse Button's face and the Filter node's Include/Exclude
+            # switch are the same big rounded rect the gate toggle draws (see
+            # _gate_rect / _draw_impulse_button / _draw_filter_mode_button),
+            # so they claim the same height.
             return self.GATE_AREA_HEIGHT
         if spec.has_extra_row:
             # The generic bottom block: the inline field/control row, plus
@@ -2433,10 +2429,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             node["y"] + self.node_height(nid)
             - self.FIELD_HEIGHT - self.FIELD_BOTTOM_PAD
         )
-        if spec.control == "filter_mode":
-            # The Include/Exclude button owns the node's bottom strip, so the
-            # title field sits above it rather than under it.
-            y -= self.GATE_AREA_HEIGHT
         return (x, y, w, self.FIELD_HEIGHT)
 
     def _path_picker_rect(self, nid):
@@ -4976,7 +4968,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self._draw_impulse_button(cr, nid, node)
         elif spec.control == "filter_mode":
             self._draw_filter_mode_button(cr, pal, nid, node.get("exclude", False))
-            self._draw_text_field(cr, pal, nid, self._field_value(node))
         elif spec.field:
             self._draw_text_field(cr, pal, nid, self._field_value(node))
         if spec.picker:
@@ -5717,18 +5708,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     def _draw_mute_checkbox(self, cr, x, y, node_h, volume):
         self._draw_check_row(cr, x, y, node_h, volume > 0.5, "Pass audio")
 
-    def _field_text(self, nid, value):
-        """What an inline field draws: its value, or - when empty - the
-        placeholder that says what the field is for.  A spec can name its own
-        (`field_placeholder`: the Filter node's box is "a title"), else the
-        generic prompt."""
-        if value:
-            return value
-        return (
-            spec_for(self.nodes[nid]["type"]).field_placeholder
-            or "(click to set)"
-        )
-
     def _draw_text_field(self, cr, pal, nid, value):
         field_x, field_y, field_w, field_h = self._field_rect(nid)
 
@@ -5739,7 +5718,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         cr.set_line_width(1)
         cr.stroke()
 
-        text = self._field_text(nid, value)
+        text = value if value else "(click to set)"
         color = pal["field_fg"] if value else pal["subtext"]
         font_size = 10
 

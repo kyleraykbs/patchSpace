@@ -127,7 +127,6 @@ class NodeSpec:
         "description",
         "setting_tooltips",
         "toggle",
-        "field_placeholder",
         "indicator",
         "picker",
     )
@@ -152,7 +151,6 @@ class NodeSpec:
         description: str = "",
         setting_tooltips: Optional[Dict[str, str]] = None,
         toggle: Optional[tuple] = None,
-        field_placeholder: Optional[str] = None,
         indicator: Optional[str] = None,
         picker: bool = False,
     ):
@@ -208,11 +206,6 @@ class NodeSpec:
         # which single string property (if any) is edited via an inline
         # text field (the Filter node's title box is one of these).
         self.field = field
-        # Optional placeholder for the empty inline field, so a box whose
-        # meaning isn't obvious from the node's caption says what it sets
-        # (the Filter node's title box).  None => the generic
-        # "(click to set)".  Keep it short: the field ellipsizes.
-        self.field_placeholder = field_placeholder
         # Optional (attr, label) for a checkbox drawn on the node body,
         # above the field/control row - a boolean property the user flips
         # in place rather than through the Settings dialog (the Sound
@@ -313,18 +306,14 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
     # Filter's classifier inputs are dynamic: it starts with one and
     # grows a spare each time a classifier is plugged in (the daemon
     # reports them as filter_inputs), so one Filter ANDs many classifiers.
-    # The Filter node's face is its two controls: the title box it matches
-    # members against, and the big Include/Exclude button under it
-    # ("filter_mode", the gate toggle's shape with those captions).
+    # The Filter node is just its sockets (the bundle in, the classifier
+    # inputs) plus the Include/Exclude switch: which members the classifiers'
+    # predicate keeps, or - switched to Exclude - everything but those.
+    # "filter_mode" is the gate toggle's shape with those captions.
     "filter": NodeSpec(
         "Filter", ["in", "filter1"], ["out"],
         bundle_inputs=["in"], bundle_outputs=["out"], filter_inputs=["filter1"],
         socket_labels=True,
-        field="title",
-        # Short on purpose: the box ellipsizes, so a placeholder has to fit
-        # the narrowest node it can appear on ("title", like a form label)
-        # rather than the generic "(click to set)" prompt.
-        field_placeholder="title",
         control="filter_mode",
     ),
     # Merge Bundle's input sockets are dynamic: it starts with one and
@@ -364,6 +353,11 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
     ),
     "description_classifier": NodeSpec(
         "Description", [], ["out"], field="description",
+        filter_outputs=["out"],
+        settings=[("invert", "Invert (exclude matches)", "bool")],
+    ),
+    "title_classifier": NodeSpec(
+        "Title", [], ["out"], field="title",
         filter_outputs=["out"],
         settings=[("invert", "Invert (exclude matches)", "bool")],
     ),
@@ -782,10 +776,9 @@ NODE_DESCRIPTIONS: Dict[str, str] = {
     "all_outputs": "A bundle of every destination (hardware outputs and "
     "app recording streams) to route audio into.",
     "all_apps": "A bundle of just the app playback streams.",
-    "filter": "Narrows a bundle to the members that match: type a title in "
-    "its box (the media.name a playing app reports, e.g. \"YouTube\") "
-    "and/or plug classifiers into its filter input(s).  Its Include/Exclude "
-    "switch keeps everything except those members when set to Exclude.",
+    "filter": "Narrows a bundle to the members the classifiers plugged into "
+    "its filter input(s) match (AND).  Its Include/Exclude switch keeps "
+    "everything except those members when set to Exclude.",
     "bundle": "Collects several lines or bundles into one bundle; it grows "
     "another input each time you plug one in.",
     "bundle_split": "Takes a bundle apart: one output line per member, so "
@@ -796,6 +789,9 @@ NODE_DESCRIPTIONS: Dict[str, str] = {
     "class.",
     "description_classifier": "A filter that matches by a text match on the "
     "description.",
+    "title_classifier": "A filter that matches a stream's title - PipeWire's "
+    "media.name, the label a mixer shows for a playing app (\"YouTube\", a "
+    "track name).",
     "external_only_classifier": "A filter that keeps only real apps and "
     "hardware, stripping Patch Space's own plumbing.",
     "bundle_to_audio": "Converts a source bundle back into one ordinary "
@@ -980,6 +976,7 @@ ADD_NODE_CATEGORIES = [
             ("Regex Classifier", "regex_classifier"),
             ("Media Class Classifier", "media_class_classifier"),
             ("Description Classifier", "description_classifier"),
+            ("Title Classifier", "title_classifier"),
             ("External Only", "external_only_classifier"),
             ("Bundle -> Audio", "bundle_to_audio"),
             ("Bundle Output", "bundle_output"),
@@ -1154,6 +1151,7 @@ NODE_TYPE_ICONS: Dict[str, str] = {
     "regex_classifier": "edit-find-symbolic",
     "media_class_classifier": "view-list-symbolic",
     "description_classifier": "text-x-generic-symbolic",
+    "title_classifier": "insert-text-symbolic",
     "external_only_classifier": "system-users-symbolic",
     "bundle_to_audio": "media-playback-start-symbolic",
     "bundle_output": "audio-card-symbolic",
@@ -1201,6 +1199,7 @@ CLASS_NAME_TO_TYPE = {
     "RegexClassifierNode": "regex_classifier",
     "MediaClassClassifierNode": "media_class_classifier",
     "DescriptionClassifierNode": "description_classifier",
+    "TitleClassifierNode": "title_classifier",
     "ExternalOnlyClassifierNode": "external_only_classifier",
     "BundleToAudioNode": "bundle_to_audio",
     "BundleOutputNode": "bundle_output",

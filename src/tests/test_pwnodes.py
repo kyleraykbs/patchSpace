@@ -8,6 +8,7 @@ import pytest
 from pwproc import Backoff
 from pwmatch import INTERNAL_MEDIA_CLASS, SOURCE_MEDIA_CLASSES
 from pwnodes import (
+    TitleClassifierNode,
     PatchSpace,
     InputNode,
     OutputNode,
@@ -39,6 +40,31 @@ from pwnodes import (
     device_profile_name,
     pick_auto_a2dp_profile,
 )
+
+
+# ---------------------------------------------------------------------------
+# Title classifier: the filter type that selects streams by their title
+# ---------------------------------------------------------------------------
+
+
+def test_title_classifier_matches_the_stream_title():
+    c = TitleClassifierNode("c", "YouTube")
+    # media.name is the title PipeWire reports for what the app is playing.
+    assert c.matches({"media.name": "YouTube - some track"}, "source")
+    assert not c.matches({"media.name": "Spotify - other"}, "source")
+    # The *title* field only: a description that happens to contain the text
+    # is the Description classifier's business, not this one's.
+    assert not c.matches(
+        {"media.name": "unrelated", "node.description": "YouTube"}, "source"
+    )
+    # No title set => matches nothing, like every other classifier.
+    assert not TitleClassifierNode("c", "").matches({"media.name": "x"}, "source")
+
+
+def test_title_classifier_exclude_switch_flips_it():
+    c = TitleClassifierNode("c", "YouTube", invert=True)
+    assert not c.classify({"media.name": "YouTube - some track"}, "source")
+    assert c.classify({"media.name": "Spotify - other"}, "source")
 
 
 class FakeGraph:

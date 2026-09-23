@@ -1,11 +1,10 @@
-"""The Filter node's face: its title box and its Include/Exclude button.
+"""The Filter node's face: its sockets and its Include/Exclude button.
 
-The node is the one place a bundle gets narrowed, so it carries both controls
-itself: the title box it matches members against, and - under it - the big
-Include/Exclude button (the gate toggle's geometry with those captions).  The
-layout is what can silently break when either control changes: the field must
-sit *above* the button rather than underneath it, and both must stay inside
-the node with the sockets clear.
+The node is a filter: a bundle input, its classifier input(s), a bundle out -
+and one control, the big Include/Exclude button (the gate toggle's geometry
+with those captions) to choose between keeping what the classifiers match and
+keeping everything else.  It has no text box of its own; selecting by title is
+the Title classifier's job, plugged into the filter input like the rest.
 
 Needs GTK; skipped when unavailable."""
 
@@ -36,7 +35,6 @@ def _filter_node(nid="f", **attrs):
         "id": nid,
         "type": "filter",
         "label": "Filter",
-        "title": "YouTube",
         "exclude": False,
         "x": 0.0,
         "y": 0.0,
@@ -56,6 +54,7 @@ def _widget(node):
     from gi.repository import Gtk
     if not Gtk.init_check():
         pytest.skip("no display available for GTK")
+    from gui.node_specs import spec_for
     from gui.patchspace_widget import PatchSpaceGraphWidget
 
     client = _Client()
@@ -73,37 +72,18 @@ def _centre(rect):
     return (x + w / 2.0, y + h / 2.0)
 
 
-def test_the_title_box_sits_above_the_button_inside_the_node():
+def test_the_node_is_its_sockets_and_the_switch():
+    """No box on the face: the bundle in, the classifier inputs, the out, and
+    the Include/Exclude button."""
     w, _ = _widget(_filter_node())
-    field = w._field_rect("f")
-    button = w._gate_rect("f")
-    top = w.nodes["f"]["y"]
-    bottom = top + w.node_height("f")
-    assert field[1] + field[3] <= button[1], (field, button)
-    assert top <= field[1] and button[1] + button[3] <= bottom, (field, button)
+    from gui.node_specs import spec_for
 
-
-def test_the_empty_title_box_says_what_it_sets():
-    """An empty box reading "(click to set)" looks like it belongs to the
-    socket above it; the Filter node's box names itself - briefly, since the
-    field ellipsizes."""
-    w, _ = _widget(_filter_node(title=""))
-    assert w._field_text("f", w._field_value(w.nodes["f"])) == "title"
-    # Once set it shows the title, and other nodes keep the generic prompt.
-    w2, _ = _widget(_filter_node())
-    assert w2._field_text("f", w2._field_value(w2.nodes["f"])) == "YouTube"
-    w3, _ = _widget({"f": dict(_filter_node(), type="regex_classifier",
-                               pattern="", label="Regex")})
-    assert w3._field_text("f", "") == "(click to set)"
-
-
-def test_the_button_is_clickable_and_the_box_is_not_under_it():
-    w, _ = _widget(_filter_node())
+    assert spec_for("filter").field is None
+    assert w.nodes["f"]["inputs"] == ["in", "filter1", "filter2"]
+    # Nothing on the node is a text field, and the button is clickable.
+    assert w.find_field_at(0.0, 0.0) is None
     bx, by = _centre(w._gate_rect("f"))
     assert w.find_filter_mode_at(bx, by) == "f"
-    fx, fy = _centre(w._field_rect("f"))
-    assert w.find_filter_mode_at(fx, fy) is None
-    assert w.find_field_at(fx, fy) == "f"
 
 
 def test_flipping_the_switch_updates_the_node_and_tells_the_daemon():

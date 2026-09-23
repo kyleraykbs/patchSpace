@@ -18,6 +18,7 @@ from pwnodes import (
     RegexClassifierNode,
     MediaClassClassifierNode,
     FilterNode,
+    TitleClassifierNode,
     BundleMergeNode,
     BundleSplitNode,
     BundleToAudioNode,
@@ -177,9 +178,9 @@ def test_all_inputs_filter_regex_routes_only_matching_source():
     assert not any(o == mic["FL"] for o, _ in links)
 
 
-def test_filter_title_box_matches_the_stream_title():
-    """The Filter node's own box selects by title - the media.name a
-    playing app reports - with no classifier node involved."""
+def test_title_classifier_selects_the_stream_by_title():
+    """The title selector is a classifier like the others - it plugs into a
+    Filter node's filter input and matches the stream's media.name."""
     g = FakeGraph()
     watched = g.add_source(10, "watched", app="firefox",
                            media_name="YouTube - a video")
@@ -191,20 +192,20 @@ def test_filter_title_box_matches_the_stream_title():
     s = PatchSpace(g)
     s.mark_graph_loaded()
     s.add_node(AllAppsNode("apps"))
-    s.add_node(FilterNode("f", title="youtube"))
+    s.add_node(FilterNode("f"))
+    s.add_node(TitleClassifierNode("c", "youtube"))
     s.add_node(SinkNode("snk", "sink1"))
     s.add_edge("apps", "f")
+    s.add_edge("c", "f", to_port="filter")
     s.add_edge("f", "snk")
     s.sync()
-    links = g.linked_pairs()
     # Case-insensitive substring, on the title only.
-    assert (watched["FL"], sink["FL"]) in links
-    assert {out for out, _ in links} == {watched["FL"], watched["FR"]}
+    assert {out for out, _ in g.linked_pairs()} == {watched["FL"], watched["FR"]}
 
 
 def test_filter_exclude_switch_flips_the_bundle_between_keep_and_drop():
-    """One Filter node covers both senses: keep the members that match its
-    title box / classifiers, or - switched to Exclude - everything else."""
+    """One Filter node covers both senses: keep the members its classifiers
+    match, or - switched to Exclude - everything else."""
     g = FakeGraph()
     watched = g.add_source(10, "watched", app="firefox",
                            media_name="YouTube - a video")
@@ -214,9 +215,11 @@ def test_filter_exclude_switch_flips_the_bundle_between_keep_and_drop():
     s = PatchSpace(g)
     s.mark_graph_loaded()
     s.add_node(AllAppsNode("apps"))
-    s.add_node(FilterNode("f", title="YouTube"))
+    s.add_node(FilterNode("f"))
+    s.add_node(TitleClassifierNode("c", "YouTube"))
     s.add_node(SinkNode("snk", "sink1"))
     s.add_edge("apps", "f")
+    s.add_edge("c", "f", to_port="filter")
     s.add_edge("f", "snk")
 
     def linked_outputs():
@@ -624,26 +627,31 @@ def test_daemon_serializes_filter_inputs():
     assert nodes["f"]["filter_inputs"] == ["filter1", "filter2"]
 
 
-def test_daemon_filter_title_and_switch_survive_set_node_property():
-    """Both controls the GUI sends (the title box and the Include/Exclude
-    switch go out as set_node_property) reach the daemon and are exported."""
+def test_daemon_switch_and_title_classifier_survive_set_node_property():
+    """Both controls the GUI sends (the Filter node's Include/Exclude switch,
+    the title classifier's box) go out as set_node_property, reach the daemon
+    and are exported."""
     from main import PatchSpaceDaemon
 
     d = PatchSpaceDaemon()
     d.handle_command({"command": "add_node", "node_type": "filter",
-                      "node_id": "f", "config": {"title": "YouTube"}})
+                      "node_id": "f"})
+    d.handle_command({"command": "add_node", "node_type": "title_classifier",
+                      "node_id": "c", "config": {"title": "YouTube"}})
     nodes = d.handle_command({"command": "get_nodes"})["nodes"]
-    assert nodes["f"]["title"] == "YouTube"
     assert nodes["f"]["exclude"] is False
+    assert nodes["c"]["title"] == "YouTube"
 
-    for prop, value, expected in (("exclude", True, True),
-                                  ("title", "some track", "some track")):
-        res = d.handle_command({"command": "set_node_property", "node_id": "f",
+    for node_id, prop, value, expected in (
+        ("f", "exclude", True, True),
+        ("c", "title", "some track", "some track"),
+    ):
+        res = d.handle_command({"command": "set_node_property", "node_id": node_id,
                                 "property": prop, "value": value})
         assert res.get("status") != "error", res
         assert d.handle_command(
             {"command": "get_nodes"}
-        )["nodes"]["f"][prop] == expected
+        )["nodes"][node_id][prop] == expected
 
 
 def test_daemon_create_node_builds_bundle_output_without_starting_it():

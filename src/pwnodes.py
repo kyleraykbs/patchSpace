@@ -1467,6 +1467,26 @@ class DescriptionClassifierNode(ClassifierNode):
         return pwmatch.matches_source_filter(props, {"description": self.description})
 
 
+class TitleClassifierNode(ClassifierNode):
+    """Classifier that matches a stream's *title*.
+
+    "Title" is PipeWire's ``media.name``: the label a mixer shows for a
+    playing app ("YouTube", a track name) - what an app *calls* the thing it
+    is playing, as opposed to the node's own ``description`` that
+    :class:`DescriptionClassifierNode` matches.  Substring match, like the
+    description classifier.  ``invert`` (the node's Exclude switch) turns it
+    into "everything except these titles"."""
+
+    def __init__(self, node_id, title: str = "", invert: bool = False):
+        super().__init__(node_id, invert)
+        self.title = title
+
+    def matches(self, props: dict, side: str) -> bool:
+        if not self.title:
+            return False
+        return pwmatch.matches_source_filter(props, {"mediaName": self.title})
+
+
 class ExternalOnlyClassifierNode(ClassifierNode):
     """Classifier that keeps everything Patch Space doesn't own (real apps
     and hardware), stripping our own built-ins and plumbing.  See
@@ -1492,20 +1512,13 @@ class FilterNode(TransparentNode):
     the spare grows another and one node can hold an arbitrary number of
     classifiers.
 
-    The node also carries its own ``title`` box (case-insensitive substring
-    of a member's ``media.name`` - the title a playing app reports, e.g.
-    "YouTube"), so a plain "keep the app playing <title>" needs no
-    classifier node at all.  The box is another AND term: the node keeps
-    the members that match the title *and* every wired classifier.
-
     ``exclude`` is the node's Include/Exclude switch.  Off (Include, the
     default) the node keeps what matches; on (Exclude) it keeps everything
     *except* what matches - the same predicate, negated, so one node covers
     "only these" and "everything but these"."""
 
-    def __init__(self, node_id, title: str = "", exclude: bool = False):
+    def __init__(self, node_id, exclude: bool = False):
         super().__init__(node_id)
-        self.title = title
         self.exclude = bool(exclude)
 
     def port_kind(self, port: str, direction: str) -> str:
@@ -3844,14 +3857,12 @@ class PatchSpace:
 
     def _apply_classifier(self, filter_node: "FilterNode", side: str,
                           ids: List[int]) -> List[int]:
-        """Keep the `ids` a Filter node passes: its own title box (when set)
-        *and* every wired classifier (AND).  Neither set => the bundle passes
-        through; a wired but empty classifier matches nothing.  With the
-        node's Include/Exclude switch on Exclude, keep the complement
-        instead: everything that does *not* match."""
+        """Keep the `ids` a Filter node's classifiers all match (AND).  No
+        classifier wired => the bundle passes through; an empty classifier
+        matches nothing.  With the node's Include/Exclude switch on Exclude,
+        keep the complement instead: everything that does *not* match."""
         classifiers = self._classifiers_for(filter_node.id)
-        title = (getattr(filter_node, "title", "") or "").strip()
-        if not classifiers and not title:
+        if not classifiers:
             return list(ids)
         exclude = bool(getattr(filter_node, "exclude", False))
         kept: List[int] = []
@@ -3862,10 +3873,6 @@ class PatchSpace:
             )
             props["_node_id"] = node_id
             matched = all(c.classify(props, side) for c in classifiers)
-            if matched and title:
-                matched = pwmatch.matches_source_filter(
-                    props, {"mediaName": title}
-                )
             if matched != exclude:
                 kept.append(node_id)
         return kept

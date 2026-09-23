@@ -83,6 +83,7 @@ from pwnodes import (
     RegexOutputNode,
     MediaClassInputNode,
     MediaClassOutputNode,
+    TitleClassifierNode,
     DescriptionInputNode,
     DescriptionOutputNode,
     AllInputsNode,
@@ -333,6 +334,7 @@ NODE_TYPE_REGISTRY: Dict[str, type] = {
     "regex_classifier": RegexClassifierNode,
     "media_class_classifier": MediaClassClassifierNode,
     "description_classifier": DescriptionClassifierNode,
+    "title_classifier": TitleClassifierNode,
     "external_only_classifier": ExternalOnlyClassifierNode,
     "filter": FilterNode,
     "bundle": BundleMergeNode,
@@ -3756,10 +3758,12 @@ class PatchSpaceDaemon:
             return cls(node_id, g("media_class", ""), g("invert", False))
         if cls is DescriptionClassifierNode:
             return cls(node_id, g("description", ""), g("invert", False))
+        if cls is TitleClassifierNode:
+            return cls(node_id, g("title", ""), g("invert", False))
         if cls is ExternalOnlyClassifierNode:
             return cls(node_id, g("invert", False))
         if cls is FilterNode:
-            return cls(node_id, g("title", ""), g("exclude", False))
+            return cls(node_id, g("exclude", False))
         if cls in (BundleMergeNode, BundleSplitNode):
             return cls(node_id)
         if cls is BundleToAudioNode:
