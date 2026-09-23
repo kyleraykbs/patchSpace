@@ -1608,17 +1608,17 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                         source != known or rev != self._clip_wave_rev.get(nid)
                     )
                     # Loading a waveform costs the daemon an ffmpeg pass over
-                    # the whole file, so a file that keeps changing - a take
-                    # being recorded - is loaded on a leash rather than on
-                    # every poll.  The exception is a take *ending*: that is
-                    # the take the user just made, and it should land at once.
+                    # the whole file, so a take is *not* followed while it
+                    # records - no live waveform.  It is loaded when the take
+                    # ends (the one the user made), and beyond that a file that
+                    # changes is loaded no oftener than the leash allows.
                     was_recording = self._sound_recording.get(nid)
                     now_recording = bool(ndata.get("recording", False))
                     self._sound_recording[nid] = now_recording
                     take_ended = was_recording is True and not now_recording
                     due = (now - self._clip_wave_asked.get(nid, 0.0)
                            >= self.SOUND_WAVE_MIN_INTERVAL_MS / 1000.0)
-                    if stale and (due or take_ended) \
+                    if stale and not now_recording and (due or take_ended) \
                             and nid not in self._clip_wave_pending:
                         self._clip_wave_pending.add(nid)
                         self._clip_wave_asked[nid] = now
@@ -1841,6 +1841,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     def on_layout_tick(self):
         if not self.layout_awake:
+            return True
+
+        if self.dragging_node is not None:
+            # While a node is being dragged, the pointer is the only thing
+            # that may place it: the physics used to keep stepping underneath
+            # and spring the node away from where it was put, which reads as
+            # "it doesn't move".  It resumes on drop, from where the node was
+            # dropped.
             return True
 
         max_delta = self._hierarchical_step()

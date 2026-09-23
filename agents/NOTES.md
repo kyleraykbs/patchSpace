@@ -487,3 +487,18 @@ gesture accepts; tested only structurally (no touchscreen here).
 * A file that changes on every poll (a take being recorded) should be *loaded
   on a leash* - at most once per interval - with an exemption for the moment it
   stops, which is the state the user is waiting for.
+
+* **A drag must own the graph.**  `on_layout_tick` ran the force layout *during*
+  a node drag - `dragging_node` only governed whether the layout went to sleep -
+  so the physics kept stepping underneath and sprang the node away from where
+  the pointer put it.  Reported as "when I move around the handles it doesn't
+  move": it moved, and then moved back.  The tick now returns early while a
+  drag is in progress and resumes on drop, from where the node was dropped.
+* **Closing the window closed nothing.**  `_on_close_request` left
+  `app.window` pointing at the destroyed window and never quit, so a later
+  activation called `present()` on a dead window instead of building a fresh
+  one - the UI looked like it reopened itself.  It clears the reference and
+  quits now; the daemon has its own service, so nothing needs the GUI to linger.
+* **No live waveform.**  `probe_peaks` is an ffmpeg pass over the whole file,
+  so following a take while it records is not worth it at any leash.  A take is
+  loaded when it *ends*; other changes go through the 1.5s leash.

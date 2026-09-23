@@ -36,6 +36,14 @@ class PatchSpaceApp(Gtk.Application):
 
     def _on_close_request(self, window):
         window.on_close()
+        # A closed window is gone.  Clearing it means a later activation
+        # builds a *fresh* one instead of calling present() on a destroyed
+        # window, which is what made the UI look like it reopened itself.
+        self.window = None
+        # And closing the window closes the app: the daemon has its own
+        # service (services.patchspace), so there is nothing here worth
+        # staying alive for.
+        self.quit()
         return False
 
     def do_shutdown(self):

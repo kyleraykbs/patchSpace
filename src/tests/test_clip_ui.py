@@ -288,17 +288,16 @@ def test_recorder_re_asks_for_its_waveform_after_a_take():
 
     rec["recording"] = True          # a take starts: the file is wiped
     rec["source_rev"] = ""
-    assert polls() == 2
+    assert polls() == 1              # nothing is loaded while a take records
+    rec.update(recording=False, duration=4.2, source_rev="2:800000")  # ... ends
+    assert polls() == 2              # and that is loaded
     answer()
-    rec.update(recording=False, duration=4.2, source_rev="2:800000")  # ... and ends
-    assert polls() == 3
-    answer()
-    assert polls() == 3              # steady again
+    assert polls() == 2              # steady again
 
-    # A take that started *and* finished between two polls never shows a
-    # `recording` flip - the file's revision is what catches it.
+    # A take that started *and* finished between two polls never showed a
+    # `recording` flag at all - the file's revision is what catches it.
     rec["source_rev"] = "3:812000"
-    assert polls() == 4
+    assert polls() == 3
 
 
 def test_a_clip_fed_by_a_recorder_follows_the_take():
@@ -337,11 +336,11 @@ def test_a_clip_fed_by_a_recorder_follows_the_take():
     assert len(polls()) == 4              # steady again
 
 
-def test_waveform_loads_are_leashed_except_when_a_take_ends(monkeypatch):
-    """Loading a waveform costs the daemon an ffmpeg pass over the whole file,
-    so a file that keeps changing - a take being recorded - is loaded on a
-    leash instead of on every poll.  A take *ending* is the exception: that is
-    the take the user just made."""
+def test_a_take_is_loaded_when_it_ends_not_while_it_records(monkeypatch):
+    """No live waveform: loading one costs the daemon an ffmpeg pass over the
+    whole file, and a take being recorded changes it on every poll.  The take
+    is loaded when it *ends* - that is the one the user just made - and a file
+    that keeps changing is otherwise loaded no oftener than the leash allows."""
     from gui import patchspace_widget as widget_mod
 
     clock = [1000.0]
@@ -358,7 +357,7 @@ def test_waveform_loads_are_leashed_except_when_a_take_ends(monkeypatch):
     monkeypatch.setattr(widget_mod, "time", FakeClock)
 
     w, client = _recorder_and_clip()
-    w.SOUND_WAVE_MIN_INTERVAL_MS = 1500     # ... and here is that test
+    w.SOUND_WAVE_MIN_INTERVAL_MS = 1500
     rec = {"id": "rec1", "type": "recorder", "label": "Recorder", "x": 0.0, "y": 0.0,
            "ready": True, "connected": True, "declarative": False,
            "selection_label": "Recorder", "description": "",
@@ -377,16 +376,17 @@ def test_waveform_loads_are_leashed_except_when_a_take_ends(monkeypatch):
     assert polls() == 1                  # registered, then loaded
     answer()
 
-    clock[0] += 2.0                      # past the leash
-    rec.update(recording=True, source_rev="2:2000")   # a take wipes the file
-    assert polls() == 2                  # so the first change loads
-    answer()
-    clock[0] += 0.2                      # it grew again, inside the leash
-    rec["source_rev"] = "3:3000"
-    assert polls() == 2                  # ... and this one waits its turn
+    rec.update(recording=True, source_rev="2:2000")   # a take starts
+    clock[0] += 10.0                                  # ... and runs a while
+    rec["source_rev"] = "3:9000"                      # growing all the time
+    assert polls() == 1                  # nothing is loaded while it records
 
-    clock[0] += 2.0                      # past the leash
-    assert polls() == 3                  # now it loads again
-    answer()
-    rec.update(recording=False, source_rev="4:4000")   # the take ends
-    assert polls() == 4                  # which always lands, whatever the clock
+    rec.update(recording=False, source_rev="4:12000")  # it ends
+    assert polls() == 2                  # and *that* is loaded, at once
+
+    answer()                             # the take's own load landed
+    clock[0] += 0.2                      # an unrelated change, inside the leash
+    rec["source_rev"] = "5:13000"
+    assert polls() == 2                  # still leashed
+    clock[0] += 2.0
+    assert polls() == 3                  # past it, loaded
