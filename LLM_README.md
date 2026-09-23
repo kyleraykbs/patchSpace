@@ -124,6 +124,12 @@ can be `0` until the window is mapped, so unit-style smoke tests should stub siz
 they exercise geometry.
 
 ### Declarative deployment (NixOS / home-manager)
+User-facing docs for the two modules live in `docs/`: [`docs/nixos.md`](docs/nixos.md) (the
+module, the option table, placement, operational notes) and
+[`docs/homeManager.md`](docs/homeManager.md) (standalone use, and how a home-manager
+configuration layers on top of a NixOS one).  Keep them honest: every example in them is
+evaluated by hand before it goes in, against the same stubs the `module-scopes` check uses.
+
 
 **The two scopes mirror each other, and home-manager layers on top.**  Both
 `flake.modules.nixos.patchspace` and `flake.modules.homeManager.patchspace` are the same
