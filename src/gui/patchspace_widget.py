@@ -6869,7 +6869,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             node = self.nodes.get(record_hit) or {}
             recording = not bool(node.get("recording"))
             node["recording"] = recording          # optimistic; the poll confirms
-            self._pending_bool[(nid, "recording")] = recording
+            self._pending_bool[(record_hit, "recording")] = recording
             self.client.send({"command": "record", "node_id": record_hit,
                               "recording": recording})
             self.queue_draw()

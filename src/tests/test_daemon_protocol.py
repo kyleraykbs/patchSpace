@@ -1828,3 +1828,62 @@ def test_a_recorder_reports_its_takes_revision(tmp_path, monkeypatch):
 
     take.write_bytes(b"a second, longer take")   # the next take, same path
     assert d.handle_command({"command": "get_nodes"})["nodes"]["rec"]["source_rev"] != first
+
+
+def test_a_failing_autosave_does_not_starve_the_panel_poll(monkeypatch):
+    """The tick's two post-steps each have their own guard.  They shared one
+    try, so a failing session export kept the panel poll from ever running -
+    and the panel poll is what notices a panel file changing on disk."""
+    d = fresh_daemon()
+    d._running = True               # _tick returns immediately otherwise
+    polls = []
+    monkeypatch.setattr(d, "_poll_panels", lambda: polls.append(True))
+
+    def boom():
+        raise RuntimeError("the export is broken")
+
+    monkeypatch.setattr(d, "_auto_export_session", boom)
+    d._dirty = True
+
+    d._tick()                       # must not propagate the export's failure
+    assert polls == [True]
+
+
+def test_waveforms_are_decoded_without_holding_the_daemon_lock(monkeypatch):
+    """Reading a waveform is an ffmpeg pass over the whole file.  Doing that
+    under the command lock stalled every other command behind it - the GUI's own
+    polls included - which is what "events get held back" was, and why it only
+    showed in the sound chain."""
+    import threading
+    import time
+
+    import pwnodes
+    from tests.test_impulse import FakeCli, FakeProc
+
+    monkeypatch.setattr(pwnodes, "OwnedPwNode", FakeCli)
+    monkeypatch.setattr(pwnodes, "OwnedPwProcess", FakeProc)
+    d = fresh_daemon()
+    assert d.handle_command({"command": "add_node", "node_type": "recorder",
+                             "node_id": "rec"})["status"] == "ok"
+
+    def slow_peaks(path):
+        time.sleep(0.5)
+        return []
+
+    monkeypatch.setattr(pwnodes, "probe_peaks", slow_peaks)
+
+    decoded = []
+    worker = threading.Thread(
+        target=lambda: decoded.append(
+            d.handle_command({"command": "get_peaks", "node_id": "rec"})
+        )
+    )
+    worker.start()
+    time.sleep(0.15)                # let it get into the decode
+    started = time.monotonic()
+    d.handle_command({"command": "get_nodes"})
+    waited = time.monotonic() - started
+    worker.join()
+
+    assert decoded and decoded[0]["status"] == "ok"
+    assert waited < 0.3, f"get_nodes waited {waited:.2f}s behind a waveform decode"

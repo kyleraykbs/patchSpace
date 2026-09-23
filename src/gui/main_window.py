@@ -75,6 +75,34 @@ def _arm_hang_watchdog() -> None:
     threading.Thread(target=_watcher, daemon=True).start()
 
 
+def _coalesce_responses(queued):
+    """Split a batch of daemon replies into (newest poll, waveforms, events).
+
+    A backlog of polls is a backlog of *the same state*: applying every one
+    costs a full UI update each and they can only end up showing the newest, so
+    only the newest is kept.  Waveforms coalesce the same way - one per node,
+    since an older one is of an older file.  Everything else is an event and
+    keeps its arrival order.
+
+    Returns ``(latest_nodes, {node_id: reply}, [other replies])``, with the
+    error replies logged on the way (they are news, not state)."""
+    latest_nodes = None
+    latest_peaks = {}
+    events = []
+    for resp in queued:
+        if resp.get("status") != "ok":
+            if resp.get("status") == "error":
+                logger.warning("daemon error: %s", resp.get("message"))
+            continue
+        if "nodes" in resp:
+            latest_nodes = resp
+        elif "peaks" in resp:
+            latest_peaks[resp.get("node_id")] = resp
+        else:
+            events.append(resp)
+    return latest_nodes, latest_peaks, events
+
+
 class LogConsole(Gtk.Box):
     """A read-only, monospace log view fed by the daemon's get_logs
     command (see main.py's _cmd_get_logs / in-memory ring handler).
@@ -1304,27 +1332,8 @@ class MainWindow(Gtk.ApplicationWindow):
             self.log_console.set_active(button.get_active())
 
     def process_responses(self):
-        # A backlog of polls is a backlog of *the same state*: applying every
-        # one costs a full UI update each and they can only show the newest
-        # last, so only the newest is applied.  Sound waveforms coalesce the
-        # same way (one per node - an older one is of an older file), which is
-        # what kept the sound chain from stacking updates while a take grew.
-        # Everything else is an event and still applies in arrival order.
         queued = self.client.get_responses()
-        latest_nodes = None
-        latest_peaks = {}
-        events = []
-        for resp in queued:
-            if resp.get("status") != "ok":
-                if resp.get("status") == "error":
-                    logger.warning("daemon error: %s", resp.get("message"))
-                continue
-            if "nodes" in resp:
-                latest_nodes = resp
-            elif "peaks" in resp:
-                latest_peaks[resp.get("node_id")] = resp
-            else:
-                events.append(resp)
+        latest_nodes, latest_peaks, events = _coalesce_responses(queued)
         for resp in events:
             try:
                 if "graph" in resp:
