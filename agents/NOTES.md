@@ -446,3 +446,17 @@ gesture accepts; tested only structurally (no touchscreen here).
   cannot be linked *fails* rather than recording the wrong stream.  This was
   also the recorder's "flakiness": whichever way the name lookup went, the take
   was either the node's input or the mic.
+
+* **Measure before restructuring the draw.**  The instinct was "cache each
+  node's rendering": a frame is 682k calls and looks like per-node cairo work.
+  Profiling by *cumulative* time said otherwise - roughly half of it was
+  *layout arithmetic* (`_socket_position` 220x a frame, `_socket_margins` 220x,
+  header wraps and Pango measures), and the driver was `update_from_daemon`
+  clearing the whole dimension cache on *every* poll (every 400ms), so the next
+  frame re-derived every visible node's geometry.  Dropping a node's cached
+  geometry only when its fingerprint changes took the poll+draw cycle from
+  17.8ms to 15.7ms.  A render cache would have been a large change for less.
+* Idle is cheap: 1.75% CPU, flat RSS over interaction.  A warm frame for a
+  95-node session is 13-18ms, i.e. ~60fps, so "the UI freezes" was never
+  visible in the steady state - it needs a specific reproduction (which action,
+  how long) rather than more guessing.
