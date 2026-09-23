@@ -201,6 +201,14 @@ class GraphViewMixin:
         def _show():
             if self._context_popover is not popover:
                 return GLib.SOURCE_REMOVE
+            # A deferred popup can outlive the window it was requested from -
+            # the window closes, or the canvas is torn down, between scheduling
+            # and running.  Popping up a popover that is no longer rooted is not
+            # a warning in GTK, it is a segfault (the widget tree behind it has
+            # been freed), which is what made the whole app die at random after
+            # closing a menu.
+            if popover.get_root() is None or self.get_root() is None:
+                return GLib.SOURCE_REMOVE
             if not popover.get_visible() and popover.get_parent() is not None:
                 popover.popup()
                 if focus_widget is not None:

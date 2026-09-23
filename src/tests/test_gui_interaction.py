@@ -231,4 +231,8 @@ def test_panel_settings_apply_leaves_the_colour_applied():
     assert w.panels["P1"]["label"] == "P1"      # keeps the name it had
     sent = [c for c in client.sent if c.get("command") == "edit_panel"]
     assert sent and sent[-1]["color"] == "#00ff00"
+    # Tear the window down and let any deferred work run while the objects are
+    # gone: a popup scheduled against a torn-down tree used to segfault the
+    # whole process (see popup_context_menu's _show).
     win.destroy()
+    pump(200)
