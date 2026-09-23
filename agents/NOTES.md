@@ -526,3 +526,12 @@ gesture accepts; tested only structurally (no touchscreen here).
   stop a take that was already over.  The poll's value is applied every time
   now, with `_accept_bool_echo` holding an optimistic press until the daemon
   agrees (the guard the gates and switchers already used).
+
+* **An exception after an optimistic flip is a button that looks alive and does
+  nothing.**  The Record press flipped its node locally and *then* raised (a
+  mistyped local - `nid` for `record_hit`), so the command was never sent: the
+  button showed Stop, the next poll put it back, and recording was dead - "I
+  click record and it instantly stops".  Test the *press path* itself
+  (`_record_button_rect` gives the coordinates, `on_click` drives it), not just
+  the state it manages: the state-level tests all passed while the button did
+  nothing at all.
