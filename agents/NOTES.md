@@ -112,3 +112,9 @@ pipewire &  ;  wireplumber &
   them, and write them for anything non-obvious.
 * Todo list live and granular; update as work happens, not at the end.
 * Ask before assuming on interpretation; batch questions (see `agents/TERMINOLOGY.md`).
+
+## Overridable paths (env, for services)
+
+`PATCHBAY_SOCKET` (daemon `--socket`, GUI, CLI clients all read it), `PATCHBAY_PANEL_DIR`,
+`PATCHBAY_ROOT_PANEL` — the three knobs a service/module needs to keep a daemon per-user
+(socket in `$XDG_RUNTIME_DIR`, panel dirs from the store, root panel in state).

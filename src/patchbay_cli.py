@@ -19,6 +19,7 @@ arrive in the same order requests were sent.
 from __future__ import annotations
 
 import json
+import os
 import socket
 from typing import Any, Dict
 
@@ -27,8 +28,9 @@ from typing import Any, Dict
 # apply_config.py), and importing across into the gui package would
 # tie its sys.path layout to wherever those scripts happen to be run
 # from. Keep this in sync with SOCKET_PATH in gui/constants.py and
-# main.py if it ever changes.
-SOCKET_PATH = "/tmp/patchbay.sock"
+# main.py if it ever changes - including the $PATCHBAY_SOCKET override,
+# which is how all three are moved together.
+SOCKET_PATH = os.environ.get("PATCHBAY_SOCKET") or "/tmp/patchbay.sock"
 
 
 class PatchBayClient:

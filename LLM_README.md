@@ -103,9 +103,11 @@ cd src/gui && python patchbay_gui.py
 cd src && python -m pytest -q
 ```
 
-The daemon listens on a Unix socket at `/tmp/patchbay.sock`. The GUI talks to it over
-that socket; it can start/adopt the daemon itself (see §3), so you don't have to launch
-the daemon by hand.
+The daemon listens on a Unix socket, `/tmp/patchbay.sock` by default. `--socket PATH` on the
+daemon (or `$PATCHBAY_SOCKET`, which the daemon, the GUI and the CLI tools all read) moves
+it - e.g. into `$XDG_RUNTIME_DIR` for a user service, or so a second daemon can exist
+without tripping the single-instance guard. The GUI talks to it over that socket; it can
+start/adopt the daemon itself (see §3), so you don't have to launch the daemon by hand.
 
 **Headless GUI testing (for verifying widget changes without a display):**
 ```bash

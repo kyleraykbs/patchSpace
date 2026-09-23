@@ -10,8 +10,10 @@ Layout
     with backoff for anything that keeps failing);
   * a single tick thread runs PatchSpace.supervise() every ~0.5s (and
     immediately when a mutating command nudges it);
-  * a Unix socket at /tmp/patchbay.sock serves the JSON command API the
-    GUI (gui/) and the CLI scripts speak.
+  * a Unix socket (``/tmp/patchbay.sock`` by default; ``--socket`` or
+    ``$PATCHBAY_SOCKET`` moves it, e.g. into ``$XDG_RUNTIME_DIR`` for a
+    service) serves the JSON command API the GUI (gui/) and the CLI
+    scripts speak.
 
 The daemon's own built-in virtual sink ("PatchBay") and virtual mic
 ("PatchBay Mic") are ordinary hidden VirtualSpeaker/VirtualMic nodes
@@ -150,7 +152,12 @@ def _install_log_ring() -> None:
     logging.getLogger().addHandler(handler)
     _log_ring_installed = True
 
-SOCKET_PATH = "/tmp/patchbay.sock"
+# The command-API socket.  Overridable so more than one daemon can exist on
+# a machine (a second user, a test instance, or a service whose socket
+# belongs in $XDG_RUNTIME_DIR) - otherwise the single-instance guard below
+# makes the second one refuse to start.  Same env-var convention as the
+# panel dirs/root panel below; `--socket` overrides it.
+SOCKET_PATH = os.environ.get("PATCHBAY_SOCKET") or "/tmp/patchbay.sock"
 SESSION_CACHE_PATH = os.path.expanduser("~/.cache/patchbay/last_session.json")
 
 # How often the tick rescans the panel directories for changes.
@@ -5009,8 +5016,19 @@ class PatchBayDaemon:
 def main():
     import argparse
 
+    # SOCKET_PATH is read here (as the flag's default) and reassigned below,
+    # so the global declaration has to come first in this scope.
+    global SOCKET_PATH
+
     parser = argparse.ArgumentParser(
         prog="patchbay-daemon", description="Patch Space daemon"
+    )
+    parser.add_argument(
+        "--socket",
+        default=SOCKET_PATH,
+        metavar="PATH",
+        help="Unix socket to serve the command API on "
+        "(default: $PATCHBAY_SOCKET, else /tmp/patchbay.sock)",
     )
     parser.add_argument(
         "--panel-dir",
@@ -5026,6 +5044,10 @@ def main():
         help="Path of the root panel file (session autosave).",
     )
     args = parser.parse_args()
+
+    # The server and the single-instance guard read SOCKET_PATH straight off
+    # the module global, so the flag lands there (declared above).
+    SOCKET_PATH = args.socket
 
     panel_dirs = None
     if args.panel_dir:

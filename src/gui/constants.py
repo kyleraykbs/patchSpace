@@ -5,7 +5,12 @@ Shared timing / limit constants for the PatchBay GTK client.
 
 import os
 
-SOCKET_PATH = "/tmp/patchbay.sock"
+SOCKET_PATH = os.environ.get("PATCHBAY_SOCKET") or "/tmp/patchbay.sock"
+# ^ $PATCHBAY_SOCKET (the daemon's --socket/`PATCHBAY_SOCKET`) lets a second
+# daemon - another user, a test instance, a systemd user service whose socket
+# belongs in $XDG_RUNTIME_DIR - coexist with the default one.  The GUI both
+# connects to this path and hands it to any daemon it spawns (the child
+# inherits the environment), so the two ends can't disagree.
 
 # Where the daemon auto-saves the imperative half of the PatchSpace after
 # every structural/config change (see main.py's _auto_export_session).

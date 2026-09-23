@@ -4,7 +4,7 @@ patchbay_gui.py
 
 Entrypoint for the PatchBay GTK4 client. Run this against a running
 patchbay daemon (main.py) - it talks to it over the Unix socket at
-constants.SOCKET_PATH (default /tmp/patchbay.sock).
+constants.SOCKET_PATH (default /tmp/patchbay.sock, or $PATCHBAY_SOCKET).
 """
 import sys
 

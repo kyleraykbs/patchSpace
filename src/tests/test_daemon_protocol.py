@@ -2,8 +2,12 @@
 so nothing touches a real PipeWire process.  Exercises the same command
 layer and serialization shapes the GUI depends on."""
 
+import os
 import socket
+import subprocess
+import sys
 import threading
+import time
 
 from main import PatchBayDaemon
 from pwnodes import BackedNode, Node
@@ -1482,6 +1486,61 @@ def test_start_refuses_when_another_daemon_is_listening(monkeypatch, tmp_path):
         assert d.builtin_sink is None
     finally:
         srv.close()
+
+
+def test_patchbay_socket_env_moves_every_end(monkeypatch, tmp_path):
+    """$PATCHBAY_SOCKET is the one knob that moves the daemon, the GUI and
+    the CLI tools together (a service whose socket belongs in
+    $XDG_RUNTIME_DIR, a second user, a test instance).  Each module derives
+    its default from it at import time - checked in a child interpreter,
+    since that is when the env is read."""
+    sock = str(tmp_path / "custom" / "patchbay.sock")
+    src = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    code = (
+        "import sys; sys.path[:0] = [{src!r}, {gui!r}];"
+        "import main, patchbay_cli; from gui import constants;"
+        "print(main.SOCKET_PATH, patchbay_cli.SOCKET_PATH, constants.SOCKET_PATH)"
+    ).format(src=src, gui=os.path.join(src, "gui"))
+    env = dict(os.environ, PATCHBAY_SOCKET=sock)
+    result = subprocess.run(
+        [sys.executable, "-c", code], env=env, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == [sock, sock, sock]
+
+    # …and without it, the historical default is unchanged.
+    del env["PATCHBAY_SOCKET"]
+    result = subprocess.run(
+        [sys.executable, "-c", code], env=env, capture_output=True, text=True
+    )
+    assert result.stdout.split() == ["/tmp/patchbay.sock"] * 3
+
+
+def test_daemon_serves_the_configured_socket(monkeypatch, tmp_path):
+    """The daemon binds whatever SOCKET_PATH says (the module global the
+    --socket flag writes), and the one-shot CLI client reaches it there -
+    the pair the NixOS/home-manager module will drive."""
+    from patchbay_cli import PatchBayClient
+
+    path = str(tmp_path / "service.sock")
+    monkeypatch.setattr(main_mod, "SOCKET_PATH", path)
+    d = fresh_daemon()
+    d._running = True
+    server = threading.Thread(target=d._socket_server, daemon=True)
+    server.start()
+    deadline = time.monotonic() + 5.0
+    while not os.path.exists(path) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert os.path.exists(path), "daemon never bound the configured socket"
+
+    client = PatchBayClient(path)
+    try:
+        assert client.add_node("warp_out", "w1")["status"] == "ok"
+        exported = client.export_config()["config"]
+        assert exported["nodes"]["w1"]["type"] == "warp_out"
+    finally:
+        client.close()
+        d._running = False
 
 
 def _device_snapshot(profile, enum_profiles):
