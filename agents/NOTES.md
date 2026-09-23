@@ -236,3 +236,9 @@ write, reload again.  Idempotent, and the root file keeps every node it had.
   `document-edit-symbolic` (the pencil).  Never pass an explicit None viewport.
 * **Impulse port colour** is `blue_3` from the theme (Adwaita's #3584e4; stylix maps it to its
   palette's blue - which in the current palette is a muted teal).
+
+* **Declarative panels are placed beside the graph**: a panel file with no `placement.x`/`y`
+  (the module's new default - it omits them) is *unpositioned*, and on load the daemon puts it
+  to the right of the placed top-level panels, top-aligned, then marks it placed so the
+  autosave remembers it (`_place_unplaced_panels`, `panels.PLACE_GAP`).  A user drag is the same
+  thing (a geometry on the child reference marks it placed).  Nested panels are left alone.
