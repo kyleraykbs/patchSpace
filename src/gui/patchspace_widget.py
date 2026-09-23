@@ -414,6 +414,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # a bulk load_session import (see _begin_load), never for the
         # brief not-ready window of a single added node.
         self.on_loading_changed: list = []
+        # The canvas opacity the daemon reports (the deployment's UI
+        # preference - see main.CANVAS_OPACITY).  The window applies it, so
+        # the widget only carries the value and calls back when it changes.
+        self.canvas_opacity_from_daemon = None
+        self.on_canvas_opacity: list = []
         self.loading = False
         self._load_started_at = 0.0
         self._load_min_visible_until = 0.0
@@ -1275,6 +1280,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 node["y"] += dy
 
     def update_from_daemon(self, data):
+        reported_opacity = data.get("canvas_opacity")
+        if reported_opacity != self.canvas_opacity_from_daemon:
+            self.canvas_opacity_from_daemon = reported_opacity
+            for cb in self.on_canvas_opacity:
+                try:
+                    cb(reported_opacity)
+                except Exception:
+                    logger.exception("canvas opacity callback failed")
         daemon_nodes = data.get("nodes", {})
         daemon_edges = data.get("edges", {})
         # Which gates/switchers have a boolean control signal wired into
@@ -4280,9 +4293,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # wires running inside them, so their boxes must know the routes.
         self._route_all_wires()
         pal = theme_palette(self)
-        # Grid background.  Fully opaque by default; --canvas-opacity < 1
-        # paints it at that alpha so the desktop shows through the grid only
-        # (panels/nodes are opaque, see _draw_panel_boxes).
+        # Grid background.  Fully opaque by default; a canvas opacity < 1
+        # paints it at that alpha so the desktop shows through, and
+        # _draw_panel_boxes paints a panel's backing at the same alpha (nodes
+        # and wires stay opaque) - see constants.CANVAS_BG_ALPHA.
         cr.save()
         alpha = constants.CANVAS_BG_ALPHA
         if alpha < 1.0:

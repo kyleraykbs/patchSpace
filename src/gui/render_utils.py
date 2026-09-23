@@ -23,6 +23,11 @@ _FALLBACK_TEXT = (0.93, 0.93, 0.94)
 # instead of a fixed near-black box.
 _FALLBACK_VIEW_BG = (0.14, 0.14, 0.15)
 _FALLBACK_VIEW_FG = (0.85, 0.85, 0.86)
+# How far a field's background is lifted off the surface behind it (the node
+# card).  Every named "surface" colour a theme offers is the *same* tone as the
+# card here - window_bg/view_bg are darker still - so an entry that should read
+# as a lighter inset is derived from the card rather than looked up.
+FIELD_BG_LIFT = 0.16
 _FALLBACK_SUBTEXT = (0.63, 0.63, 0.66)
 _FALLBACK_INPUT_PORT = (0.35, 0.78, 0.51)
 _FALLBACK_OUTPUT_PORT = (0.94, 0.47, 0.42)
@@ -107,6 +112,15 @@ def _stable_index(text: str, modulo: int) -> int:
     return zlib.crc32(text.encode("utf-8")) % modulo
 
 
+def _lighten(color, amount, toward=(1.0, 1.0, 1.0)):
+    """Blend `color` `amount` of the way toward `toward` (white by default),
+    so a derived tone follows the theme instead of being a literal."""
+    return tuple(
+        c + (t - c) * max(0.0, min(1.0, amount))
+        for c, t in zip(color, toward)
+    )
+
+
 def theme_palette(widget) -> dict:
     return {
         "bg": _lookup(widget, "window_bg_color", _FALLBACK_BG),
@@ -114,7 +128,9 @@ def theme_palette(widget) -> dict:
         "node_border": _lookup(widget, "borders", _FALLBACK_NODE_BORDER),
         "text": _lookup(widget, "window_fg_color", _FALLBACK_TEXT),
         "subtext": _lookup(widget, "dim_label_color", _FALLBACK_SUBTEXT),
-        "field_bg": _lookup(widget, "view_bg_color", _FALLBACK_VIEW_BG),
+        "field_bg": _lighten(
+            _lookup(widget, "card_bg_color", _FALLBACK_NODE_BG), FIELD_BG_LIFT
+        ),
         "field_fg": _lookup(widget, "view_fg_color", _FALLBACK_VIEW_FG),
         "input_port": _FALLBACK_INPUT_PORT,
         "output_port": _FALLBACK_OUTPUT_PORT,

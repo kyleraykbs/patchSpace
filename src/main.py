@@ -170,6 +170,24 @@ SOCKET_PATH = (
 )
 SESSION_CACHE_PATH = os.path.expanduser("~/.cache/patchspace/last_session.json")
 
+# The GUI's canvas background opacity, when the deployment configures one (the
+# module sets this on the *unit*, so a locally started daemon reads it from the
+# environment like the socket and panel dirs - and it reaches a client that was
+# started by a launcher with a stale session environment, which a session
+# variable alone would not).  `None` (unset or unusable) means "no preference".
+def _env_canvas_opacity():
+    raw = os.environ.get("PATCHSPACE_CANVAS_OPACITY")
+    if not raw:
+        return None
+    try:
+        return max(0.0, min(1.0, float(raw)))
+    except ValueError:
+        logger.warning("Ignoring PATCHSPACE_CANVAS_OPACITY=%r: expected 0..1", raw)
+        return None
+
+
+CANVAS_OPACITY = _env_canvas_opacity()
+
 # How often the tick rescans the panel directories for changes.
 PANEL_POLL_S = 1.5
 
@@ -4652,6 +4670,9 @@ class PatchSpaceDaemon:
                 "groups": groups,
                 "panels": self._serialize_panels(),
                 "loading": self._startup_loading,
+                # The deployment's UI preference, so a client does not have to
+                # be launched with the session environment for it to apply.
+                "canvas_opacity": CANVAS_OPACITY,
             }
 
     def _cmd_get_graph(self, cmd: dict) -> dict:

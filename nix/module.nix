@@ -275,6 +275,14 @@ let
     ] ++ socketArgs ++ panelDirArgs ++ rootPanelArgs ++ cfg.extraArgs);
     restarts = { Restart = "on-failure"; RestartSec = 2; };
     wantedBy = [ "default.target" ];
+    # The GUI's canvas opacity travels with the *daemon*: the daemon reads
+    # this variable (see main.CANVAS_OPACITY) and reports it with the graph,
+    # so a window started from a launcher gets it even when the session
+    # environment predates the rebuild - which is the normal case, since a
+    # session variable only reaches a session at login.
+    environment = mkIf (cfg.canvasOpacity != null) [
+      "PATCHSPACE_CANVAS_OPACITY=${toString cfg.canvasOpacity}"
+    ];
   };
 
 in
@@ -470,6 +478,7 @@ in
             ExecStartPre = unit.execStartPre;
             ExecStart = unit.execStart;
             inherit (unit.restarts) Restart RestartSec;
+            Environment = unit.environment;
           };
           Install.WantedBy = unit.wantedBy;
         } else {
@@ -483,6 +492,7 @@ in
             ExecStartPre = unit.execStartPre;
             ExecStart = unit.execStart;
             inherit (unit.restarts) Restart RestartSec;
+            Environment = unit.environment;
           };
           # NixOS's user units take the new-style `wantedBy`, not
           # `install.WantedBy` (that one is home-manager's spelling).

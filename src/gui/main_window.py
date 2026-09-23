@@ -233,8 +233,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.set_title("Patch Space")
         self.set_default_size(1200, 800)
         self._install_translucency_css()
-        if constants.CANVAS_BG_ALPHA < 1.0:
-            self.add_css_class("translucent-canvas")
+        self._set_canvas_translucency(constants.CANVAS_BG_ALPHA < 1.0)
 
         # Explicit titlebar with the program name (the default CSD title
         # also shows it, but this makes the name unambiguous and matches
@@ -514,6 +513,7 @@ class MainWindow(Gtk.ApplicationWindow):
         # Load progress (start/stop) drives the overlay + console
         # auto-open/collapse; see _on_loading_changed.
         self.ps_widget.on_loading_changed.append(self._on_loading_changed)
+        self.ps_widget.on_canvas_opacity.append(self._apply_canvas_opacity)
 
         # A Gtk.Paned instead of a plain Box+Separator: it draws its
         # own draggable handle, so the user can grab the edge between
@@ -992,6 +992,29 @@ class MainWindow(Gtk.ApplicationWindow):
             self.pw_widget.refresh()
             self.ps_widget.refresh()
         return False
+
+    def _set_canvas_translucency(self, on):
+        """The canvas is see-through only when the alpha says so; the class is
+        what makes the window surface and the containers around the grids
+        transparent (see `_install_translucency_css`)."""
+        if on:
+            self.add_css_class("translucent-canvas")
+        else:
+            self.remove_css_class("translucent-canvas")
+
+    def _apply_canvas_opacity(self, value):
+        """The canvas opacity the daemon reports - the deployment's preference
+        (the module derives it from stylix).  `--canvas-opacity` and
+        `$PATCHSPACE_CANVAS_OPACITY` are the user's own choice and win."""
+        if value is None or constants.CANVAS_BG_ALPHA_EXPLICIT:
+            return
+        value = max(0.0, min(1.0, float(value)))
+        if abs(value - constants.CANVAS_BG_ALPHA) < 1e-6:
+            return
+        constants.CANVAS_BG_ALPHA = value
+        self._set_canvas_translucency(value < 1.0)
+        self.pw_widget.queue_draw()
+        self.ps_widget.queue_draw()
 
     def _poll_daemon_connection(self):
         """Fallback to the client's live state in case a state change was

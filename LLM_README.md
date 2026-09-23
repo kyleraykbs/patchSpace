@@ -556,24 +556,33 @@ every blend. The router is pure geometry (no GTK) and unit-tested in
 `tests/test_wire_router.py`.
 
 *Entries.* A node's text field, its folder button and a device row's select/codec box draw
-with `theme_palette`'s `field_bg`/`field_fg` (the theme's `view_bg_color`/`view_fg_color` -
-what a real `GtkEntry` uses) and the `node_border` stroke, with `subtext` for the
-"(click to set)" placeholder.  They were a hardcoded neutral near-black, which reads as a
-foreign widget on a themed (stylix-recoloured) card.  The fallbacks in `render_utils` are the
-old literals, so a theme without the named colours is unchanged.
+with `theme_palette`'s `field_bg` - `card_bg_color` lifted `FIELD_BG_LIFT` toward white, since
+every named *surface* a theme offers is the same tone as the card and `view_bg_color` is
+darker still, so a lighter inset has to be derived - plus the `node_border` stroke, text in
+`field_fg` (`view_fg_color`) and `subtext` for the "(click to set)" placeholder.  They were a
+hardcoded neutral near-black, which reads as a foreign widget on a themed (stylix-recoloured)
+card; the `view_bg`/`view_fg` fallbacks are the old literals.
 
 *Canvas chrome.* The graph background is fully opaque by default. `--canvas-opacity F`
 (`patchspace_gui.py`, 0..1, default 1.0) - or `$PATCHSPACE_CANVAS_OPACITY`, which the flag
-overrides: the module sets that variable so a window started from the launcher is themed too,
-and `services.patchspace.canvasOpacity` defaults to stylix's application opacity when stylix
-is configured for the scope - paints both canvases' background at that alpha; when
+overrides - paints both canvases' background at that alpha; when
 < 1 only the *grid* becomes see-through - the window surface and immediate canvas
 containers go transparent while `.opaque-chrome` (headerbar, tab bar, toolbars, side
 panels, console, with a **literal** palette color, not libadwaita's `@window_bg_color`
 which isn't defined here) keeps everything else filled and the CSD shadow/rounded corners
 are removed. Panels and their IO strips draw their `node_bg` backing at the **same
 `CANVAS_BG_ALPHA`** before the colour tint, so a panel is exactly as see-through as the
-grid behind it (just tinted); nodes are fully opaque. The toolbar is wrapped in a
+grid behind it (just tinted); nodes are fully opaque.
+
+Where that value comes from, in order: the flag, `$PATCHSPACE_CANVAS_OPACITY`, then whatever
+the **daemon** reports.  `get_nodes` carries `canvas_opacity`, from `main.CANVAS_OPACITY` -
+the daemon reads its own environment, which the module sets on the *unit*
+(`services.patchspace.canvasOpacity`, defaulting to `config.stylix.opacity.applications`).  The
+daemon is the carrier on purpose: a session variable only reaches a session at login, so a
+window started from a launcher after a rebuild would still get the old environment (checked:
+the running GUI's `/proc/<pid>/environ` had no such variable), while the unit is restarted by
+the activation that changed it.  The flag and the environment variable are the *user's* choice
+and beat the deployment's (`constants.CANVAS_BG_ALPHA_EXPLICIT`). The toolbar is wrapped in a
 full-width opaque strip and the notebook padding/border is zeroed so the padding around
 the grid isn't left transparent. The two side panels use `.side-panel-fill`, painted with
 the theme's `headerbar_bg_color` (the brighter "titlebar/active tab" colour Firefox uses),

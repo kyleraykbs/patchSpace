@@ -65,6 +65,11 @@ LAYOUT_SETTLE_EPSILON = 0.05
 # for app-id org.patchspace).
 CANVAS_BG_ALPHA = 1.0
 
+# True once `--canvas-opacity`/`$PATCHSPACE_CANVAS_OPACITY` set it: that is the
+# user's own choice, and it beats the value the daemon reports (which comes
+# from the deployment, e.g. the module's stylix-derived default).
+CANVAS_BG_ALPHA_EXPLICIT = False
+
 # Node appearance animation (PatchSpace).  A node that hasn't finished
 # loading draws at NODE_LOADING_ALPHA and fades to full when the daemon
 # reports it ready; a brand-new node scales up from nothing with a

@@ -102,6 +102,7 @@ def main():
     if opacity is not None:
         try:
             constants.CANVAS_BG_ALPHA = max(0.0, min(1.0, float(opacity)))
+            constants.CANVAS_BG_ALPHA_EXPLICIT = True
         except ValueError:
             print(
                 f"invalid --canvas-opacity {opacity!r}: expected a number 0..1",
