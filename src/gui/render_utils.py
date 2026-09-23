@@ -23,6 +23,11 @@ _FALLBACK_TEXT = (0.93, 0.93, 0.94)
 # instead of a fixed near-black box.
 _FALLBACK_VIEW_BG = (0.14, 0.14, 0.15)
 _FALLBACK_VIEW_FG = (0.85, 0.85, 0.86)
+# The theme's blue, used for anything that should read as "the active value":
+# the impulse port/button and the sliders.  Adwaita's blue_3 is #3584e4; under
+# stylix it is the palette's blue.  The fallback is the blue the sliders always
+# used, for a theme that defines no named colours at all.
+_FALLBACK_ACCENT = (0.4, 0.7, 0.9)
 # How far a field's background is lifted off the surface behind it (the node
 # card).  Every named "surface" colour a theme offers is the *same* tone as the
 # card here - window_bg/view_bg are darker still - so an entry that should read
@@ -142,6 +147,13 @@ def theme_palette(widget) -> dict:
         # palette) so it reads as a distinct, vibrant signal and still
         # follows the desktop's colours.  Falls back to the old cyan.
         "impulse_port": _lookup(widget, "blue_3", _FALLBACK_IMPULSE_PORT),
+        # The active-value colour: sliders, and anything else that is "set".
+        "accent": _lookup(widget, "blue_3", _FALLBACK_ACCENT),
+        # A slider's unfilled groove: the card tone lifted the same amount as
+        # an entry field, so it reads as an inset rather than a grey bar.
+        "slider_track": _lighten(
+            _lookup(widget, "card_bg_color", _FALLBACK_NODE_BG), FIELD_BG_LIFT
+        ),
         "link": _lookup(widget, "accent_color", _FALLBACK_LINK),
         "select": _FALLBACK_SELECT,
         "pending_link": _FALLBACK_PENDING_LINK,

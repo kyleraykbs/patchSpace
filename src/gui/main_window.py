@@ -546,7 +546,9 @@ class MainWindow(Gtk.ApplicationWindow):
         # the end child of an outer paned, so opening it shrinks the canvas
         # rather than covering it.
         self.panels_view = self._build_panels_view()
-        self.panels_view.set_visible(False)
+        # Open by default: the panel list is how you find your panels, and
+        # the toggle (and its close button) hide it again.
+        self._panels_toggle.set_active(True)
         outer = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
         outer.set_start_child(page)
         outer.set_resize_start_child(True)
@@ -561,7 +563,10 @@ class MainWindow(Gtk.ApplicationWindow):
         """A docked, scrollable list of the panel files on the right."""
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         box.add_css_class("side-panel-fill")
-        box.set_size_request(240, -1)
+        # Wide enough for a panel name beside the colour dot and the
+        # auto-load/add/delete buttons (~36px each): at 240 the names were
+        # cut off.  The divider is draggable, so this is only the default.
+        box.set_size_request(300, -1)
         # Padding comes from CSS (.side-panel-fill) so it is *inside* the
         # opaque background - GTK margins would sit outside it and leave a
         # transparent gap at the window edge.

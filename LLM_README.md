@@ -580,6 +580,22 @@ endpoint nodes excluded - their sockets sit on the border, so including them wou
 every blend. The router is pure geometry (no GTK) and unit-tested in
 `tests/test_wire_router.py`.
 
+*Colour.* Everything colour-bearing comes from `theme_palette`: the impulse port/button and
+the sliders share the theme's blue (`accent` = `blue_3`, Adwaita's #3584e4 - the *same* slot, so
+"make the sliders that blue" is one lookup, not a second colour), a slider's groove is the card
+lifted like an entry field, its handle is the theme's text colour, and a **panel with no colour
+of its own** (`#3584e4`, the default the daemon stores) is drawn in a colour derived per panel
+from the palette via `theme_class_color` - so default panels follow the desktop while panels
+someone coloured keep exactly what they set. Nothing here is a literal; the fallbacks in
+`render_utils` are the old literals, for a theme that defines no named colours.
+
+*Header width.* A node's width is `max(NODE_WIDTH, the narrowest width whose header lines fit)`:
+the chrome each line carries (type icon, badge reserves, side padding) plus its **widest single
+word** (`_header_needed_width`). Without the longest-word term a short label broke mid-word
+("Inve"/"rt" on a narrow gate) and the badge overlapped it; the layout also used to subtract the
+left icon inset that the draw already offsets, leaving line 0 ten pixels short of the badges.
+`HEADER_SIDE_PAD` is the one place that padding is defined now, for drawing and measuring alike.
+
 *Entries.* A node's text field, its folder button and a device row's select/codec box draw
 with `theme_palette`'s `field_bg` - `card_bg_color` lifted `FIELD_BG_LIFT` toward white, since
 every named *surface* a theme offers is the same tone as the card and `view_bg_color` is

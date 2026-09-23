@@ -242,3 +242,16 @@ write, reload again.  Idempotent, and the root file keeps every node it had.
   to the right of the placed top-level panels, top-aligned, then marks it placed so the
   autosave remembers it (`_place_unplaced_panels`, `panels.PLACE_GAP`).  A user drag is the same
   thing (a geometry on the child reference marks it placed).  Nested panels are left alone.
+
+## Colours follow the theme; header text never breaks mid-word (2026-09-23)
+
+* `theme_palette` gained `accent` (`blue_3`) and `slider_track` (the card lifted like a field).
+  The impulse port/button and all sliders share the accent; slider labels/handles are
+  `subtext`/`text`.  A **panel with no colour of its own** (`#3584e4`, what the daemon stores by
+  default) is drawn from the palette per panel via `theme_class_color`; a panel someone coloured
+  keeps its colour.  Never hardcode a colour here - the fallbacks already carry the old literals.
+* Node width = `max(NODE_WIDTH, _header_needed_width)` (chrome of each line + its widest word),
+  and `_header_line_layout` no longer double-subtracts the left icon inset (it was 10px short,
+  which is why line 0 overlapped the badge and wrapped "Invert" into "Inve"/"rt").
+* The right-hand panels list is 300px and visible by default (the divider is still draggable,
+  the toggle and its close button hide it).

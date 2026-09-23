@@ -58,6 +58,7 @@ from constants import (
 from render_utils import (
     theme_palette,
     theme_color,
+    theme_class_color,
     draw_rounded_rect,
     draw_text_ellipsized,
     draw_text_unbounded,
@@ -141,6 +142,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     # each wrapped header line thereafter (type label, then
     # description/label/id - see _draw_header/_header_blocks).
     HEADER_TOP_PAD = 14
+    #: Left padding every header line is drawn at (the `x + 10` in
+    #: `_draw_header`); one place so the measurement and the drawing agree.
+    HEADER_SIDE_PAD = 10
     HEADER_BLOCK_GAP = 4
     SLIDER_HEIGHT = 16
     SLIDER_MARGIN = 10
@@ -2019,7 +2023,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     def _is_compact_node(cls, node) -> bool:
         return node.get("type") in cls._COMPACT_NODE_TYPES
 
-    def _node_width_for(self, node):
+    def _node_width_for(self, nid, node):
         """Width a node renders at: a compact node (splitter / boolean
         logic gate) with no label collapses to a square
         (SPLITTER_MIN_SIZE); every other node - and a labelled compact
@@ -2043,16 +2047,15 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             # A gate still shows its type name at the top beside the
             # three-dot menu, so it must be wide enough for that text -
             # otherwise the name would wrap into a sliver.
-            tw, _ = self._text_size(type_label(node["type"], ""), 10)
             return max(
-                self.SPLITTER_MIN_SIZE, int(tw) + self.HEADER_ICON_RESERVE + 16
+                self.SPLITTER_MIN_SIZE, self._header_needed_width(nid, node)
             )
-        return self.NODE_WIDTH
+        return max(self.NODE_WIDTH, self._header_needed_width(nid, node))
 
     def node_width(self, node_id):
         cached = self._node_w_cache.get(node_id)
         if cached is None:
-            cached = self._node_width_for(self.nodes[node_id])
+            cached = self._node_width_for(node_id, self.nodes[node_id])
             self._node_w_cache[node_id] = cached
         return cached
 
@@ -4473,7 +4476,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             panel = self.panels.get(pid)
             if panel is None:
                 continue
-            r, g, b = self._hex_to_rgb(panel.get("color", "#3584e4"))
+            r, g, b = self._panel_rgb(pid)
             side = 9.0
             px = node["x"]
             py = node["y"] + self.node_height(nid) + 3
@@ -4862,9 +4865,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # the node - purely cosmetic).
         port_color = None
         if node["type"] in self._PORT_IN_TYPES | self._PORT_OUT_TYPES:
-            panel = self.panels.get(self._panel_of_node(nid))
-            if panel is not None:
-                port_color = self._hex_to_rgb(panel.get("color", "#3584e4"))
+            panel_id = self._panel_of_node(nid)
+            if panel_id in self.panels:
+                port_color = self._panel_rgb(panel_id)
                 border_color = port_color
 
         draw_rounded_rect(cr, x, y, node_w, node_h, 8)
@@ -4912,7 +4915,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             if is_mute_node(nid):
                 self._draw_mute_checkbox(cr, x, y, node_h, node["volume"])
             else:
-                self._draw_volume_slider(cr, x, y, node_h, node["volume"])
+                self._draw_volume_slider(cr, pal, x, y, node_h, node["volume"])
         elif spec.control == "gate":
             self._draw_gate_toggle(cr, nid, node["enabled"])
         elif spec.control == "switcher":
@@ -4939,14 +4942,16 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             output = (1 if state else 0) if (driven and state is not None) else stored
             self._draw_boolean_toggle(cr, pal, nid, output, driven=driven)
         elif spec.control == "wetdry":
-            self._draw_wetdry_slider(cr, x, y, node_h, node.get("wet_dry", 0.3))
+            self._draw_wetdry_slider(
+                cr, pal, x, y, node_h, node.get("wet_dry", 0.3)
+            )
         elif spec.control == "gain":
             # Normalize's boost, drawn as a plain 0..1 slider (fraction
             # of the plugin's 0..30 dB range - see find_gain_slider_at).
-            self._draw_volume_slider(cr, x, y, node_h, node.get("gain", 0.5))
+            self._draw_volume_slider(cr, pal, x, y, node_h, node.get("gain", 0.5))
         elif spec.control == "sensitivity":
             self._draw_threshold_slider(
-                cr, x, y, node_h, node.get("sensitivity", 0.0)
+                cr, pal, x, y, node_h, node.get("sensitivity", 0.0)
             )
         elif spec.control == "impulse":
             self._draw_impulse_button(cr, nid, node)
@@ -5055,7 +5060,36 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         if i == 0 and spec_for(node["type"]).settings:
             reserve += 22  # room for the settings cog too
         left = self.NODE_ICON_LEFT_RESERVE if i == 0 else 0
-        return float(left), self.node_width(nid) - reserve - left
+        # `_draw_header` draws at x + HEADER_SIDE_PAD + left, so the padding
+        # has to come out of the width as well - leaving it out is what let a
+        # line overlap the badges (and wrap mid-word) on a narrow node.
+        return (
+            float(left),
+            self.node_width(nid) - reserve - left - self.HEADER_SIDE_PAD,
+        )
+
+    def _header_needed_width(self, nid, node):
+        """The narrowest node width whose header lines all fit without
+        breaking a word: the chrome each line carries (the type icon on the
+        left, the badge reserves on the right, the side padding) plus its
+        widest single word.  Multi-word text still wraps normally - this is
+        what stops "Invert" rendering as two lines, "Inve"/"rt"."""
+        spec = spec_for(node["type"])
+        need = 0.0
+        for i, (text, size, _key) in enumerate(self._header_blocks(nid, node)):
+            if self._header_block_is_id(nid, text):
+                continue                      # ellipsized: never grown for
+            reserve = self.HEADER_ICON_RESERVE if i == 0 else 20
+            if i == 0 and spec.settings:
+                reserve += 22
+            left = self.NODE_ICON_LEFT_RESERVE if i == 0 else 0
+            chrome = reserve + left + self.HEADER_SIDE_PAD
+            words = [w for w in text.split() if w]
+            if not words:
+                continue
+            widest = max(self._text_size(w, size)[0] for w in words)
+            need = max(need, chrome + widest)
+        return int(need) + 1
 
     def _draw_header(self, cr, pal, nid, node, x, y, color=None):
         """Draw every _header_blocks() line, stacked top to bottom by each
@@ -5074,14 +5108,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             text_rgb = color if color is not None else pal[color_key]
             if self._header_block_is_id(nid, text):
                 draw_text_ellipsized(
-                    cr, x + 10 + left, text_y, text, max_width, font_size,
-                    text_rgb,
+                    cr, x + self.HEADER_SIDE_PAD + left, text_y, text,
+                    max_width, font_size, text_rgb,
                 )
                 block_h = self._single_line_height(font_size)
             else:
                 block_h = draw_text_wrapped(
-                    cr, x + 10 + left, text_y, text, max_width, font_size,
-                    text_rgb,
+                    cr, x + self.HEADER_SIDE_PAD + left, text_y, text,
+                    max_width, font_size, text_rgb,
                 )
             text_y += block_h + self.HEADER_BLOCK_GAP
 
@@ -5284,7 +5318,24 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             cr.stroke()
         cr.restore()
 
-    def _draw_wetdry_slider(self, cr, x, y, node_h, mix):
+    #: What the daemon/GUI store for a panel nobody coloured.  A panel at
+    #: this value (or with no colour at all) is drawn in a colour derived
+    #: from the theme instead, so panels follow the desktop palette.
+    DEFAULT_PANEL_COLOR = "#3584e4"
+
+    def _panel_rgb(self, pid):
+        """A panel's colour as RGB: the one it carries, or - when it has
+        none, which is the default - one derived from the theme, picked
+        deterministically per panel so they stay distinguishable and stable
+        across restarts."""
+        panel = self.panels.get(pid) or {}
+        raw = (panel.get("color") or "").strip()
+        if raw and raw.lower() != self.DEFAULT_PANEL_COLOR:
+            return self._hex_to_rgb(raw)
+        key = panel.get("stem") or panel.get("label") or pid
+        return theme_class_color(self, key)
+
+    def _draw_wetdry_slider(self, cr, pal, x, y, node_h, mix):
         """Reverb's dry/wet mix as an inline slider on the node body
         (0 = fully dry, 1 = fully wet), styled like the volume slider
         so the same drag gesture drives it (see on_drag_begin/update/
@@ -5294,21 +5345,21 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         slider_x = x + self.SLIDER_MARGIN
 
         cr.set_font_size(8)
-        cr.set_source_rgb(0.6, 0.6, 0.6)
+        cr.set_source_rgb(*pal["subtext"])
         cr.move_to(slider_x, slider_y - 3)
         cr.show_text("dry/wet")
 
-        cr.set_source_rgb(0.3, 0.3, 0.3)
+        cr.set_source_rgb(*pal["slider_track"])
         cr.rectangle(slider_x, slider_y, slider_width, 4)
         cr.fill()
 
-        cr.set_source_rgb(0.95, 0.72, 0.25)
+        cr.set_source_rgb(*pal["accent"])
         cr.rectangle(slider_x, slider_y, slider_width * mix, 4)
         cr.fill()
 
         handle_x = slider_x + slider_width * mix
         cr.arc(handle_x, slider_y + 2, 6, 0, 2 * math.pi)
-        cr.set_source_rgb(0.9, 0.9, 0.9)
+        cr.set_source_rgb(*pal["text"])
         cr.fill()
 
         cr.set_font_size(9)
@@ -5316,7 +5367,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         cr.move_to(x + self.NODE_WIDTH - 34, slider_y - 4)
         cr.show_text(f"{int(round(mix * 100))}% wet")
 
-    def _draw_threshold_slider(self, cr, x, y, node_h, frac):
+    def _draw_threshold_slider(self, cr, pal, x, y, node_h, frac):
         """Sensitivity Gate's sensitivity bar (Discord-style voice
         activity): `frac` is the 0..1 slider position. The value drives
         the hidden pre/post gain-staging nodes daemon-side - see
@@ -5328,48 +5379,48 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         slider_x = x + self.SLIDER_MARGIN
 
         cr.set_font_size(8)
-        cr.set_source_rgb(0.6, 0.6, 0.6)
+        cr.set_source_rgb(*pal["subtext"])
         cr.move_to(slider_x, slider_y - 3)
         cr.show_text("sensitivity")
 
-        cr.set_source_rgb(0.3, 0.3, 0.3)
+        cr.set_source_rgb(*pal["slider_track"])
         cr.rectangle(slider_x, slider_y, slider_width, 4)
         cr.fill()
 
-        cr.set_source_rgb(0.45, 0.78, 0.95)
+        cr.set_source_rgb(*pal["accent"])
         cr.rectangle(slider_x, slider_y, slider_width * frac, 4)
         cr.fill()
 
         handle_x = slider_x + slider_width * frac
         cr.arc(handle_x, slider_y + 2, 6, 0, 2 * math.pi)
-        cr.set_source_rgb(0.9, 0.9, 0.9)
+        cr.set_source_rgb(*pal["text"])
         cr.fill()
 
         cr.set_font_size(9)
-        cr.set_source_rgb(0.6, 0.6, 0.6)
+        cr.set_source_rgb(*pal["subtext"])
         cr.move_to(x + self.NODE_WIDTH - 30, slider_y - 4)
         cr.show_text(f"{int(round(frac * 100))}%")
 
-    def _draw_volume_slider(self, cr, x, y, node_h, volume):
+    def _draw_volume_slider(self, cr, pal, x, y, node_h, volume):
         slider_y = y + node_h - self.SLIDER_HEIGHT - 5
         slider_width = self.NODE_WIDTH - 2 * self.SLIDER_MARGIN
         slider_x = x + self.SLIDER_MARGIN
 
-        cr.set_source_rgb(0.3, 0.3, 0.3)
+        cr.set_source_rgb(*pal["slider_track"])
         cr.rectangle(slider_x, slider_y, slider_width, 4)
         cr.fill()
 
-        cr.set_source_rgb(0.4, 0.7, 0.9)
+        cr.set_source_rgb(*pal["accent"])
         cr.rectangle(slider_x, slider_y, slider_width * volume, 4)
         cr.fill()
 
         handle_x = slider_x + slider_width * volume
         cr.arc(handle_x, slider_y + 2, 6, 0, 2 * math.pi)
-        cr.set_source_rgb(0.9, 0.9, 0.9)
+        cr.set_source_rgb(*pal["text"])
         cr.fill()
 
         cr.set_font_size(9)
-        cr.set_source_rgb(0.6, 0.6, 0.6)
+        cr.set_source_rgb(*pal["subtext"])
         cr.move_to(x + self.NODE_WIDTH - 30, slider_y - 2)
         cr.show_text(f"{int(volume * 100)}%")
 
@@ -5689,15 +5740,15 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     cr, fx, fy, fw, fh, bool(node.get("force_default", True))
                 )
             volume = node.get("device_volume", 1.0)
-            cr.set_source_rgb(0.3, 0.3, 0.3)
+            cr.set_source_rgb(*pal["slider_track"])
             cr.rectangle(sx, sy + sh / 2 - 2, sw, 4)
             cr.fill()
-            cr.set_source_rgb(0.4, 0.7, 0.9)
+            cr.set_source_rgb(*pal["accent"])
             cr.rectangle(sx, sy + sh / 2 - 2, sw * volume, 4)
             cr.fill()
             handle_x = sx + sw * volume
             cr.arc(handle_x, sy + sh / 2, 6, 0, 2 * math.pi)
-            cr.set_source_rgb(0.9, 0.9, 0.9)
+            cr.set_source_rgb(*pal["text"])
             cr.fill()
             self._draw_lock_button(
                 cr, lx, ly, lw, lh, bool(node.get("volume_locked", True))
@@ -8966,7 +9017,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 continue
             x, y, w, h = rect
             panel = self.panels[pid]
-            r, g, b = self._hex_to_rgb(panel.get("color"))
+            r, g, b = self._panel_rgb(pid)
             cr.save()
             draw_rounded_rect(cr, x, y, w, h, 12)
             cr.clip()
@@ -9050,7 +9101,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             _x, _y, _w, _h = rect
             panel = self.panels[pid]
             geo = self._panel_header_rects(pid, rect)
-            r, g, b = self._hex_to_rgb(panel.get("color"))
+            r, g, b = self._panel_rgb(pid)
             font = self._panel_title_font()
             # Title, drawn like a group title (floating above the box, in
             # the panel's colour, scaling with zoom up to a point).
