@@ -10,10 +10,11 @@ Layout
     with backoff for anything that keeps failing);
   * a single tick thread runs PatchSpace.supervise() every ~0.5s (and
     immediately when a mutating command nudges it);
-  * a Unix socket (``/tmp/patchspace.sock`` by default; ``--socket`` or
-    ``$PATCHSPACE_SOCKET`` moves it, e.g. into ``$XDG_RUNTIME_DIR`` for a
-    service) serves the JSON command API the GUI (gui/) and the CLI
-    scripts speak.
+  * a Unix socket (``$XDG_RUNTIME_DIR/patchspace.sock`` by default, so it
+    lives somewhere the user owns - ``/tmp/patchspace.sock`` only as the
+    fallback for a session with no runtime dir; ``--socket`` or
+    ``$PATCHSPACE_SOCKET`` moves it) serves the JSON command API the GUI
+    (gui/) and the CLI scripts speak.
 
 The daemon's own built-in virtual sink ("Patch Space") and virtual mic
 ("Patch Space Mic") are ordinary hidden VirtualSpeaker/VirtualMic nodes
@@ -35,6 +36,7 @@ import time
 from collections import deque
 from typing import Any, Dict, Optional
 
+import pwgraph
 from pwgraph import PipewireGraph
 from pwproc import Backoff, Ticker
 from pwnodes import (
@@ -163,10 +165,27 @@ def _install_log_ring() -> None:
 # clients): a session that is already running started its daemon with them in
 # its environment, and a user service written before the rename still sets
 # them.  They are read, never written.
+def _default_socket_path() -> str:
+    """Where the daemon listens when nothing says otherwise.
+
+    `$XDG_RUNTIME_DIR` (a per-user directory the user owns) rather than a
+    fixed name in `/tmp`: /tmp is world-writable and sticky, so a socket
+    there left behind by another user - a root-owned one is enough - cannot
+    be unlinked by us, and the daemon used to carry on without a socket and
+    sweep the live daemon's objects.  The /tmp name is only the fallback for
+    a session with no runtime dir, and the GUI resolves this the same way
+    (gui/constants.py) - a test asserts the two agree.
+    """
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime and os.path.isdir(runtime):
+        return os.path.join(runtime, "patchspace.sock")
+    return "/tmp/patchspace.sock"
+
+
 SOCKET_PATH = (
     os.environ.get("PATCHSPACE_SOCKET")
     or os.environ.get("PATCHBAY_SOCKET")
-    or "/tmp/patchspace.sock"
+    or _default_socket_path()
 )
 SESSION_CACHE_PATH = os.path.expanduser("~/.cache/patchspace/last_session.json")
 
@@ -480,6 +499,9 @@ class PatchSpaceDaemon:
         root_panel_path: Optional[str] = None,
     ):
         self.graph = PipewireGraph(pw_cli_command=("pw-cli",))
+        #: The listening socket (bound by `_bind_socket`, served by
+        #: `_serve_clients`); None until then, and cleared on teardown.
+        self._server: Optional[socket.socket] = None
         self.space = PatchSpace(self.graph)
         self._lock = self.space._lock
 
@@ -672,13 +694,41 @@ class PatchSpaceDaemon:
         # Bind the socket immediately so the GUI connects (and sees
         # loading=true) while the slow work below runs.  The overlay blocks
         # canvas interaction until the load finishes.
-        socket_thread = threading.Thread(target=self._socket_server, daemon=True)
+        #
+        # Binding is synchronous and fatal on purpose.  It used to happen on
+        # the server thread, so a socket that could not be replaced (a
+        # root-owned leftover in sticky /tmp, say) killed only that thread:
+        # the daemon carried on headless - while its start-up sweep tore
+        # down the live daemon's objects, and both instances rebuilt the
+        # user's nodes.  A daemon nobody can talk to must not run.
+        try:
+            self._bind_socket()
+        except OSError as exc:
+            logger.error(
+                "Cannot serve %s (%s).  If that path is a leftover socket "
+                "owned by someone else, remove it or point PATCHSPACE_SOCKET "
+                "at a path you own; refusing to start rather than running "
+                "without a socket.",
+                SOCKET_PATH,
+                exc,
+            )
+            self._running = False
+            return
+        socket_thread = threading.Thread(target=self._serve_clients, daemon=True)
         socket_thread.start()
 
         # Clear anything a previous (uncleanly-killed) run left behind
         # before we request fresh objects.  This is the slow part when a
-        # crashed run left a pile of orphaned pw-cli/pw-cat helpers.
-        self._cleanup_stale_objects()
+        # crashed run left a pile of orphaned pw-cli/pw-cat helpers - and it
+        # raises AnotherDaemonRunning (refusing to touch them) when the
+        # objects belong to a daemon that is still alive.
+        try:
+            self._cleanup_stale_objects()
+        except pwgraph.AnotherDaemonRunning as exc:
+            logger.error("%s - refusing to start a second instance", exc)
+            self._close_socket()
+            self._running = False
+            return
 
         # Capture the pre-existing defaults before creating our own
         # devices - see _capture_defaults docstring.
@@ -697,6 +747,8 @@ class PatchSpaceDaemon:
 
         self._ticker = Ticker(SUPERVISE_INTERVAL_S, self._tick)
         self._ticker.start()
+
+        self.started = True
 
         # Snapshot the panel files up front so the tick's change watcher
         # doesn't fire a reload on top of the startup load (which refreshes
@@ -719,6 +771,11 @@ class PatchSpaceDaemon:
             logger.info("\nShutting down...")
         finally:
             self._running = False
+
+    #: True once `start` got past the single-instance probe, bound its
+    #: socket and claimed the graph - i.e. the daemon is actually serving.
+    #: `start` returning without this means it refused (see `main`).
+    started: bool = False
 
     def stop(self) -> None:
         self._running = False
@@ -5120,26 +5177,39 @@ class PatchSpaceDaemon:
     # socket server
     # ------------------------------------------------------------------
 
-    def _socket_server(self) -> None:
-        # Second line of defence for the single-instance guard in start():
-        # if another daemon claimed the socket while we were doing the slow
-        # start-up, do NOT unlink its socket (that would cut the live GUI
-        # off from the real daemon).  Shut this instance down instead.
-        if self._another_daemon_running():
-            logger.error(
-                "Another daemon claimed %s during start-up - shutting this "
-                "instance down",
-                SOCKET_PATH,
-            )
-            self._running = False
-            return
+    def _bind_socket(self) -> None:
+        """Replace any stale socket file and listen on SOCKET_PATH.
+
+        Raises OSError if the path cannot be taken (see `start`).  A stale
+        file whose owner is gone is safe to unlink; a *live* listener is not
+        - `start`'s single-instance probe has already refused that case."""
         if os.path.exists(SOCKET_PATH):
             os.unlink(SOCKET_PATH)
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(SOCKET_PATH)
         server.listen(5)
         os.chmod(SOCKET_PATH, 0o666)
+        self._server = server
         logger.info("Listening on %s", SOCKET_PATH)
+
+    def _close_socket(self) -> None:
+        server = self._server
+        self._server = None
+        if server is not None:
+            try:
+                server.close()
+            except OSError:
+                pass
+        if os.path.exists(SOCKET_PATH):
+            try:
+                os.unlink(SOCKET_PATH)
+            except OSError:
+                pass
+
+    def _serve_clients(self) -> None:
+        server = self._server
+        if server is None:
+            return
         try:
             while self._running:
                 try:
@@ -5151,9 +5221,7 @@ class PatchSpaceDaemon:
                     if self._running:
                         logger.error("socket accept error: %s", exc)
         finally:
-            server.close()
-            if os.path.exists(SOCKET_PATH):
-                os.unlink(SOCKET_PATH)
+            self._close_socket()
 
     def _handle_client(self, client_socket: socket.socket) -> None:
         self._clients.add(client_socket)
@@ -5207,8 +5275,9 @@ def main():
         "--socket",
         default=SOCKET_PATH,
         metavar="PATH",
-        help="Unix socket to serve the command API on "
-        "(default: $PATCHSPACE_SOCKET, else /tmp/patchspace.sock)",
+        help="Unix socket to serve the command API on (default: "
+        "$PATCHSPACE_SOCKET, else $XDG_RUNTIME_DIR/patchspace.sock, else "
+        "/tmp/patchspace.sock)",
     )
     parser.add_argument(
         "--panel-dir",
@@ -5247,6 +5316,11 @@ def main():
         daemon.start()
     finally:
         daemon.stop()
+    # `start` returns without ever running when it refused (another daemon
+    # owns the graph, or the socket cannot be served).  Exit non-zero so the
+    # supervisor reports it instead of calling the exit a success.
+    if not daemon.started:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

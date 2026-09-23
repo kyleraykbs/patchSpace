@@ -4,7 +4,8 @@ patchspace_gui.py
 
 Entrypoint for the Patch Space GTK4 client. Run this against a running
 patchspace daemon (main.py) - it talks to it over the Unix socket at
-constants.SOCKET_PATH (default /tmp/patchspace.sock, or $PATCHSPACE_SOCKET).
+constants.SOCKET_PATH (default $XDG_RUNTIME_DIR/patchspace.sock, or
+$PATCHSPACE_SOCKET).
 """
 import os
 import sys

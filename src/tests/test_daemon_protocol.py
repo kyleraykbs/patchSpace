@@ -1538,6 +1538,27 @@ def test_a_dead_pipewire_monitor_is_restarted_with_backoff(monkeypatch):
     assert len(syncs) == 3, "the monitor was never retried after the backoff"
 
 
+def test_a_socket_that_cannot_be_bound_stops_the_daemon(monkeypatch, tmp_path):
+    """A daemon nobody can talk to must not run.  This is the failure that
+    broke a live session: /tmp held a socket owned by another user, the unlink
+    raised EPERM inside the server thread, and the daemon carried on headless
+    - sweeping the objects of the daemon that *was* serving."""
+    path = tmp_path / "patchspace.sock"
+    path.write_text("")                       # something is in the way
+    monkeypatch.setattr(main_mod, "SOCKET_PATH", str(path))
+
+    def _denied(target):
+        raise PermissionError(1, "Operation not permitted", target)
+
+    monkeypatch.setattr(main_mod.os, "unlink", _denied)
+    d = fresh_daemon()
+    d.start()                                 # returns instead of serving
+    assert d.started is False
+    assert d._running is False
+    assert d._server is None
+    assert d.graph._proc is None, "the graph monitor was started anyway"
+
+
 def test_patchspace_socket_env_moves_every_end(monkeypatch, tmp_path):
     """$PATCHSPACE_SOCKET is the one knob that moves the daemon, the GUI and
     the CLI tools together (a service whose socket belongs in
@@ -1558,11 +1579,23 @@ def test_patchspace_socket_env_moves_every_end(monkeypatch, tmp_path):
     assert result.returncode == 0, result.stderr
     assert result.stdout.split() == [sock, sock, sock]
 
-    # …and without it, the historical default is unchanged.
-    del env["PATCHSPACE_SOCKET"]
+    # …and without it, the default is a path the *user* owns, with the
+    # historical /tmp name only for a session that has no runtime dir.
+    env.pop("PATCHSPACE_SOCKET")
+    rundir = tmp_path / "run"
+    rundir.mkdir()
+    env["XDG_RUNTIME_DIR"] = str(rundir)
     result = subprocess.run(
         [sys.executable, "-c", code], env=env, capture_output=True, text=True
     )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == [str(rundir / "patchspace.sock")] * 3
+
+    env.pop("XDG_RUNTIME_DIR")
+    result = subprocess.run(
+        [sys.executable, "-c", code], env=env, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
     assert result.stdout.split() == ["/tmp/patchspace.sock"] * 3
 
 
@@ -1615,8 +1648,8 @@ def test_daemon_serves_the_configured_socket(monkeypatch, tmp_path):
     monkeypatch.setattr(main_mod, "SOCKET_PATH", path)
     d = fresh_daemon()
     d._running = True
-    server = threading.Thread(target=d._socket_server, daemon=True)
-    server.start()
+    d._bind_socket()                     # synchronous and fatal, as in start()
+    threading.Thread(target=d._serve_clients, daemon=True).start()
     deadline = time.monotonic() + 5.0
     while not os.path.exists(path) and time.monotonic() < deadline:
         time.sleep(0.02)

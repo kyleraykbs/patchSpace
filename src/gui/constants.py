@@ -5,7 +5,22 @@ Shared timing / limit constants for the Patch Space GTK client.
 
 import os
 
-SOCKET_PATH = os.environ.get("PATCHSPACE_SOCKET") or "/tmp/patchspace.sock"
+def _default_socket_path() -> str:
+    """The daemon's default socket: `$XDG_RUNTIME_DIR/patchspace.sock`, with
+    the /tmp name only as a fallback (see main.py's `_default_socket_path` -
+    a test asserts the two agree, since the client and the daemon must pick
+    the same path without being told)."""
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime and os.path.isdir(runtime):
+        return os.path.join(runtime, "patchspace.sock")
+    return "/tmp/patchspace.sock"
+
+
+SOCKET_PATH = (
+    os.environ.get("PATCHSPACE_SOCKET")
+    or os.environ.get("PATCHBAY_SOCKET")
+    or _default_socket_path()
+)
 # ^ $PATCHSPACE_SOCKET (the daemon's --socket/`PATCHSPACE_SOCKET`) lets a second
 # daemon - another user, a test instance, a systemd user service whose socket
 # belongs in $XDG_RUNTIME_DIR - coexist with the default one.  The GUI both

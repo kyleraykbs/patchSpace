@@ -193,3 +193,19 @@ Reminder for module work: after editing this repo, a consumer using a `path:` in
 * **`services.patchspace.canvasOpacity`** defaults to `config.stylix.opacity.applications` (or
   `null`) and reaches the GUI as `PATCHSPACE_CANVAS_OPACITY` from the session environment; the
   `--canvas-opacity` flag still wins.
+
+## The two-daemon incident (2026-09-23)
+
+A root-owned `/tmp/patchspace.sock` + a daemon that only *logged* its failed
+unlink = a headless daemon whose start-up sweep destroyed the serving
+daemon's 98 objects, killed its helpers and left the user's mic graph
+thrashing.  Fixes (all tested):
+
+* default socket is `$XDG_RUNTIME_DIR/patchspace.sock` in all three places
+  (daemon, CLI, GUI) - the /tmp name only when there is no runtime dir;
+* `_bind_socket` runs synchronously in `start()` and a failure is fatal
+  (exit 1 via `daemon.started`), so the daemon can never run socket-less;
+* `reap_stale_for_names` raises `AnotherDaemonRunning` when a candidate's
+  owner is alive *and* its parent is a daemon (`_is_daemon_process`) - it
+  only sweeps true orphans (parent init/user manager);
+* `_terminate_orphan_helpers` applies the same predicate.

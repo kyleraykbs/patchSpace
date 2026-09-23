@@ -4,6 +4,8 @@ and stale-object reaping, without touching a live PipeWire server."""
 import json
 import types
 
+import os
+
 import pytest
 
 from pwgraph import LinkError, PipewireGraph, _name_is_backing_of
@@ -264,3 +266,50 @@ def test_targeted_reap_matches_only_its_backing_family():
     # A mere textual prefix ("fxbox") is not part of the "fx" family.
     assert "fxbox" not in g._live_names_matching(["fx"])
 
+
+
+def test_the_reaper_refuses_to_touch_a_live_daemons_graph(monkeypatch):
+    """Reaping is only justified when the process that owns the objects is
+    gone.  Two daemons at once is not that: one sweeping the other's graph is
+    how a second instance left the first running headless while BOTH rebuilt
+    the user's nodes."""
+    from pwgraph import AnotherDaemonRunning, PipewireGraph
+
+    g = PipewireGraph()
+    monkeypatch.setattr(
+        g, "_snapshot_stale",
+        lambda markers, owned_sweep=False: ({101: "nc_a"}, {4242}),
+    )
+    monkeypatch.setattr(g, "_parent_is_another_daemon", lambda pid: pid == 4242)
+    touched = []
+    monkeypatch.setattr(os, "kill", lambda pid, sig: touched.append(pid))
+    monkeypatch.setattr(
+        g, "_destroy_nodes",
+        lambda stale: touched.append(("destroy", dict(stale))) or 0,
+    )
+    monkeypatch.setattr(g, "_terminate_orphan_helpers", lambda markers: 0)
+
+    with pytest.raises(AnotherDaemonRunning):
+        g.reap_stale_for_names(["nc_a"])
+    assert touched == [], "the reaper acted on another daemon's objects"
+
+
+def test_the_reaper_still_reaps_genuine_orphans(monkeypatch):
+    """The crash-recovery case it exists for: the owning process is gone (its
+    parent is init or the user manager, not a daemon), so the leftovers go."""
+    from pwgraph import PipewireGraph
+
+    g = PipewireGraph()
+    monkeypatch.setattr(
+        g, "_snapshot_stale",
+        lambda markers, owned_sweep=False: ({101: "nc_a"}, {4242}),
+    )
+    monkeypatch.setattr(g, "_parent_is_another_daemon", lambda pid: False)
+    killed = []
+    monkeypatch.setattr(os, "kill", lambda pid, sig: killed.append(pid))
+    monkeypatch.setattr(g, "_destroy_nodes", lambda stale: 1)
+    monkeypatch.setattr(g, "_terminate_orphan_helpers", lambda markers: 0)
+    monkeypatch.setattr(g, "_wait_markers_gone", lambda *a, **k: True)
+
+    assert g.reap_stale_for_names(["nc_a"]) >= 1
+    assert killed == [4242]

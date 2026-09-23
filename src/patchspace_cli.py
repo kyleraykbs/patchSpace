@@ -30,7 +30,20 @@ from typing import Any, Dict
 # from. Keep this in sync with SOCKET_PATH in gui/constants.py and
 # main.py if it ever changes - including the $PATCHSPACE_SOCKET override,
 # which is how all three are moved together.
-SOCKET_PATH = os.environ.get("PATCHSPACE_SOCKET") or "/tmp/patchspace.sock"
+def _default_socket_path() -> str:
+    """The daemon's default socket: `$XDG_RUNTIME_DIR/patchspace.sock`, with
+    the /tmp name only as a fallback (see main.py's `_default_socket_path`)."""
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime and os.path.isdir(runtime):
+        return os.path.join(runtime, "patchspace.sock")
+    return "/tmp/patchspace.sock"
+
+
+SOCKET_PATH = (
+    os.environ.get("PATCHSPACE_SOCKET")
+    or os.environ.get("PATCHBAY_SOCKET")
+    or _default_socket_path()
+)
 
 
 class PatchSpaceClient:

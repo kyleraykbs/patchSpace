@@ -308,8 +308,8 @@ in
       example = "%t/patchspace.sock";
       description = ''
         Command-API socket.  `null` keeps the daemon's own default
-        (`/tmp/patchspace.sock`), which is what the GUI and the CLI tools
-        connect to out of the box.  Change it and they all need
+        (`$XDG_RUNTIME_DIR/patchspace.sock`), which is what the GUI and the
+        CLI tools connect to out of the box.  Change it and they all need
         `PATCHSPACE_SOCKET` in the session environment - the GUI is a client
         and has to be pointed at the same path.
       '';

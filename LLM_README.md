@@ -103,7 +103,9 @@ cd src/gui && python patchspace_gui.py
 cd src && python -m pytest -q
 ```
 
-The daemon listens on a Unix socket, `/tmp/patchspace.sock` by default. `--socket PATH` on the
+The daemon listens on a Unix socket, `$XDG_RUNTIME_DIR/patchspace.sock` by default (the /tmp name
+is only the fallback when a session has no runtime dir - a socket there can be left behind by
+another user, and in sticky /tmp we cannot unlink it). `--socket PATH` on the
 daemon (or `$PATCHSPACE_SOCKET`, which the daemon, the GUI and the CLI tools all read) moves
 it - e.g. into `$XDG_RUNTIME_DIR` for a user service, or so a second daemon can exist
 without tripping the single-instance guard. The GUI talks to it over that socket; it can
@@ -172,7 +174,8 @@ services.patchspace = {
   fails the build of the panel dir the daemon loads.
 * **Rebuilds restart the daemon**: the generated dir is a new store path, which changes the
   unit's `ExecStart`. `services.patchspace.socket` defaults to `null` (the built-in
-  `/tmp/patchspace.sock`); set it and the GUI/CLI need `PATCHSPACE_SOCKET` in the session too.
+  `$XDG_RUNTIME_DIR/patchspace.sock`); set it and the GUI/CLI need `PATCHSPACE_SOCKET` in the
+  session too.
 
 * **Ordering against PipeWire.** The unit is `Wants=`/`After=` both
 `pipewire.service` and `wireplumber.service` and `WantedBy=default.target`, so a
@@ -1045,6 +1048,37 @@ approach for pure GUI behavior). "It passed pytest" is not proof an effect works
 ---
 
 ## 5. Hard-won rules / traps (read before debugging effects)
+
+**Two daemons must never share a session - and a daemon that cannot serve
+must not run.** Both halves were learned the hard way, in one incident: a
+Patch Space socket left in `/tmp` *owned by another user* (root, in this
+case) made `os.unlink` raise EPERM in the daemon's socket thread. The thread
+died, the daemon carried on **headless**, its start-up sweep then tore down
+98 objects belonging to the daemon that *was* serving (helpers killed,
+nodes destroyed), and the two instances fought over the user's mic graph for
+minutes. Fixes, all of them load-bearing:
+
+* The socket default is `$XDG_RUNTIME_DIR/patchspace.sock` (`main.py`,
+  `patchspace_cli.py`, `gui/constants.py` - the three are checked against each
+  other in a test), so a foreign file in world-writable `/tmp` cannot block
+  us; `/tmp/patchspace.sock` is only the fallback.
+* `start()` binds the socket **synchronously** and treats failure as fatal
+  (`_bind_socket`, exit 1). It used to bind on the server thread, which is
+  what let the daemon run with no way to talk to it.
+* `reap_stale_for_names` refuses (`AnotherDaemonRunning`) instead of reaping
+  when a candidate object's owner is *alive and its parent is a daemon*
+  (`_is_daemon_process`); only genuine orphans (parent is init or the user
+  manager) are swept. The name-based helper pass checks the same thing. The
+  old docstring's premise - "anything under our names can only be a leftover"
+  - is false the moment two daemons run.
+* `start()` returns without `started` set when it refuses, and the CLI exits
+  1, so systemd's `Restart=on-failure` and the GUI both report it rather than
+  treating a refusal as a healthy start.
+
+Verified live against a running daemon: a second instance started elsewhere
+refused (exit 1, its own socket cleaned up) and left the first's 83 nodes, 78
+edges and 52 helper processes untouched.
+
 
 **The graph monitor is supervised.** The daemon's window onto PipeWire is a
 `pw-dump -m` child; it exits by itself when PipeWire goes away (a PipeWire

@@ -120,6 +120,41 @@ def _name_matches_marker(name: str, marker: str) -> bool:
     return _name_is_backing_of(name, marker)
 
 
+class AnotherDaemonRunning(RuntimeError):
+    """Objects this daemon was about to clean up belong to a *live* Patch
+    Space daemon.
+
+    The startup sweep exists for a daemon that was killed uncleanly: its
+    helpers outlive it and keep exporting under the same names, so a fresh
+    run has to tear them down before creating its own.  That reasoning only
+    holds when the process that owns them is gone.  Two daemons running at
+    once is a different situation entirely - one must not reap the other's
+    graph (that is how a second instance left the first running headless
+    while BOTH rebuilt the user's nodes) - so the reaper refuses instead.
+    """
+
+
+def _is_daemon_process(pid: int) -> bool:
+    """Whether ``pid`` looks like a Patch Space daemon: its own entrypoint,
+    either the packaged ``patchspace-daemon`` or ``main.py`` (any build, so a
+    service, a GUI-spawned daemon and a dev-shell one all match).
+
+    The GUI is ``patchspace_gui.py`` and the helpers are pw-cli/pw-cat, so
+    neither matches.  Used to tell "my helper's parent is another daemon"
+    from "my helper was orphaned to init/the user manager"."""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            argv = [a.decode("utf-8", "replace") for a in f.read().split(b"\0") if a]
+    except OSError:
+        return False
+    if not argv:
+        return False
+    prog = os.path.basename(argv[0])
+    if prog in ("patchspace-daemon", "patchbay-daemon"):
+        return True
+    return any(os.path.basename(a) == "main.py" for a in argv[1:])
+
+
 def _owned_backings(node_datas) -> Set[str]:
     """Derive the ``backing_node_name`` of every one of this project's
     objects present in a node snapshot, from the objects themselves.
@@ -193,6 +228,10 @@ class PipewireGraph:
         pw_cli_command: Sequence[str] = ("pw-cli",),
     ):
         self.on_error = on_error
+        #: The process this graph belongs to (the daemon that built it), so
+        #: the startup reaper never mistakes its *own* helpers for another
+        #: instance's - see `_parent_is_another_daemon`.
+        self._caller_pid = os.getpid()
         self._dump_command = list(dump_command)
         self._link_command = list(link_command)
         self._unlink_command = list(unlink_command)
@@ -408,8 +447,24 @@ class PipewireGraph:
         markers = [m for m in markers if m]
         if not markers and not owned_sweep:
             return 0
-        swept = self._terminate_orphan_helpers(set(markers))
+        skipped = self._caller_pid
         stale, owner_pids = self._snapshot_stale(markers, owned_sweep)
+        # Refuse *before* touching anything: a candidate whose owning process
+        # is alive and was spawned by another daemon is that daemon's live
+        # graph, not a leftover.  (An orphaned helper's parent is init or the
+        # user manager, which is not a daemon process, so genuine leftovers
+        # are still reaped.)
+        live = sorted(
+            pid for pid in owner_pids
+            if pid != skipped and self._parent_is_another_daemon(pid)
+        )
+        if live:
+            raise AnotherDaemonRunning(
+                "another Patch Space daemon is running (its helper process(es) "
+                f"{live} still own graph objects); refusing to sweep or start a "
+                "second instance"
+            )
+        swept = self._terminate_orphan_helpers(set(markers))
         # Kill the actual owning process first, not just the node id.
         # Per pwproc.py's ownership model this is the one teardown path
         # the server always honors atomically and completely - a client
@@ -511,6 +566,11 @@ class PipewireGraph:
             args_text = " ".join(cmdline)
             if not any(marker in args_text for marker in markers):
                 continue
+            if self._parent_is_another_daemon(pid):
+                raise AnotherDaemonRunning(
+                    f"another Patch Space daemon owns the {prog} helper pid "
+                    f"{pid}; refusing to reap another instance's helpers"
+                )
             try:
                 os.kill(pid, signal.SIGTERM)
                 reaped += 1
@@ -637,6 +697,17 @@ class PipewireGraph:
         with open(f"/proc/{pid}/cmdline", "rb") as f:
             raw = f.read()
         return [p.decode("utf-8", errors="replace") for p in raw.split(b"\0") if p]
+
+    def _parent_is_another_daemon(self, pid: int) -> bool:
+        """Whether ``pid``'s parent is a live Patch Space daemon that is not
+        the daemon asking (see `_is_daemon_process`)."""
+        try:
+            parent = self._read_ppid(pid)
+        except (OSError, ValueError, IndexError):
+            return False
+        if parent in (0, 1) or parent == self._caller_pid:
+            return False
+        return _is_daemon_process(parent)
 
     @staticmethod
     def _read_ppid(pid: int) -> int:
