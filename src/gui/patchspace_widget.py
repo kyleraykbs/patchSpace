@@ -2569,8 +2569,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         dot_r = 5.0
         dot_x = node["x"] + self.NODE_WIDTH - self.FIELD_MARGIN - dot_r
         if self._readout_above_switch(node):
-            _tx, ty, _tw, th = self._toggle_switch_rect(nid)
-            dot_y = ty + th / 2.0
+            # The switch has moved down to the field row, so the read-out takes
+            # the row the switch used to occupy - the top of the bottom block.
+            dot_y = (
+                node["y"] + self.node_height(nid)
+                - (self._bottom_control_height(node) + 2)
+                + self.TOGGLE_SWITCH_HEIGHT / 2.0
+            )
         else:
             dot_y = fy + fh / 2.0
         return (dot_x, dot_y, dot_r, dot_x - dot_r - 5.0)

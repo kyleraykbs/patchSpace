@@ -38,6 +38,7 @@ from typing import Any, Dict, Optional
 
 import pwgraph
 import pwmatch
+import pwnodes
 from pwgraph import PipewireGraph
 from pwproc import Backoff, Ticker
 from pwnodes import (
@@ -5124,6 +5125,7 @@ class PatchSpaceDaemon:
                 # the timeline needs that sound's start to place them on the
                 # file's waveform.  Zero unless clips are stacked.
                 data["source_start"] = float(sound.get("start") or 0.0)
+                data["duration"] = pwnodes.probe_duration(sound.get("path") or "")
             if isinstance(node, SoundNode):
                 # The file's length, so the node can show it and the Clip
                 # timeline knows how much sound there is to select from.
