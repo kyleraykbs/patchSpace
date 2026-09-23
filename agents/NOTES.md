@@ -292,3 +292,8 @@ factor)` with the wheel.  Two traps: `::scale-changed` is cumulative since the g
 no bounding box (`get_bounding_box_center` fails) so the pointer is the fallback centre.
 Single-finger panning relies on GTK emulating button 1 for touch, which the primary-button drag
 gesture accepts; tested only structurally (no touchscreen here).
+
+* **Declaring a graph is optional.** `enable = true` with no `panels`/`nodes`/`edges` is a
+  complete configuration (the GUI's own panels are then the graph).  In that case the module
+  generates *no* panel files: an empty `main` panel is still a file, and `auto_load` makes the
+  daemon adopt it, putting an empty "Main" panel on the canvas.

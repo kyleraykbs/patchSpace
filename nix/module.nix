@@ -241,12 +241,24 @@ let
 
   ownPanels = removeAttrs cfg.panels [ "main" ];
   basePanels = if base == null then { } else removeAttrs base.panels [ "main" ];
-  panels =
+  declaredPanels =
     lib.mapAttrs
       (name: upper: if basePanels ? ${name} then layerPanel basePanels.${name} upper else upper)
       ownPanels
-    // lib.filterAttrs (name: _: !(ownPanels ? ${name})) basePanels
-    // { main = mainPanel; };
+    // lib.filterAttrs (name: _: !(ownPanels ? ${name})) basePanels;
+  # Is there anything declarative at all?  Enabling the service without
+  # declaring a graph is a complete configuration - the panels you make in the
+  # GUI (the daemon's own, writable panel directory) are then the graph - and
+  # generating an *empty* `main` panel file for it would be worse than
+  # useless: it opts in with `auto_load`, so the daemon adopts it and an empty
+  # "Main" panel appears on the canvas.
+  hasDeclarations =
+    mainPanel.nodes != { } || mainPanel.imports != [ ]
+    || mainPanel.edges != [ ] || mainPanel.groups != [ ]
+    || mainPanel.children != [ ] || declaredPanels != { };
+  panels =
+    if hasDeclarations then declaredPanels // { main = mainPanel; }
+    else declaredPanels;
 
   # Scalars: the upper (user) scope wins when it sets one.
   socket = pick cfg.socket (baseOf "socket" null);
@@ -649,16 +661,6 @@ in
           message = ''
             services.patchspace declares node(s) with no type, and no import
             provides one: ${typelessNodes}
-          '';
-        }
-        {
-          assertion = mainPanel.nodes != { } || mainPanel.imports != [ ]
-            || mainPanel.edges != [ ] || mainPanel.groups != [ ]
-            || mainPanel.children != [ ];
-          message = ''
-            services.patchspace is enabled but declares nothing: give it
-            `panels.<name>` (or the top-level `imports`/`nodes`/`edges`) to
-            configure.
           '';
         }
       ];

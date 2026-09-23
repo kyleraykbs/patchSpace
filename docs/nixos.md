@@ -23,6 +23,12 @@ actually open.
 Then rebuild. The daemon starts as `patchspace.service` (a *user* unit) and the client lands in
 `environment.systemPackages`, so `patchspace` and its desktop entry appear for every user.
 
+**Declaring a graph is optional.** `enable = true` on its own is a complete configuration: the
+daemon runs and the panels you make in the GUI - the daemon's own writable panel directory - are
+the graph. With nothing declared here, no panel files are generated at all (an *empty* generated
+panel would still opt in with `auto_load`, so the daemon would adopt it and an empty "Main"
+panel would appear on your canvas).
+
 ## What the module does
 
 * **Daemon**: `systemd.user.services.patchspace`, ordered `After=`/`Wants=`
