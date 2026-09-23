@@ -220,3 +220,19 @@ so the reference was lost on both sides and the panel never appeared (which is
 why a declarative graph could be built, validated, passed into the unit and
 still not show up in the GUI).  Fixed to: reload, append to the fresh root,
 write, reload again.  Idempotent, and the root file keeps every node it had.
+
+## Scope composition, icons, and the impulse colour (2026-09-23)
+
+* **NixOS and home-manager mirror each other and compose**: one `nix/module.nix`, two
+  instantiations.  The home-manager scope reads the NixOS scope via `osConfig` and merges on
+  top (nodes/edges/groups/panels/scalars; lists accumulate).  Whichever scope is *enabled*
+  owns the daemon unit - never both, because a user service belongs to the user and two
+  definitions of the same unit collide.  `installClient` puts the GUI client in whatever
+  profile the owning scope has; `effectiveConfig` exposes the merged per-panel config (the
+  `module-scopes` flake check asserts all of this by pure evaluation).
+* **`_node_icon_pixbuf` was dead**: `render_texture(node, None)` is rejected by PyGObject, so
+  every icon silently fell back to the hand-drawn glyph.  Icons used now:
+  `view-refresh-symbolic` (the reset button on read-only panels) and
+  `document-edit-symbolic` (the pencil).  Never pass an explicit None viewport.
+* **Impulse port colour** is `blue_3` from the theme (Adwaita's #3584e4; stylix maps it to its
+  palette's blue - which in the current palette is a muted teal).

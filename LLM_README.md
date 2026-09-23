@@ -125,6 +125,22 @@ they exercise geometry.
 
 ### Declarative deployment (NixOS / home-manager)
 
+**The two scopes mirror each other, and home-manager layers on top.**  Both
+`flake.modules.nixos.patchspace` and `flake.modules.homeManager.patchspace` are the same
+`nix/module.nix` with `homeManager = true/false`, exposing the same options.  A home-manager
+configuration reads the NixOS one through `osConfig` and merges over it - per node, per edge,
+per panel, per scalar - so a graph (or a single override) can live in either place and the user
+scope wins.  Whichever scope is *enabled* owns the daemon unit, and they never both define it:
+home-manager enabled ⇒ it owns (a user service belongs to the user, with that user's own
+merged config), NixOS enabled ⇒ it owns unless some home-manager user claims it.  `enable =
+true` is the whole configuration: the daemon, the generated panels, the client with its
+desktop entry and icon (`installClient`, on by default, respects the scope it lands in -
+`environment.systemPackages` or `home.packages`), and the session environment.  The merged
+per-panel config is exposed as `services.patchspace.effectiveConfig`, which is what the
+flake's `module-scopes` check asserts on (NixOS scope evaluated first, then home-manager with
+that as `osConfig` - exactly the order a real host goes through).
+
+
 `nix/module.nix` (exported as `flake.modules.nixos.patchspace`,
 `flake.modules.homeManager.patchspace` and the `nixosModules`/`homeModules` aliases; the
 merge helpers alone are `flake.lib.patchspace`) runs the daemon as a **user** service and
@@ -1048,6 +1064,13 @@ approach for pure GUI behavior). "It passed pytest" is not proof an effect works
 ---
 
 ## 5. Hard-won rules / traps (read before debugging effects)
+
+**Icon lookups fail silently if you pass a viewport.** `_node_icon_pixbuf` renders a symbolic
+GTK icon through `Gsk.CairoRenderer.render_texture`.  Passing an explicit `None` viewport
+(`render_texture(node, None)`) is rejected by PyGObject - so *every* lookup returned None, the
+hand-drawn fallback glyphs were what actually drew, and both the node icons and the panel
+header buttons looked wrong (a crescent "reset", an angled-rectangle "pencil").  Call
+`render_texture(node)` with the argument omitted.
 
 **Panel files are loaded by reference, and the auto-load adoption has to write
 before it reloads.** `panels.load_tree` reads the root panel and then only the

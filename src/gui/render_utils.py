@@ -137,7 +137,11 @@ def theme_palette(widget) -> dict:
         "boolean_port": _FALLBACK_BOOLEAN_PORT,
         "bundle_port": _FALLBACK_BUNDLE_PORT,
         "filter_port": _FALLBACK_FILTER_PORT,
-        "impulse_port": _FALLBACK_IMPULSE_PORT,
+        # An impulse is a momentary event, not a stream: the theme's own
+        # blue (Adwaita's #3584e4 by default; stylix maps blue_3 to its
+        # palette) so it reads as a distinct, vibrant signal and still
+        # follows the desktop's colours.  Falls back to the old cyan.
+        "impulse_port": _lookup(widget, "blue_3", _FALLBACK_IMPULSE_PORT),
         "link": _lookup(widget, "accent_color", _FALLBACK_LINK),
         "select": _FALLBACK_SELECT,
         "pending_link": _FALLBACK_PENDING_LINK,

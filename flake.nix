@@ -236,6 +236,131 @@
                 jq -e '.groups | length == 1' merged.json > /dev/null
                 touch $out
               '';
+
+              # Scope composition: the home-manager variant mirrors the NixOS
+              # one's options and layers on top of them, and whichever scope is
+              # enabled owns the daemon unit (a *user* service) - defined once,
+              # not twice.  Asserted purely by evaluation, in the two steps a
+              # real host goes through: the NixOS scope first, then the
+              # home-manager scope with that as its `osConfig`.
+              module-scopes =
+                let
+                  module = import ./nix/module.nix;
+                  patchspace = cfg: cfg.services.patchspace;
+
+                  nixosScope = hmUsers: pkgs.lib.evalModules {
+                    specialArgs = { inherit pkgs; lib = pkgs.lib; };
+                    modules = [
+                      (module { inherit self; homeManager = false; })
+                      {
+                        options.systemd.user.services = pkgs.lib.mkOption {
+                          type = pkgs.lib.types.attrsOf pkgs.lib.types.anything;
+                          default = { };
+                        };
+                        options.assertions = pkgs.lib.mkOption {
+                          type = pkgs.lib.types.listOf pkgs.lib.types.anything;
+                          default = [ ];
+                        };
+                        options.environment.sessionVariables = pkgs.lib.mkOption {
+                          type = pkgs.lib.types.attrsOf pkgs.lib.types.str;
+                          default = { };
+                        };
+                        options.environment.systemPackages = pkgs.lib.mkOption {
+                          type = pkgs.lib.types.listOf pkgs.lib.types.package;
+                          default = [ ];
+                        };
+                        options.home-manager.users = pkgs.lib.mkOption {
+                          type = pkgs.lib.types.attrsOf (pkgs.lib.types.submodule {
+                            options.services.patchspace.enable = pkgs.lib.mkOption {
+                              type = pkgs.lib.types.bool;
+                              default = false;
+                            };
+                          });
+                          default = { };
+                        };
+                        config.services.patchspace = {
+                          enable = true;
+                          nodes.from_nixos = {
+                            type = "gate";
+                            params = { label = "nixos"; enabled = true; };
+                          };
+                        };
+                        config.home-manager.users = hmUsers;
+                      }
+                    ];
+                  };
+
+                  # The NixOS scope alone: it owns the unit.
+                  alone = nixosScope { };
+
+                  # A home-manager user that enables patchspace: the user scope
+                  # now owns it, and the NixOS scope must define no unit at all.
+                  claimed = nixosScope {
+                    kyle.services.patchspace.enable = true;
+                  };
+
+                  # The home-manager scope, layering onto that NixOS scope.
+                  homeScope = pkgs.lib.evalModules {
+                    # What home-manager passes when it runs under NixOS: the
+                    # system configuration, which this scope layers onto.
+                    specialArgs = { inherit pkgs; lib = pkgs.lib; osConfig = claimed.config; };
+                    modules = [
+                      (module { inherit self; homeManager = true; })
+                      {
+                        options.home.packages = pkgs.lib.mkOption {
+                          type = pkgs.lib.types.listOf pkgs.lib.types.package;
+                          default = [ ];
+                        };
+                        options.home.sessionVariables = pkgs.lib.mkOption {
+                          type = pkgs.lib.types.attrsOf pkgs.lib.types.str;
+                          default = { };
+                        };
+                        options.systemd.user.services = pkgs.lib.mkOption {
+                          type = pkgs.lib.types.attrsOf pkgs.lib.types.anything;
+                          default = { };
+                        };
+                        options.assertions = pkgs.lib.mkOption {
+                          type = pkgs.lib.types.listOf pkgs.lib.types.anything;
+                          default = [ ];
+                        };
+                        config.services.patchspace = {
+                          enable = true;
+                          nodes.from_nixos.params = { label = "from-hm"; };
+                          nodes.from_hm = { type = "splitter"; params = { }; };
+                          edges = [ { from = "from_nixos"; to = "from_hm"; } ];
+                        };
+                      }
+                    ];
+                  };
+
+                  merged = (patchspace homeScope.config).effectiveConfig.main;
+                  solo = (patchspace alone.config).effectiveConfig.main;
+                  userUnit = homeScope.config.systemd.user.services.patchspace or { };
+                  systemUnit = claimed.config.systemd.user.services.patchspace or { };
+                  soloUnit = alone.config.systemd.user.services.patchspace or { };
+
+                  problems = pkgs.lib.filter (p: p != null) [
+                    (if merged.nodes.from_nixos.params.label == "from-hm" then null
+                     else "the home-manager scope did not win the field it set")
+                    (if merged.nodes.from_nixos.params.enabled then null
+                     else "the NixOS-scope field did not survive the merge")
+                    (if merged.nodes.from_hm.type == "splitter" then null
+                     else "a home-manager-only node is missing")
+                    (if pkgs.lib.length merged.edges == 1 then null
+                     else "the edges did not merge")
+                    (if userUnit.Service.ExecStart or null != null then null
+                     else "the home-manager scope did not take over the daemon")
+                    (if systemUnit == { } then null
+                     else "the NixOS scope defined a unit while home-manager owns it")
+                    (if soloUnit.serviceConfig.ExecStart or null != null then null
+                     else "a NixOS-only configuration did not define the daemon")
+                    (if solo.nodes.from_nixos.type == "gate" then null
+                     else "a NixOS-only configuration did not generate its panel")
+                  ];
+                in
+                if problems == [ ]
+                then pkgs.runCommand "check-module-scopes" { } "touch $out"
+                else throw "module scope composition: ${pkgs.lib.concatStringsSep "; " problems}";
             };
 
           devShells.default = pkgs.mkShell {

@@ -5177,7 +5177,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                         renderer = Gsk.CairoRenderer.new()
                         renderer.realize(None)
                         try:
-                            texture = renderer.render_texture(node, None)
+                            # NB: no viewport argument.  Passing an
+                            # explicit None is rejected by PyGObject
+                            # ("Argument 1 does not allow None as a
+                            # value"), which made every icon lookup fail
+                            # silently and fall back to the hand-drawn
+                            # glyphs.
+                            texture = renderer.render_texture(node)
                         finally:
                             renderer.unrealize()
                         if texture is not None:
@@ -9106,8 +9112,23 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             cr.set_source_rgb(*color)
             cr.set_line_width(1.0)
             cr.stroke()
-        cr.set_source_rgb(*((0.06, 0.06, 0.07) if active else color))
+        ink = (0.06, 0.06, 0.07) if active else color
+        cr.set_source_rgb(*ink)
         cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+        # Two of these are real GTK symbolic icons rather than hand-drawn
+        # glyphs: the arc-with-nub "reset" read as a crescent and the
+        # parallelogram "pencil" as an angled rectangle, so use the theme's
+        # own view-refresh / document-edit.  If the icon can't be rendered
+        # (no display, theme missing it) the hand-drawn versions below still
+        # draw, so a button is never blank.
+        if glyph in ("reset", "pencil"):
+            name = ("view-refresh-symbolic" if glyph == "reset"
+                    else "document-edit-symbolic")
+            pad = size * 0.14
+            inner = size - 2 * pad
+            if self._node_icon_pixbuf(name, inner, ink) is not None:
+                self._draw_node_icon(cr, name, x1 + pad, y1 + pad, inner, ink)
+                return
         if glyph == "pause":
             bar_w = max(1.5, size * 0.12)
             bar_h = size * 0.42

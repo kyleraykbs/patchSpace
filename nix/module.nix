@@ -18,7 +18,7 @@
 #     `session_repair`, so a bad port, a duplicate edge or an unknown node
 #     type fails the build instead of the daemon.
 { self, homeManager ? false }:
-{ config, lib, pkgs, ... }:
+{ config, lib, pkgs, osConfig ? null, ... }:
 
 let
   inherit (lib)
@@ -30,6 +30,7 @@ let
 
   system = pkgs.stdenv.hostPlatform.system;
   defaultDaemon = self.packages.${system}.patchspace-daemon;
+  defaultClient = self.packages.${system}.patchspace;
   repairTool = self.packages.${system}.patchspace-repair;
 
   # Node type keys the daemon knows (main.py's NODE_TYPE_REGISTRY).  An enum
@@ -167,14 +168,77 @@ let
     groups = [ ];
     children = [ ];
   };
-  explicitMain = cfg.panels.main or { };
-  mainPanel = panelDefaults // explicitMain // {
-    imports = cfg.imports ++ (explicitMain.imports or [ ]);
-    nodes = cfg.nodes // (explicitMain.nodes or { });
-    edges = cfg.edges ++ (explicitMain.edges or [ ]);
-    groups = cfg.groups ++ (explicitMain.groups or [ ]);
+  # ------------------------------------------------------------------
+  # Composition across the two scopes
+  #
+  # The NixOS and home-manager variants expose exactly the same options, and
+  # a home-manager configuration **layers on top of** the NixOS-scope one:
+  # the user scope wins per node, per edge, per panel and per scalar, so a
+  # graph - or a single override - can be written in either place.  The user
+  # scope is also where the daemon unit belongs when it is the one enabled:
+  # it is a *user* service, and the same unit defined in both scopes would
+  # leave systemd picking the user's copy while the system copy's
+  # `default.target.wants` link still pointed at the same name.
+  #
+  # `osConfig` is the NixOS configuration, available when these modules are
+  # used together; it is absent for a standalone home-manager install, where
+  # this scope is simply the only one.
+  # ------------------------------------------------------------------
+  base = if homeManager then (osConfig.services.patchspace or null) else null;
+  pick = upper: lower: if upper != null then upper else lower;
+  baseOf = name: fallback: if base == null then fallback else (base.${name} or fallback);
+
+  # The `main` panel of one scope: the top-level shorthand merged under an
+  # explicit `panels.main` (unchanged from the single-scope version, just
+  # parameterised so the base scope is laid out the same way).
+  mainOf = scope: panelDefaults // (scope.panels.main or { }) // {
+    imports = scope.imports ++ ((scope.panels.main or { }).imports or [ ]);
+    nodes = scope.nodes // ((scope.panels.main or { }).nodes or { });
+    edges = scope.edges ++ ((scope.panels.main or { }).edges or [ ]);
+    groups = scope.groups ++ ((scope.panels.main or { }).groups or [ ]);
   };
-  panels = cfg.panels // { main = mainPanel; };
+
+  # One panel, lower scope under upper scope.  Lists (imports, children)
+  # accumulate, nodes/edges/groups merge the same way they do within a scope.
+  layerPanel = lower: upper: {
+    label = pick upper.label lower.label;
+    color = pick upper.color lower.color;
+    autoLoad = upper.autoLoad;
+    placement = lower.placement // upper.placement;
+    children = lower.children ++ upper.children;
+    imports = lower.imports ++ upper.imports;
+    nodes = lib.recursiveUpdate lower.nodes upper.nodes;
+    edges = patchspaceLib.mergeEdges lower.edges upper.edges;
+    groups = patchspaceLib.mergeGroups lower.groups upper.groups;
+  };
+
+  ownMain = mainOf cfg;
+  baseMain = if base == null then null else mainOf base;
+  mainPanel = if baseMain == null then ownMain else layerPanel baseMain ownMain;
+
+  ownPanels = removeAttrs cfg.panels [ "main" ];
+  basePanels = if base == null then { } else removeAttrs base.panels [ "main" ];
+  panels =
+    lib.mapAttrs
+      (name: upper: if basePanels ? ${name} then layerPanel basePanels.${name} upper else upper)
+      ownPanels
+    // lib.filterAttrs (name: _: !(ownPanels ? ${name})) basePanels
+    // { main = mainPanel; };
+
+  # Scalars: the upper (user) scope wins when it sets one.
+  socket = pick cfg.socket (baseOf "socket" null);
+  rootPanel = pick cfg.rootPanel (baseOf "rootPanel" null);
+  canvasOpacity = pick cfg.canvasOpacity (baseOf "canvasOpacity" null);
+  panelDirs = pick cfg.panelDirs (baseOf "panelDirs" null);
+  extraArgs = (baseOf "extraArgs" [ ]) ++ cfg.extraArgs;
+
+  # The daemon is handed *some* `--panel-dir` (the generated declarative one
+  # is always last), and handing it any at all replaces its built-in default,
+  # so the conventional directory - where the GUI keeps the panels you make by
+  # hand - has to be named explicitly unless the configuration says otherwise.
+  daemonDirs =
+    if panelDirs != null then panelDirs
+    else [ "%h/.local/share/patchspace/panels:rw" ];
 
   panelConfig = panel: patchspaceLib.panelConfig panel;
 
@@ -230,7 +294,7 @@ let
       "ln -s ${panelFile name panel} $out/${name}.json") panels)}
   '';
 
-  socketArgs = lib.optionals (cfg.socket != null) [ "--socket" (toString cfg.socket) ];
+  socketArgs = lib.optionals (socket != null) [ "--socket" (toString socket) ];
 
   # The daemon *replaces* its default panel directory as soon as one
   # `--panel-dir` is given, so the conventional (imperative) directory has to
@@ -238,11 +302,11 @@ let
   # panels the GUI makes by hand.  The generated declarative directory goes
   # last: later dirs shadow earlier ones, so a panel defined in Nix wins over
   # a file with the same stem anywhere else.
-  panelDirArgs = lib.concatMap (d: [ "--panel-dir" d ]) cfg.panelDirs
+  panelDirArgs = lib.concatMap (d: [ "--panel-dir" d ]) daemonDirs
     ++ [ "--panel-dir" "${panelsDir}:ro" ];
 
-  rootPanelArgs = lib.optionals (cfg.rootPanel != null) [
-    "--root-panel" (toString cfg.rootPanel)
+  rootPanelArgs = lib.optionals (rootPanel != null) [
+    "--root-panel" (toString rootPanel)
   ];
 
   # `type` may be omitted on an override (it comes from the import), so the
@@ -260,6 +324,14 @@ let
       "${name}: ${concatStringsSep ", " missing}"
   ) (builtins.attrNames panels);
 
+  # A home-manager user that enables patchspace owns the daemon for that user
+  # (see the composition note): this scope then defines nothing at all, not
+  # even a unit - otherwise systemd would have two definitions of the same
+  # user unit and the system one's activation link would point at the other.
+  hmOwns = !homeManager && lib.any
+    (u: u.services.patchspace.enable or false)
+    (lib.attrValues (config.home-manager.users or { }));
+
   unit = {
     description = "Patch Space daemon (PipeWire patchspace)";
     after = [ "pipewire.service" "wireplumber.service" ];
@@ -267,8 +339,8 @@ let
     # Only needed when a root panel is configured somewhere the daemon
     # wouldn't have created for itself (its own default lives under ~/.cache,
     # which already exists).
-    execStartPre = lib.optionals (cfg.rootPanel != null) [
-      "${pkgs.coreutils}/bin/mkdir -p ${builtins.dirOf (toString cfg.rootPanel)}"
+    execStartPre = lib.optionals (rootPanel != null) [
+      "${pkgs.coreutils}/bin/mkdir -p ${builtins.dirOf (toString rootPanel)}"
     ];
     execStart = concatStringsSep " " ([
       "${cfg.package}/bin/patchspace-daemon"
@@ -280,8 +352,8 @@ let
     # so a window started from a launcher gets it even when the session
     # environment predates the rebuild - which is the normal case, since a
     # session variable only reaches a session at login.
-    environment = mkIf (cfg.canvasOpacity != null) [
-      "PATCHSPACE_CANVAS_OPACITY=${toString cfg.canvasOpacity}"
+    environment = mkIf (canvasOpacity != null) [
+      "PATCHSPACE_CANVAS_OPACITY=${toString canvasOpacity}"
     ];
   };
 
@@ -302,6 +374,27 @@ in
       description = "The daemon to run (needs pw-cli/pw-cat/wpctl on PATH).";
     };
 
+    installClient = mkOption {
+      type = types.bool;
+      default = true;
+      description = ''
+        Install the GUI client (from `clientPackage`) in this scope's profile.
+
+        A patchspace is a daemon plus a set of panel files, and neither of
+        those is something you can *open*: the window is a separate app, with
+        the `.desktop` entry and icon travelling in its package.  Installing
+        it here means `services.patchspace.enable = true` is the whole
+        configuration; set this to false if you install the client yourself.
+      '';
+    };
+
+    clientPackage = mkOption {
+      type = types.package;
+      default = defaultClient;
+      defaultText = literalExpression "the patchspace GUI from this flake";
+      description = "The GUI installed when `installClient` is set.";
+    };
+
     socket = mkOption {
       type = types.nullOr types.str;
       default = null;
@@ -316,8 +409,8 @@ in
     };
 
     panelDirs = mkOption {
-      type = types.listOf types.str;
-      default = [ "%h/.local/share/patchspace/panels:rw" ];
+      type = types.nullOr (types.listOf types.str);
+      default = null;
       example = literalExpression ''
         [
           "%h/.local/share/patchspace/panels:rw"
@@ -330,10 +423,11 @@ in
         declarative directory is always appended **last and read-only**, so a
         panel written in Nix wins over a file with the same stem anywhere else.
 
-        The default is the daemon's conventional directory - where the GUI
-        keeps the panels you make by hand - because handing the daemon any
-        `--panel-dir` at all replaces its built-in default.  Pass `[]` to load
-        nothing but the declarative panels.
+        `null` (the default) is the daemon's conventional directory - where
+        the GUI keeps the panels you make by hand - because handing the daemon
+        any `--panel-dir` at all replaces its built-in default.  Pass `[]` to
+        load nothing but the declarative panels.  A home-manager value
+        overrides a NixOS-scope one (see the composition note above).
       '';
     };
 
@@ -445,10 +539,27 @@ in
         (that build is what runs the validation).
       '';
     };
+
+    effectiveConfig = mkOption {
+      type = types.attrsOf types.anything;
+      readOnly = true;
+      internal = true;
+      description = ''
+        The flattened, merged configuration per panel (`{ <stem> = { nodes,
+        edges, groups }; }`) that the generated panel files are built from -
+        i.e. the NixOS scope with the home-manager scope layered on top.  Set
+        by whichever scope owns the daemon; exposed so a deployment (and the
+        flake's own checks) can see exactly what the daemon loads.
+      '';
+    };
   };
 
-  config = mkIf cfg.enable (mkMerge [
-    { services.patchspace.panelsDir = panelsDir; }
+  config = mkIf (cfg.enable && !hmOwns) (mkMerge [
+    {
+      services.patchspace.panelsDir = panelsDir;
+      services.patchspace.effectiveConfig =
+        lib.mapAttrs (_: patchspaceLib.panelConfig) panels;
+    }
 
     # The GUI is a client of the daemon, so its window defaults come from the
     # session environment rather than the unit - and `canvasOpacity` already
@@ -456,13 +567,15 @@ in
     # option holds the session environment depends on the scope this module
     # was loaded in.
     (if homeManager then {
-      home.sessionVariables = mkIf (cfg.canvasOpacity != null) {
-        PATCHSPACE_CANVAS_OPACITY = toString cfg.canvasOpacity;
+      home.sessionVariables = mkIf (canvasOpacity != null) {
+        PATCHSPACE_CANVAS_OPACITY = toString canvasOpacity;
       };
+      home.packages = mkIf cfg.installClient [ cfg.clientPackage ];
     } else {
-      environment.sessionVariables = mkIf (cfg.canvasOpacity != null) {
-        PATCHSPACE_CANVAS_OPACITY = toString cfg.canvasOpacity;
+      environment.sessionVariables = mkIf (canvasOpacity != null) {
+        PATCHSPACE_CANVAS_OPACITY = toString canvasOpacity;
       };
+      environment.systemPackages = mkIf cfg.installClient [ cfg.clientPackage ];
     })
 
     {
