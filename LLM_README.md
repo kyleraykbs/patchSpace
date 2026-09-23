@@ -243,7 +243,8 @@ stored default (`gui/bool_state.py:resolve_bool_state_from_poll`); it clears onc
 genuinely disconnected.
 
 **Impulse (`button` / `sound_effect`).** A fourth control-plane kind, but a *momentary
-event* rather than a level: `ButtonNode` ("Button") has one `impulse` output and no state
+event* rather than a level: `ButtonNode` (type "Button", face captioned "Trigger" - see
+`_impulse_label`, which keeps a name the user gave it) has one `impulse` output and no state
 at all, `SoundEffectNode` ("Sound Effect") has an `impulse` input plus an audio output and
 plays `path` when triggered. Nothing about an impulse is resolved on a sync - there is no
 value to sample - so it is a **push**: the GUI sends one `impulse` command and
@@ -1328,11 +1329,13 @@ supervision pass then recreates whatever vanished with the old PipeWire.
   control=..., field=..., settings=[...], boolean_inputs/outputs=..., impulse_inputs/
   outputs=..., toggle=..., indicator=..., socket_labels=...)`.
   - `control` ∈ `None | "volume" | "gate" | "boolean" | "fallback_onoff" | "wetdry" |
-    "sensitivity" | "gain" | "impulse"` selects the inline control drawn on the node body.
-    Boolean source nodes use `"boolean"`; gate/switcher fallback on/off uses
-    `"fallback_onoff"` (read-only white when a ctrl signal is wired); a Button uses
-    `"impulse"` (the gate-shaped face, grey until a press pulses it green for
-    `IMPULSE_FLASH_MS` - deliberately the only feedback, since a button has no state).
+    "sensitivity" | "gain" | "impulse" | "filter_mode"` selects the inline control drawn
+    on the node body.  Boolean source nodes use `"boolean"`; gate/switcher fallback on/off
+    uses `"fallback_onoff"` (read-only white when a ctrl signal is wired); a Button uses
+    `"impulse"` (the gate-shaped face, one step lighter while `hover_impulse` says the
+    pointer is over it, and pulsing green for `IMPULSE_FLASH_MS` on a press); the Filter
+    node uses `"filter_mode"` (the same face captioned `INCLUDE`/`EXCLUDE`).  All of these
+    claim `GATE_AREA_HEIGHT` in `_bottom_control_height`, so the face clears the sockets.
   - `socket_labels=False` suppresses per-port name labels on the symmetric boolean gates.
   - `settings` rows are `(attr, label, kind[, extra])` with kind `bool|number|choice|text`;
     `number` extra is `{min,max,step}`.

@@ -355,6 +355,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self.drag_start_xy = (0, 0)
         self.drag_current_xy = (0, 0)
         self.hover_target_node = None
+        # The Button node whose face the pointer is over (see on_motion and
+        # _draw_impulse_button): its face lifts a step to read as pressable.
+        self.hover_impulse = None
 
         # Slider-drag state.
         self.slider_dragging = (
@@ -5828,17 +5831,33 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         cr.set_source_rgb(*color)
         cr.fill()
 
+    def _impulse_label(self, node):
+        """What a Button node's face says: the label the user gave it, or
+        "Trigger" - the node *type* is called "Button", which describes the
+        kind of node rather than what pressing it does."""
+        label = (node.get("label") or "").strip()
+        if not label or label == spec_for(node["type"]).label:
+            return "Trigger"
+        return label
+
     def _draw_impulse_button(self, cr, nid, node):
         """The Button node's clickable face: the gate toggle's big
-        rounded rect, grey while idle and pulsing to the success green
-        for IMPULSE_FLASH_MS after a press (see _impulse_flash), captioned
-        with the node's label ("Trigger" when it has none)."""
+        rounded rect, grey while idle - one step lighter while the pointer is
+        over it (see hover_impulse) - and pulsing to the success green for
+        IMPULSE_FLASH_MS after a press (see _impulse_flash).  Captioned with
+        _impulse_label: "Trigger" unless the node has been renamed."""
         x, y, w, h = self._gate_rect(nid)
         radius = 10
         t = self._impulse_flash_progress(nid)
 
         idle_fill = (0.30, 0.30, 0.33)
         idle_border = (0.46, 0.46, 0.49)
+        if self.hover_impulse == nid:
+            # Pointer-over cue: the same face, one step lighter, so the button
+            # reads as pressable before it is pressed (the press pulse below
+            # is what turns it green).
+            idle_fill = (0.41, 0.41, 0.45)
+            idle_border = (0.60, 0.60, 0.64)
         # Ease the green in and back out so the press reads as a pulse
         # rather than a one-frame blink (the ticker repaints while it runs).
         glow = 1.0 - abs(2.0 * t - 1.0) if t is not None else 0.0
@@ -5859,14 +5878,18 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         cr.set_line_width(1.5)
         cr.stroke()
 
-        label_text = node.get("label") or "Trigger"
+        label_text = self._impulse_label(node)
         cr.select_font_face("sans")
         cr.set_font_size(12)
         extents = cr.text_extents(label_text)
         text_x = x + (w - extents.width) / 2 - extents.x_bearing
         text_y = y + (h - extents.height) / 2 - extents.y_bearing
-        cr.set_source_rgb(*(0.06, 0.16, 0.09) if glow > 0.5
-                          else (0.78, 0.78, 0.80))
+        if glow > 0.5:
+            cr.set_source_rgb(0.06, 0.16, 0.09)
+        elif self.hover_impulse == nid:
+            cr.set_source_rgb(0.94, 0.94, 0.97)
+        else:
+            cr.set_source_rgb(0.78, 0.78, 0.80)
         cr.move_to(text_x, text_y)
         cr.show_text(label_text)
 
@@ -5922,6 +5945,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self.track_pointer(x, y)
         wx, wy = self.to_world(x, y)
 
+        # The Button node lights its face while the pointer is on it.  Set
+        # before the branches below so the cue can't get stuck on through a
+        # drag, and repaint only on the edge.
+        hover = self.find_impulse_button_at(wx, wy)
+        if hover != self.hover_impulse:
+            self.hover_impulse = hover
+            self.queue_draw()
+
         if self.connecting_from:
             self.drag_current_xy = (wx, wy)
             socket_hit = self.find_socket_at(wx, wy)
@@ -5971,6 +6002,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     def on_leave(self, controller):
         self.set_cursor(None)
+        if self.hover_impulse is not None:
+            self.hover_impulse = None
+            self.queue_draw()
 
     def on_click(self, gesture, n_press, x, y):
         if n_press != 1:

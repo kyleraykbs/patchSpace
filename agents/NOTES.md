@@ -332,3 +332,9 @@ gesture accepts; tested only structurally (no touchscreen here).
   `blue_1`..`blue_5`, `accent_color` and the audio `link` color are all the *same* color -
   a blue bundle wire would have been indistinguishable from an audio one.  (Same reason the
   impulse's `blue_3` collides with audio there; reported, not changed.)
+
+* **A Button's face says what it does.**  `_impulse_label`: the node type is "Button", so
+  an unrenamed node's label *is* "Button" - the face shows "Trigger" for that and the
+  user's own label once they rename it.  The face also lifts one grey step while
+  `hover_impulse` holds it (`on_motion` sets it, `on_leave`/motion clears it, repaint only
+  on the edge); that hover is deliberately the only cue besides the press pulse.
