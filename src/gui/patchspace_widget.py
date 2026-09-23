@@ -2390,11 +2390,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             # than the button faces.
             return self.CLIP_AREA_HEIGHT
         if spec.control == "dump":
-            # Two text rows (folder, then name) on the node's own body - see
-            # _dump_row_rect.
+            # The impulse face *and* two text rows (folder, then name) below it
+            # - see _dump_row_rect.  Leaving the face out put it on top of the
+            # rows, which is what drew them on top of each other.
             return (
-                len(self.DUMP_FIELDS) * (self.FIELD_HEIGHT + self.DUMP_ROW_GAP)
-                + self.FIELD_BOTTOM_PAD
+                self.GATE_AREA_HEIGHT
+                + self._dump_rows_height()
             )
         if spec.control in ("gate", "switcher", "boolean", "impulse",
                             "filter_mode"):
@@ -2890,6 +2891,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         rows = self.FIELD_HEIGHT + self.FIELD_BOTTOM_PAD
         if spec.toggle:
             rows += self.TOGGLE_ROW_GAP + self.TOGGLE_ROW_HEIGHT
+        if spec.control == "dump":
+            # A Sound Dump's own two rows sit there instead of one field.
+            rows = self._dump_rows_height() + self.FIELD_BOTTOM_PAD
         x = node["x"] + self.GATE_MARGIN
         w = self.NODE_WIDTH - 2 * self.GATE_MARGIN
         y = (node["y"] + self.node_height(nid) - rows
@@ -6691,7 +6695,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         cr.set_source_rgb(0.46, 0.46, 0.49)
         cr.set_line_width(1.5)
         cr.stroke()
-        label = "Play"
+        # What pressing the face *does*, which differs by node: a player
+        # plays, a dump saves.
+        label = (
+            "Save"
+            if spec_for(self.nodes[nid]["type"]).control == "dump"
+            else "Play"
+        )
         cr.select_font_face("sans")
         cr.set_font_size(12)
         extents = cr.text_extents(label)
@@ -8184,6 +8194,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     #: Gap between those rows, pixels.
     DUMP_ROW_GAP = 6.0
+
+    def _dump_rows_height(self) -> float:
+        """How tall a Sound Dump's rows are, in total - the one place that
+        knows, so the node's height and its impulse face agree."""
+        return len(self.DUMP_FIELDS) * (
+            self.FIELD_HEIGHT + self.DUMP_ROW_GAP
+        )
 
     def _dump_row_rect(self, nid, which):
         """Geometry of one of a Sound Dump's field rows.  The folder row gives

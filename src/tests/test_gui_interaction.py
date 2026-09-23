@@ -276,3 +276,26 @@ def test_a_sound_dump_shows_its_two_fields_on_its_body():
     import cairo
     surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, 700, 500)
     w.on_draw(w, cairo.Context(surf), 700, 500)
+
+
+def test_a_sound_dumps_face_and_rows_do_not_overlap():
+    """The impulse face and the two field rows are stacked on the node's body:
+    the face first, then folder, then name.  Leaving the face out of the node's
+    height drew the rows on top of it (and each other)."""
+    w, client = _widget()
+    w.update_from_daemon({
+        "nodes": {"d1": {
+            "id": "d1", "type": "sound_dump", "label": "Sound Dump",
+            "x": 0.0, "y": 0.0, "ready": True, "connected": True,
+            "declarative": False, "selection_label": "Sound Dump",
+            "description": "", "folder": "~/Dumps", "name": "take 1",
+            "dump_path": ""}},
+        "edges": {}, "panels": [], "groups": []})
+
+    fx, fy, fw, fh = w._impulse_face_rect("d1")
+    dx, dy, dw, dh = w._dump_row_rect("d1", "folder")
+    nx, ny, nw, nh = w._dump_row_rect("d1", "name")
+
+    assert fy + fh <= dy + 0.01, "the Save face overlaps the folder row"
+    assert dy + dh <= ny + 0.01, "the folder row overlaps the name row"
+    assert ny + nh <= w.nodes["d1"]["y"] + w.node_height("d1") + 0.01
