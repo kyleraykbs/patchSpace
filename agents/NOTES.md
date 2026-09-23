@@ -407,3 +407,9 @@ gesture accepts; tested only structurally (no touchscreen here).
   like a recorder that had recorded nothing.  The waveform is now re-asked when
   `recording` flips (either direction: the file is wiped at the start and
   rewritten at the end), which is the only signal that changes.
+
+* The waveform refresh follows a *take*, not just the node that made it: a Clip
+  fed by a Recorder has the same stable path, so it stayed stale too.  The poll
+  collects the take paths whose recorder flipped `recording` *before* walking
+  the nodes (the consumer can be visited before the recorder), and any node
+  whose `source_path` is one of those re-asks.

@@ -1371,6 +1371,25 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         if loading_now and not self._daemon_loading:
             self._begin_load()
         self._daemon_loading = loading_now
+        # A take always writes the same path, so nothing *downstream* of a
+        # recorder sees its source change when a new take is made - but the
+        # file behind that path did.  Collect the take paths whose recorder
+        # flipped `recording` this poll, before the node loop: the node that
+        # *uses* that take may well be visited before the recorder itself.
+        changed_takes = set()
+        for nid, ndata in daemon_nodes.items():
+            if ndata.get("type") != "recorder":
+                continue
+            was = self._take_recording.get(nid)
+            now = bool(ndata.get("recording", False))
+            self._take_recording[nid] = now
+            if was is not None and was != now:
+                path = str(ndata.get("source_path") or "")
+                if path:
+                    changed_takes.add(path)
+        for nid in list(self._take_recording):
+            if nid not in daemon_nodes:
+                self._take_recording.pop(nid, None)
         selection_before = set(self.selected_nodes)
         anchored_before = set(self.anchored_nodes)
         # A poll can change a node's label/description/control state (and
@@ -1574,28 +1593,20 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                         node["source_start"] = ndata.get("source_start", 0.0)
                     # The timeline needs the waveform of whatever reaches this
                     # clip: ask when the source changes (not every poll - it is
-                    # a few hundred peaks).  A *recorder* breaks that rule on
-                    # purpose: a take always writes the same path - recording
-                    # deletes the node's file and writes it again - so the path
-                    # never changes and the old waveform would sit there
-                    # forever.  What does change is `recording`, so a Record or
-                    # Stop (either direction: the file is deleted at the start
-                    # and rewritten at the end) re-asks.
+                    # a few hundred peaks).  A recorder breaks the path rule on
+                    # purpose (a take always writes the same path), so a take
+                    # that just started or finished counts as a change for
+                    # everything fed by that file - the recorder itself and any
+                    # Clip downstream of it.
                     source = str(ndata.get("source_path") or "")
                     known = (self._clip_waves.get(nid) or {}).get("path")
-                    was_recording = self._take_recording.get(nid)
-                    now_recording = bool(ndata.get("recording", False))
-                    self._take_recording[nid] = now_recording
-                    take_flipped = (was_recording is not None
-                                    and was_recording != now_recording)
-                    if ((source and source != known) or take_flipped) \
-                            and nid not in self._clip_wave_pending:
+                    if ((source and (source != known or source in changed_takes))
+                            and nid not in self._clip_wave_pending):
                         self._clip_wave_pending.add(nid)
                         self.client.send({"command": "get_peaks", "node_id": nid})
                     elif not source:
                         self._clip_waves.pop(nid, None)
                         self._clip_views.pop(nid, None)
-                        self._take_recording.pop(nid, None)
                 if "exclude" in ndata:
                     exclude = self._accept_bool_echo(
                         nid, "exclude", ndata.get("exclude", False)

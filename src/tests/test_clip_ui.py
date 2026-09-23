@@ -289,3 +289,52 @@ def test_recorder_re_asks_for_its_waveform_after_a_take():
 
     rec["source_path"] = "/recordings/other.wav"   # a new source still re-asks
     assert polls() == 4
+
+
+def test_a_clip_fed_by_a_recorder_follows_the_take():
+    """A Clip wired to a Recorder never sees its own source path change - a
+    take always writes the same path - so it has to follow the recorder's
+    `recording` flip instead, exactly like the recorder's own timeline."""
+    gi = pytest.importorskip("gi")
+    gi.require_version("Gtk", "4.0")
+    from gi.repository import Gtk
+    if not Gtk.init_check():
+        pytest.skip("no display available for GTK")
+    from gui.patchspace_widget import PatchSpaceGraphWidget
+
+    TAKE = "/recordings/rec1.wav"
+    client = _Client()
+    w = PatchSpaceGraphWidget(client)
+    w.physics_active = False
+    w.layout_awake = False
+    rec = {"id": "rec1", "type": "recorder", "label": "Recorder", "x": 0.0, "y": 0.0,
+           "ready": True, "connected": True, "declarative": False,
+           "selection_label": "Recorder", "description": "",
+           "source_path": TAKE, "recording": False, "duration": 4.0}
+    clip = {"id": "clip1", "type": "clip", "label": "Clip", "x": 300.0, "y": 0.0,
+            "ready": True, "connected": True, "declarative": False,
+            "selection_label": "Clip", "description": "",
+            "source_path": TAKE, "start": 0.0, "end": 2.0, "duration": 4.0,
+            "source_start": 0.0}
+
+    def polls():
+        w.update_from_daemon({"nodes": {"rec1": dict(rec), "clip1": dict(clip)},
+                              "edges": {}, "panels": [], "groups": []})
+        return sorted(c["node_id"] for c in client.sent
+                      if c.get("command") == "get_peaks")
+
+    def answer():
+        for nid in ("rec1", "clip1"):
+            w.on_peaks({"node_id": nid, "path": TAKE, "duration": 4.0, "peaks": []})
+
+    polls(); polls()                      # the clip's path is new, then registered
+    assert polls() == ["clip1", "rec1"]
+    answer()
+
+    rec["recording"] = True               # a take starts: the file is wiped
+    assert len(polls()) == 4              # *both* re-ask, though neither path moved
+    answer()
+    rec.update(recording=False, duration=6.0)
+    assert len(polls()) == 6
+    answer()
+    assert len(polls()) == 6              # steady again
