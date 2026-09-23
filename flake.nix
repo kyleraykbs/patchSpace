@@ -144,7 +144,7 @@
             installPhase = ''
               runHook preInstall
               mkdir -p $out/bin $out/share/applications \
-                $out/share/icons/hicolor/scalable/apps
+                $out/share/icons/hicolor/512x512/apps
               # PATCHSPACE_DAEMON tells the GUI exactly which daemon binary
               # to spawn for its "start a background daemon" behaviour.
               makeWrapper ${guiPythonEnv}/bin/python $out/bin/patchspace \
@@ -159,8 +159,13 @@
               # a hash prefix, and a desktop file is found by its name.
               cp ${./packaging/org.patchspace.desktop} \
                 $out/share/applications/org.patchspace.desktop
-              cp ${./packaging/org.patchspace.svg} \
-                $out/share/icons/hicolor/scalable/apps/org.patchspace.svg
+              # A PNG, so it goes in a size slot that hicolor's own
+              # index.theme lists (a `<N>x<N>` directory it does not list is
+              # never looked at).  512x512 is the largest standard one; the
+              # source image is bigger than that, which only ever means the
+              # icon gets downscaled, never upscaled.
+              cp ${./packaging/org.patchspace.png} \
+                $out/share/icons/hicolor/512x512/apps/org.patchspace.png
               runHook postInstall
             '';
             meta.mainProgram = "patchspace";

@@ -941,6 +941,13 @@ control back to the daemon.
 `PATCHSPACE_DAEMON` is what lets the packaged GUI find the daemon binary. There is no
 `.gitignore`, so `nix build` on a dirty tree is normal.
 
+The GUI package also ships the `.desktop` entry and its icon from `packaging/` (copied under
+plain names - a store path's basename carries a hash), so a consumer just adds the package to
+`home.packages`. The icon is a PNG in `hicolor/512x512/apps`: hicolor's `index.theme` only
+lists the directory sizes it declares, so an icon in a size directory nobody lists (a
+`1080x1080` of its own) is never found, and a source image larger than its slot is only ever
+downscaled. `desktop-file-validate` runs in the flake's checks.
+
 ### Adding/changing a node property (checklist)
 A new tunable/serialized attribute usually touches all of these:
 1. `pwnodes.py` — the node class: default constant, bounds, clamp in `__init__`, and use
