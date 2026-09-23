@@ -672,11 +672,27 @@ node/edge/panel set changes, so it also runs right after a panel is created or l
 authoritative while physics/drag moves it (`_pending_panels`): a poll carries the last
 flushed placement, so accepting it would snap the panel - and, since moving a panel moves
 its nodes, drag every node back - each refresh. It is handed back to the daemon when the
-daemon echoes exactly what was sent. Newly created, cloned and placed panels start
-**pinned/paused** (`anchored=True`) so the re-armed layout can't shove a fresh panel
-around; `_panel_is_paused` (self or any ancestor anchored) makes a paused panel skip
-physics entirely - both its own nodes and the panel-vs-panel pass - and the panel header's
-physics-stop toggle unpins it.
+daemon echoes exactly what was sent. Newly created, cloned and placed panels start **pinned** (`anchored=True`) so the re-armed
+layout can't shove a fresh panel around; `_panel_is_paused` (self or any ancestor anchored)
+holds that panel's **box** still, and the panel header's physics-stop toggle unpins it
+(which now re-arms `layout_awake`, so un-pinning acts immediately instead of waiting for
+some unrelated structural change to wake the layout).
+
+Crucially, pinning a panel holds the box, **not its contents**: node physics still runs in
+a pinned panel's local frame, so nodes that arrive unanchored - anything loaded from a
+file, an export, or a Nix-generated panel; only nodes the *user* placed are node-anchored -
+settle themselves inside their panel while the box stays put. Because the box auto-fits its
+members, that settling would otherwise grow the box without bound: `_panel_growth_limits`
+caps the fitted box's *size* at the panel's declared placement plus `PANEL_PHYSICS_GROW`
+per side, and `_wall_nodes_into_panels` then holds members inside the *allowed* box (the capped
+size, centred on the fitted box the user is looking at - walling against the fitted box itself
+would forbid the contents from spreading at all).  The pull is a fraction of the overshoot per
+step (`PANEL_WALL_PULL`) with a clamp to the padded bound as a backstop, and it is applied
+against the box snapshot taken *before* that step's node physics, so the box can't chase its own
+tail.  The cap is on size, not on edges, because the box's origin legitimately follows its
+content - an origin-relative cap ratchets outward a `PANEL_PHYSICS_GROW` per step. Both passes
+are skipped while a drag is in flight (the drag path owns growth then, via
+`_panel_drag_baseline`/`PANEL_DRAG_GROW`).
 
 *Reparenting:* dragging a node across a boundary sends `move_nodes`; the daemon
 re-qualifies its id, re-homes its edges (ownership is derived from ids) and re-points

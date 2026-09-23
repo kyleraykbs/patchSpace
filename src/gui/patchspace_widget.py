@@ -760,8 +760,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     def set_physics_active(self, active):
         """Resume/pause *all* physics (node layout and panel repulsion).
-        Paused by default, so the graph stays exactly where it is until the
-        user opts in."""
+
+        On by default; this is the hamburger menu's / floating button's
+        global switch.  A *panel* that is pinned (`anchored`) is a separate,
+        per-panel thing: its box is held still, but node physics still runs
+        inside it (see `_panel_is_paused`)."""
         self.physics_active = bool(active)
         if self.physics_active:
             self.layout_awake = True
@@ -1075,10 +1078,15 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     def _panel_is_paused(self, panel_id):
         """Whether `panel_id` is pinned/paused: True if it, or any ancestor,
-        carries the panel header's physics-stop flag (`anchored`).  A paused
-        panel is skipped entirely by physics - its own nodes and the panel
-        itself hold still - which is what makes the per-panel pause button
-        (and the paused-by-default state of a new panel) meaningful."""
+        carries the panel header's physics-stop flag (`anchored`).
+
+        This pins the panel's **box**, not its nodes: `_hierarchical_step`
+        still runs node physics inside a paused panel's local frame (so the
+        contents settle, which is the whole point of a declarative panel
+        whose nodes arrive unanchored), while the panel-motion pass holds
+        the box where it is.  Pinning individual *nodes* is `anchored_nodes`
+        - which is what a node the user placed by hand gets, so hand
+        placement is never disturbed by either."""
         pid = panel_id
         guard = 0
         while pid and pid in self.panels and guard < 64:
@@ -1098,6 +1106,85 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             elif "::" not in nid:
                 out.append(nid)
         return out
+
+    def _wall_nodes_into_panels(self, rooms):
+        """Pull each panel's members back inside its box (the capped
+        `_panel_rect_base`, inset by `PANEL_PADDING`).
+
+        This is the other half of "physics runs inside panels": node
+        physics is free to push a member outward, and the box is what
+        defines the room (see `_panel_growth_limits`, which is what stops a
+        spreading cloud from simply growing the box without bound).
+
+        The correction is a *fraction of the overshoot per step* rather than
+        a hard clamp, so a spring that genuinely wants to pull outward
+        doesn't leave a node glued to the border with the solver fighting
+        the wall, and a loaded file whose coordinates sit far outside its
+        panel walks back in over a few frames - with a clamp to the padded
+        bound as a backstop, so a member is never drawn outside its box.
+
+        ``rooms`` is the box snapshot taken *before* this step's node
+        physics (see `_hierarchical_step`): walling against a box computed
+        from the new positions would chase its own tail.
+
+        Skipped for nodes/ports that are pinned at the node level, and for
+        the root panel (it has no box).  Returns the largest distance it
+        moved a node, for the caller's settle detection."""
+        moved = 0.0
+        ports = self._PORT_IN_TYPES | self._PORT_OUT_TYPES
+        pad = self.PANEL_PADDING
+        for pid, rect in rooms.items():
+            if rect is None:
+                continue
+            rx, ry, rw, rh = rect
+            # The room is the *allowed* box (placement plus
+            # PANEL_PHYSICS_GROW per side), centred on the fitted box the
+            # user is looking at - not the fitted box itself: a box that
+            # only ever hugs its current contents would refuse to let those
+            # contents spread at all (the wall would hold them inside the
+            # size they already had), which is the opposite of settling
+            # them.
+            max_w, max_h = self._panel_growth_limits(pid)
+            if max_w is not None:
+                cx = rx + rw / 2.0
+                rx, rw = cx - max_w / 2.0, max_w
+            if max_h is not None:
+                cy = ry + rh / 2.0
+                ry, rh = cy - max_h / 2.0, max_h
+            left, top = rx + pad, ry + pad
+            right, bottom = rx + rw - pad, ry + rh - pad
+            for nid in self._panel_direct_nodes(pid):
+                if nid in self.anchored_nodes or nid in self.pinned_nodes:
+                    continue
+                node = self.nodes[nid]
+                if node.get("type") in ports:
+                    continue
+                w, h = self.node_width(nid), self.node_height(nid)
+                ox, oy = node["x"], node["y"]
+                dx = dy = 0.0
+                if node["x"] < left:
+                    dx = (left - node["x"]) * self.PANEL_WALL_PULL
+                elif node["x"] + w > right:
+                    dx = (right - (node["x"] + w)) * self.PANEL_WALL_PULL
+                if node["y"] < top:
+                    dy = (top - node["y"]) * self.PANEL_WALL_PULL
+                elif node["y"] + h > bottom:
+                    dy = (bottom - (node["y"] + h)) * self.PANEL_WALL_PULL
+                node["x"] += dx
+                node["y"] += dy
+                # Backstop: never leave a member outside the padded box (a
+                # node too big for the room is centred rather than pinned to
+                # one edge).
+                if w >= right - left:
+                    node["x"] = left - (w - (right - left)) / 2.0
+                else:
+                    node["x"] = min(max(node["x"], left), right - w)
+                if h >= bottom - top:
+                    node["y"] = top - (h - (bottom - top)) / 2.0
+                else:
+                    node["y"] = min(max(node["y"], top), bottom - h)
+                moved = max(moved, abs(node["x"] - ox) + abs(node["y"] - oy))
+        return moved
 
     def _panel_direct_nodes(self, panel_id):
         """A panel's *own* nodes only - descendants belong to their own
@@ -1568,17 +1655,28 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         panel's local frame, internal edges only) and then the panels
         themselves repel each other in the parent frame.  Nodes never exert
         forces across a panel boundary; cross-panel edges gently spring the
-        two panels together instead."""
+        two panels together instead.
+
+        A **pinned/paused panel holds its box still, not its nodes** (see
+        `_panel_is_paused`).  That distinction is what makes a declarative
+        panel usable: nodes an external config created (unanchored - only
+        nodes the *user* placed are node-anchored) settle themselves inside
+        their panel while the box stays where it was put.  Pinning the
+        nodes too is what `anchored_nodes` is for.
+        """
         if not self.physics_active:
-            # All physics paused (default): leave layout exactly as-is.
+            # All physics paused: leave layout exactly as-is.
             self._panel_geo_cache.clear()
             return 0.0
         max_delta = 0.0
+        # The wall's authority is the box as the user is looking at it now -
+        # captured *before* members move.  Deriving it from the positions
+        # physics has just produced would let the box chase its own tail, and
+        # the wall would only ever bite a fraction of the overshoot.
+        rooms = {
+            pid: self._panel_rect_base(pid) for pid in self.panels if pid
+        }
         for pid in [""] + [p for p in self.panels if p]:
-            if self._panel_is_paused(pid):
-                # This panel is pinned/paused (its header toggle, or an
-                # ancestor's): leave its nodes exactly where they are.
-                continue
             members = self._panel_direct_nodes(pid)
             if len(members) < 2:
                 continue
@@ -1612,6 +1710,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             for nid in members:
                 self.nodes[nid]["x"] = positions[nid][0] + ox
                 self.nodes[nid]["y"] = positions[nid][1] + oy
+
+        # Nodes have moved: pull any member that physics pushed outside its
+        # (size-capped) box back in, against the boxes captured above, before
+        # the panel pass reads them.
+        if self.dragging_node is None and self.dragging_panel is None:
+            max_delta = max(max_delta, self._wall_nodes_into_panels(rooms))
+            self._panel_geo_cache.clear()
 
         # Panels repel/spring only against their *siblings*, each group in
         # its parent's local frame.  Running every panel through one flat
@@ -5570,6 +5675,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             panel = self.panels[pid]
             panel["anchored"] = not panel.get("anchored", False)
             self._mark_panel_moved(pid)
+            # Un-pinning releases the box to the panel pass; if the layout
+            # had settled (or hit its safety valve) nothing would move
+            # without re-arming it here - the same thing toggle_node_anchor
+            # does for a node.
+            self.layout_awake = True
+            self._settle_ticks = 0
             self.client.send(
                 {"command": "set_panel_layout", "panel_id": pid,
                  "anchored": panel["anchored"]}
@@ -8205,6 +8316,16 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     # While dragging a node, its panel may grow this far past the size it
     # had at drag start (it never shrinks during the drag).
     PANEL_DRAG_GROW = 280.0
+    # How far past its *declared* placement a panel's box may auto-fit while
+    # physics is settling its members (per side).  Node physics moves nodes,
+    # and the box follows its contents, so without a cap a cloud of
+    # unanchored nodes would grow its panel without bound; past this the
+    # wall (PANEL_WALL_PULL) holds the members inside the box instead.
+    PANEL_PHYSICS_GROW = 240.0
+    # Fraction of a wall overshoot corrected per step.  Soft enough that a
+    # spring pulling outward doesn't end up glued to the border, firm enough
+    # that a node left far outside walks back in within a few frames.
+    PANEL_WALL_PULL = 0.25
 
     @staticmethod
     def _panel_local(pid):
@@ -8236,6 +8357,29 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         the way."""
         z = max(self.zoom, 1e-6)
         return min(14.0, 40.0 / z)
+
+    def _panel_growth_limits(self, pid):
+        """(max_w, max_h) a panel's auto-fit may reach, or (None, None) for
+        a panel with no declared size.
+
+        Derived from the panel's *placement* width/height - which the widget
+        never rewrites (it only ever writes back x/y), so this is a stable
+        reference even while the box moves - plus `PANEL_PHYSICS_GROW` per
+        side.  See `_panel_rect_base`: this is what stops a cloud of
+        unanchored nodes being settled by physics from growing its panel
+        without bound, and `_wall_nodes_into_panels` is what then keeps the
+        members inside the capped box."""
+        panel = self.panels.get(pid)
+        if panel is None:
+            return (None, None)
+        w = float(panel.get("w") or 0.0)
+        h = float(panel.get("h") or 0.0)
+        if w <= 0.0 or h <= 0.0:
+            return (None, None)
+        return (
+            w + 2.0 * self.PANEL_PHYSICS_GROW,
+            h + 2.0 * self.PANEL_PHYSICS_GROW,
+        )
 
     def _panel_rect_base(self, pid):
         """(x, y, w, h) absolute box for a panel from its contents only
@@ -8399,6 +8543,21 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 grow = (side - (bottom - top)) / 2.0
                 top -= grow
                 bottom += grow
+            max_w, max_h = self._panel_growth_limits(pid)
+            # Physics settles members, the box follows them, so cap how far
+            # the *size* may run past the declared placement (an explicit
+            # drag has its own, origin-relative cap above).  Size rather than
+            # edges on purpose: the box's origin legitimately follows its
+            # content, and an origin-relative cap would ratchet outward a
+            # PANEL_PHYSICS_GROW per step.  Shrinking stays free - the box
+            # still hugs its contents - and the min-side floor above wins if
+            # it is larger than the cap.
+            if max_w is not None and right - left > max_w:
+                cx = (left + right) / 2.0
+                left, right = cx - max_w / 2.0, cx + max_w / 2.0
+            if max_h is not None and bottom - top > max_h:
+                cy = (top + bottom) / 2.0
+                top, bottom = cy - max_h / 2.0, cy + max_h / 2.0
             rect = (left, top, right - left, bottom - top)
         self._panel_geo_cache[pid] = rect
         return rect
