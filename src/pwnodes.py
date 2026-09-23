@@ -1673,6 +1673,15 @@ _DURATION_CACHE: Dict[str, float] = {}
 #: timeline to look like a waveform, small enough to hand to the GUI whole.
 PEAK_BUCKETS = 600
 
+def forget_sound(path: str) -> None:
+    """Drop a path's cached length and waveform.  For a file that is rewritten
+    in place (a Recorder's take): the caches are keyed by path, so the new take
+    would otherwise report the old shape."""
+    resolved = os.path.expanduser((path or "").strip())
+    _DURATION_CACHE.pop(resolved, None)
+    _PEAKS_CACHE.pop(resolved, None)
+
+
 #: path -> peaks; see probe_peaks.  A file's shape doesn't change either.
 _PEAKS_CACHE: Dict[str, List[Tuple[float, float]]] = {}
 
@@ -2113,6 +2122,117 @@ class FilterNode(_SingleSinkNode):
 
     def passes_output(self, from_port: str) -> bool:
         return True
+
+
+class RecorderNode(_SingleSinkNode):
+    """Records what is wired into it: an audio input, and a *sound* out.
+
+    The input is summed into the node's own private internal sink (every node
+    gets a sink - see the rule of thumb), and recording taps that sink's monitor
+    with one ``pw-cat --record`` child, so what is captured is exactly what the
+    node was fed and nothing else.  Stopping finalises the file, and the node's
+    sound output then points at it - ready for a Clip or a Sound Player.
+
+    Record always starts a *fresh* take: the file is deleted first and written
+    to the same path every time, so the node's output identity never changes and
+    "record" simply overwrites.  The waveform and length caches for that path
+    are dropped on stop, since the file behind them just changed."""
+
+    MEDIA_CLASS = pwmatch.INTERNAL_MEDIA_CLASS
+
+    #: Where takes land.  One fixed file per node, so a new take overwrites the
+    #: old one rather than piling up.
+    RECORD_DIR = os.path.join(
+        os.path.expanduser("~/.local/share/patchspace"), "recordings"
+    )
+    RECORD_RATE = 48000
+    RECORD_CHANNELS = 2
+    RECORD_FORMAT = "s16"
+
+    def __init__(self, node_id, backing_node_name: Optional[str] = None,
+                 pw_cli_command=("pw-cli",), settle: float = 0.3):
+        _SingleSinkNode.__init__(
+            self, node_id, backing_node_name or f"recorder_{node_id}",
+            pw_cli_command, settle, description=f"Recorder: {node_id}",
+        )
+        self._recorder: Optional[OwnedPwProcess] = None
+
+    def port_kind(self, port: str, direction: str) -> str:
+        return "sound" if direction == "out" else "audio"
+
+    @property
+    def take_path(self) -> str:
+        """The file this node records to (the same one every take)."""
+        safe = re.sub(r"[^A-Za-z0-9_.-]", "_", str(self.id))
+        return os.path.join(self.RECORD_DIR, f"{safe}.wav")
+
+    @property
+    def path(self) -> str:
+        """The take's file - the name a Sound node uses, so anything that
+        resolves a *sound* treats this node the same way."""
+        return self.take_path
+
+    @property
+    def recording(self) -> bool:
+        return self._recorder is not None and self._recorder.is_alive
+
+    @property
+    def duration(self) -> float:
+        """The take's length in seconds (0.0 while recording or when empty)."""
+        return probe_duration(self.take_path) if not self.recording else 0.0
+
+    def start(self) -> bool:
+        """Start a take, overwriting the previous one.  False if it wouldn't
+        start (no dummy sink yet, no program to record with)."""
+        self._prune_recorder()
+        if self.recording:
+            return True
+        path = self.take_path
+        try:
+            os.makedirs(self.RECORD_DIR, exist_ok=True)
+            if os.path.exists(path):
+                os.remove(path)
+        except OSError as exc:
+            logger.warning("Couldn't clear %r for recording: %s", path, exc)
+            return False
+        name = f"{self.backing_node_name}_recording"
+        command = (
+            "pw-cat", "--record", "--target", self.backing_node_name,
+            "--format", self.RECORD_FORMAT, "--rate", str(self.RECORD_RATE),
+            "--channels", str(self.RECORD_CHANNELS),
+            "--properties", f'{{ node.name = "{name}" }}',
+            path,
+        )
+        proc = OwnedPwProcess(name, self._pw_cli_command, 0.1)
+        if not proc.create(command, quiet=True):
+            logger.warning(
+                "Recorder %r couldn't start recording from %r",
+                self.id, self.backing_node_name,
+            )
+            return False
+        self._recorder = proc
+        return True
+
+    def stop(self) -> bool:
+        """Finish the take.  True when something was actually recording."""
+        was = self.recording
+        proc, self._recorder = self._recorder, None
+        if proc is not None:
+            proc.destroy()
+        if was:
+            # The file behind these caches just changed: a re-record under the
+            # same path would otherwise keep its old waveform and length.
+            forget_sound(self.take_path)
+        return was
+
+    def _prune_recorder(self) -> None:
+        """A recorder that exited on its own (disk full, the sink went away)
+        is not a fault - let the node read as idle."""
+        if self._recorder is not None and not self._recorder.is_alive:
+            self._recorder = None
+
+    def refresh_live(self) -> None:
+        self._prune_recorder()
 
 
 class BundleOutputNode(OutputNode, _SingleSinkNode):
@@ -4165,7 +4285,7 @@ class PatchSpace:
         source = self.nodes.get(upstream[0].from_node)
         if source is None:
             return None
-        if isinstance(source, SoundNode):
+        if isinstance(source, (SoundNode, RecorderNode)):
             return {"path": source.path, "start": 0.0, "end": None}
         if isinstance(source, ClipNode):
             # A clip narrows whatever reaches it, in the *incoming* file's own

@@ -105,6 +105,7 @@ from pwnodes import (
     BundleOutputNode,
     SplitterNode,
     ClipNode,
+    RecorderNode,
     SoundNode,
     SoundPlayerNode,
     ButtonNode,
@@ -352,6 +353,7 @@ NODE_TYPE_REGISTRY: Dict[str, type] = {
     "splitter": SplitterNode,
     "button": ButtonNode,
     "sound": SoundNode,
+    "recorder": RecorderNode,
     "clip": ClipNode,
     "sound_player": SoundPlayerNode,
     "gate": GateNode,
@@ -3795,6 +3797,8 @@ class PatchSpaceDaemon:
             return cls(node_id, backing, g("overlap", False))
         if cls is ClipNode:
             return cls(node_id, g("start", 0.0), g("end"))
+        if cls is RecorderNode:
+            return cls(node_id, backing)
         if cls is SoundNode:
             return cls(node_id, g("path", ""))
         if cls is GateNode:
@@ -4255,6 +4259,35 @@ class PatchSpaceDaemon:
             self._dirty = True
             return {"status": "ok"}
 
+    def _cmd_record(self, cmd: dict) -> dict:
+        """Start or finish a Recorder's take.
+
+        A take is always fresh: recording deletes the node's file first and
+        writes the same path, so the node's output identity never changes and
+        "record" simply overwrites."""
+        node_id = cmd.get("node_id")
+        if not node_id:
+            return {"status": "error", "message": "node_id required"}
+        with self._lock:
+            node = self.space.nodes.get(node_id)
+            if not isinstance(node, RecorderNode):
+                return {
+                    "status": "error",
+                    "message": f"Node {node_id} is not a recorder",
+                }
+            if cmd.get("recording", True):
+                started = node.start()
+                if not started:
+                    return {
+                        "status": "error",
+                        "message": f"Recorder {node_id} could not start "
+                                   "(its sink is not up yet?)",
+                    }
+            else:
+                node.stop()
+        return {"status": "ok", "node_id": node_id,
+                "recording": node.recording, "path": node.take_path}
+
     def _cmd_stop_sound(self, cmd: dict) -> dict:
         """Stop whatever a Sound Player is playing (its Stop button).
 
@@ -4304,6 +4337,12 @@ class PatchSpaceDaemon:
         if not node_id:
             return {"status": "error", "message": "node_id required"}
         node = self.space.nodes.get(node_id)
+        if isinstance(node, SoundPlayerNode):
+            # A player's own Play face fires *that* node (it has no impulse
+            # output to pulse - the wire would be what triggers it).
+            with self._lock:
+                node.on_impulse(self.space.resolve_sound(node_id))
+            return {"status": "ok", "fired": [node_id]}
         if not isinstance(node, ButtonNode):
             return {
                 "status": "error",
@@ -4906,6 +4945,14 @@ class PatchSpaceDaemon:
         node_id = cmd.get("node_id")
         with self._lock:
             node = self.space.nodes.get(node_id)
+            if isinstance(node, RecorderNode):
+                # A recorder's waveform is of its own take.
+                path = node.take_path
+                return {
+                    "status": "ok", "node_id": node_id, "path": path,
+                    "duration": pwnodes.probe_duration(path),
+                    "peaks": pwnodes.probe_peaks(path),
+                }
             if not isinstance(node, ClipNode):
                 return {"status": "ok", "node_id": node_id, "path": "",
                         "duration": 0.0, "peaks": []}
@@ -5182,6 +5229,12 @@ class PatchSpaceDaemon:
                 # file's waveform.  Zero unless clips are stacked.
                 data["source_start"] = float(sound.get("start") or 0.0)
                 data["duration"] = pwnodes.probe_duration(sound.get("path") or "")
+            if isinstance(node, RecorderNode):
+                # What the GUI shows: whether a take is running, and the file
+                # (and length) of the last one, for its waveform.
+                data["recording"] = node.recording
+                data["source_path"] = node.take_path
+                data["duration"] = node.duration
             if isinstance(node, SoundNode):
                 # The file's length, so the node can show it and the Clip
                 # timeline knows how much sound there is to select from.
@@ -5293,6 +5346,8 @@ class PatchSpaceDaemon:
                 response = self._cmd_remove_edge(cmd)
             elif command == "set_gate":
                 response = self._cmd_set_gate(cmd)
+            elif command == "record":
+                response = self._cmd_record(cmd)
             elif command == "stop_sound":
                 response = self._cmd_stop_sound(cmd)
             elif command == "stop_sound":

@@ -8,6 +8,7 @@ timeline and the node's read-out talk about time in a file nobody has opened.
 Needs no GTK; the duration test needs ffprobe (skipped without it)."""
 
 import os
+import pathlib
 import shutil
 import struct
 import sys
@@ -17,6 +18,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import pwnodes
 from pwnodes import SoundNode, probe_duration  # noqa: E402
 
 
@@ -223,3 +225,102 @@ def test_a_clips_times_are_settable_and_stick():
     # Garbage is refused rather than stored, and the old value survives.
     assert set_prop("start", "abc")["status"] == "error"
     assert reported() == (2.5, None)
+
+
+class _FakeRecorder:
+    """Just enough of OwnedPwProcess for a Recorder's take."""
+
+    commands = []
+
+    def __init__(self, name, command=("pw-cli",), settle=0.0, **kw):
+        self.name = name
+        self.alive = False
+
+    def create(self, command, quiet=False):
+        _FakeRecorder.commands.append(list(command))
+        self.alive = True
+        return True
+
+    @property
+    def is_alive(self):
+        return self.alive
+
+    def destroy(self):
+        self.alive = False
+
+
+def test_a_recorder_takes_an_audio_input_and_gives_a_sound(monkeypatch):
+    """Record -> Stop, and the take is what the node's sound output points at,
+    so a Clip or a Player behind it resolves it like any other sound."""
+    from main import PatchSpaceDaemon
+    from tests.test_pwnodes import FakeGraph
+
+    _FakeRecorder.commands.clear()
+    monkeypatch.setattr(pwnodes, "OwnedPwProcess", _FakeRecorder)
+
+    d = PatchSpaceDaemon()
+    d.space.graph = FakeGraph()
+    d.space.mark_graph_loaded()
+    _ok = lambda **cmd: d.handle_command(cmd)  # noqa: E731
+    assert _ok(command="add_node", node_type="recorder", node_id="rec")["status"] == "ok"
+
+    node = d.space.nodes["rec"]
+    assert node.port_kind("audio", "in") == "audio"
+    assert node.port_kind("out", "out") == "sound"
+
+    # Record: one pw-cat child, recording that node's own sink, to its take.
+    resp = _ok(command="record", node_id="rec", recording=True)
+    assert resp["recording"] is True
+    assert node.take_path.endswith("rec.wav")
+    assert _ok(command="get_nodes")["nodes"]["rec"]["recording"] is True
+    command = _FakeRecorder.commands[0]
+    assert command[0] == "pw-cat" and "--record" in command
+    assert command[command.index("--target") + 1] == node.backing_node_name
+    assert command[-1] == node.take_path
+
+    # Stop: the child goes, and the play head reads idle again.
+    resp = _ok(command="record", node_id="rec", recording=False)
+    assert resp["recording"] is False
+    assert node.recording is False
+    assert _ok(command="get_nodes")["nodes"]["rec"]["recording"] is False
+
+    # Its output is a sound, resolved the same way a Sound node's is: a player
+    # wired to the recorder's *sound output* sees the take.
+    assert _ok(command="add_node", node_type="sound_player",
+               node_id="pl")["status"] == "ok"
+    assert _ok(command="add_edge", from_node="rec", to_node="pl",
+               to_port="sound")["status"] == "ok"
+    assert d.space.resolve_sound("pl") == {
+        "path": node.take_path, "start": 0.0, "end": None,
+    }
+    # Recording something that isn't a recorder is an error, not a crash.
+    assert d.handle_command({"command": "record", "node_id": "nope"})["status"] == "error"
+
+
+def test_recording_again_overwrites_the_take(tmp_path, monkeypatch):
+    """One fixed file per node: Record clears it first, so a new take replaces
+    the old one and the cached waveform/length can't be stale."""
+    from main import PatchSpaceDaemon
+    from tests.test_pwnodes import FakeGraph
+
+    _FakeRecorder.commands.clear()
+    monkeypatch.setattr(pwnodes, "OwnedPwProcess", _FakeRecorder)
+    monkeypatch.setattr(pwnodes.RecorderNode, "RECORD_DIR", str(tmp_path))
+
+    d = PatchSpaceDaemon()
+    d.space.graph = FakeGraph()
+    d.handle_command({"command": "add_node", "node_type": "recorder", "node_id": "rec"})
+    node = d.space.nodes["rec"]
+
+    take = pathlib.Path(node.take_path)
+    take.write_bytes(b"old take")
+    pwnodes._DURATION_CACHE[take.as_posix()] = 12.5
+    pwnodes._PEAKS_CACHE[take.as_posix()] = [(0.0, 1.0)]
+
+    d.handle_command({"command": "record", "node_id": "rec", "recording": True})
+    assert not take.exists()                      # cleared before the new take
+    d.handle_command({"command": "record", "node_id": "rec", "recording": False})
+    # The caches for that path were dropped, or a re-record would report the
+    # old shape (the path never changes).
+    assert take.as_posix() not in pwnodes._DURATION_CACHE
+    assert take.as_posix() not in pwnodes._PEAKS_CACHE

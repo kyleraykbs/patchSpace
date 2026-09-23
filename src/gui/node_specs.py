@@ -533,6 +533,16 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
         sound_outputs=["out"],
         control="clip",
     ),
+    # A Recorder: audio in, a *sound* out.  Its body is the take's controls -
+    # a Record/Stop button and the waveform of the last take.
+    "recorder": NodeSpec(
+        "Recorder",
+        ["audio"],
+        ["out"],
+        sound_outputs=["out"],
+        control="recorder",
+        indicator="duration",
+    ),
     "sound_player": NodeSpec(
         "Sound Player",
         ["impulse", "sound"],
@@ -920,6 +930,9 @@ NODE_DESCRIPTIONS: Dict[str, str] = {
     "timeline of the file - waveform, a yellow selection you drag the sides "
     "of, and the selection's start/end times - and what it passes on is that "
     "part of the sound.",
+    "recorder": "Records what is wired into it: an audio input, and a sound "
+    "output pointing at the take.  Record starts a fresh take (overwriting the "
+    "last), Stop finishes it, and the node shows the take's waveform and length.",
     "sound_player": "Plays the sound wired into it whenever an impulse "
     "arrives: a sound input, an impulse input, an audio output.  The Stack "
     "switch picks whether a new impulse restarts it or stacks another take.",
@@ -1064,6 +1077,7 @@ ADD_NODE_CATEGORIES = [
             ("Button", "button"),
             ("Sound", "sound"),
             ("Sound Player", "sound_player"),
+            ("Recorder", "recorder"),
             ("Clip", "clip"),
         ],
     ),
@@ -1216,6 +1230,7 @@ NODE_TYPE_ICONS: Dict[str, str] = {
     "button": "media-playback-start-symbolic",
     "sound": "audio-x-generic-symbolic",
     "clip": "edit-select-all-symbolic",
+    "recorder": "media-record-symbolic",
     "sound_player": "media-playback-start-symbolic",
 }
 
@@ -1294,6 +1309,7 @@ CLASS_NAME_TO_TYPE = {
     "ButtonNode": "button",
     "SoundNode": "sound",
     "SoundPlayerNode": "sound_player",
+    "RecorderNode": "recorder",
     "ClipNode": "clip",
     "SoundEffectNode": "sound_effect",
 }

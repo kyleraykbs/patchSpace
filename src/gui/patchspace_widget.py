@@ -1474,6 +1474,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     "duration": ndata.get("duration", 0.0),
                     "source_start": ndata.get("source_start", 0.0),
                     "source_path": ndata.get("source_path", ""),
+                    # A Recorder: whether a take is running right now.
+                    "recording": ndata.get("recording", False),
                     "connected": ndata.get("connected", False),
                     "is_bluetooth": ndata.get("is_bluetooth", False),
                     "selection_label": ndata.get("selection_label", ""),
@@ -1559,7 +1561,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                         node["overlap"] = bool(overlap)
                 # Filter: its Include/Exclude switch, same echo guard as the
                 # other boolean body controls (only Filter nodes send it).
-                if ndata.get("type") == "clip":
+                if ndata.get("type") in ("clip", "recorder"):
                     # The poll's copy of the selection, unless it is being
                     # dragged right now (the same rule the volume slider uses).
                     if self.clip_dragging is None or self.clip_dragging[1] != nid:
@@ -2262,6 +2264,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             # nothing is wired into the ctrl input, and a read-only white
             # state indicator once a boolean signal drives the node.
             return self.GATE_AREA_HEIGHT
+        if spec.control == "recorder":
+            # Button, the take's waveform, and the read-out row under it (its
+            # length) - without that row the text landed inside the waveform.
+            return (
+                self.RECORD_BUTTON_H + 6.0 + self.RECORD_WAVE_H
+                + self.FIELD_HEIGHT + self.FIELD_BOTTOM_PAD
+            )
         if spec.control == "clip":
             # The Clip's timeline owns the bottom of the node and is taller
             # than the button faces.
@@ -2603,6 +2612,94 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         else:
             dot_y = fy + fh / 2.0
         return (dot_x, dot_y, dot_r, dot_x - dot_r - 5.0)
+
+    def _record_wave_rect(self, nid):
+        """The strip the take's waveform is drawn in - above the read-out row,
+        which shows the take's length."""
+        node = self.nodes[nid]
+        w = self.NODE_WIDTH - 2 * self.FIELD_MARGIN
+        y = (node["y"] + self.node_height(nid)
+             - self.FIELD_HEIGHT - self.FIELD_BOTTOM_PAD - self.RECORD_WAVE_H)
+        return (node["x"] + self.FIELD_MARGIN, y, w, self.RECORD_WAVE_H)
+
+    def _record_button_rect(self, nid):
+        """The Recorder's Record/Stop button: on its own row, above the take's
+        waveform."""
+        node = self.nodes[nid]
+        _x, wave_y, w, _h = self._record_wave_rect(nid)
+        return (node["x"] + self.FIELD_MARGIN, wave_y - self.RECORD_BUTTON_H - 6.0,
+                w, self.RECORD_BUTTON_H)
+
+    def find_record_button_at(self, x, y):
+        """The Recorder whose Record/Stop button is under the pointer."""
+        for nid, node in self._hit_nodes(x, y, require_ready=False):
+            if spec_for(node["type"]).control != "recorder":
+                continue
+            bx, by, bw, bh = self._record_button_rect(nid)
+            if bx <= x <= bx + bw and by <= y <= by + bh:
+                return nid
+        return None
+
+    def _draw_wave_bars(self, cr, x, y, w, h, peaks, total, start, span, color):
+        """A waveform: one vertical bar per pixel column, from the extremes of
+        the buckets that column covers.  Shared by the Clip's timeline and the
+        Recorder's take."""
+        mid = y + h / 2.0
+        cr.set_line_width(1.0)
+        cr.set_source_rgb(*color)
+        if not peaks:
+            cr.move_to(x, mid)
+            cr.line_to(x + w, mid)
+            cr.stroke()
+            return
+        buckets = len(peaks)
+        total = total or 1.0
+        for column in range(int(w)):
+            t0 = start + column / w * span
+            t1 = start + (column + 1) / w * span
+            i0 = int(t0 / total * buckets)
+            i1 = max(i0 + 1, int(t1 / total * buckets))
+            chunk = peaks[max(0, i0):min(buckets, i1)]
+            if not chunk:
+                continue
+            low = min(peak[0] for peak in chunk)
+            high = max(peak[1] for peak in chunk)
+            cx = x + column + 0.5
+            cr.move_to(cx, mid - high * (h / 2.0 - 4))
+            cr.line_to(cx, mid - low * (h / 2.0 - 4))
+        cr.stroke()
+
+    def _draw_recorder(self, cr, pal, nid, node):
+        """A Recorder's body: Record/Stop, and the take's waveform under it."""
+        recording = bool(node.get("recording"))
+        bx, by, bw, bh = self._record_button_rect(nid)
+        draw_rounded_rect(cr, bx, by, bw, bh, 10)
+        cr.set_source_rgb(*(pal["error"] if recording else (0.30, 0.30, 0.33)))
+        cr.fill_preserve()
+        cr.set_source_rgb(*(pal["error"] if recording else (0.46, 0.46, 0.49)))
+        cr.set_line_width(1.5)
+        cr.stroke()
+        label = "Stop" if recording else "Record"
+        cr.select_font_face("sans")
+        cr.set_font_size(11)
+        extents = cr.text_extents(label)
+        cr.set_source_rgb(*(0.12, 0.06, 0.06) if recording else (0.82, 0.82, 0.84))
+        cr.move_to(bx + (bw - extents.width) / 2 - extents.x_bearing,
+                   by + (bh - extents.height) / 2 - extents.y_bearing)
+        cr.show_text(label)
+
+        x, y, w, h = self._record_wave_rect(nid)
+        draw_rounded_rect(cr, x, y, w, h, 4)
+        cr.set_source_rgb(*pal["field_bg"])
+        cr.fill_preserve()
+        cr.set_source_rgb(*pal["node_border"])
+        cr.set_line_width(1)
+        cr.stroke()
+        wave = self._clip_waves.get(nid) or {}
+        total = float(node.get("duration", 0.0) or 0.0) or 1.0
+        self._draw_wave_bars(cr, x, y, w, h, wave.get("peaks") or [], total,
+                             0.0, total,
+                             self._mix(pal["sound_port"], pal["text"], 0.25))
 
     def _clip_rect(self, nid):
         """Geometry of a Clip node's timeline strip: the widest rectangle that
@@ -5332,6 +5429,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             )
         elif spec.control == "impulse":
             self._draw_impulse_button(cr, nid, node)
+        elif spec.control == "recorder":
+            self._draw_recorder(cr, pal, nid, node)
         elif spec.control == "clip":
             self._draw_clip_timeline(cr, pal, nid, node)
         if spec.impulse_inputs and not self._impulse_wired(nid):
@@ -5645,6 +5744,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     #: Grab knob at the top of each selection line: dragging it *slides* the
     #: selection (dragging the line itself moves just that side).
     CLIP_KNOB = 9.0
+    # The Recorder's body: a Record/Stop button over the take's waveform.
+    RECORD_BUTTON_H = 22.0
+    RECORD_WAVE_H = 44.0
+
     #: Clearance above a node's read-out when it opens its bottom block (see
     #: _readout_above_switch), so the row clears the socket labels above it.
     READOUT_LEAD_GAP = 12.0
@@ -6413,7 +6516,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         cr.set_source_rgb(0.46, 0.46, 0.49)
         cr.set_line_width(1.5)
         cr.stroke()
-        label = "Impulse"
+        label = "Play"
         cr.select_font_face("sans")
         cr.set_font_size(12)
         extents = cr.text_extents(label)
@@ -6573,7 +6676,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             # cursor doesn't flicker.
             return
 
-        if self.find_stop_button_at(wx, wy) is not None:
+        if self.find_record_button_at(wx, wy) is not None:
+            self.set_cursor(Gdk.Cursor.new_from_name("pointer", None))
+        elif self.find_stop_button_at(wx, wy) is not None:
             self.set_cursor(Gdk.Cursor.new_from_name("pointer", None))
         elif self.find_impulse_fallback_at(wx, wy) is not None:
             self.set_cursor(Gdk.Cursor.new_from_name("pointer", None))
@@ -6631,6 +6736,16 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         wx, wy = self.to_world(x, y)
 
         # Panel reset button (read-only panels) - re-apply the file state.
+        record_hit = self.find_record_button_at(wx, wy)
+        if record_hit is not None:
+            node = self.nodes.get(record_hit) or {}
+            recording = not bool(node.get("recording"))
+            node["recording"] = recording          # optimistic; the poll confirms
+            self.client.send({"command": "record", "node_id": record_hit,
+                              "recording": recording})
+            self.queue_draw()
+            return
+
         stop_hit = self.find_stop_button_at(wx, wy)
         if stop_hit is not None:
             # Nothing to wait for: a stop is immediate, and the poll confirms.

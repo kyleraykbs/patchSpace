@@ -235,8 +235,11 @@ def test_impulse_with_no_file_is_a_silent_noop():
 
 
 def test_impulse_command_rejects_a_non_button():
+    """A Button pulses its impulse edges and a Sound Player fires itself; some
+    other node has no impulse of its own to fire."""
     d, _fx = _daemon_with_pair()
-    resp = d.handle_command({"command": "impulse", "node_id": "fx"})
+    _ok(d, command="add_node", node_type="volume", node_id="vol")
+    resp = d.handle_command({"command": "impulse", "node_id": "vol"})
     assert resp["status"] == "error"
 
 
@@ -370,3 +373,25 @@ def test_stopping_a_player_cuts_it_short():
     # Stopping something that isn't a player is an error, not a crash.
     assert d.handle_command({"command": "stop_sound", "node_id": "btn"})["status"] == "error"
     assert d.handle_command({"command": "stop_sound"})["status"] == "error"
+
+
+def test_a_players_own_play_button_fires_it():
+    """The face a player shows while its impulse input is unwired has to work:
+    the daemon's impulse command only accepted a Button, so pressing a player's
+    own Play face answered "is not a button" and nothing happened."""
+    d, fx = _daemon_with_pair()
+    resp = _ok(d, command="impulse", node_id="fx")
+    assert resp["fired"] == ["fx"]
+    assert len(FakeProc.commands) == 1
+    assert FakeProc.commands[0][-1] == "/sounds/clang.wav"
+    assert fx.playing == 1
+
+
+def test_a_players_face_does_nothing_without_a_sound():
+    """No sound wired: the press still succeeds, it just has nothing to play -
+    and it must not raise."""
+    d = PatchSpaceDaemon()
+    _ok(d, command="add_node", node_type="sound_player", node_id="pl")
+    resp = _ok(d, command="impulse", node_id="pl")
+    assert resp["fired"] == ["pl"]
+    assert d.space.nodes["pl"].playing == 0
