@@ -1459,6 +1459,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     # checkbox's value (absent on every other type).
                     "playing": ndata.get("playing", 0),
                     "overlap": ndata.get("overlap", False),
+                    # The node's own id, so geometry that needs to ask about
+                    # the graph (a Clip's timeline, an unwired impulse input)
+                    # doesn't have to be handed it separately.
+                    "id": nid,
                     # The Filter node's Include/Exclude switch (absent on
                     # every other type).
                     "exclude": ndata.get("exclude", False),
@@ -2237,6 +2241,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 len(rows) * (self.FIELD_HEIGHT + 4) + self.FIELD_BOTTOM_PAD
             )
         spec = spec_for(node["type"])
+        if spec.impulse_inputs and not self._impulse_wired(node["id"]):
+            # An impulse input with nothing wired shows the node's own face to
+            # fire it, above the read-out/switch rows (see _impulse_face_rect).
+            return self.GATE_AREA_HEIGHT + (
+                self.FIELD_HEIGHT + self.FIELD_BOTTOM_PAD
+                + (self.TOGGLE_ROW_GAP + self.TOGGLE_ROW_HEIGHT
+                   if spec.toggle else 0)
+            )
         if spec.control == "fallback_onoff":
             # The on/off button is always shown: interactive while
             # nothing is wired into the ctrl input, and a read-only white
@@ -2570,11 +2582,15 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         dot_x = node["x"] + self.NODE_WIDTH - self.FIELD_MARGIN - dot_r
         if self._readout_above_switch(node):
             # The switch has moved down to the field row, so the read-out takes
-            # the row the switch used to occupy - the top of the bottom block.
+            # the row the switch used to occupy - the top of the *buttons*
+            # above it (an unwired impulse input owns the row over that).
+            face = (self.GATE_AREA_HEIGHT
+                    if (spec_for(node["type"]).impulse_inputs
+                        and not self._impulse_wired(nid)) else 0.0)
             dot_y = (
                 node["y"] + self.node_height(nid)
                 - (self._bottom_control_height(node) + 2)
-                + self.TOGGLE_SWITCH_HEIGHT / 2.0
+                + face + self.TOGGLE_SWITCH_HEIGHT / 2.0
             )
         else:
             dot_y = fy + fh / 2.0
@@ -2588,6 +2604,92 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         w = self.NODE_WIDTH - 2 * self.CLIP_MARGIN
         y = node["y"] + self.node_height(nid) - self.CLIP_HEIGHT - 10
         return (x, y, w, self.CLIP_HEIGHT)
+
+    def _impulse_wired(self, nid) -> bool:
+        """Whether a wire actually drives this node's impulse input."""
+        node = self.nodes.get(nid) or {}
+        ntype = node.get("type", "")
+        for edge in self.edges.values():
+            if edge.get("to_node") != nid:
+                continue
+            if port_kind(ntype, edge.get("to_port", ""), "in") == "impulse":
+                return True
+        return False
+
+    def _impulse_face_rect(self, nid):
+        """The face a node shows while its impulse input is unwired: press it to
+        fire that node's impulse (the gate's fallback-button pattern)."""
+        node = self.nodes[nid]
+        spec = spec_for(node["type"])
+        rows = self.FIELD_HEIGHT + self.FIELD_BOTTOM_PAD
+        if spec.toggle:
+            rows += self.TOGGLE_ROW_GAP + self.TOGGLE_ROW_HEIGHT
+        x = node["x"] + self.GATE_MARGIN
+        w = self.NODE_WIDTH - 2 * self.GATE_MARGIN
+        y = (node["y"] + self.node_height(nid) - rows
+             - self.GATE_HEIGHT - self.GATE_BOTTOM_MARGIN)
+        return (x, y, w, self.GATE_HEIGHT)
+
+    def find_impulse_fallback_at(self, x, y):
+        """The node whose own impulse face is under the pointer."""
+        for nid, node in self._hit_nodes(x, y, require_ready=False):
+            if not spec_for(node["type"]).impulse_inputs:
+                continue
+            if self._impulse_wired(nid):
+                continue
+            fx, fy, fw, fh = self._impulse_face_rect(nid)
+            if fx <= x <= fx + fw and fy <= y <= fy + fh:
+                return nid
+        return None
+
+    def _clip_row_rect(self, nid):
+        """The row above the timeline: the boxes on its right, and the space
+        the selection's knobs hang into."""
+        x, y, w, _h = self._clip_rect(nid)
+        return (x, y - self.CLIP_ROW_H - 2, w, self.CLIP_ROW_H)
+
+    def _clip_box_rect(self, nid, which):
+        """One of the two start/end boxes: between them they fill the row."""
+        rx, ry, rw, rh = self._clip_row_rect(nid)
+        gap = 6.0
+        bw = max(24.0, (rw - gap) / 2.0)
+        bx = rx if which == "start" else rx + bw + gap
+        return (bx, ry + (rh - 18) / 2.0, bw, 18.0)
+
+    def _clip_knob_rect(self, nid, which):
+        """The grab knob at the top of a selection line."""
+        sel_start, sel_end = self._clip_selection(nid)
+        _rx, ry, _rw, _rh = self._clip_rect(nid)
+        cx = self._clip_x_at(nid, sel_start if which == "start" else sel_end)
+        return (cx - self.CLIP_KNOB / 2.0, ry - self.CLIP_KNOB / 2.0,
+                self.CLIP_KNOB, self.CLIP_KNOB)
+
+    @staticmethod
+    def _parse_clip_time(text):
+        """Seconds from a typed time: plain seconds ("1.5"), or the stamps'
+        m:ss.t / h:mm:ss.t.  None when it isn't a time at all."""
+        text = (text or "").strip()
+        if not text:
+            return None
+        try:
+            return max(0.0, float(text))
+        except ValueError:
+            pass
+        parts = text.split(":")
+        if len(parts) > 3:
+            return None
+        for part in parts:
+            head = part.strip()
+            if not head or head.count(".") > 1:
+                return None
+            try:
+                float(head)
+            except ValueError:
+                return None
+        seconds = 0.0
+        for part in parts:
+            seconds = seconds * 60.0 + float(part)
+        return max(0.0, seconds)
 
     def _clip_span(self, nid):
         """(view_start, view_span) for a Clip's timeline, defaulting to the
@@ -4257,6 +4359,30 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 return nid
         return None
 
+    def find_clip_knob_at(self, x, y):
+        """(node_id, "start"|"end") for a selection's grab knob - dragging one
+        *slides* the whole selection."""
+        for nid, node in self._hit_nodes(x, y, require_ready=False):
+            if spec_for(node["type"]).control != "clip":
+                continue
+            for which in ("start", "end"):
+                kx, ky, kw, kh = self._clip_knob_rect(nid, which)
+                if (kx - 3 <= x <= kx + kw + 3
+                        and ky - 3 <= y <= ky + kh + 3):
+                    return (nid, which)
+        return None
+
+    def find_clip_box_at(self, x, y):
+        """(node_id, "start"|"end") for a start/end box under the pointer."""
+        for nid, node in self._hit_nodes(x, y, require_ready=False):
+            if spec_for(node["type"]).control != "clip":
+                continue
+            for which in ("start", "end"):
+                bx, by, bw, bh = self._clip_box_rect(nid, which)
+                if bx <= x <= bx + bw and by <= y <= by + bh:
+                    return (nid, which)
+        return None
+
     def find_clip_handle_at(self, x, y):
         """(node_id, "start"|"end") for a selection side under the pointer."""
         for nid, node in self._hit_nodes(x, y, require_ready=False):
@@ -5184,6 +5310,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self._draw_impulse_button(cr, nid, node)
         elif spec.control == "clip":
             self._draw_clip_timeline(cr, pal, nid, node)
+        if spec.impulse_inputs and not self._impulse_wired(nid):
+            self._draw_impulse_fallback(cr, nid)
         elif spec.control == "filter_mode":
             self._draw_filter_mode_button(cr, pal, nid, node.get("exclude", False))
         elif spec.field:
@@ -5481,10 +5609,18 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     # The Clip node's timeline: a strip tall enough for a waveform, a
     # yellow selection and its two timestamps.
     CLIP_HEIGHT = 104
-    CLIP_AREA_HEIGHT = CLIP_HEIGHT + 14
+    #: The row above the timeline: the start/end boxes live there, and the
+    #: selection's grab knobs sit on its bottom edge, at the top of each line.
+    CLIP_ROW_H = 24
+    CLIP_AREA_HEIGHT = CLIP_HEIGHT + CLIP_ROW_H + 16
     CLIP_MARGIN = 10
     #: Draggable side band of the selection, in world units.
     CLIP_HANDLE_W = 9.0
+    #: Grab knob at the top of each selection line: dragging it *slides* the
+    #: selection (dragging the line itself moves just that side).
+    CLIP_KNOB = 9.0
+    #: Width of each start/end box in the row above.
+    CLIP_BOX_W = 64.0
     #: Never zoom in past this many seconds of file on screen.
     CLIP_MIN_SPAN = 0.02
 
@@ -5847,6 +5983,26 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                  or float(node.get("duration", 0.0) or 0.0) or 1.0)
         mid = y + h / 2.0
 
+        # The two times, boxed side by side above the waveform: click one to
+        # type that end exactly.
+        sel_start, sel_end = self._clip_selection(nid)
+        for which, seconds in (("start", sel_start), ("end", sel_end)):
+            bx, by, bw, bh = self._clip_box_rect(nid, which)
+            draw_rounded_rect(cr, bx, by, bw, bh, 4)
+            cr.set_source_rgb(*pal["field_bg"])
+            cr.fill_preserve()
+            cr.set_source_rgb(*pal["node_border"])
+            cr.set_line_width(1)
+            cr.stroke()
+            text = self._clip_stamp(seconds)
+            cr.select_font_face("sans")
+            cr.set_font_size(9)
+            extents = cr.text_extents(text)
+            cr.set_source_rgb(*pal["field_fg"])
+            cr.move_to(bx + (bw - extents.width) / 2.0,
+                       by + bh / 2.0 - extents.height / 2.0 - extents.y_bearing)
+            cr.show_text(text)
+
         # The waveform goes on *over* the selection wash: a tint the sound
         # can't be read through is worse than no selection at all.
         sel_start, sel_end = self._clip_selection(nid)
@@ -5893,21 +6049,22 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             cr.stroke()
         cr.restore()
 
-        # Timestamps at the selection's bottom corners, kept inside the strip
-        # when an edge is scrolled off it.
-        cr.select_font_face("sans")
-        cr.set_font_size(9)
-        cr.set_source_rgb(0.95, 0.82, 0.25)
-        left = self._clip_stamp(sel_start)
-        right = self._clip_stamp(sel_end)
-        cr.move_to(max(x + 4, min(x + w - 44, sx0 + 4)), y + h - 4)
-        cr.show_text(left)
-        extents = cr.text_extents(right)
-        cr.move_to(
-            max(x + 4, min(x + w - extents.width - 4, sx1 - extents.width - 4)),
-            y + h - 4,
-        )
-        cr.show_text(right)
+        # The grab knobs, on the top ends of the selection lines: dragging one
+        # slides the whole selection past the sound.
+        for which in ("start", "end"):
+            kx, ky, kw, kh = self._clip_knob_rect(nid, which)
+            sel_start, sel_end = self._clip_selection(nid)
+            if not (x - 6 <= kx <= x + w + 6):
+                continue
+            draw_rounded_rect(cr, kx, ky, kw, kh, 2)
+            cr.set_source_rgb(0.95, 0.82, 0.25)
+            cr.fill_preserve()
+            cr.set_source_rgb(0.20, 0.17, 0.05)
+            cr.set_line_width(1)
+            cr.stroke()
+
+        # No stamps inside the strip: the two boxes above the waveform show
+        # exactly these times, and inside a narrow selection they collided.
 
     def _draw_filter_mode_button(self, cr, pal, nid, exclude):
         """The Filter node's Include/Exclude switch - the gate toggle's big
@@ -6180,6 +6337,25 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                    dot_y - extents.height / 2 - extents.y_bearing)
         cr.show_text(text)
 
+    def _draw_impulse_fallback(self, cr, nid):
+        """The face an unwired impulse input shows: press it to fire that
+        node's impulse, so a player can be tested without a Button."""
+        x, y, w, h = self._impulse_face_rect(nid)
+        draw_rounded_rect(cr, x, y, w, h, 10)
+        cr.set_source_rgb(0.30, 0.30, 0.33)
+        cr.fill_preserve()
+        cr.set_source_rgb(0.46, 0.46, 0.49)
+        cr.set_line_width(1.5)
+        cr.stroke()
+        label = "Impulse"
+        cr.select_font_face("sans")
+        cr.set_font_size(12)
+        extents = cr.text_extents(label)
+        cr.set_source_rgb(0.78, 0.78, 0.80)
+        cr.move_to(x + (w - extents.width) / 2 - extents.x_bearing,
+                   y + (h - extents.height) / 2 - extents.y_bearing)
+        cr.show_text(label)
+
     def _impulse_label(self, node):
         """What a Button node's face says: the label the user gave it, or
         "Trigger" - the node *type* is called "Button", which describes the
@@ -6328,7 +6504,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             # cursor doesn't flicker.
             return
 
-        if self.find_clip_handle_at(wx, wy) is not None:
+        if self.find_impulse_fallback_at(wx, wy) is not None:
+            self.set_cursor(Gdk.Cursor.new_from_name("pointer", None))
+        elif self.find_clip_knob_at(wx, wy) is not None:
+            self.set_cursor(Gdk.Cursor.new_from_name("grab", None))
+        elif self.find_clip_box_at(wx, wy) is not None:
+            self.set_cursor(Gdk.Cursor.new_from_name("pointer", None))
+        elif self.find_clip_handle_at(wx, wy) is not None:
             self.set_cursor(Gdk.Cursor.new_from_name("ew-resize", None))
         elif self.find_clip_body_at(wx, wy) is not None:
             self.set_cursor(Gdk.Cursor.new_from_name("grab", None))
@@ -6377,6 +6559,16 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         wx, wy = self.to_world(x, y)
 
         # Panel reset button (read-only panels) - re-apply the file state.
+        impulse_hit = self.find_impulse_fallback_at(wx, wy)
+        if impulse_hit is not None:
+            self.client.send({"command": "impulse", "node_id": impulse_hit})
+            return
+
+        clip_box = self.find_clip_box_at(wx, wy)
+        if clip_box is not None:
+            self._edit_clip_time(clip_box[0], clip_box[1], x, y)
+            return
+
         pid = self.find_panel_reset_at(wx, wy)
         if pid is not None:
             self._begin_load()
@@ -6803,6 +6995,45 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             "peaks": resp.get("peaks") or [],
         }
         self.queue_draw()
+
+    def _edit_clip_time(self, nid, which, screen_x, screen_y):
+        """Type an exact time into one of a Clip's boxes - the same popover
+        entry a node field uses.  Times are shown against the file and stored
+        against the sound reaching the clip (see _clip_selection)."""
+        node = self.nodes.get(nid) or {}
+        base = float(node.get("source_start", 0.0) or 0.0)
+        total = float(node.get("duration", 0.0) or 0.0) or 1.0
+        sel_start, sel_end = self._clip_selection(nid)
+        current = sel_start if which == "start" else sel_end
+
+        popover = Gtk.Popover()
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        box.set_margin_top(6)
+        box.set_margin_bottom(6)
+        box.set_margin_start(6)
+        box.set_margin_end(6)
+        entry = Gtk.Entry()
+        entry.set_text(self._clip_stamp(current))
+        entry.set_width_chars(9)
+
+        def apply(*_args):
+            seconds = self._parse_clip_time(entry.get_text())
+            if seconds is not None:
+                seconds = max(0.0, min(total, seconds))
+                seconds = (min(seconds, sel_end) if which == "start"
+                           else max(seconds, sel_start))
+                node[which] = seconds - base
+                self._send_property(nid, which, seconds - base)
+                self.queue_draw()
+            popover.popdown()
+
+        entry.connect("activate", apply)
+        box.append(entry)
+        set_btn = Gtk.Button(label="Set")
+        set_btn.connect("clicked", apply)
+        box.append(set_btn)
+        popover.set_child(box)
+        self.popup_context_menu(popover, screen_x, screen_y, focus_widget=entry)
 
     def on_apps(self, apps):
         """The live applications arrived: open the Application classifier's
@@ -7500,6 +7731,21 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         node = self.nodes.get(nid)
         if node is None:
             return
+        if part == "slide":
+            # A knob drag moves the selection as a whole, keeping its length.
+            origin_x, (origin_start, origin_end) = self._clip_drag_origin
+            _rx, _ry, rw, _rh = self._clip_rect(nid)
+            _start, span = self._clip_span(nid)
+            total = float(node.get("duration", 0.0) or 0.0) or 1.0
+            length = max(0.0, origin_end - origin_start)
+            shift = (wx - origin_x) / rw * span
+            start = max(0.0, min(total - length, origin_start + shift))
+            node["start"] = start
+            node["end"] = start + length
+            self._send_property(nid, "start", start)
+            self._send_property(nid, "end", start + length)
+            self.queue_draw()
+            return
         if part == "pan":
             origin_x, origin_start = self._clip_drag_origin
             _rx, _ry, rw, _rh = self._clip_rect(nid)
@@ -7625,6 +7871,15 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self.queue_draw()
             logger.debug("Started dragging slider for node %s", slider_hit)
             self.pinned_nodes.add(slider_hit)
+            return
+
+        clip_knob = self.find_clip_knob_at(wx, wy)
+        if clip_knob is not None:
+            nid, _which = clip_knob
+            self.clip_dragging = ("slide", nid)
+            self._clip_drag_origin = (wx, self._clip_selection(nid))
+            self.pinned_nodes.add(nid)
+            self.queue_draw()
             return
 
         clip_handle = self.find_clip_handle_at(wx, wy)

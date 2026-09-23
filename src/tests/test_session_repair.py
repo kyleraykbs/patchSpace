@@ -107,7 +107,9 @@ def test_repair_drops_duplicate_edges():
         edges=[{"from": "a", "to": "b"}, {"from": "a", "to": "b"}],
     )
     result = repair(cfg)
-    assert result.config["edges"] == [{"from": "a", "to": "b"}]
+    assert result.config["edges"] == [
+        {"from": "a", "to": "b", "to_port": "audio"}
+    ]
     assert any("duplicate edge" in f for f in result.fixes)
 
 
@@ -179,7 +181,9 @@ def test_repair_collapse_duplicate_lines_keeps_busiest():
     result = repair(cfg, collapse_duplicate_lines=True)
     assert "line_busy" in result.config["nodes"]
     assert "line_idle" not in result.config["nodes"]
-    assert result.config["edges"] == [{"from": "src", "to": "line_busy"}]
+    assert result.config["edges"] == [
+        {"from": "src", "to": "line_busy", "to_port": "audio"}
+    ]
     assert any("collapsed duplicate" in f and "Patch Space Mic" in f for f in result.fixes)
 
 

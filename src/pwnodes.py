@@ -1094,7 +1094,7 @@ class BooleanSplitterNode(Node):
     # Its boolean input port, so PatchSpace._resolve_boolean_input knows
     # which inbound edge to follow (it shares the lookup with the
     # BoolControlledMixin nodes, whose input is "ctrl").
-    BOOLEAN_INPUT = "in"
+    BOOLEAN_INPUT = "boolean"
 
     def port_kind(self, port: str, direction: str) -> str:
         return "boolean"
@@ -1105,7 +1105,7 @@ class BooleanInvertNode(Node):
     signal is wired into "in"; with nothing wired it emits no value, so
     anything downstream falls back to its own default."""
 
-    BOOLEAN_INPUT = "in"
+    BOOLEAN_INPUT = "boolean"
 
     def port_kind(self, port: str, direction: str) -> str:
         return "boolean"
@@ -1182,7 +1182,7 @@ class BooleanWarpInNode(Node):
     """Boolean counterpart of WarpInNode: publishes the boolean signal
     on its "in" under ``warp_name`` in the separate boolean namespace."""
 
-    BOOLEAN_INPUT = "in"
+    BOOLEAN_INPUT = "boolean"
 
     def __init__(self, node_id, warp_name: str = ""):
         super().__init__(node_id)
@@ -1280,7 +1280,7 @@ class BoolPanelInNode(Node):
     input); ``None`` means "no default" (downstream falls back to its own
     default, as before)."""
 
-    BOOLEAN_INPUT = "in"
+    BOOLEAN_INPUT = "boolean"
     # Several edges may land on the same boolean port; resolution takes
     # the first wired source (see _resolve_boolean_input).
     ALLOW_MULTIPLE_BOOLEAN = True
@@ -1300,7 +1300,7 @@ class BoolPanelOutNode(Node):
     """Boolean counterpart of PanelOutNode: internal boolean on "in" is
     republished outside on "out"."""
 
-    BOOLEAN_INPUT = "in"
+    BOOLEAN_INPUT = "boolean"
     # Like the audio panel ports, several edges may land on the same
     # boolean port; resolution takes the first wired source (see
     # _resolve_boolean_input).
@@ -1867,7 +1867,7 @@ class SoundPlayerNode(_SingleSinkNode):
 
     # The impulse socket.  Its name is "in", so edge ids stay the plain
     # ``button->player`` form; the *kind* is what makes it an impulse wire.
-    IMPULSE_INPUT = "in"
+    IMPULSE_INPUT = "impulse"
 
     #: The socket a sound arrives on (a Sound node, or a Clip narrowing one).
     SOUND_INPUT = "sound"
@@ -1901,7 +1901,7 @@ class SoundPlayerNode(_SingleSinkNode):
 
     def port_kind(self, port: str, direction: str) -> str:
         if direction == "in":
-            if port == self.IMPULSE_INPUT:
+            if port == self.IMPULSE_INPUT or port == "in":
                 return "impulse"
             if port == self.SOUND_INPUT:
                 return "sound"
@@ -3916,10 +3916,16 @@ class PatchSpace:
         port = getattr(node, "BOOLEAN_INPUT", None)
         if port is None:
             return None
-        for edge in self._edges_into.get(node_id, []):
-            if edge.to_port != port:
-                continue
-            return self._resolve_boolean(edge.from_node, edge.from_port, seen)
+        edges = self._edges_into.get(node_id, [])
+        for edge in edges:
+            if edge.to_port == port:
+                return self._resolve_boolean(edge.from_node, edge.from_port, seen)
+        # A saved session may still name this input "in", from before ports
+        # were named after what they carry.  Only as a fallback: another port's
+        # edge must never be mistaken for this one.
+        for edge in edges:
+            if edge.to_port == "in" and node.port_kind("in", "in") == "boolean":
+                return self._resolve_boolean(edge.from_node, edge.from_port, seen)
         return None
 
     def _resolve_boolean_inputs(self, node_id: NodeId,
@@ -3930,9 +3936,12 @@ class PatchSpace:
         (the caller combines whatever it gets)."""
         node = self.nodes.get(node_id)
         values: List[bool] = []
+        edges = self._edges_into.get(node_id, [])
+        legacy = node.port_kind("in", "in") == "boolean"
         for port in getattr(node, "BOOLEAN_INPUTS", ()):
-            for edge in self._edges_into.get(node_id, []):
-                if edge.to_port != port:
+            wanted = [port] + (["in"] if legacy else [])
+            for edge in edges:
+                if edge.to_port not in wanted:
                     continue
                 value = self._resolve_boolean(edge.from_node, edge.from_port, seen)
                 if value is not None:

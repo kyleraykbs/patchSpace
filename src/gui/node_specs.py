@@ -267,12 +267,12 @@ class NodeSpec:
 
 NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
     "regex_input": NodeSpec("Regex In", [], ["out"], field="pattern"),
-    "regex_output": NodeSpec("Regex Out", ["in"], [], field="pattern"),
+    "regex_output": NodeSpec("Regex Out", ["audio"], [], field="pattern"),
     "media_class_input": NodeSpec("Media Class In", [], ["out"], field="media_class"),
-    "media_class_output": NodeSpec("Media Class Out", ["in"], [], field="media_class"),
+    "media_class_output": NodeSpec("Media Class Out", ["audio"], [], field="media_class"),
     "description_input": NodeSpec("Description In", [], ["out"], field="description"),
-    "description_output": NodeSpec("Description Out", ["in"], [], field="description"),
-    "splitter": NodeSpec("Splitter", ["in"], ["out"]),
+    "description_output": NodeSpec("Description Out", ["audio"], [], field="description"),
+    "splitter": NodeSpec("Splitter", ["audio"], ["out"]),
     # Gate and the two switches are bool-controlled: a boolean signal on
     # the gray "ctrl" input drives them.  When nothing is wired there
     # they show an on/off fallback button instead (control
@@ -280,14 +280,14 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
     # connected.  Their two channels are "on"/"off".
     "gate": NodeSpec(
         "Gate",
-        ["in", "ctrl"],
+        ["audio", "ctrl"],
         ["out"],
         control="fallback_onoff",
         boolean_inputs=["ctrl"],
     ),
     "switcher": NodeSpec(
         "Switcher",
-        ["in", "ctrl"],
+        ["audio", "ctrl"],
         ["on", "off"],
         control="fallback_onoff",
         boolean_inputs=["ctrl"],
@@ -299,7 +299,7 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
         control="fallback_onoff",
         boolean_inputs=["ctrl"],
     ),
-    "exclude_filter": NodeSpec("Exclude (Regex)", ["in"], ["out"], field="pattern"),
+    "exclude_filter": NodeSpec("Exclude (Regex)", ["audio"], ["out"], field="pattern"),
     # Bundles: a wire that stands for a whole set of endpoints.  All
     # Inputs / All Apps are *source* bundles (audio can be pulled from
     # their members); All Outputs is a *sink* bundle (audio can be pushed
@@ -326,8 +326,8 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
     # predicate keeps, or - switched to Exclude - everything but those.
     # "filter_mode" is the gate toggle's shape with those captions.
     "filter": NodeSpec(
-        "Filter", ["in", "filter1"], ["out"],
-        bundle_inputs=["in"], bundle_outputs=["out"], filter_inputs=["filter1"],
+        "Filter", ["bundle", "filter1"], ["out"],
+        bundle_inputs=["bundle"], bundle_outputs=["out"], filter_inputs=["filter1"],
         socket_labels=True,
         control="filter_mode",
     ),
@@ -342,15 +342,15 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
     # its spec declares none; the daemon reports them as bundle_members
     # and the canvas appends a socket for each.
     "bundle_split": NodeSpec(
-        "Split Bundle", ["in"], [],
-        bundle_inputs=["in"],
+        "Split Bundle", ["bundle"], [],
+        bundle_inputs=["bundle"],
     ),
     "bundle_to_audio": NodeSpec(
-        "Bundle -> Audio", ["in"], ["out"],
-        bundle_inputs=["in"],
+        "Bundle -> Audio", ["bundle"], ["out"],
+        bundle_inputs=["bundle"],
     ),
     "bundle_output": NodeSpec(
-        "Bundle Output", ["in", "bundle"], [],
+        "Bundle Output", ["audio", "bundle"], [],
         bundle_inputs=["bundle"],
         socket_labels=True,
     ),
@@ -391,7 +391,7 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
         filter_outputs=["out"],
         settings=[("invert", "Invert (exclude matches)", "bool")],
     ),
-    "volume": NodeSpec("Volume", ["in"], ["out"], control="volume"),
+    "volume": NodeSpec("Volume", ["audio"], ["out"], control="volume"),
     # Boolean control-signal nodes (gray ports/edges; never a PipeWire
     # link). The On/Off source's button flips a boolean output; the
     # splitter fans one boolean out to two; Invert negates its single input;
@@ -406,16 +406,16 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
     ),
     "boolean_splitter": NodeSpec(
         "Bool Splitter",
-        ["in"],
+        ["boolean"],
         ["out1", "out2"],
-        boolean_inputs=["in"],
+        boolean_inputs=["boolean"],
         boolean_outputs=["out1", "out2"],
     ),
     "boolean_invert": NodeSpec(
         "Invert",
-        ["in"],
+        ["boolean"],
         ["out"],
-        boolean_inputs=["in"],
+        boolean_inputs=["boolean"],
         boolean_outputs=["out"],
     ),
     "boolean_and": NodeSpec(
@@ -447,14 +447,14 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
     # matching publisher(s). Audio warps mix multiple publishers;
     # boolean warps are a separate namespace (first match wins). The
     # inline `warp_name` text box is the pairing key.
-    "warp_in": NodeSpec("Warp In", ["in"], [], field="warp_name"),
+    "warp_in": NodeSpec("Warp In", ["audio"], [], field="warp_name"),
     "warp_out": NodeSpec("Warp Out", [], ["out"], field="warp_name"),
     "bool_warp_in": NodeSpec(
         "Bool Warp In",
-        ["in"],
+        ["boolean"],
         [],
         field="warp_name",
-        boolean_inputs=["in"],
+        boolean_inputs=["boolean"],
     ),
     "bool_warp_out": NodeSpec(
         "Bool Warp Out",
@@ -467,18 +467,18 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
     # (inputs) / right (outputs) edge.  Audio ones are transparent; boolean
     # ones carry a boolean control signal.
     "panel_in": NodeSpec(
-        "Panel In", ["in"], ["out"],
+        "Panel In", ["audio"], ["out"],
         settings=[("description", "Description:", "text")],
     ),
     "panel_out": NodeSpec(
-        "Panel Out", ["in"], ["out"],
+        "Panel Out", ["audio"], ["out"],
         settings=[("description", "Description:", "text")],
     ),
     "bool_panel_in": NodeSpec(
         "Bool Panel In",
-        ["in"],
+        ["boolean"],
         ["out"],
-        boolean_inputs=["in"],
+        boolean_inputs=["boolean"],
         boolean_outputs=["out"],
         settings=[
             ("description", "Description:", "text"),
@@ -487,9 +487,9 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
     ),
     "bool_panel_out": NodeSpec(
         "Bool Panel Out",
-        ["in"],
+        ["boolean"],
         ["out"],
-        boolean_inputs=["in"],
+        boolean_inputs=["boolean"],
         boolean_outputs=["out"],
         settings=[("description", "Description:", "text")],
     ),
@@ -527,17 +527,17 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
     # "clip" control area instead of a field row.
     "clip": NodeSpec(
         "Clip",
-        ["in"],
+        ["sound"],
         ["out"],
-        sound_inputs=["in"],
+        sound_inputs=["sound"],
         sound_outputs=["out"],
         control="clip",
     ),
     "sound_player": NodeSpec(
         "Sound Player",
-        ["in", "sound"],
+        ["impulse", "sound"],
         ["out"],
-        impulse_inputs=["in"],
+        impulse_inputs=["impulse"],
         sound_inputs=["sound"],
         # The Stack switch is on the node body (above nothing else it needs);
         # the green dot + play count is the live read-out (_draw_play_indicator).
@@ -560,7 +560,7 @@ NODE_TYPE_SPECS.update(
         ),
         "noise_cancel": NodeSpec(
             "AI Noise Cancel",
-            ["in"],
+            ["audio"],
             ["out"],
             settings=[
                 (
@@ -605,7 +605,7 @@ NODE_TYPE_SPECS.update(
         # docstring).
         "sensitivity_gate": NodeSpec(
             "Sensitivity",
-            ["in"],
+            ["audio"],
             ["out"],
             control="sensitivity",
             settings=[
@@ -664,7 +664,7 @@ NODE_TYPE_SPECS.update(
         # main.py's set_node_property.
         "reverb": NodeSpec(
             "Reverb",
-            ["in"],
+            ["audio"],
             ["out"],
             control="wetdry",
             # Calf Reverb (LV2). The inline slider is wet/dry; the rest
@@ -715,7 +715,7 @@ NODE_TYPE_SPECS.update(
         # interior-only reload (debounced) rather than a live set-param.
         "normalize": NodeSpec(
             "Normalize",
-            ["in"],
+            ["audio"],
             ["out"],
             control="gain",
             settings=[
@@ -783,15 +783,15 @@ NODE_TYPE_SPECS.update(
 NODE_TYPE_SPECS.update(
     {
         "device_input": NodeSpec("Hardware Input", [], ["out"]),
-        "device_output": NodeSpec("Hardware Output", ["in"], []),
+        "device_output": NodeSpec("Hardware Output", ["audio"], []),
         "app_input": NodeSpec("App Playback", [], ["out"]),
-        "app_output": NodeSpec("App Mic", ["in"], []),
-        "patchspace_device": NodeSpec("Speaker Line", ["in"], ["out"]),
-        "patchspace_mic_device": NodeSpec("Mic Line", ["in"], ["out"]),
+        "app_output": NodeSpec("App Mic", ["audio"], []),
+        "patchspace_device": NodeSpec("Speaker Line", ["audio"], ["out"]),
+        "patchspace_mic_device": NodeSpec("Mic Line", ["audio"], ["out"]),
         "virtual_speaker": NodeSpec(
-            "Virtual Speaker", ["in"], ["out"], field="device_label"
+            "Virtual Speaker", ["audio"], ["out"], field="device_label"
         ),
-        "virtual_mic": NodeSpec("Virtual Mic", ["in"], ["out"], field="device_label"),
+        "virtual_mic": NodeSpec("Virtual Mic", ["audio"], ["out"], field="device_label"),
     }
 )
 
@@ -1311,7 +1311,7 @@ CLASS_NAME_TO_TYPE.update(
     }
 )
 
-_FALLBACK_SPEC = NodeSpec("Unknown", ["in"], ["out"])
+_FALLBACK_SPEC = NodeSpec("Unknown", ["audio"], ["out"])
 
 
 def normalize_node_type(raw_type: str) -> str:
@@ -1335,6 +1335,12 @@ def port_kind(node_type: str, port: str, direction: str) -> str:
     validation so the GUI can't create a connection the daemon would
     reject."""
     spec = spec_for(node_type)
+    if port == "in" and port not in spec.inputs:
+        # Legacy name: before ports were named after what they carry, a node's
+        # first input was always "in".  A saved session or panel file still
+        # carries it (session_repair rewrites it on load, and this resolves it
+        # in the meantime), so map it to the kind that input actually has.
+        port = spec.inputs[0] if spec.inputs else "in"
     # A Merge Bundle's inputs are dynamic (in1, in2, ...); the spec only
     # declares the first, so treat every input on one as a bundle socket.
     if node_type == "bundle" and direction == "in":

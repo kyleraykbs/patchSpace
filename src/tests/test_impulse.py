@@ -306,7 +306,7 @@ def test_a_loaded_session_brings_an_impulse_chain_back(monkeypatch):
     fx = d.space.nodes["boom"]
     assert fx.overlap is True and not hasattr(fx, "path")
     assert d.space.nodes["sound__boom"].path == "/sounds/boom.wav"
-    assert "kick->boom" in d.space.edges
+    assert "kick->boom:impulse" in d.space.edges
     assert "sound__boom->boom:sound" in d.space.edges
     assert d.space.pulse("kick") == ["boom"]
     assert len(FakeProc.commands) == 1
@@ -314,7 +314,7 @@ def test_a_loaded_session_brings_an_impulse_chain_back(monkeypatch):
 
 def test_gui_mirrors_the_impulse_port_kind():
     assert node_specs.port_kind("button", "out", "out") == "impulse"
-    assert node_specs.port_kind("sound_player", "in", "in") == "impulse"
+    assert node_specs.port_kind("sound_player", "impulse", "in") == "impulse"
     assert node_specs.port_kind("sound_player", "out", "out") == "audio"
     assert node_specs.ports_compatible("button", "out", "sound_player", "in")
     assert not node_specs.ports_compatible("button", "out", "volume", "in")
@@ -333,9 +333,11 @@ def test_session_repair_accepts_an_impulse_wire():
         "groups": [],
     }
     assert [i for i in validate(cfg) if i.severity == ERROR] == []
-    # repair normalizes away the redundant default ports; the edge itself
-    # must survive untouched.
-    assert repair(cfg).config["edges"] == [{"from": "btn", "to": "fx"}]
+    # repair rewrites the legacy "in" to the name that input now carries; the
+    # edge itself (and its endpoints) must survive.
+    assert repair(cfg).config["edges"] == [
+        {"from": "btn", "to": "fx", "to_port": "impulse"}
+    ]
 
 
 def test_session_repair_flags_a_mismatched_impulse_wire():

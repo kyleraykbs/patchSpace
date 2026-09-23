@@ -282,7 +282,7 @@ def test_reset_panel_reverts_subtree_scoped(tmp_path):
     assert d.space.nodes["frozen::x"].pattern == "a"
     assert "frozen::z" not in d.space.nodes
     # ...while the imperative cross-panel edge survives.
-    assert "frozen::x->y" in d.space.edges
+    assert "frozen::x->y:audio" in d.space.edges
     assert "y" in d.space.nodes
 
 

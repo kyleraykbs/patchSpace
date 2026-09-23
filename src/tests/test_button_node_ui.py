@@ -54,7 +54,7 @@ def _widget(node):
     w.layout_awake = False
     w.pan_x, w.pan_y, w.zoom = 0.0, 0.0, 1.0
     w.update_from_daemon(
-        {"nodes": {"b": node}, "edges": {}, "panels": [], "groups": []}
+        {"nodes": {node["id"]: node}, "edges": {}, "panels": [], "groups": []}
     )
     # Nodes fade in on their first drawn frame; a one-shot render would paint
     # the node at alpha 0 and probe the canvas instead of the face.
@@ -100,3 +100,20 @@ def test_the_face_changes_color_while_hovered():
     w.on_leave(None)                   # and leaves again
     assert w.hover_impulse is None
     assert _render_centre_pixel(w, *probe) == idle
+
+
+def test_an_unwired_impulse_input_gets_its_own_face():
+    """A node whose impulse input has no wire shows a face that fires it, so a
+    player can be tested without a Button - and it goes away once wired."""
+    node = _button_node("pl")
+    node.update({"type": "sound_player", "label": "Sound Player", "playing": 0})
+    w = _widget(node)
+    fx, fy, fw, fh = w._impulse_face_rect("pl")
+    assert w.find_impulse_fallback_at(fx + fw / 2, fy + fh / 2) == "pl"
+
+    # A wire into the impulse input takes the face away.
+    w.edges["btn->pl:impulse"] = {
+        "from_node": "btn", "from_port": "out", "to_node": "pl",
+        "to_port": "impulse",
+    }
+    assert w.find_impulse_fallback_at(fx + fw / 2, fy + fh / 2) is None

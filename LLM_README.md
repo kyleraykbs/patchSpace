@@ -1351,14 +1351,28 @@ supervision pass then recreates whatever vanished with the old PipeWire.
 - **`node_specs.py` is the UI source of truth.** `NodeSpec(label, inputs, outputs,
   control=..., field=..., settings=[...], boolean_inputs/outputs=..., impulse_inputs/
   outputs=..., toggle=..., indicator=..., socket_labels=...)`.
+  - **Ports are named after what they carry**: an audio input is `audio`, an impulse
+    input `impulse`, a sound input `sound`, a bundle input `bundle`; auxiliary inputs keep
+    their role names (`ctrl` on gate/switcher, `filter1` on a Filter, `in1` on Merge
+    Bundle, `a`/`b` on the logic gates).  `port_kind` maps a legacy `"in"` to whatever that
+    node's first input actually carries, and `session_repair` rewrites it on load, so a
+    saved session or panel file from before the rename still works.
+  - A node with an `impulse` input and *nothing wired* to it draws its own "Impulse" face
+    (`_impulse_face_rect`), so a player can be fired without a Button; the face goes away
+    once a wire arrives.
   - `control` ∈ `None | "volume" | "gate" | "boolean" | "fallback_onoff" | "wetdry" |
-    "sensitivity" | "gain" | "impulse" | "filter_mode"` selects the inline control drawn
+    "sensitivity" | "gain" | "impulse" | "filter_mode" | "clip"` selects the inline control drawn
     on the node body.  Boolean source nodes use `"boolean"`; gate/switcher fallback on/off
     uses `"fallback_onoff"` (read-only white when a ctrl signal is wired); a Button uses
     `"impulse"` (the gate-shaped face, one step lighter while `hover_impulse` says the
     pointer is over it, and pulsing green for `IMPULSE_FLASH_MS` on a press); the Filter
-    node uses `"filter_mode"` (the same face captioned `INCLUDE`/`EXCLUDE`).  All of these
-    claim `GATE_AREA_HEIGHT` in `_bottom_control_height`, so the face clears the sockets.
+    node uses `"filter_mode"` (the same face captioned `INCLUDE`/`EXCLUDE`); a Clip uses
+    `"clip"` (the timeline).  All of these claim their height in `_bottom_control_height`,
+    so the face clears the sockets.
+  - The Clip's body is a timeline: waveform (peaks from `get_peaks`), a yellow selection
+    whose **sides drag to resize** and whose top knobs **drag to slide**, two boxes filling
+    the row above (`start` | `end`, click to type a time - `1.5` or `0:01.5`), dragging the
+    waveform to pan and the wheel to zoom about the pointer.
   - `socket_labels=False` suppresses per-port name labels on the symmetric boolean gates.
   - `settings` rows are `(attr, label, kind[, extra])` with kind `bool|number|choice|text`;
     `number` extra is `{min,max,step}`.

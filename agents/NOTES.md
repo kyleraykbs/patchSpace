@@ -359,3 +359,12 @@ gesture accepts; tested only structurally (no touchscreen here).
   process binary then the application name.  `{"appKey": ...}` is the filter key; the
   picker gets its list from the daemon's `get_apps`.  Verified against Kyle's live graph:
   the Vesktop audio-service client (pid 3808060, binary electron) resolves to "vesktop".
+
+* **Ports are named after what they carry** (`audio`/`impulse`/`sound`/`bundle`); role
+  names stay (ctrl, filter1, in1, a/b).  Three places must agree: the specs, the node
+  classes' `port_kind`, and the resolvers that match an edge's `to_port` - a rename that
+  misses one silently stops a control from resolving (the boolean gates broke exactly
+  that way).  `session_repair._normalized_port` rewrites legacy `"in"` on load, which is
+  why no legacy edge is dropped as a bad port.
+* A `WidgetPaintable` needs the widget allocated; a *GTK popover* still can't be
+  snapshotted offscreen.  The canvas renders (cairo) are the way to check node faces.

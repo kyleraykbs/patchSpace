@@ -610,7 +610,7 @@ def test_node_specs_declare_bundle_and_filter_ports():
 
     assert node_specs.port_kind("all_inputs", "out", "out") == "bundle"
     assert node_specs.port_kind("all_outputs", "out", "out") == "bundle"
-    assert node_specs.port_kind("filter", "in", "in") == "bundle"
+    assert node_specs.port_kind("filter", "bundle", "in") == "bundle"
     assert node_specs.port_kind("filter", "out", "out") == "bundle"
     assert node_specs.port_kind("filter", "filter1", "in") == "filter"
     assert node_specs.port_kind("filter", "filter9", "in") == "filter"

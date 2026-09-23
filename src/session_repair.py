@@ -132,6 +132,14 @@ def _normalized_port(node_type: str, port: str, direction: str) -> Tuple[str, bo
     modern = LEGACY_PORTS.get(port)
     if modern is not None and modern in valid:
         return modern, True
+    if port == "in" and direction == "in":
+        # Before ports were named after what they carry, a node's first input
+        # was always "in".  A saved config is rewritten to the real name, so
+        # the GUI, the daemon and the file all agree (and no edge is dropped
+        # as if the port had never existed).
+        spec = NODE_TYPE_SPECS.get(node_type)
+        if spec is not None and spec.inputs and spec.inputs[0] in valid:
+            return spec.inputs[0], True
     return port, False
 
 

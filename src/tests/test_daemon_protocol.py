@@ -1057,7 +1057,7 @@ def test_boolean_nodes_registry_specs_and_output_control():
     assert ns.spec_for("boolean_switch").boolean_outputs == {"out"}
     assert ns.spec_for("gate").boolean_inputs == {"ctrl"}
     assert ns.spec_for("gate").control == "fallback_onoff"
-    assert ns.spec_for("switcher").inputs == ["in", "ctrl"]
+    assert ns.spec_for("switcher").inputs == ["audio", "ctrl"]
     assert ns.spec_for("switcher").outputs == ["on", "off"]
     assert ns.port_kind("gate", "ctrl", "in") == "boolean"
     assert ns.port_kind("gate", "in", "in") == "audio"

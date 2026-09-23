@@ -110,3 +110,61 @@ def test_the_wheel_zooms_the_timeline_under_it_and_nothing_else():
     assert w._clip_time_at("clip1", cx) == pytest.approx(5.0, abs=0.05)
     # Somewhere else the canvas keeps the wheel.
     assert w.zoom_clip_at(99999.0, 99999.0, 0.5) is False
+
+
+def test_a_typed_time_understands_stamps_and_seconds():
+    w, _ = _widget()
+    assert w._parse_clip_time("1.5") == pytest.approx(1.5)
+    assert w._parse_clip_time("0:01.5") == pytest.approx(1.5)
+    assert w._parse_clip_time("1:02") == pytest.approx(62.0)
+    assert w._parse_clip_time("1:02:03.5") == pytest.approx(3723.5)
+    assert w._parse_clip_time("-4") == 0.0
+    for junk in ("", "   ", "abc", "1:2:3:4"):
+        assert w._parse_clip_time(junk) is None
+
+
+def test_the_boxes_sit_side_by_side_above_the_timeline():
+    w, _ = _widget()
+    rx, ry, rw, _rh = w._clip_rect("clip1")
+    sx, sy, sw, sh = w._clip_box_rect("clip1", "start")
+    ex, ey, ew, eh = w._clip_box_rect("clip1", "end")
+    # Next to each other, inside the row, above the timeline.
+    assert sx + sw < ex
+    assert ey == pytest.approx(sy)
+    assert sy + sh <= ry
+    assert ex + ew <= rx + rw
+    assert w.find_clip_box_at(sx + 2, sy + 2) == ("clip1", "start")
+    assert w.find_clip_box_at(ex + 2, ey + 2) == ("clip1", "end")
+
+
+def test_the_knobs_sit_on_top_of_the_selection_lines():
+    w, _ = _widget()
+    rx, ry, rw, _rh = w._clip_rect("clip1")
+    for which, seconds in (("start", 2.0), ("end", 6.0)):
+        kx, ky, kw, kh = w._clip_knob_rect("clip1", which)
+        # Horizontally on the line, vertically at the timeline's top edge.
+        assert kx + kw / 2.0 == pytest.approx(w._clip_x_at("clip1", seconds))
+        assert ky <= ry <= ky + kh
+        assert rx <= kx <= rx + rw
+        assert w.find_clip_knob_at(kx + kw / 2.0, ky + kh / 2.0) == (
+            "clip1", which
+        )
+
+
+def test_dragging_a_knob_slides_the_selection():
+    w, client = _widget(duration=10.0, start=2.0, end=6.0)
+    _rx, _ry, rw, _rh = w._clip_rect("clip1")
+    _x, y, _w, _h = w._clip_rect("clip1")
+    mid_y = y + _rh / 2.0
+
+    w.clip_dragging = ("slide", "clip1")
+    w._clip_drag_origin = (w._clip_x_at("clip1", 2.0), (2.0, 6.0))
+    # One second to the right: both times move, the length stays 4s.
+    w._drag_clip(w._clip_x_at("clip1", 3.0), mid_y)
+    assert w.nodes["clip1"]["start"] == pytest.approx(3.0)
+    assert w.nodes["clip1"]["end"] == pytest.approx(7.0)
+    assert [c["property"] for c in client.sent[-2:]] == ["start", "end"]
+    # And it cannot slide off either end of the file.
+    w._drag_clip(w._clip_x_at("clip1", 100.0), mid_y)
+    assert w.nodes["clip1"]["start"] == pytest.approx(6.0)
+    assert w.nodes["clip1"]["end"] == pytest.approx(10.0)
