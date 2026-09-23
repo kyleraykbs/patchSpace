@@ -4915,11 +4915,7 @@ class PatchSpaceDaemon:
         the file behind it was rewritten - and a take that starts and finishes
         between two polls (a short one) shows no ``recording`` flip either.  The
         file's own mtime and size catch both."""
-        try:
-            st = os.stat(path)
-        except OSError:
-            return ""
-        return f"{st.st_mtime_ns}:{st.st_size}"
+        return pwnodes.sound_rev(path)
 
     def _cmd_get_nodes(self, cmd: dict) -> dict:
         # Serialize *under* the lock: the supervision tick creates/removes

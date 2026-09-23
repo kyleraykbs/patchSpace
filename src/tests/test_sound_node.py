@@ -311,7 +311,8 @@ def test_a_recorder_takes_an_audio_input_and_gives_a_sound(monkeypatch):
 
 def test_recording_again_overwrites_the_take(tmp_path, monkeypatch):
     """One fixed file per node: Record clears it first, so a new take replaces
-    the old one and the cached waveform/length can't be stale."""
+    the old one rather than piling up beside it.  (That the new take also
+    *reads* as the new take is the growing-take test's job.)"""
     from main import PatchSpaceDaemon
     from tests.test_pwnodes import FakeGraph
 
@@ -326,16 +327,10 @@ def test_recording_again_overwrites_the_take(tmp_path, monkeypatch):
 
     take = pathlib.Path(node.take_path)
     take.write_bytes(b"old take")
-    pwnodes._DURATION_CACHE[take.as_posix()] = 12.5
-    pwnodes._PEAKS_CACHE[take.as_posix()] = [(0.0, 1.0)]
 
     d.handle_command({"command": "record", "node_id": "rec", "recording": True})
     assert not take.exists()                      # cleared before the new take
     d.handle_command({"command": "record", "node_id": "rec", "recording": False})
-    # The caches for that path were dropped, or a re-record would report the
-    # old shape (the path never changes).
-    assert take.as_posix() not in pwnodes._DURATION_CACHE
-    assert take.as_posix() not in pwnodes._PEAKS_CACHE
 
 
 def test_a_recorders_export_is_json_serialisable(monkeypatch):
@@ -440,3 +435,28 @@ def test_a_take_reads_its_own_sink_and_fails_loudly_when_it_cannot(
     assert node.recording is False
     monkeypatch.setattr(pwnodes, "_recorder_input_ports", lambda name: [])
     assert node.start_take() is False
+
+
+def test_a_growing_take_is_re_read_not_answered_from_the_cache(tmp_path):
+    """A take exists as a *growing* file while it records, which is what lets
+    its waveform fill in as it goes.  The sound caches are therefore keyed on
+    the file's revision as well as its path: the same path having got longer
+    must give the longer answer, not the first one - a stale answer is what
+    left the timeline sitting still for the whole take."""
+    import wave as wave_mod
+
+    take = tmp_path / "take.wav"
+
+    def put_seconds(seconds):
+        with wave_mod.open(str(take), "w") as f:
+            f.setnchannels(1)
+            f.setsampwidth(2)
+            f.setframerate(48000)
+            f.writeframes(b"\x00\x00" * int(48000 * seconds))
+
+    put_seconds(1.0)
+    assert probe_duration(str(take)) == pytest.approx(1.0, abs=0.05)
+
+    put_seconds(2.0)                                  # the same take, still growing
+    assert pwnodes.sound_rev(str(take))
+    assert probe_duration(str(take)) == pytest.approx(2.0, abs=0.05)

@@ -1673,13 +1673,19 @@ _DURATION_CACHE: Dict[str, float] = {}
 #: timeline to look like a waveform, small enough to hand to the GUI whole.
 PEAK_BUCKETS = 600
 
-def forget_sound(path: str) -> None:
-    """Drop a path's cached length and waveform.  For a file that is rewritten
-    in place (a Recorder's take): the caches are keyed by path, so the new take
-    would otherwise report the old shape."""
-    resolved = os.path.expanduser((path or "").strip())
-    _DURATION_CACHE.pop(resolved, None)
-    _PEAKS_CACHE.pop(resolved, None)
+def sound_rev(path: str) -> str:
+    """A revision for the file behind a sound path: mtime and size.
+
+    The sound caches (length, waveform) are keyed on this as well as the path,
+    so a file rewritten *under the same path* is re-read instead of answered
+    from a stale entry - a Recorder's take (which always writes one path), and
+    a take that is *still growing*, which is what lets its waveform fill in
+    while it records."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return ""
+    return f"{st.st_mtime_ns}:{st.st_size}"
 
 
 #: path -> peaks; see probe_peaks.  A file's shape doesn't change either.
@@ -1695,8 +1701,9 @@ def probe_duration(path: str) -> float:
     if not path:
         return 0.0
     resolved = os.path.expanduser(path.strip())
-    if resolved in _DURATION_CACHE:
-        return _DURATION_CACHE[resolved]
+    cache_key = (resolved, sound_rev(resolved))
+    if cache_key in _DURATION_CACHE:
+        return _DURATION_CACHE[cache_key]
     duration = 0.0
     try:
         result = subprocess.run(
@@ -1708,7 +1715,9 @@ def probe_duration(path: str) -> float:
             duration = max(0.0, float((result.stdout or "").strip() or 0.0))
     except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
         logger.debug("ffprobe couldn't read %r: %s", resolved, exc)
-    _DURATION_CACHE[resolved] = duration
+    if len(_DURATION_CACHE) > 256:
+        _DURATION_CACHE.clear()
+    _DURATION_CACHE[cache_key] = duration
     return duration
 
 
@@ -1722,8 +1731,9 @@ def probe_peaks(path: str) -> List[Tuple[float, float]]:
     if not path:
         return []
     resolved = os.path.expanduser(path.strip())
-    if resolved in _PEAKS_CACHE:
-        return _PEAKS_CACHE[resolved]
+    cache_key = (resolved, sound_rev(resolved))
+    if cache_key in _PEAKS_CACHE:
+        return _PEAKS_CACHE[cache_key]
     peaks: List[Tuple[float, float]] = []
     try:
         result = subprocess.run(
@@ -1746,7 +1756,11 @@ def probe_peaks(path: str) -> List[Tuple[float, float]]:
                     ))
     except (OSError, subprocess.TimeoutExpired) as exc:
         logger.debug("ffmpeg couldn't read %r for a waveform: %s", resolved, exc)
-    _PEAKS_CACHE[resolved] = peaks
+    if len(_PEAKS_CACHE) > 256:
+        # A file that keeps changing (a take being recorded) leaves a dead
+        # entry per revision; keep the memo from growing without bound.
+        _PEAKS_CACHE.clear()
+    _PEAKS_CACHE[cache_key] = peaks
     return peaks
 
 
@@ -2285,10 +2299,6 @@ class RecorderNode(_SingleSinkNode):
         proc, self._recorder = self._recorder, None
         if proc is not None:
             proc.destroy()
-        if was:
-            # The file behind these caches just changed: a re-record under the
-            # same path would otherwise keep its old waveform and length.
-            forget_sound(self.take_path)
         return was
 
     def _prune_recorder(self) -> None:
