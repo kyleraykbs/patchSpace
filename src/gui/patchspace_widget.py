@@ -383,6 +383,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._clip_views: Dict[str, tuple] = {}
         self._clip_waves: Dict[str, dict] = {}
         self._clip_wave_pending: set = set()
+        # nid -> the `recording` flag the last poll reported, so a take's
+        # start/finish can be told apart even though its path never changes.
+        self._take_recording: dict = {}
         #: ("start"|"end"|"pan", node_id) while a Clip selection is dragged.
         self.clip_dragging = None
         self._clip_drag_origin = (0.0, 0.0)
@@ -1571,16 +1574,28 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                         node["source_start"] = ndata.get("source_start", 0.0)
                     # The timeline needs the waveform of whatever reaches this
                     # clip: ask when the source changes (not every poll - it is
-                    # a few hundred peaks).
+                    # a few hundred peaks).  A *recorder* breaks that rule on
+                    # purpose: a take always writes the same path - recording
+                    # deletes the node's file and writes it again - so the path
+                    # never changes and the old waveform would sit there
+                    # forever.  What does change is `recording`, so a Record or
+                    # Stop (either direction: the file is deleted at the start
+                    # and rewritten at the end) re-asks.
                     source = str(ndata.get("source_path") or "")
                     known = (self._clip_waves.get(nid) or {}).get("path")
-                    if (source and source != known
-                            and nid not in self._clip_wave_pending):
+                    was_recording = self._take_recording.get(nid)
+                    now_recording = bool(ndata.get("recording", False))
+                    self._take_recording[nid] = now_recording
+                    take_flipped = (was_recording is not None
+                                    and was_recording != now_recording)
+                    if ((source and source != known) or take_flipped) \
+                            and nid not in self._clip_wave_pending:
                         self._clip_wave_pending.add(nid)
                         self.client.send({"command": "get_peaks", "node_id": nid})
                     elif not source:
                         self._clip_waves.pop(nid, None)
                         self._clip_views.pop(nid, None)
+                        self._take_recording.pop(nid, None)
                 if "exclude" in ndata:
                     exclude = self._accept_bool_echo(
                         nid, "exclude", ndata.get("exclude", False)

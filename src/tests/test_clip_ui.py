@@ -236,3 +236,56 @@ def test_the_wheel_zooms_in_scrolling_up_and_out_scrolling_down():
 
 def _to_screen(w, wx, wy):
     return (wx * w.zoom + w.pan_x, wy * w.zoom + w.pan_y)
+
+
+def test_recorder_re_asks_for_its_waveform_after_a_take():
+    """A take writes the same path every time, so the path cannot say the file
+    changed - the recording flag does.  Asking only on a path change left the
+    previous take's waveform on screen for ever, which made a fresh take look
+    like a recorder that had done nothing.
+
+    The first poll of a node only registers it, so the counting starts at the
+    second."""
+    gi = pytest.importorskip("gi")
+    gi.require_version("Gtk", "4.0")
+    from gi.repository import Gtk
+    if not Gtk.init_check():
+        pytest.skip("no display available for GTK")
+    from gui.patchspace_widget import PatchSpaceGraphWidget
+
+    client = _Client()
+    w = PatchSpaceGraphWidget(client)
+    w.physics_active = False
+    w.layout_awake = False
+    rec = {
+        "id": "rec1", "type": "recorder", "label": "Recorder", "x": 0.0, "y": 0.0,
+        "ready": True, "connected": True, "declarative": False,
+        "selection_label": "Recorder", "description": "",
+        "source_path": "/recordings/rec1.wav", "recording": False, "duration": 0.0,
+    }
+
+    def polls():
+        w.update_from_daemon({"nodes": {"rec1": dict(rec)}, "edges": {},
+                              "panels": [], "groups": []})
+        return len([c for c in client.sent if c.get("command") == "get_peaks"])
+
+    def answer():
+        # The daemon's reply clears the widget's in-flight flag.
+        w.on_peaks({"node_id": "rec1", "path": rec["source_path"],
+                    "duration": rec["duration"], "peaks": []})
+
+    assert polls() == 0              # first sight: the node is registered
+    assert polls() == 1              # ... and its waveform is asked for
+    answer()
+    assert polls() == 1              # nothing changed: stay quiet
+
+    rec["recording"] = True          # a take starts (the file is wiped)
+    assert polls() == 2
+    answer()
+    rec.update(recording=False, duration=4.2)   # ... and finishes
+    assert polls() == 3
+    answer()
+    assert polls() == 3              # steady again
+
+    rec["source_path"] = "/recordings/other.wav"   # a new source still re-asks
+    assert polls() == 4

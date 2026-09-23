@@ -399,3 +399,11 @@ gesture accepts; tested only structurally (no touchscreen here).
 * The tick's two independent post-steps (the session autosave and the panel poll)
   each have their own guard now: sharing one meant a failing export starved the
   panel poll for as long as it kept failing.
+
+* **A stable path is not a stable file.**  A Recorder's take always writes the
+  same path (recording wipes the file and rewrites it), so the GUI's "ask for
+  the waveform when `source_path` changes" rule never fired again: after a
+  re-record the timeline kept showing the *previous* take - a silent one looked
+  like a recorder that had recorded nothing.  The waveform is now re-asked when
+  `recording` flips (either direction: the file is wiped at the start and
+  rewritten at the end), which is the only signal that changes.
