@@ -1418,6 +1418,21 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 self._node_alpha.pop(nid, None)
                 self._node_fade.pop(nid, None)
                 self._anim_seen.discard(nid)
+                # Every per-node cache goes with the node.  These are keyed by
+                # id and were left behind: a long session that adds and removes
+                # nodes kept walking dicts that only ever grew, and a node that
+                # later reuses a freed id would inherit the old node's
+                # geometry, waveform or recording state.
+                for cache in (
+                    self._node_h_cache, self._node_w_cache,
+                    self._socket_margins_cache, self._node_fp,
+                    self._clip_waves, self._clip_views,
+                    self._clip_wave_rev, self._clip_wave_asked,
+                    self._sound_recording, self._pending_positions,
+                    self._pending_effect_slider,
+                ):
+                    cache.pop(nid, None)
+                self.force_layout.velocities.pop(nid, None)
 
         # A take being recorded is a file still being written: nothing showing
         # it - the Recorder itself, or a Clip (or anything else) downstream of
@@ -7785,7 +7800,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         name_entry.set_text(str(panel.get("label") or self._panel_local(panel_id)))
         content.append(self._labeled_row("Name:", name_entry))
 
-        panel_key = panel.get("stem") or panel.get("label") or pid
+        panel_key = panel.get("stem") or panel.get("label") or panel_id
         color_picker = ColorPicker(
             panel.get("color") or self.DEFAULT_PANEL_COLOR,
             presets=self._group_colors(),
@@ -7805,24 +7820,30 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
         def _on_response(dlg, response):
             if response == Gtk.ResponseType.APPLY:
-                label = name_entry.get_text().strip()
-                if label:
-                    self.client.send(
-                        {
-                            "command": "edit_panel",
-                            "panel_id": panel_id,
-                            "label": label,
-                            "color": color_picker.get_value(),
-                            "auto_load": autoload.get_active(),
-                        }
-                    )
-                    # Optimistic local update so the header reflects the
-                    # change before the next poll.
-                    panel["label"] = label
-                    panel["color"] = color_picker.get_value()
-                    panel["auto_load"] = autoload.get_active()
-                    self._panel_geo_cache.clear()
-                    self.queue_draw()
+                # All three fields are this dialog's business.  An empty name
+                # used to discard the colour and the auto-load flag with it -
+                # Apply looked like it did nothing at all - so an empty name
+                # now means "keep the name it has" instead.
+                label = name_entry.get_text().strip() or str(
+                    panel.get("label") or self._panel_local(panel_id)
+                )
+                color_dialog_value = color_picker.get_value()
+                self.client.send(
+                    {
+                        "command": "edit_panel",
+                        "panel_id": panel_id,
+                        "label": label,
+                        "color": color_dialog_value,
+                        "auto_load": autoload.get_active(),
+                    }
+                )
+                # Optimistic local update so the header reflects the change
+                # before the next poll.
+                panel["label"] = label
+                panel["color"] = color_dialog_value
+                panel["auto_load"] = autoload.get_active()
+                self._panel_geo_cache.clear()
+                self.queue_draw()
             dlg.destroy()
 
         dialog.connect("response", _on_response)
@@ -10871,11 +10892,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         def on_response(dlg, response):
             if response == Gtk.ResponseType.APPLY:
                 new_id = id_entry.get_text().strip()
-                if not new_id or (new_id != gid and new_id in self.groups):
-                    return  # empty or duplicate id - leave dialog open
-                new_color = color_picker.get_value()
+                if new_id != gid and new_id in self.groups:
+                    return  # duplicate id - leave the dialog open
+                # An empty id keeps the one it has: it used to discard the
+                # label and colour too, so Apply looked like it did nothing.
+                new_id = new_id or gid
                 self._apply_group_edit(
-                    gid, new_id, label_entry.get_text(), new_color
+                    gid, new_id, label_entry.get_text(),
+                    color_picker.get_value()
                 )
             elif response == Gtk.ResponseType.REJECT:
                 self.groups.pop(gid, None)

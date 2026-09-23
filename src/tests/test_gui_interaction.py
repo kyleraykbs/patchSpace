@@ -175,3 +175,60 @@ def test_responses_coalesce_to_the_newest_state():
     assert latest_nodes == {"status": "ok", "nodes": {"a": 2}}
     assert latest_peaks == {"n1": {"status": "ok", "peaks": [2], "node_id": "n1"}}
     assert [e.get("devices") or e.get("apps") for e in events] == [["d"], ["firefox"]]
+
+
+def _walk(widget):
+    yield widget
+    child = widget.get_first_child()
+    while child is not None:
+        yield from _walk(child)
+        child = child.get_next_sibling()
+
+
+def test_panel_settings_apply_leaves_the_colour_applied():
+    """"The color panel when clicking apply doesn't do anything and just
+    closes."  The colour (and the auto-load flag) were applied only when the
+    *name* field was non-empty, so Apply could silently discard both - the
+    dialog closed and nothing had changed."""
+    gi = pytest.importorskip("gi")
+    gi.require_version("Gtk", "4.0")
+    from gi.repository import Gtk, GLib
+    if not Gtk.init_check():
+        pytest.skip("no display available for GTK")
+    from gui.patchspace_widget import PatchSpaceGraphWidget
+    from color_picker import ColorPicker
+
+    client = _Client()
+    win = Gtk.Window()
+    w = PatchSpaceGraphWidget(client)
+    win.set_child(w)
+    win.present()
+    w.update_from_daemon({"nodes": {}, "edges": {}, "groups": [], "panels": [{
+        "id": "P1", "label": "P1", "color": "#ff0000", "x": 0, "y": 0,
+        "w": 200, "h": 150, "writable": True, "readonly": False,
+        "stem": "P1", "auto_load": False}]})
+
+    def pump(ms=120):
+        loop = GLib.MainLoop()
+        GLib.timeout_add(ms, lambda: (loop.quit(), False)[1])
+        loop.run()
+
+    pump()
+    w.show_panel_settings_dialog("P1")
+    pump()
+    dialogs = [t for t in Gtk.Window.get_toplevels() if isinstance(t, Gtk.Dialog)]
+    assert dialogs, "the settings dialog did not open"
+    dialog = dialogs[0]
+    pickers = [x for x in _walk(dialog) if isinstance(x, ColorPicker)]
+    entries = [x for x in _walk(dialog) if isinstance(x, Gtk.Entry)]
+    assert pickers and entries
+    pickers[0].set_hex("#00ff00")
+    entries[0].set_text("")                 # no name given
+    dialog.response(Gtk.ResponseType.APPLY)
+    pump()
+
+    assert w.panels["P1"]["color"] == "#00ff00"
+    assert w.panels["P1"]["label"] == "P1"      # keeps the name it had
+    sent = [c for c in client.sent if c.get("command") == "edit_panel"]
+    assert sent and sent[-1]["color"] == "#00ff00"
+    win.destroy()
