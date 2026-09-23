@@ -426,3 +426,14 @@ gesture accepts; tested only structurally (no touchscreen here).
   the view simply stops changing.  When a GUI report is "X stopped working", it
   is worth reading the daemon's log for the command that failed, not only the
   widget.
+
+* **A Filter is not an ordinary bundle endpoint.**  It is a *backed* node, so
+  its output is its own dummy sink's monitor - not a set of live sources.  A
+  Bundle Split downstream of one therefore resolved to *no* members at all (the
+  generic `find_source_nodes` over a sink identity matches nothing), so the
+  split showed no lines and nothing wired: "it works, but not on the other side
+  of a filter".  Members now resolve *through* a Filter and are narrowed by its
+  classifiers, which is what the filter means everywhere else.
+* Watch for `seen` sets shared across two functions that each guard with them:
+  passing a caller's `seen` into a helper that has already added the node reads
+  as a cycle and silently returns "nothing".

@@ -4433,6 +4433,33 @@ class PatchSpace:
         count = max(len(used), max_index) + 1
         return [f"in{i}" for i in range(1, count + 1)]
 
+    def _bundle_member_ids(self, node_id: NodeId,
+                           seen: Optional[Set[Any]] = None) -> List[int]:
+        """The live source ids behind a bundle endpoint, as ints.
+
+        A Filter is resolved through to what reaches it and then narrowed by
+        its classifiers: it is a *backed* node, so its own output is its
+        monitor, which is not a live source - resolving it the generic way
+        found no members at all, and a Split on the far side of a filter
+        showed no lines."""
+        if seen is None:
+            seen = set()
+        if node_id in seen:
+            return []
+        seen = seen | {node_id}
+        node = self.nodes.get(node_id)
+        if isinstance(node, FilterNode):
+            upstream = self._bundle_upstream(node_id)
+            if upstream is None:
+                return []
+            return self._apply_classifier(
+                node, "source",
+                self._bundle_member_ids(upstream.from_node, seen),
+            )
+        return pwmatch.find_source_nodes(
+            self.graph, self._resolve_sources(node_id, "out")
+        )
+
     def bundle_members(
         self, node_id: NodeId, seen: Optional[Set[Any]] = None
     ) -> List[dict]:
@@ -4457,9 +4484,10 @@ class PatchSpace:
             return self.bundle_members(chosen.from_node, seen) if chosen else []
         live = self.graph.nodes()
         members: List[dict] = []
-        for member_id in pwmatch.find_source_nodes(
-            self.graph, self._resolve_sources(node_id, "out")
-        ):
+        # A fresh `seen` for the helper: this node is *already* in the caller's
+        # (added above), and handing that in would read as a cycle.  The helper
+        # keeps its own guard for the filters it walks through.
+        for member_id in self._bundle_member_ids(node_id):
             props = (live.get(member_id) or {}).get("info", {}).get("props", {})
             name = props.get("node.name") or ""
             if not name:

@@ -850,3 +850,33 @@ def test_a_split_cycle_does_not_recurse_for_ever():
     s.add_edge("split1", "split2")      # ... which resolves through split1
 
     assert s.bundle_members("split1") == []
+
+
+def test_a_split_on_the_far_side_of_a_filter_sees_only_what_passed():
+    """A Filter narrows a bundle and a Split downstream of it hands the lines
+    on: the shape "on the other side of a filter node" that appeared not to
+    work.  The split's members have to come from the *filter's* output (git
+    only alpha), and the member must still route."""
+    g = FakeGraph()
+    alpha = g.add_source(10, "alpha", app="alpha")
+    beta = g.add_source(11, "beta", app="beta")
+    sink = g.add_sink(20, "sink1")
+    s = PatchSpace(g)
+    s.mark_graph_loaded()
+    s.add_node(AllAppsNode("apps"))
+    s.add_node(FilterNode("flt"))
+    s.add_node(RegexClassifierNode("cls", "alpha"))
+    s.add_node(BundleSplitNode("split"))
+    s.add_node(SinkNode("snk", "sink1"))
+    s.add_edge("apps", "flt")
+    s.add_edge("cls", "flt", to_port="filter")
+    s.add_edge("flt", "split")
+
+    # The split offers a line per stream that *survived* the filter.
+    assert {m["port"] for m in s.bundle_members("split")} == {"alpha"}
+
+    s.add_edge("split", "snk", from_port="alpha")
+    s.sync()
+    links = g.linked_pairs()
+    assert (alpha["FL"], sink["FL"]) in links
+    assert not any(o == beta["FL"] for o, _ in links)
