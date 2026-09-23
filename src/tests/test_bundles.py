@@ -880,3 +880,94 @@ def test_a_split_on_the_far_side_of_a_filter_sees_only_what_passed():
     links = g.linked_pairs()
     assert (alpha["FL"], sink["FL"]) in links
     assert not any(o == beta["FL"] for o, _ in links)
+
+
+def _filter_links_with(exclude, classifier_key="vesktop"):
+    """Build All Apps -> Filter(app classifier) -> its dummy sink and return
+    (space, graph, sources, dummy ports, links) after a sync.
+
+    The filter's *own* dummy is what the model sums its kept members into, so
+    the graph has to carry it for the links to exist at all - the same reason
+    the link-level behaviour had no test before."""
+    g = FakeGraph()
+    vesktop = g.add_source(10, "vesktop-stream", app="vesktop")
+    other = g.add_source(11, "other-stream", app="librewolf")
+    s = PatchSpace(g)
+    s.mark_graph_loaded()
+    s.add_node(AllAppsNode("apps"))
+    s.add_node(FilterNode("flt"))
+    s.add_node(AppClassifierNode("cls", app_key=classifier_key))
+    s.add_edge("apps", "flt")
+    s.add_edge("cls", "flt", to_port="filter1")
+    s.nodes["flt"].exclude = exclude
+    dummy = g.add_sink(90, "filter_flt")
+    # The sink id comes from the node's own backing registry, which needs a
+    # spawned pw-cli to populate - the one piece a fake graph can't stand in
+    # for.  Everything *downstream* of that (which members are summed, and the
+    # channel pairs for them) is real.
+    s.nodes["flt"].sink_node_id = lambda: 90
+    s.sync()
+    return s, g, vesktop, other, dummy, g.linked_pairs()
+
+
+def test_a_filter_links_only_the_members_it_keeps():
+    """Include mode keeps what matches, exclude mode keeps what doesn't - and
+    the *links* have to say so.  What a Filter passes is its kept members summed
+    into its own dummy sink, whose monitor is its output; the earlier tests
+    asserted the decision, not the wiring, which is what the pipeline hears."""
+    _s, _g, vesktop, other, dummy, links = _filter_links_with(exclude=False)
+
+    assert (vesktop["FL"], dummy["FL"]) in links          # the match gets through
+    assert not any(o == other["FL"] for o, _ in links)    # the rest does not
+
+
+def test_an_excluding_filter_links_everything_but_the_match():
+    """Exclude mode is the same pair the other way round: the members that
+    *don't* match reach the output, and the matching one is dropped."""
+    _s, _g, vesktop, other, dummy, links = _filter_links_with(exclude=True)
+
+    assert (other["FL"], dummy["FL"]) in links
+    assert not any(o == vesktop["FL"] for o, _ in links)
+
+
+def test_a_filter_with_no_dummy_passes_nothing_at_all():
+    """A Filter's output *is* its dummy sink's monitor, so with no dummy there
+    is nothing to link and nothing gets through - however the switch is set.
+    That is the state a vanished backing leaves behind, and why a filter can
+    look healthy and be silently bypassing everything."""
+    g = FakeGraph()
+    g.add_source(10, "vesktop-stream", app="vesktop")
+    s = PatchSpace(g)
+    s.mark_graph_loaded()
+    s.add_node(AllAppsNode("apps"))
+    s.add_node(FilterNode("flt"))
+    s.add_node(AppClassifierNode("cls", app_key="vesktop"))
+    s.add_edge("apps", "flt")
+    s.add_edge("cls", "flt", to_port="filter1")
+
+    assert s.nodes["flt"].sink_node_id() is None      # no backing has landed
+    s.sync()
+    assert g.linked_pairs() == set()            # nothing in, nothing out
+    assert s._filter_links(s.nodes["flt"]) == {
+        "__internal__:flt:sum": set()
+    }
+
+
+def test_a_filter_with_no_classifiers_passes_the_whole_bundle():
+    """Nothing plugged into the filter inputs means the bundle passes through
+    unchanged - the case that is easy to mistake for "the filter is broken"."""
+    g = FakeGraph()
+    alpha = g.add_source(10, "alpha", app="alpha")
+    beta = g.add_source(11, "beta", app="beta")
+    s = PatchSpace(g)
+    s.mark_graph_loaded()
+    s.add_node(AllAppsNode("apps"))
+    s.add_node(FilterNode("flt"))
+    s.add_edge("apps", "flt")
+    dummy = g.add_sink(90, "filter_flt")
+    s.nodes["flt"].sink_node_id = lambda: 90
+    s.sync()
+
+    links = g.linked_pairs()
+    assert (alpha["FL"], dummy["FL"]) in links
+    assert (beta["FL"], dummy["FL"]) in links
