@@ -441,3 +441,53 @@ def test_adding_a_node_with_an_impulse_input_works():
         w.on_draw(w, __import__("cairo").Context(
             __import__("cairo").ImageSurface(__import__("cairo").FORMAT_ARGB32, 600, 400)),
             600, 400)
+
+
+def _recorder_at(recording):
+    return {"id": "rec1", "type": "recorder", "label": "Recorder", "x": 0.0, "y": 0.0,
+            "ready": True, "connected": True, "declarative": False,
+            "selection_label": "Recorder", "description": "",
+            "source_path": TAKE, "source_rev": "1:1000",
+            "recording": recording, "duration": 4.0}
+
+
+def test_the_button_follows_a_take_that_ends_on_its_own():
+    """A take can end without anyone pressing anything - its capture process
+    dying.  The daemon knows, and the poll carries it, but the node only took
+    `recording` when it was first seen: the button kept showing Stop, and
+    pressing it asked the daemon to stop a take that was already over."""
+    w, _ = _recorder_and_clip()
+    rec = _recorder_at(True)
+    w.update_from_daemon({"nodes": {"rec1": dict(rec)}, "edges": {},
+                          "panels": [], "groups": []})
+    assert w.nodes["rec1"]["recording"] is True
+
+    rec["recording"] = False                    # it ended on its own
+    w.update_from_daemon({"nodes": {"rec1": dict(rec)}, "edges": {},
+                          "panels": [], "groups": []})
+    assert w.nodes["rec1"]["recording"] is False   # so the button says Record
+
+
+def test_a_press_is_not_undone_by_a_poll_taken_before_it():
+    """The press is optimistic; a poll taken *before* it can land after it.
+    Hold our value until the daemon agrees, or the button flips back and the
+    next press asks for what is already happening."""
+    w, _ = _recorder_and_clip()
+    w.update_from_daemon({"nodes": {"rec1": _recorder_at(False)}, "edges": {},
+                          "panels": [], "groups": []})
+    assert w.nodes["rec1"]["recording"] is False
+
+    # What the press does: flip, and say what we asked for.
+    w.nodes["rec1"]["recording"] = True
+    w._pending_bool[("rec1", "recording")] = True
+
+    stale = _recorder_at(False)                 # taken before the press
+    w.update_from_daemon({"nodes": {"rec1": stale}, "edges": {},
+                          "panels": [], "groups": []})
+    assert w.nodes["rec1"]["recording"] is True   # our press stands
+
+    agreed = _recorder_at(True)                 # the daemon caught up
+    w.update_from_daemon({"nodes": {"rec1": agreed}, "edges": {},
+                          "panels": [], "groups": []})
+    assert w.nodes["rec1"]["recording"] is True
+    assert ("rec1", "recording") not in w._pending_bool

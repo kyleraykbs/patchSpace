@@ -1655,6 +1655,19 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     )
                     if exclude is not None:
                         node["exclude"] = bool(exclude)
+                # Whether a take is running is the daemon's to know: one can
+                # end on its own (its capture process dying), and the button
+                # has to follow - it used to keep showing Stop, and pressing it
+                # then asked the daemon to stop a take that was already over.
+                # A press is optimistic, so hold our own value until the daemon
+                # agrees (the echo guard the gates and switchers use), or a poll
+                # taken *before* the press would land after it and flip back.
+                if not isinstance(ndata.get("recording"), type(None)):
+                    reported = self._accept_bool_echo(
+                        nid, "recording", ndata.get("recording")
+                    )
+                    if reported is not None:
+                        node["recording"] = reported
                 node["connected"] = ndata.get("connected", False)
                 node["is_bluetooth"] = ndata.get("is_bluetooth", False)
                 node["selection_label"] = ndata.get("selection_label", "")
@@ -6856,6 +6869,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             node = self.nodes.get(record_hit) or {}
             recording = not bool(node.get("recording"))
             node["recording"] = recording          # optimistic; the poll confirms
+            self._pending_bool[(nid, "recording")] = recording
             self.client.send({"command": "record", "node_id": record_hit,
                               "recording": recording})
             self.queue_draw()
