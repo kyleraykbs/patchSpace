@@ -194,3 +194,29 @@ def test_wrapped_text_is_the_same_at_every_zoom():
         assert drawn == reserved, (zoom, drawn, reserved)
         # And the same breaks at that zoom.
         assert wrap_text_lines(w, text, width, size)[0] == lines
+
+
+def test_an_icon_is_drawn_the_same_size_at_any_zoom():
+    """A symbolic icon comes back from GTK at its *natural* size (a 16px
+    request can yield 14px).  Deriving the draw scale from the request instead
+    of from the pixbuf made the drawn size depend on the zoom: the panel
+    buttons' icons shrank as you zoomed in.  The placement is computed from
+    the pixbuf alone, so the zoom cancels out."""
+    gi = pytest.importorskip("gi")
+    gi.require_version("GdkPixbuf", "2.0")
+    from gi.repository import GdkPixbuf
+    # No display needed: the placement math is pure.
+    from gui.patchspace_widget import PatchSpaceGraphWidget
+
+    for px in (8, 14, 16, 32):
+        pixbuf = GdkPixbuf.Pixbuf.new(
+            GdkPixbuf.Colorspace.RGB, True, 8, px, px
+        )
+        ox, oy, scale = PatchSpaceGraphWidget.icon_placement(
+            100.0, 200.0, 22.0, pixbuf
+        )
+        # The pixbuf occupies exactly `size` world units, whatever it came
+        # back as and whatever the zoom is.
+        assert pixbuf.get_width() * scale == pytest.approx(22.0)
+        assert pixbuf.get_height() * scale == pytest.approx(22.0)
+        assert ox == 100.0 and oy == pytest.approx(200.0)

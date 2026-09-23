@@ -598,10 +598,13 @@ shows what the canvas draws.
 `wrap_text_lines` (on the widget's own Pango context, memoised), and `draw_text_wrapped`
 draws those lines - so `wrapped_text_height` and the drawing agree by construction and a
 marginal word can't fit at one zoom and wrap at another (wrapping at draw time happened
-on the zoom-scaled Cairo context).  Same idea for icons: `_draw_node_icon` rasterises a
-symbolic icon at the size it will actually occupy (`size * zoom`, quantised so the cache
-doesn't grow per zoom step) and scales the pixbuf back down, so a zoomed-in node shows
-the icon's own pixels instead of an upscaled blur.
+on the zoom-scaled Cairo context).  Icons are drawn at exactly the size asked for, from a **fixed-size raster**
+(`ICON_RASTER_PX = 96`) - not one per zoom.  GTK returns a differently-sized pixbuf for
+different requests (13px for a 20px request, 58px for 64px) and the icon's own padding is
+a different fraction of it each time, so rasterising per zoom made the drawn glyph change
+size as you zoomed: the panel buttons' pencil was about half its button at one zoom and
+two-thirds at another.  One generous raster, scaled to the target (`icon_placement`),
+gives the same size at every zoom and a cache of one entry per icon.
 
 *Pan and zoom.* `graph_view` (view_mixin.py) owns the shared view math: middle-drag pans,
 `EventControllerScroll` zooms about the pointer, and a `Gtk.GestureZoom` handles a

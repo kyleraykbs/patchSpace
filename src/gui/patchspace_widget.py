@@ -5210,24 +5210,40 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         cache[key] = pixbuf
         return pixbuf
 
+    @staticmethod
+    def icon_placement(x, y, size, pixbuf):
+        """(offset_x, offset_y, scale) that draws `pixbuf` at exactly `size`
+        world units, centred.
+
+        The scale is derived from the pixbuf we actually got: a symbolic icon
+        comes back at its *natural* size (a 16px request can yield 14px), so
+        assuming the request was met made the drawn size depend on the zoom -
+        the icon shrank as you zoomed in."""
+        px = max(1.0, float(pixbuf.get_width()))
+        scale = size / px
+        drawn_h = pixbuf.get_height() * scale
+        return (x, y + (size - drawn_h) / 2.0, scale)
+
+    #: Symbolic icons are rasterised at this many pixels regardless of the
+    #: size they are drawn at.  GTK returns a *different* pixbuf size for
+    #: different requests - and the icon's own padding is a different
+    #: fraction of it each time (13px for a 20px request, 58px for 64px) - so
+    #: rasterising per zoom made the drawn glyph change size as you zoomed.
+    #: One fixed, generous raster is scaled to the target size instead; the
+    #: cache then holds a single entry per (icon, colour).
+    ICON_RASTER_PX = 96
+
     def _draw_node_icon(self, cr, icon_name, x, y, size, rgb):
-        """Draw a symbolic icon at `size` world units, rasterised at the size
-        it will actually occupy on screen (the canvas is zoomed), so a
-        zoomed-in node shows the icon's own pixels instead of an upscaled
-        blur.  The raster size is quantised so the cache doesn't hold a copy
-        per zoom step."""
-        zoom = max(0.05, float(getattr(self, "zoom", 1.0)))
-        px = max(8, int(round(size * zoom / 4.0)) * 4)
-        pixbuf = self._node_icon_pixbuf(icon_name, px, rgb)
+        """Draw a symbolic icon at exactly `size` world units, so the icon is
+        the same size (and the same fraction of the button it sits in) at
+        every zoom."""
+        pixbuf = self._node_icon_pixbuf(icon_name, self.ICON_RASTER_PX, rgb)
         if pixbuf is None:
             return
+        ox, oy, scale = self.icon_placement(x, y, size, pixbuf)
         cr.save()
-        # The pixbuf covers `px / zoom` world units; centre that in `size`.
-        drawn = pixbuf.get_width() / zoom
-        ox = x + (size - drawn) / 2.0
-        oy = y + (size - pixbuf.get_height() / zoom) / 2.0
         cr.translate(ox, oy)
-        cr.scale(1.0 / zoom, 1.0 / zoom)
+        cr.scale(scale, scale)
         Gdk.cairo_set_source_pixbuf(cr, pixbuf, 0, 0)
         cr.paint()
         cr.restore()

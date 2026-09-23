@@ -313,3 +313,9 @@ gesture accepts; tested only structurally (no touchscreen here).
   zoom and wrap at another, and the wrap could disagree with `wrapped_text_height`.
 * `_draw_node_icon` rasterises at `size * zoom` (quantised to 4px steps) and scales back
   down, so icons are crisp when zoomed in.
+
+* **Icons are rasterised at one fixed size** (`ICON_RASTER_PX = 96`) and scaled to the
+  target by `icon_placement`.  Rasterising per zoom looked right in theory but GTK returns
+  a differently-sized pixbuf per request with a *different* padding fraction (13px for 20px,
+  58px for 64px), so the drawn glyph changed size with the zoom.  `icon_placement` derives
+  the scale from the pixbuf it got, so the target size is exact regardless.
