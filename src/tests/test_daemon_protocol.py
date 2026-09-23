@@ -3,6 +3,7 @@ so nothing touches a real PipeWire process.  Exercises the same command
 layer and serialization shapes the GUI depends on."""
 
 import os
+import pathlib
 import socket
 import subprocess
 import sys
@@ -1797,3 +1798,33 @@ def test_ensure_device_profiles_clears_warning_when_routable(monkeypatch, caplog
     ]
     assert len(warned) == 2
 
+
+
+def test_a_recorder_reports_its_takes_revision(tmp_path, monkeypatch):
+    """The GUI re-asks for a waveform when source_rev moves, so a recording has
+    to move it: a take always writes the same path, and one short enough to
+    start and finish between two polls shows no `recording` flip at all."""
+    import pwnodes
+    from tests.test_impulse import FakeCli, FakeProc
+
+    monkeypatch.setattr(pwnodes, "OwnedPwNode", FakeCli)
+    monkeypatch.setattr(pwnodes, "OwnedPwProcess", FakeProc)
+    monkeypatch.setattr(pwnodes.RecorderNode, "RECORD_DIR",
+                        str(tmp_path / "recordings"))
+    d = fresh_daemon()
+    assert d.handle_command({"command": "add_node", "node_type": "recorder",
+                             "node_id": "rec"})["status"] == "ok"
+
+    node = d.handle_command({"command": "get_nodes"})["nodes"]["rec"]
+    take = pathlib.Path(node["source_path"])
+    assert take.parent == tmp_path / "recordings"
+    assert node["source_rev"] == ""              # nothing recorded yet
+
+    take.parent.mkdir(parents=True, exist_ok=True)
+    take.write_bytes(b"a take")
+    first = d.handle_command({"command": "get_nodes"})["nodes"]["rec"]["source_rev"]
+    assert first
+    assert d.handle_command({"command": "get_nodes"})["nodes"]["rec"]["source_rev"] == first
+
+    take.write_bytes(b"a second, longer take")   # the next take, same path
+    assert d.handle_command({"command": "get_nodes"})["nodes"]["rec"]["source_rev"] != first

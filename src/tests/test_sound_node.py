@@ -369,3 +369,21 @@ def test_every_node_type_exports_to_json(monkeypatch):
         if resp.get("status") != "ok":
             continue                      # needs a device/config it hasn't got
         json.dumps(d._build_export_config())    # must not raise
+
+
+def test_source_rev_changes_when_a_take_overwrites_the_file(tmp_path):
+    """The GUI's queue to re-ask for a waveform comes from the daemon's
+    source_rev, so it has to move when a take rewrites the file - and must not
+    move on its own, or every poll would re-ask for a few hundred peaks."""
+    from main import PatchSpaceDaemon
+
+    take = tmp_path / "take.wav"
+    assert PatchSpaceDaemon._file_rev(str(take)) == ""      # no take yet
+
+    take.write_bytes(b"first take")
+    first = PatchSpaceDaemon._file_rev(str(take))
+    assert first
+    assert PatchSpaceDaemon._file_rev(str(take)) == first    # unchanged file
+
+    take.write_bytes(b"a second, longer take")               # same path, new file
+    assert PatchSpaceDaemon._file_rev(str(take)) != first

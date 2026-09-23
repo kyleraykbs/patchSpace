@@ -4906,6 +4906,21 @@ class PatchSpaceDaemon:
         except Exception as exc:
             return {"status": "error", "message": str(exc)}
 
+    @staticmethod
+    def _file_rev(path: str) -> str:
+        """A cheap revision for the file behind a node's ``source_path``.
+
+        The GUI re-asks for a waveform when this changes.  A Recorder always
+        writes the *same* path, so the path alone says nothing about whether
+        the file behind it was rewritten - and a take that starts and finishes
+        between two polls (a short one) shows no ``recording`` flip either.  The
+        file's own mtime and size catch both."""
+        try:
+            st = os.stat(path)
+        except OSError:
+            return ""
+        return f"{st.st_mtime_ns}:{st.st_size}"
+
     def _cmd_get_nodes(self, cmd: dict) -> dict:
         # Serialize *under* the lock: the supervision tick creates/removes
         # nodes (e.g. a sensitivity gate's hidden pre/post pair) while the
@@ -5230,9 +5245,11 @@ class PatchSpaceDaemon:
                 data["playing"] = node.playing
             if isinstance(node, ClipNode):
                 # What the clip is showing: the GUI re-asks for the waveform
-                # (get_peaks) whenever this changes.
+                # (get_peaks) whenever the path *or the file behind it* changes
+                # - see source_rev.
                 sound = self.space.resolve_sound(node_id, "sound") or {}
                 data["source_path"] = str(sound.get("path") or "")
+                data["source_rev"] = self._file_rev(data["source_path"])
                 # A clip's own times are seconds into *what it is given*, so
                 # the timeline needs that sound's start to place them on the
                 # file's waveform.  Zero unless clips are stacked.
@@ -5240,9 +5257,12 @@ class PatchSpaceDaemon:
                 data["duration"] = pwnodes.probe_duration(sound.get("path") or "")
             if isinstance(node, RecorderNode):
                 # What the GUI shows: whether a take is running, and the file
-                # (and length) of the last one, for its waveform.
+                # (and length) of the last one, for its waveform.  A take
+                # always writes the same path, so the GUI tracks the *file*
+                # (source_rev) rather than the path to know a take landed.
                 data["recording"] = node.recording
                 data["source_path"] = node.take_path
+                data["source_rev"] = self._file_rev(node.take_path)
                 data["duration"] = node.duration
             if isinstance(node, SoundNode):
                 # The file's length, so the node can show it and the Clip

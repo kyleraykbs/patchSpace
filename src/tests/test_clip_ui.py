@@ -238,14 +238,7 @@ def _to_screen(w, wx, wy):
     return (wx * w.zoom + w.pan_x, wy * w.zoom + w.pan_y)
 
 
-def test_recorder_re_asks_for_its_waveform_after_a_take():
-    """A take writes the same path every time, so the path cannot say the file
-    changed - the recording flag does.  Asking only on a path change left the
-    previous take's waveform on screen for ever, which made a fresh take look
-    like a recorder that had done nothing.
-
-    The first poll of a node only registers it, so the counting starts at the
-    second."""
+def _recorder_and_clip():
     gi = pytest.importorskip("gi")
     gi.require_version("Gtk", "4.0")
     from gi.repository import Gtk
@@ -257,12 +250,26 @@ def test_recorder_re_asks_for_its_waveform_after_a_take():
     w = PatchSpaceGraphWidget(client)
     w.physics_active = False
     w.layout_awake = False
-    rec = {
-        "id": "rec1", "type": "recorder", "label": "Recorder", "x": 0.0, "y": 0.0,
-        "ready": True, "connected": True, "declarative": False,
-        "selection_label": "Recorder", "description": "",
-        "source_path": "/recordings/rec1.wav", "recording": False, "duration": 0.0,
-    }
+    return w, client
+
+
+TAKE = "/recordings/rec1.wav"
+
+
+def test_recorder_re_asks_for_its_waveform_after_a_take():
+    """A take writes the same path every time, so the path cannot say the file
+    changed - source_rev can.  Asking only on a path change left the previous
+    take's waveform on screen for ever, which made a fresh take look like a
+    recorder that had done nothing.
+
+    The first poll of a node only registers it, so the counting starts at the
+    second."""
+    w, client = _recorder_and_clip()
+    rec = {"id": "rec1", "type": "recorder", "label": "Recorder", "x": 0.0, "y": 0.0,
+           "ready": True, "connected": True, "declarative": False,
+           "selection_label": "Recorder", "description": "",
+           "source_path": TAKE, "source_rev": "1:1000",
+           "recording": False, "duration": 4.0}
 
     def polls():
         w.update_from_daemon({"nodes": {"rec1": dict(rec)}, "edges": {},
@@ -270,52 +277,43 @@ def test_recorder_re_asks_for_its_waveform_after_a_take():
         return len([c for c in client.sent if c.get("command") == "get_peaks"])
 
     def answer():
-        # The daemon's reply clears the widget's in-flight flag.
-        w.on_peaks({"node_id": "rec1", "path": rec["source_path"],
-                    "duration": rec["duration"], "peaks": []})
+        w.on_peaks({"node_id": "rec1", "path": TAKE, "duration": rec["duration"],
+                    "peaks": []})
 
     assert polls() == 0              # first sight: the node is registered
     assert polls() == 1              # ... and its waveform is asked for
     answer()
     assert polls() == 1              # nothing changed: stay quiet
 
-    rec["recording"] = True          # a take starts (the file is wiped)
+    rec["recording"] = True          # a take starts: the file is wiped
+    rec["source_rev"] = ""
     assert polls() == 2
     answer()
-    rec.update(recording=False, duration=4.2)   # ... and finishes
+    rec.update(recording=False, duration=4.2, source_rev="2:800000")  # ... and ends
     assert polls() == 3
     answer()
     assert polls() == 3              # steady again
 
-    rec["source_path"] = "/recordings/other.wav"   # a new source still re-asks
+    # A take that started *and* finished between two polls never shows a
+    # `recording` flip - the file's revision is what catches it.
+    rec["source_rev"] = "3:812000"
     assert polls() == 4
 
 
 def test_a_clip_fed_by_a_recorder_follows_the_take():
-    """A Clip wired to a Recorder never sees its own source path change - a
-    take always writes the same path - so it has to follow the recorder's
-    `recording` flip instead, exactly like the recorder's own timeline."""
-    gi = pytest.importorskip("gi")
-    gi.require_version("Gtk", "4.0")
-    from gi.repository import Gtk
-    if not Gtk.init_check():
-        pytest.skip("no display available for GTK")
-    from gui.patchspace_widget import PatchSpaceGraphWidget
-
-    TAKE = "/recordings/rec1.wav"
-    client = _Client()
-    w = PatchSpaceGraphWidget(client)
-    w.physics_active = False
-    w.layout_awake = False
+    """A Clip wired to a Recorder shares that stable path, so it has to follow
+    the file the same way the recorder's own timeline does."""
+    w, client = _recorder_and_clip()
     rec = {"id": "rec1", "type": "recorder", "label": "Recorder", "x": 0.0, "y": 0.0,
            "ready": True, "connected": True, "declarative": False,
            "selection_label": "Recorder", "description": "",
-           "source_path": TAKE, "recording": False, "duration": 4.0}
+           "source_path": TAKE, "source_rev": "1:1000",
+           "recording": False, "duration": 4.0}
     clip = {"id": "clip1", "type": "clip", "label": "Clip", "x": 300.0, "y": 0.0,
             "ready": True, "connected": True, "declarative": False,
             "selection_label": "Clip", "description": "",
-            "source_path": TAKE, "start": 0.0, "end": 2.0, "duration": 4.0,
-            "source_start": 0.0}
+            "source_path": TAKE, "source_rev": "1:1000", "start": 0.0, "end": 2.0,
+            "duration": 4.0, "source_start": 0.0}
 
     def polls():
         w.update_from_daemon({"nodes": {"rec1": dict(rec), "clip1": dict(clip)},
@@ -327,14 +325,12 @@ def test_a_clip_fed_by_a_recorder_follows_the_take():
         for nid in ("rec1", "clip1"):
             w.on_peaks({"node_id": nid, "path": TAKE, "duration": 4.0, "peaks": []})
 
-    polls(); polls()                      # the clip's path is new, then registered
-    assert polls() == ["clip1", "rec1"]
+    polls(); assert polls() == ["clip1", "rec1"]
     answer()
+    assert len(polls()) == 2              # steady: neither re-asks
 
-    rec["recording"] = True               # a take starts: the file is wiped
+    rec["source_rev"] = "2:900000"        # the take landed
+    clip["source_rev"] = "2:900000"
     assert len(polls()) == 4              # *both* re-ask, though neither path moved
     answer()
-    rec.update(recording=False, duration=6.0)
-    assert len(polls()) == 6
-    answer()
-    assert len(polls()) == 6              # steady again
+    assert len(polls()) == 4              # steady again

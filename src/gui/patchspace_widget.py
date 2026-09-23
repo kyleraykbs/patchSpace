@@ -383,9 +383,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._clip_views: Dict[str, tuple] = {}
         self._clip_waves: Dict[str, dict] = {}
         self._clip_wave_pending: set = set()
-        # nid -> the `recording` flag the last poll reported, so a take's
-        # start/finish can be told apart even though its path never changes.
-        self._take_recording: dict = {}
+        #: nid -> the source_rev each node's waveform was last asked *for*, so a
+        #: file rewritten under the same path (a Recorder's take) re-asks.
+        self._clip_wave_rev: dict = {}
         #: ("start"|"end"|"pan", node_id) while a Clip selection is dragged.
         self.clip_dragging = None
         self._clip_drag_origin = (0.0, 0.0)
@@ -1371,25 +1371,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         if loading_now and not self._daemon_loading:
             self._begin_load()
         self._daemon_loading = loading_now
-        # A take always writes the same path, so nothing *downstream* of a
-        # recorder sees its source change when a new take is made - but the
-        # file behind that path did.  Collect the take paths whose recorder
-        # flipped `recording` this poll, before the node loop: the node that
-        # *uses* that take may well be visited before the recorder itself.
-        changed_takes = set()
-        for nid, ndata in daemon_nodes.items():
-            if ndata.get("type") != "recorder":
-                continue
-            was = self._take_recording.get(nid)
-            now = bool(ndata.get("recording", False))
-            self._take_recording[nid] = now
-            if was is not None and was != now:
-                path = str(ndata.get("source_path") or "")
-                if path:
-                    changed_takes.add(path)
-        for nid in list(self._take_recording):
-            if nid not in daemon_nodes:
-                self._take_recording.pop(nid, None)
         selection_before = set(self.selected_nodes)
         anchored_before = set(self.anchored_nodes)
         # A poll can change a node's label/description/control state (and
@@ -1593,20 +1574,25 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                         node["source_start"] = ndata.get("source_start", 0.0)
                     # The timeline needs the waveform of whatever reaches this
                     # clip: ask when the source changes (not every poll - it is
-                    # a few hundred peaks).  A recorder breaks the path rule on
-                    # purpose (a take always writes the same path), so a take
-                    # that just started or finished counts as a change for
-                    # everything fed by that file - the recorder itself and any
-                    # Clip downstream of it.
+                    # a few hundred peaks).  The *file* matters as much as the
+                    # path: a Recorder always writes the same path, so a take
+                    # (short enough to start and finish between two polls
+                    # included) is only visible as a change in source_rev - and
+                    # that is also what makes a Clip downstream of one follow
+                    # it.
                     source = str(ndata.get("source_path") or "")
+                    rev = str(ndata.get("source_rev") or "")
                     known = (self._clip_waves.get(nid) or {}).get("path")
-                    if ((source and (source != known or source in changed_takes))
-                            and nid not in self._clip_wave_pending):
+                    if source and (source != known
+                                   or rev != self._clip_wave_rev.get(nid)) \
+                            and nid not in self._clip_wave_pending:
                         self._clip_wave_pending.add(nid)
+                        self._clip_wave_rev[nid] = rev
                         self.client.send({"command": "get_peaks", "node_id": nid})
                     elif not source:
                         self._clip_waves.pop(nid, None)
                         self._clip_views.pop(nid, None)
+                        self._clip_wave_rev.pop(nid, None)
                 if "exclude" in ndata:
                     exclude = self._accept_bool_echo(
                         nid, "exclude", ndata.get("exclude", False)
