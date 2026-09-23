@@ -323,3 +323,44 @@ def test_removed_edge_retracts_instead_of_blinking_out():
     assert "a->b" not in w.edges
     ghost = w._edge_ghosts.get("a->b")
     assert ghost is not None and ghost["points"]
+
+
+def test_close_pair_wire_jogs_in_the_gap_not_on_a_border():
+    """Two sockets close enough that the stubs are dropped must still jog
+    *between* the nodes.
+
+    With the endpoints that close the A* grid collapses to one cell and there
+    are two equal-cost Ls; either puts its perpendicular run on an endpoint's
+    border (x == the source's or the target's socket x), where the node -
+    painted after the wires - covers it.  The wire then reads as "stops at
+    the box" instead of entering the socket, and which L the heap tie-break
+    returns can flip on any re-route.  The route must instead cross the gap.
+    """
+    w = _widget()
+    # 30px between the sockets, 47px of vertical offset: exactly the case the
+    # old code reduced to one hidden L.
+    nodes = {
+        "btn": {"type": "button", "x": 40.0, "y": 120.0, "label": "Button"},
+        "fx": {"type": "sound_effect", "x": 250.0, "y": 160.0, "label": "FX"},
+    }
+    edges = {"btn->fx": {"from_node": "btn", "to_node": "fx",
+                         "to_port": "in", "from_port": "out"}}
+    w.update_from_daemon({"nodes": nodes, "edges": edges, "panels": []})
+    w._route_all_wires()
+
+    pts = w._wire_routes["btn->fx"]
+    x1, y1 = w._socket_position("btn", "out", 0)
+    x2, y2 = w._socket_position("fx", "in", 0)
+    assert abs(pts[0][0] - x1) < 0.5 and abs(pts[0][1] - y1) < 0.5
+    assert abs(pts[-1][0] - x2) < 0.5 and abs(pts[-1][1] - y2) < 0.5
+
+    # The jog has to happen *in the open gap*: some point of the route must
+    # sit strictly between the two socket columns, at a height strictly
+    # between the two socket rows.  Either L (whatever the tie-break picks)
+    # has no such point - its perpendicular run is on a border - so this is
+    # the property that separates "enters the socket" from "stops at the box".
+    lo, hi = min(x1, x2), max(x1, x2)
+    assert any(
+        lo + 0.5 < px < hi - 0.5 and y1 + 0.5 < py < y2 - 0.5
+        for px, py in pts
+    ), pts

@@ -2685,6 +2685,37 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             (x2 - slen, mid_y), (x2 - slen, y2), (x2, y2),
         ]
 
+    @staticmethod
+    def _close_pair_z(x1, y1, x2, y2, core):
+        """A socket-to-socket Z for a close pair whose L hides a leg under an
+        endpoint node, or None when the route is fine as it stands.
+
+        Only the perpendicular run's *position* is at issue: the two sockets
+        are close enough that the jog has to happen inside the gap, and if it
+        lands on the source's (x1) or target's (x2) border the node covers it
+        (nodes are painted after wires).  Putting it in the middle of the gap
+        keeps every segment visible.  A pair level in y needs no jog at all,
+        and a route whose jog is already between the two borders is left
+        alone."""
+        if core is None or len(core) < 3:
+            return None
+        if abs(x2 - x1) < 1.0 or abs(y2 - y1) < 1.0:
+            return None
+        # Where the *perpendicular runs* are (a run = a vertical segment): a
+        # route with none is a level pair's straight line, and a route whose
+        # runs are all strictly between the two borders is already fine.
+        runs = {
+            round(ax, 3)
+            for (ax, ay), (bx, by) in zip(core, core[1:])
+            if abs(ax - bx) < 0.5 and abs(ay - by) >= 0.5
+        }
+        if not runs or all(
+            abs(x - x1) > 0.75 and abs(x - x2) > 0.75 for x in runs
+        ):
+            return None
+        mid = (x1 + x2) / 2.0
+        return [(x1, y1), (mid, y1), (mid, y2), (x2, y2)]
+
     def _wire_points(self, edge, x1, y1, x2, y2, wire_rects, wire_panels,
                      extra_obstacles=(), panel_titles=None):
         """A square route (rounded at draw time) from socket to socket that
@@ -2944,7 +2975,21 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
         if not (src_stub or dst_stub):
             # The route leaves/enters sideways already (or the far endpoint
-            # is too close to stub): use it as-is.
+            # is too close to stub): use it as-is - EXCEPT for the one shape
+            # that *looks* broken.  With the two sockets close, the A* grid
+            # collapses to a single cell and there are exactly two
+            # equal-cost socket-to-socket Ls; one of them puts its corner on
+            # the target's border (the perpendicular run at x == x2), and
+            # since nodes are painted *after* wires that leg is covered by
+            # the node - the wire reads as "stops at the box" instead of
+            # entering the socket.  Which L the heap tie-break returns is not
+            # stable, so any re-route (a poll, a node growing, physics) can
+            # flip the same pair between the two, i.e. "sometimes it does
+            # this".  Rebuild the route as the Z the stub logic would have
+            # produced had there been room: sideways out of the source,
+            # across the middle of the gap, sideways into the socket, with
+            # every segment in open air.
+            core = self._close_pair_z(x1, y1, x2, y2, core) or core
             return self._dehairpin(self._drop_short_straights(
                 self._round_short_ends(
                     self._smooth_jogs(

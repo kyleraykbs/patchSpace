@@ -414,6 +414,15 @@ avoiding every visible node rect **and every panel box**, each inflated by `PAD`
   socket-to-socket directly. That is the "Bool Warp Out next to its destination" case:
   the pre-fix code built a near-zero first segment, the cleanup passes erased it, and the
   wire hugged/looped its own node.
+  Such a route still has to jog *between* the two nodes: with the endpoints that close the
+  A* grid collapses to one cell and there are exactly two equal-cost socket-to-socket Ls,
+  and *both* put their perpendicular run on an endpoint's border (`x == x1` or `x == x2`) -
+  where the node, painted after the wires, covers it, so the wire reads as "stops at the
+  box" rather than entering the socket, and the heap tie-break can flip a pair between the
+  two on any re-route (a poll, a node growing, physics) - the "sometimes it does this" the
+  user reported for a Button next to a Sound Effect. `_close_pair_z` replaces either shape
+  with a Z through the middle of the gap, so every segment is in open air
+  (`test_close_pair_wire_jogs_in_the_gap_not_on_a_border`).
   When the cap is due to a *third* node (a real crowd) below one grid step, the wire
   instead takes an L-shaped **escape** (`_third_node_escape`): a sideways leg as far as
   the gap allows (pad-clear if possible, else merely body-clear) followed by a
