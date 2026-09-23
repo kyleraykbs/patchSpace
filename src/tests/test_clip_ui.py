@@ -279,7 +279,7 @@ def test_recorder_re_asks_for_its_waveform_after_a_take():
 
     def answer():
         w.on_peaks({"node_id": "rec1", "path": TAKE, "duration": rec["duration"],
-                    "peaks": []})
+                    "peaks": [(-1.0, 1.0)]})
 
     assert polls() == 0              # first sight: the node is registered
     assert polls() == 1              # ... and its waveform is asked for
@@ -323,7 +323,7 @@ def test_a_clip_fed_by_a_recorder_follows_the_take():
 
     def answer():
         for nid in ("rec1", "clip1"):
-            w.on_peaks({"node_id": nid, "path": TAKE, "duration": 4.0, "peaks": []})
+            w.on_peaks({"node_id": nid, "path": TAKE, "duration": 4.0, "peaks": [(-1.0, 1.0)]})
 
     polls(); assert polls() == ["clip1", "rec1"]
     answer()
@@ -370,7 +370,7 @@ def test_a_take_is_loaded_when_it_ends_not_while_it_records(monkeypatch):
         return len([c for c in client.sent if c.get("command") == "get_peaks"])
 
     def answer():
-        w.on_peaks({"node_id": "rec1", "path": TAKE, "duration": 4.0, "peaks": []})
+        w.on_peaks({"node_id": "rec1", "path": TAKE, "duration": 4.0, "peaks": [(-1.0, 1.0)]})
 
     polls()
     assert polls() == 1                  # registered, then loaded
@@ -491,3 +491,36 @@ def test_a_press_is_not_undone_by_a_poll_taken_before_it():
                           "panels": [], "groups": []})
     assert w.nodes["rec1"]["recording"] is True
     assert ("rec1", "recording") not in w._pending_bool
+
+
+def test_an_empty_waveform_for_a_real_file_is_asked_for_again():
+    """A take that just stopped can be decoded before the file is finalised,
+    which comes back with no peaks but a real length.  Remembering that
+    revision left the clip blank for ever - no waveform, no length for the
+    selection or handles - so it is forgotten and the next poll asks again."""
+    w, client = _recorder_and_clip()
+    w.SOUND_WAVE_MIN_INTERVAL_MS = 0
+    TAKE = "/recordings/rec1.wav"
+    clip = {"id": "clip1", "type": "clip", "label": "Clip", "x": 0.0, "y": 0.0,
+            "ready": True, "connected": True, "declarative": False,
+            "selection_label": "Clip", "description": "",
+            "source_path": TAKE, "source_rev": "1:1000", "start": 0.0,
+            "end": 2.0, "duration": 4.0, "source_start": 0.0}
+
+    def polls():
+        w.update_from_daemon({"nodes": {"clip1": dict(clip)}, "edges": {},
+                              "panels": [], "groups": []})
+        return len([c for c in client.sent if c.get("command") == "get_peaks"])
+
+    polls(); assert polls() == 1
+
+    # The decode raced the file: a length, but no waveform.
+    w.on_peaks({"node_id": "clip1", "path": TAKE, "duration": 8.0, "peaks": []})
+    assert "clip1" not in w._clip_waves      # not remembered as a waveform
+    assert polls() == 2                      # and it is asked for again
+
+    # This time there is one: it is kept, and it stops asking.
+    w.on_peaks({"node_id": "clip1", "path": TAKE, "duration": 8.0,
+                "peaks": [(-1.0, 1.0)]})
+    assert w._clip_waves["clip1"]["peaks"] == [(-1.0, 1.0)]
+    assert polls() == 2

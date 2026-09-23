@@ -530,6 +530,14 @@ class PatchSpaceDaemon:
         self._ticker: Optional[Ticker] = None
         self._reload_wake_timer: Optional[threading.Timer] = None
         self._dirty = False
+        #: When the session first went dirty, for the autosave's quiet period -
+        #: see _tick.  0.0 means "not waiting".
+        self._dirty_since = 0.0
+        #: How long the session must be left alone before the autosave runs.
+        #: Long enough that a drag (which marks the session dirty on every
+        #: motion) never triggers an export mid-gesture; short enough that
+        #: little is at risk if the daemon dies.
+        self.AUTOSAVE_QUIET_S = 2.0
 
         # Panels: first-class nested containers.  Each non-root panel is
         # one file; the root panel is the session autosave.  `panel_dirs`
@@ -1233,15 +1241,28 @@ class PatchSpaceDaemon:
         # node (declarative -> hardware output, say) and, if the daemon is
         # killed before the next save, that loss is permanent.  Keep
         # `_dirty` set and save once the reload has finished.
+        # Autosave waits for the session to go *quiet*.  Every morphing action
+        # marks it dirty - a clip's times and a node's layout change on each
+        # motion of a drag, dozens of times a second - and exporting the whole
+        # session per tick meant the daemon was still writing while the pointer
+        # moved on: the GUI's polls then carried stale positions, so a dragged
+        # selection snapped back to where the daemon last knew it, and the app
+        # only caught up once the drag stopped.
         if self._dirty and not self._panel_reloading:
-            self._dirty = False
-            # Each of these gets its own guard: they are independent jobs, and a
-            # failure in one must not starve the other (a bad export kept the
-            # panel poll from ever running, while the ticker logged and looped).
-            try:
-                self._auto_export_session()
-            except Exception:
-                logger.exception("session autosave failed")
+            if self._dirty_since == 0.0:
+                self._dirty_since = time.monotonic()
+            elif time.monotonic() - self._dirty_since >= self.AUTOSAVE_QUIET_S:
+                self._dirty_since = 0.0
+                self._dirty = False
+                # Each of these gets its own guard: they are independent jobs,
+                # and a failure in one must not starve the other (a bad export
+                # kept the panel poll from ever running).
+                try:
+                    self._auto_export_session()
+                except Exception:
+                    logger.exception("session autosave failed")
+        else:
+            self._dirty_since = 0.0
         try:
             self._poll_panels()
         except Exception:

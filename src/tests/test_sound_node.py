@@ -511,3 +511,40 @@ def test_a_player_reports_how_far_into_the_sound_it_is(monkeypatch):
 
     node._stop_players()
     assert node.progress == 0.0
+
+
+def test_an_unfinalised_read_is_not_remembered(tmp_path, monkeypatch):
+    """A take that just stopped can be decoded before the file is finalised:
+    an empty waveform and no length, for a file that *has* content.  Caching
+    that answered every retry with the same nothing, so the clip stayed blank
+    until the next revision came along - "it resolves itself, it just takes
+    forever".  A file that really is empty is still cached."""
+    calls = []
+
+    class Result:
+        returncode = 0
+        stdout = ""
+
+    def fake_run(*args, **kwargs):
+        calls.append(1)
+        return Result()
+
+    monkeypatch.setattr(pwnodes.subprocess, "run", fake_run)
+    pwnodes._PEAKS_CACHE.clear()
+    pwnodes._DURATION_CACHE.clear()
+
+    # A file with content but nothing readable yet: try again next time.
+    real = tmp_path / "take.wav"
+    real.write_bytes(b"x" * 4096)
+    assert pwnodes.probe_peaks(str(real)) == []
+    assert pwnodes.probe_peaks(str(real)) == []
+    assert pwnodes.probe_duration(str(real)) == 0.0
+    assert pwnodes.probe_duration(str(real)) == 0.0
+    assert len(calls) == 4
+
+    # An empty file is a real answer; don't re-run ffmpeg for it for ever.
+    empty = tmp_path / "empty.wav"
+    empty.write_bytes(b"")
+    assert pwnodes.probe_peaks(str(empty)) == []
+    assert pwnodes.probe_peaks(str(empty)) == []
+    assert len(calls) == 5

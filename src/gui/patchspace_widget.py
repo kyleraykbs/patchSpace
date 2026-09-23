@@ -7349,10 +7349,21 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._clip_wave_pending.discard(nid)
         if not nid:
             return
+        duration = float(resp.get("duration") or 0.0)
+        peaks = resp.get("peaks") or []
+        if not peaks and duration > 0.0:
+            # A file that *has* length but no waveform means the decode raced
+            # the file being finalised - a take that just stopped is exactly
+            # that.  Forget the revision we asked for so the next poll asks
+            # again; remembering it would leave the timeline blank for good,
+            # with no waveform *and* no length for the selection and handles to
+            # work from (they snapped back).
+            self._clip_wave_rev.pop(nid, None)
+            return
         self._clip_waves[nid] = {
             "path": resp.get("path") or "",
-            "duration": float(resp.get("duration") or 0.0),
-            "peaks": resp.get("peaks") or [],
+            "duration": duration,
+            "peaks": peaks,
         }
         self.queue_draw()
 

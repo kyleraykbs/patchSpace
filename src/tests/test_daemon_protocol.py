@@ -1887,3 +1887,33 @@ def test_waveforms_are_decoded_without_holding_the_daemon_lock(monkeypatch):
 
     assert decoded and decoded[0]["status"] == "ok"
     assert waited < 0.3, f"get_nodes waited {waited:.2f}s behind a waveform decode"
+
+
+def test_the_autosave_waits_for_a_quiet_moment(monkeypatch):
+    """A drag marks the session dirty on every motion (a clip's times, a node's
+    layout), and exporting the whole session per tick meant the daemon was still
+    writing while the pointer moved on: the GUI's polls then carried stale
+    positions, so a dragged selection snapped back until it caught up - "the
+    numbers take forever to catch up, and only then is it responsive again"."""
+    d = fresh_daemon()
+    d._running = True
+    exports = []
+    monkeypatch.setattr(d, "_auto_export_session", lambda: exports.append(True))
+    monkeypatch.setattr(d, "_poll_panels", lambda: None)
+
+    clock = [1000.0]
+    monkeypatch.setattr(main_mod.time, "monotonic", lambda: clock[0])
+
+    d._dirty = True
+    d._tick()                        # starts the quiet timer
+    clock[0] += 0.5
+    d._dirty = True                  # still moving
+    d._tick()
+    assert exports == []             # nothing written mid-gesture
+
+    clock[0] += 2.5                  # the user stopped moving
+    d._tick()
+    assert exports == [True]         # saved once
+
+    d._tick()
+    assert exports == [True]         # and not again: nothing is dirty

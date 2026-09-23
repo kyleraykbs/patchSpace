@@ -1715,9 +1715,13 @@ def probe_duration(path: str) -> float:
             duration = max(0.0, float((result.stdout or "").strip() or 0.0))
     except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
         logger.debug("ffprobe couldn't read %r: %s", resolved, exc)
-    if len(_DURATION_CACHE) > 256:
-        _DURATION_CACHE.clear()
-    _DURATION_CACHE[cache_key] = duration
+    if duration > 0.0 or not os.path.exists(resolved) \
+            or os.path.getsize(resolved) == 0:
+        # As with probe_peaks: a real file that reports no length was read
+        # while it was still being finalised, so don't remember that.
+        if len(_DURATION_CACHE) > 256:
+            _DURATION_CACHE.clear()
+        _DURATION_CACHE[cache_key] = duration
     return duration
 
 
@@ -1756,11 +1760,15 @@ def probe_peaks(path: str) -> List[Tuple[float, float]]:
                     ))
     except (OSError, subprocess.TimeoutExpired) as exc:
         logger.debug("ffmpeg couldn't read %r for a waveform: %s", resolved, exc)
-    if len(_PEAKS_CACHE) > 256:
-        # A file that keeps changing (a take being recorded) leaves a dead
-        # entry per revision; keep the memo from growing without bound.
-        _PEAKS_CACHE.clear()
-    _PEAKS_CACHE[cache_key] = peaks
+    if peaks or not os.path.exists(resolved) or os.path.getsize(resolved) == 0:
+        # Cache only answers worth keeping.  An empty waveform for a file that
+        # *has* content means the decode raced the file being finalised (a take
+        # that just stopped), and caching that would answer every retry with
+        # the same nothing - which is why the clip stayed blank and then,
+        # eventually, recovered on its own: only the next revision could.
+        if len(_PEAKS_CACHE) > 256:
+            _PEAKS_CACHE.clear()
+        _PEAKS_CACHE[cache_key] = peaks
     return peaks
 
 
