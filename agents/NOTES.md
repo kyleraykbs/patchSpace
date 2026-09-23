@@ -413,3 +413,16 @@ gesture accepts; tested only structurally (no touchscreen here).
   collects the take paths whose recorder flipped `recording` *before* walking
   the nodes (the consumer can be visited before the recorder), and any node
   whose `source_path` is one of those re-asks.
+
+* **A recursion guard has to precede the recursive branch.**  `bundle_members()`
+  resolves a Split through its upstream, and that upstream can be another Split;
+  the branch ran before `seen` was initialised, so every recursive call started
+  from an empty `seen`.  A chain terminated, a *cycle* did not - and a cycle is
+  easy to make by hand.  It is reached from `get_nodes` (served under the
+  daemon's lock), so the symptom is a Split Bundle with no members and a view
+  that stops updating rather than anything that names the recursion.
+* Anything that *raises* inside `get_nodes` costs the GUI its whole update path,
+  not just the offending node: `handle_command` turns it into an error reply and
+  the view simply stops changing.  When a GUI report is "X stopped working", it
+  is worth reading the daemon's log for the command that failed, not only the
+  widget.
