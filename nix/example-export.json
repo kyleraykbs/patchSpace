@@ -1,0 +1,16 @@
+{
+  "nodes": {
+    "exported_vol": {
+      "type": "volume",
+      "params": { "label": "From the export", "initial_volume": 0.5, "x": 40, "y": 40 }
+    },
+    "exported_gate": {
+      "type": "gate",
+      "params": { "label": "Exported gate", "enabled": true, "x": 40, "y": 220 }
+    }
+  },
+  "edges": [
+    { "from": "exported_vol", "to": "exported_gate" }
+  ],
+  "groups": []
+}

@@ -110,14 +110,62 @@ without tripping the single-instance guard. The GUI talks to it over that socket
 start/adopt the daemon itself (see §3), so you don't have to launch the daemon by hand.
 
 **Headless GUI testing (for verifying widget changes without a display):**
+
 ```bash
 gtk4-broadwayd :5 &
-BROADWAY_DISPLAY=:5 GDK_BACKEND=broadway python your_smoke_script.py
+BROADWAY_DISPLAY=5 GDK_BACKEND=broadway python your_smoke_script.py
 ```
+
 Constructing `MainWindow` works under broadway and even with no daemon running (widgets
 tolerate a missing daemon; the first `get_nodes` just errors). `get_width()/get_height()`
 can be `0` until the window is mapped, so unit-style smoke tests should stub sizes if
 they exercise geometry.
+
+### Declarative deployment (NixOS / home-manager)
+
+`nix/module.nix` (exported as `flake.modules.nixos.patchbay`,
+`flake.modules.homeManager.patchbay` and the `nixosModules`/`homeModules` aliases; the
+merge helpers alone are `flake.lib.patchbay`) runs the daemon as a **user** service and
+generates the graph as **read-only panel files**:
+
+```nix
+services.patchbay = {
+  enable = true;
+  imports = [ ./exports/live-session.json ];     # anything export_config.py wrote
+  nodes.boom = { type = "sound_effect"; params = { path = "~/sounds/boom.wav"; }; };
+  nodes.kick = { type = "button"; params = { label = "Kick"; }; };
+  edges = [ { from = "kick"; to = "boom"; } ];
+  panels.kit = { placement.w = 720; nodes.snare = { type = "button"; }; };
+};
+```
+
+* **Layering.** Each panel's `imports` (flat exports, or panel files the GUI wrote) are
+  merged *under* the panel's own `nodes`/`edges`/`groups`: `recursiveUpdate` per node, so a
+  Nix entry overrides the fields it names and keeps the rest - including the node's `type`,
+  which is why an override of an imported node doesn't have to restate it
+  (`node.type` has no default and is only required for a node nothing imports; the module
+  asserts that after merging). Edges are keyed by the daemon's own edge identity
+  (`from->to[:to_port][@from_port]`), so an edge named twice is one edge. Panel vs panel
+  is dir-order precedence: the generated store dir is passed `:ro` and *last*.
+* **Generated files** carry `mode = "read-only"` and `auto_load`, so the daemon never writes
+  them back, `Reset` in the GUI re-applies exactly what Nix said, and an unreferenced
+  panel is placed at the root on start-up by itself. The root panel (session autosave:
+  placements, hand-made nodes) stays in `stateDir` - config in the store, state in
+  `$XDG_STATE_HOME`.
+* **Layout.** Nodes keep whatever `x`/`y` the JSON has; nodes with no coordinates are placed
+  by the layout. Only nodes the *user* placed are node-anchored, so Nix/imported nodes
+  settle by physics inside their panel (which is why `anchored` panels pin the box, not the
+  contents - see §3 "Physics").
+* **Two gates, both at build time.** `services.patchbay.nodes.*.type` is an enum of
+  `NODE_TYPE_REGISTRY`, so a typo fails evaluation; and every generated panel is run
+  through `session_repair --check --strict` (the new strict mode: fail on the *input*
+  needing any repair, not only on the repaired config failing). That catches bad ports,
+  kind mismatches (an impulse wire into an audio input), duplicate edges, missing endpoints
+  and unknown types - `packages.patchbay-repair` is the CLI that does it. A failing panel
+  fails the build of the panel dir the daemon loads.
+* **Rebuilds restart the daemon**: the generated dir is a new store path, which changes the
+  unit's `ExecStart`. `services.patchbay.socket` defaults to `null` (the built-in
+  `/tmp/patchbay.sock`); set it and the GUI/CLI need `PATCHBAY_SOCKET` in the session too.
 
 **Diagnosing UI freezes:** launch the GUI with `PATCHBAY_TRACE_HANG=1`; a watchdog dumps
 all thread stacks via `faulthandler` if the main thread stalls >4s.

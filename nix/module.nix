@@ -1,0 +1,449 @@
+# NixOS / home-manager module for the Patch Space daemon + a declarative
+# patchbay.
+#
+# The shape it produces:
+#
+#   * the daemon runs as a **user** service (it drives the logged-in user's
+#     PipeWire session: pw-cli/pw-dump/pw-cat/pw-loopback/wpctl);
+#   * the declarative graph is a set of **read-only panel files** generated
+#     into the store, handed to the daemon with `--panel-dir ...:ro`, so the
+#     daemon can never write them back and `Reset` in the GUI re-applies
+#     exactly what Nix said;
+#   * the session autosave (the "root panel", where placements and hand-made
+#     nodes live) stays in the user's state directory - config in the store,
+#     state in $XDG_STATE_HOME;
+#   * exported JSON is mixed in per panel (`panels.<name>.imports`) and Nix
+#     merges *on top* of it, per node and per edge (see ./lib.nix);
+#   * every generated panel is validated at build time with the repo's own
+#     `session_repair`, so a bad port, a duplicate edge or an unknown node
+#     type fails the build instead of the daemon.
+{ self, homeManager ? false }:
+{ config, lib, pkgs, ... }:
+
+let
+  inherit (lib)
+    mkEnableOption mkIf mkOption types literalExpression optionalString
+    concatStringsSep;
+
+  cfg = config.services.patchbay;
+  patchbayLib = import ./lib.nix { inherit lib; };
+
+  system = pkgs.stdenv.hostPlatform.system;
+  defaultDaemon = self.packages.${system}.patchbay-daemon;
+  repairTool = self.packages.${system}.patchbay-repair;
+
+  # Node type keys the daemon knows (main.py's NODE_TYPE_REGISTRY).  An enum
+  # here turns a typo into an evaluation error; the flake's checks assert
+  # this list still matches the packaged daemon, so it can't silently drift.
+  nodeTypes = [
+    "all_apps" "all_inputs" "all_outputs" "app_input" "app_output"
+    "bool_panel_in" "bool_panel_out" "bool_warp_in" "bool_warp_out"
+    "boolean_and" "boolean_invert" "boolean_or" "boolean_splitter"
+    "boolean_switch" "boolean_xor" "bundle" "bundle_output" "bundle_split"
+    "bundle_to_audio" "button" "description_classifier" "description_input"
+    "description_output" "device_input" "device_output" "echo_cancel"
+    "exclude_filter" "external_only_classifier" "filter" "gate"
+    "inverse_switcher" "light_noise_cancel" "media_class_classifier"
+    "media_class_input" "media_class_output" "noise_cancel" "normalize"
+    "panel_in" "panel_out" "patchbay_device" "patchbay_mic_device"
+    "regex_classifier" "regex_input" "regex_output" "reverb"
+    "sensitivity_gate" "sound_effect" "splitter" "switcher" "virtual_mic"
+    "virtual_speaker" "volume" "warp_in" "warp_out"
+  ];
+
+  panelModule = { name, ... }: {
+    options = {
+      label = mkOption {
+        type = types.str;
+        default = name;
+        description = "Panel title shown above the box.";
+      };
+      color = mkOption {
+        type = types.str;
+        default = "#3584e4";
+        description = "Panel colour (hex).";
+      };
+      autoLoad = mkOption {
+        type = types.bool;
+        default = true;
+        description = ''
+          Load this panel at start-up.  A panel file that nothing references
+          is placed at the root automatically when this is on, so a
+          declarative panel comes up on its own - and comes back if the
+          placement is deleted in the GUI.
+        '';
+      };
+      placement = {
+        # types.number, not float: `w = 520` is what anyone writes, and the
+        # daemon reads them as plain JSON numbers.
+        x = mkOption { type = types.number; default = 0; };
+        y = mkOption { type = types.number; default = 0; };
+        w = mkOption { type = types.number; default = 420; };
+        h = mkOption { type = types.number; default = 260; };
+        anchored = mkOption {
+          type = types.bool;
+          default = true;
+          description = ''
+            Pin the panel's *box* so the layout can't shove it around.
+            Contents still settle: only nodes the user placed by hand are
+            anchored at the node level, so nodes defined here (or imported)
+            are laid out by the physics inside the box.
+          '';
+        };
+      };
+      imports = mkOption {
+        type = types.listOf types.path;
+        default = [ ];
+        example = literalExpression "[ ./exports/live-session.json ]";
+        description = ''
+          Exported JSON to merge *under* this panel: anything
+          `export_config.py` wrote (or a panel file the GUI exported).  Nix
+          wins per node/edge; see the merge rules below.
+        '';
+      };
+      nodes = mkOption {
+        type = types.attrsOf (types.submodule {
+          options = {
+            type = mkOption {
+              type = types.nullOr (types.enum nodeTypes);
+              default = null;
+              description = ''
+                Node type.  May be omitted when this entry is *overriding* a
+                node an `imports` file already declares - the type then comes
+                from there.  Required for a node that exists only here.
+              '';
+            };
+            params = mkOption {
+              type = types.attrsOf types.anything;
+              default = { };
+              description = ''
+                The node's serialized parameters, exactly as an export spells
+                them (`pattern`, `path`, `label`, `x`, `y`, `anchored`, ...).
+                Nodes given no `x`/`y` are placed by the layout.
+              '';
+            };
+          };
+        });
+        default = { };
+        description = "Nodes owned by this panel, keyed by their local id.";
+      };
+      edges = mkOption {
+        type = types.listOf (types.submodule {
+          options = {
+            from = mkOption { type = types.str; };
+            to = mkOption { type = types.str; };
+            from_port = mkOption { type = types.str; default = "out"; };
+            to_port = mkOption { type = types.str; default = "in"; };
+          };
+        });
+        default = [ ];
+      };
+      groups = mkOption {
+        type = types.listOf types.attrs;
+        default = [ ];
+        description = "Canvas groups inside this panel (id, label, color, nodes).";
+      };
+      children = mkOption {
+        type = types.listOf types.str;
+        default = [ ];
+        description = ''
+          Stems of sub-panels belonging to this panel (each is its own entry
+          in `panels`).  A child's placement lives in the child file.
+        '';
+      };
+    };
+  };
+
+  # `panels.main` plus the top-level shorthand for the common case
+  # (one exported session, a few Nix nodes on top).
+  panelDefaults = {
+    label = "Main";
+    color = "#3584e4";
+    autoLoad = true;
+    placement = { x = 0; y = 0; w = 420; h = 260; anchored = true; };
+    imports = [ ];
+    nodes = { };
+    edges = [ ];
+    groups = [ ];
+    children = [ ];
+  };
+  explicitMain = cfg.panels.main or { };
+  mainPanel = panelDefaults // explicitMain // {
+    imports = cfg.imports ++ (explicitMain.imports or [ ]);
+    nodes = cfg.nodes // (explicitMain.nodes or { });
+    edges = cfg.edges ++ (explicitMain.edges or [ ]);
+    groups = cfg.groups ++ (explicitMain.groups or [ ]);
+  };
+  panels = cfg.panels // { main = mainPanel; };
+
+  panelConfig = panel: patchbayLib.panelConfig panel;
+
+  # Flat config for the validator (what `session_repair` understands).  Its
+  # exit status is the build gate: a bad port, an unknown type, a duplicate
+  # edge or an endpoint that doesn't exist fails the build here, not at
+  # runtime in the daemon.
+  panelCheck = name: panel:
+    let json = pkgs.writeText "patchbay-${name}.json" (builtins.toJSON (panelConfig panel));
+    in pkgs.runCommand "patchbay-check-${name}" {
+      # A package-shaped output (dir + bin/), so it is a valid build input
+      # rather than a bare file; the build fails here if the config is bad.
+      nativeBuildInputs = [ repairTool ];
+    } ''
+      mkdir -p $out/bin
+      # No pipe: the validator's exit status *is* this build's verdict, and a
+      # pipe would report the last command's status instead.
+      if ! patchbay-repair --check --strict ${json} > $out/report.txt; then
+        echo "--- patchbay config for panel '${name}' is invalid ---" >&2
+        cat $out/report.txt >&2
+        exit 1
+      fi
+      cat > $out/bin/patchbay-check-${name} <<EOF
+      #!${pkgs.runtimeShell}
+      exec patchbay-repair --check ${json}
+      EOF
+      chmod +x $out/bin/patchbay-check-${name}
+    '';
+
+  # The panel file the daemon reads.  `mode = read-only` + the `:ro` panel dir
+  # is what makes this genuinely declarative: the daemon never writes it back,
+  # and `Reset` in the GUI re-applies exactly this content.
+  panelFile = name: panel:
+    pkgs.writeText "patchbay-panel-${name}.json" (builtins.toJSON {
+      type = "panel";
+      mode = "read-only";
+      label = panel.label;
+      color = panel.color;
+      auto_load = panel.autoLoad;
+      placement = {
+        inherit (panel.placement) x y w h anchored;
+      };
+      config = (panelConfig panel) // { panels = panel.children; };
+    });
+
+  panelsDir = pkgs.runCommand "patchbay-panels" {
+    # The validated config *is* the config the daemon loads: an invalid panel
+    # fails the build here rather than half-loading at runtime.
+    buildInputs = lib.optionals cfg.validate (lib.mapAttrsToList panelCheck panels);
+  } ''
+    mkdir -p $out
+    ${concatStringsSep "\n" (lib.mapAttrsToList (name: panel:
+      "ln -s ${panelFile name panel} $out/${name}.json") panels)}
+  '';
+
+  socketArgs = lib.optionals (cfg.socket != null) [ "--socket" (toString cfg.socket) ];
+
+  panelDirArgs = [ "--panel-dir" "${panelsDir}:ro" ];
+
+  # `type` may be omitted on an override (it comes from the import), so the
+  # merged result is what has to have one for every node.  Reported as a
+  # build-time assertion naming the offending panel and ids, rather than
+  # letting `null` reach the daemon.
+  typelessNodes = lib.concatMapStringsSep ", " (name:
+    let
+      merged = panelConfig panels.${name};
+      missing = builtins.filter
+        (nid: (merged.nodes.${nid}.type or null) == null)
+        (builtins.attrNames merged.nodes);
+    in
+    lib.optionalString (missing != [ ])
+      "${name}: ${concatStringsSep ", " missing}"
+  ) (builtins.attrNames panels);
+
+  unit = {
+    description = "Patch Space daemon (PipeWire patchbay)";
+    after = [ "pipewire.service" "wireplumber.service" ];
+    wants = [ "pipewire.service" "wireplumber.service" ];
+    execStartPre = "${pkgs.coreutils}/bin/mkdir -p ${cfg.stateDir}";
+    execStart = concatStringsSep " " ([
+      "${cfg.package}/bin/patchbay-daemon"
+    ] ++ socketArgs ++ panelDirArgs ++ [
+      "--root-panel" cfg.rootPanel
+    ] ++ cfg.extraArgs);
+    restarts = { Restart = "on-failure"; RestartSec = 2; };
+    wantedBy = [ "default.target" ];
+  };
+
+in
+{
+  # The panels are handed to the daemon by closure; the check above rides
+  # along with the unit so `nixos-rebuild` builds (and therefore validates)
+  # the config it is about to load, and a rebuild lands a *new* store path in
+  # ExecStart - which is what restarts the daemon with the new panels.
+
+  options.services.patchbay = {
+    enable = mkEnableOption "the Patch Space daemon (and its declarative panels)";
+
+    package = mkOption {
+      type = types.package;
+      default = defaultDaemon;
+      defaultText = literalExpression "patchbay-daemon from this flake";
+      description = "The daemon to run (needs pw-cli/pw-cat/wpctl on PATH).";
+    };
+
+    socket = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = "%t/patchbay.sock";
+      description = ''
+        Command-API socket.  `null` keeps the daemon's own default
+        (`/tmp/patchbay.sock`), which is what the GUI and the CLI tools
+        connect to out of the box.  Change it and they all need
+        `PATCHBAY_SOCKET` in the session environment - the GUI is a client
+        and has to be pointed at the same path.
+      '';
+    };
+
+    stateDir = mkOption {
+      type = types.str;
+      default = "%S/patchbay";
+      description = ''
+        Where the root panel (the session autosave: placements and nodes made
+        in the GUI) lives.  Config is in the store; this is the state.
+      '';
+    };
+
+    rootPanel = mkOption {
+      type = types.str;
+      default = "${cfg.stateDir}/last_session.json";
+      defaultText = literalExpression ''"''${cfg.stateDir}/last_session.json"'';
+      description = "Path of the root panel file.";
+    };
+
+    imports = mkOption {
+      type = types.listOf types.path;
+      default = [ ];
+      example = literalExpression "[ ./exports/live-session.json ]";
+      description = "Exported JSON merged under the `main` panel.";
+    };
+
+    nodes = mkOption {
+      type = types.attrsOf (types.submodule {
+        options = {
+          type = mkOption {
+            type = types.nullOr (types.enum nodeTypes);
+            default = null;
+            description = "Node type (omit when overriding an imported node).";
+          };
+          params = mkOption { type = types.attrsOf types.anything; default = { }; };
+        };
+      });
+      default = { };
+      description = "Nodes of the `main` panel.";
+    };
+
+    edges = mkOption {
+      type = types.listOf (types.submodule {
+        options = {
+          from = mkOption { type = types.str; };
+          to = mkOption { type = types.str; };
+          from_port = mkOption { type = types.str; default = "out"; };
+          to_port = mkOption { type = types.str; default = "in"; };
+        };
+      });
+      default = [ ];
+      description = "Edges of the `main` panel.";
+    };
+
+    groups = mkOption {
+      type = types.listOf types.attrs;
+      default = [ ];
+      description = "Groups of the `main` panel.";
+    };
+
+    panels = mkOption {
+      type = types.attrsOf (types.submodule panelModule);
+      default = { };
+      description = ''
+        Declarative panels, keyed by stem (the file name the daemon sees).
+        `main` is also settable through the top-level `imports`/`nodes`/
+        `edges`/`groups` options, which merge under it.
+      '';
+    };
+
+    extraArgs = mkOption {
+      type = types.listOf types.str;
+      default = [ ];
+      description = "Extra arguments for the daemon (see `--help`).";
+    };
+
+    validate = mkOption {
+      type = types.bool;
+      default = true;
+      description = ''
+        Run every generated panel through the repo's `session_repair` at
+        build time.  Catches unknown node types, ports that don't exist,
+        kind mismatches (an impulse wire into an audio input), duplicate
+        edges and missing endpoints before the daemon ever sees the config.
+      '';
+    };
+
+    panelsDir = mkOption {
+      type = types.path;
+      readOnly = true;
+      internal = true;
+      description = ''
+        The generated read-only panel directory handed to the daemon.  Set by
+        this module; exposed so a deployment can inspect or `nix build` it
+        (that build is what runs the validation).
+      '';
+    };
+  };
+
+  config = mkIf cfg.enable {
+    services.patchbay.panelsDir = panelsDir;
+
+    systemd.user.services.patchbay =
+      if homeManager then {
+        # home-manager names the INI sections directly.
+        Unit = {
+          Description = unit.description;
+          After = unit.after;
+          Wants = unit.wants;
+        };
+        Service = {
+          ExecStartPre = [ unit.execStartPre ];
+          ExecStart = unit.execStart;
+          inherit (unit.restarts) Restart RestartSec;
+        };
+        Install.WantedBy = unit.wantedBy;
+      } else {
+        # NixOS splits them: unitConfig / serviceConfig / install.
+        unitConfig = {
+          Description = unit.description;
+          After = unit.after;
+          Wants = unit.wants;
+        };
+        serviceConfig = {
+          ExecStartPre = [ unit.execStartPre ];
+          ExecStart = unit.execStart;
+          inherit (unit.restarts) Restart RestartSec;
+        };
+        # NixOS's user units take the new-style `wantedBy`, not
+        # `install.WantedBy` (that one is home-manager's spelling).
+        wantedBy = unit.wantedBy;
+      };
+
+    # (A rebuild rewrites the panel files into a *new* store path, which
+    # changes this unit's ExecStart, so the daemon is restarted with the new
+    # config - no in-place reload needed.)
+    assertions = [
+      {
+        assertion = typelessNodes == "";
+        message = ''
+          services.patchbay declares node(s) with no type, and no import
+          provides one: ${typelessNodes}
+        '';
+      }
+      {
+        assertion = mainPanel.nodes != { } || mainPanel.imports != [ ]
+          || mainPanel.edges != [ ] || mainPanel.groups != [ ]
+          || mainPanel.children != [ ];
+        message = ''
+          services.patchbay is enabled but declares nothing: give it
+          `panels.<name>` (or the top-level `imports`/`nodes`/`edges`) to
+          configure.
+        '';
+      }
+    ];
+  };
+}

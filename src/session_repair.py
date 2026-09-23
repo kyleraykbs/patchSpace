@@ -484,6 +484,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Validate and repair a Patch Space session JSON.")
     parser.add_argument("path", nargs="?", help="session JSON (default: last-session cache)")
     parser.add_argument("--check", action="store_true", help="report problems only, never write")
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="fail if the config needs any repair at all (a declarative/Nix"
+        " config should already be valid), not just if repairing it failed",
+    )
     parser.add_argument("--write", action="store_true", help="write the repaired config back")
     parser.add_argument("--collapse-duplicate-lines", action="store_true", help="drop redundant built-in line nodes")
     parser.add_argument("--drop-orphans", action="store_true", help="drop nodes with no edges")
@@ -515,6 +521,21 @@ def main(argv: Optional[List[str]] = None) -> int:
         with open(args.path, "w") as f:
             json.dump(result.config, f, indent=2, sort_keys=True)
         print(f"\nWrote {args.path}")
+
+    if args.strict:
+        # `result.ok` only says the *repaired* config is fine, i.e. it is
+        # false only when a problem could not be fixed.  A declarative
+        # (Nix-authored) config should need no repairs at all - a dropped
+        # bad edge or a normalised port means the config didn't say what it
+        # meant - so `--strict` reports the *input* being invalid.
+        errors = [issue for issue in validate(config) if issue.severity == ERROR]
+        if errors:
+            print()
+            print("Strict: this config needs repairs and was rejected:")
+            for issue in errors:
+                print(f"  [{issue.code}] {issue.where}: {issue.message}")
+            return 1
+
     return 0 if result.ok else 1
 
 

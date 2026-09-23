@@ -118,3 +118,20 @@ pipewire &  ;  wireplumber &
 `PATCHBAY_SOCKET` (daemon `--socket`, GUI, CLI clients all read it), `PATCHBAY_PANEL_DIR`,
 `PATCHBAY_ROOT_PANEL` — the three knobs a service/module needs to keep a daemon per-user
 (socket in `$XDG_RUNTIME_DIR`, panel dirs from the store, root panel in state).
+
+## The Nix module (nix/)
+
+`nix/module.nix` (one body, `flake.modules.{nixos,homeManager}.patchbay`) runs the daemon as
+a **user** service and generates read-only panel files into the store; `nix/lib.nix` holds
+the JSON-merge helpers (`flake.lib.patchbay`).  Two gotchas worth remembering:
+
+* NixOS and home-manager spell systemd units differently — `unitConfig`/`serviceConfig`/
+  `wantedBy` vs `Unit`/`Service`/`Install`.  Hence the `homeManager ? false` closure arg.
+* A rebuild must restart the daemon: the generated panel dir is a new store path, which
+  changes `ExecStart`, which is what makes systemd pick the new config up.
+* Verification recipe (no `nixos-rebuild`!): `pkgs.nixos [ module config ]` and read
+  `config.systemd.user.services.patchbay.serviceConfig.ExecStart` /
+  `config.services.patchbay.panelsDir`; `nix build` that dir to run the validation, and
+  `nix build .#checks.<system>.module-merge` for the merge-precedence check.  Reach for a
+  *worse* config to confirm a gate actually fails — the first version of the validation
+  used `| tee`, whose exit status hid the failure entirely.

@@ -28,6 +28,41 @@ def test_validate_flags_missing_endpoint_and_bad_port():
     assert any(c == "bad-port" for c, _ in codes)
 
 
+def test_main_strict_check_rejects_a_config_that_needs_repairs(tmp_path):
+    """`--check` alone reports the problems and exits 0 when the repair pass
+    fixed them (a dropped bad edge is a "fix", not a failure).  A declarative
+    config - what the Nix module generates - must be valid as written, which
+    is what `--strict` is for: it fails on the *input*, so Nix can't silently
+    load a graph different from the one it declared."""
+    import json
+
+    import session_repair
+
+    broken = _config(
+        nodes={
+            "kick": {"type": "button", "params": {}},
+            "vol": {"type": "volume", "params": {}},
+        },
+        # An impulse output into an audio input: an error the repairer drops.
+        edges=[{"from": "kick", "to": "vol"}],
+    )
+    path = tmp_path / "session.json"
+    path.write_text(json.dumps(broken))
+
+    assert session_repair.main([str(path), "--check"]) == 0
+    assert session_repair.main([str(path), "--check", "--strict"]) == 1
+
+    valid = _config(
+        nodes={
+            "kick": {"type": "button", "params": {}},
+            "boom": {"type": "sound_effect", "params": {}},
+        },
+        edges=[{"from": "kick", "to": "boom"}],
+    )
+    path.write_text(json.dumps(valid))
+    assert session_repair.main([str(path), "--check", "--strict"]) == 0
+
+
 def test_repair_normalizes_legacy_switch_ports():
     # inverse_switcher inputs are on/off; an old session used a/b.
     cfg = _config(
