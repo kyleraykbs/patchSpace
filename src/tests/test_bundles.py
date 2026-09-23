@@ -17,6 +17,7 @@ from pwnodes import (
     AllAppsNode,
     RegexClassifierNode,
     MediaClassClassifierNode,
+    AppNameClassifierNode,
     FilterNode,
     TitleClassifierNode,
     BundleMergeNode,
@@ -201,6 +202,26 @@ def test_title_classifier_selects_the_stream_by_title():
     s.sync()
     # Case-insensitive substring, on the title only.
     assert {out for out, _ in g.linked_pairs()} == {watched["FL"], watched["FR"]}
+
+
+def test_app_name_classifier_selects_the_app():
+    g = FakeGraph()
+    wanted = g.add_source(10, "wanted", app="Firefox")
+    g.add_source(11, "other", app="Spotify")
+    # Same words as the app name, but only in the *title*: not a match.
+    g.add_source(12, "titled", app="mpv", media_name="Firefox")
+    sink = g.add_sink(20, "sink1")
+    s = PatchSpace(g)
+    s.mark_graph_loaded()
+    s.add_node(AllAppsNode("apps"))
+    s.add_node(FilterNode("f"))
+    s.add_node(AppNameClassifierNode("c", "firefox"))
+    s.add_node(SinkNode("snk", "sink1"))
+    s.add_edge("apps", "f")
+    s.add_edge("c", "f", to_port="filter")
+    s.add_edge("f", "snk")
+    s.sync()
+    assert {out for out, _ in g.linked_pairs()} == {wanted["FL"], wanted["FR"]}
 
 
 def test_filter_exclude_switch_flips_the_bundle_between_keep_and_drop():
@@ -652,6 +673,38 @@ def test_daemon_switch_and_title_classifier_survive_set_node_property():
         assert d.handle_command(
             {"command": "get_nodes"}
         )["nodes"][node_id][prop] == expected
+
+
+def test_daemon_get_titles_lists_live_stream_titles():
+    """The Title classifier's dropdown is built from these: the live streams'
+    media.name, deduped and sorted - a device's media.name is left out, since
+    it is a description rather than a title."""
+    from main import PatchSpaceDaemon
+
+    g = FakeGraph()
+    g.add_source(10, "one", media_name="YouTube - a video")
+    g.add_source(11, "two", media_name="YouTube - a video")   # same title
+    g.add_source(12, "three", media_name="Spotify - a song")
+    g.add_sink(20, "sink1", media_name="Built-in Audio Analog Stereo")
+    d = PatchSpaceDaemon()
+    d.graph = g
+    resp = d.handle_command({"command": "get_titles"})
+    assert resp["status"] == "ok"
+    assert resp["titles"] == ["Spotify - a song", "YouTube - a video"]
+
+
+def test_daemon_application_classifier_round_trips_its_name():
+    from main import PatchSpaceDaemon
+
+    d = PatchSpaceDaemon()
+    d.handle_command({"command": "add_node", "node_type": "app_name_classifier",
+                      "node_id": "c", "config": {"app_name": "Firefox"}})
+    assert d.handle_command({"command": "get_nodes"})["nodes"]["c"]["app_name"] == "Firefox"
+    res = d.handle_command({"command": "set_node_property", "node_id": "c",
+                            "property": "app_name", "value": "Spotify"})
+    assert res.get("status") != "error", res
+    assert (d.handle_command({"command": "get_nodes"})["nodes"]["c"]["app_name"]
+            == "Spotify")
 
 
 def test_daemon_create_node_builds_bundle_output_without_starting_it():

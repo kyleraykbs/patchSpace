@@ -298,12 +298,23 @@ so the GUI/repair can never fabricate a connection the daemon rejects.
 * `AllInputsNode` / `AllAppsNode` (`InputNode`) produce a source bundle from
   `source_filters()`; `AllOutputsNode` (`Node`) produces a sink bundle from
   `sink_filters()`. `bundle_side()` reports which.
-* `ClassifierNode` subclasses (`Regex`/`MediaClass`/`Description`/`Title`/`ExternalOnly`)
-  are pure control-plane predicates with one `filter` output; `invert` complements any of
-  them. They are plugged into a Filter node's `filter` input. `TitleClassifierNode` is
-  the one that matches a stream's `media.name` - the title a player reports for what it
-  is playing ("YouTube") - which is what "select apps by their title" means here; the
-  others match node names / classes / descriptions.
+* `ClassifierNode` subclasses (`Regex`/`MediaClass`/`Description`/`Title`/`Application`/
+  `ExternalOnly`) are pure control-plane predicates with one `filter` output; `invert`
+  complements any of them. They are plugged into a Filter node's `filter` input.
+  `TitleClassifierNode` matches a stream's `media.name` - the title a player reports for
+  what it is playing ("YouTube") - and `AppNameClassifierNode` its `application.name`
+  (the substring counterpart of the Regex classifier's `nameRegex`); the others match node
+  names / classes / descriptions.
+* **Fields that are chosen, not typed.** A spec can mark its field `field_choices=True`
+  (Title, Application): the node draws a caret in the box so it reads as a dropdown, and
+  its editor is `_show_choice_popover(..., search_hint=...)` - the shared list popover
+  with a search entry on top of a scrolling list (the entry's own text is offered as a
+  row whenever it isn't already a label, because these classifiers match *substrings*:
+  "YouTube" stays settable when every live title is longer). The values come from the
+  daemon: `get_titles` (the live streams' `media.name`, deduped/sorted, deliberately not
+  a device's - that is a description) and the existing `get_applications` (both
+  directions, deduped). The filtering rule is the GTK-free `choice_row_visibility`, which
+  is what the tests pin.
 * `FilterNode` (`TransparentNode`) resolves its bundle input to exact live ids and keeps
   the members *every* wired classifier matches (AND). Its `filterN` inputs are dynamic
   like a Merge Bundle's: the daemon reports `filter_input_ports` (one per wired classifier

@@ -132,6 +132,23 @@ BUNDLE_DASH = (5.0, 4.0)
 IMPULSE_DASH = (2.5, 3.0)
 
 
+def choice_row_visibility(labels, text):
+    """Which rows a searchable choice list shows for `text`, and whether the
+    typed text needs a row of its own.
+
+    Matching is a case-insensitive substring; the raw text gets its own row
+    whenever it is set and isn't already one of the labels, because the fields
+    these lists feed (the Title classifier's) match substrings - "YouTube" is a
+    valid value even when no live title is exactly that.  Split out from the
+    popover so the rule is testable without GTK."""
+    low = (text or "").strip().lower()
+    if not low:
+        return list(labels), False
+    matching = [label for label in labels if low in label.lower()]
+    typed = not any(label.lower() == low for label in labels)
+    return matching, typed
+
+
 class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     NODE_WIDTH = 180
     # Extra world padding around the viewport when culling offscreen draws,
@@ -2412,6 +2429,17 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         if kind in ("bundle", "filter"):
             return BUNDLE_DASH
         return None
+
+    def _draw_field_caret(self, cr, pal, field_x, field_y, field_w, field_h):
+        """The little triangle at a choice field's right edge."""
+        cx = field_x + field_w - 11
+        cy = field_y + field_h / 2.0
+        cr.set_source_rgb(*pal["subtext"])
+        cr.move_to(cx - 4, cy - 1.5)
+        cr.line_to(cx + 4, cy - 1.5)
+        cr.line_to(cx, cy + 3.5)
+        cr.close_path()
+        cr.fill()
 
     def _field_rect(self, nid):
         """Geometry of a node's inline text field - single source of truth
@@ -5725,16 +5753,24 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         color = pal["field_fg"] if value else pal["subtext"]
         font_size = 10
 
+        # A field whose value is chosen from a list (the Title/Application
+        # classifiers) gives up its right end to a caret, so the box reads as
+        # a dropdown rather than as something to type into.
+        choices = spec_for(self.nodes[nid]["type"]).field_choices
+        caret_room = 18 if choices else 0
+
         baseline_y = field_y + (field_h - font_size) // 2
         draw_text_ellipsized(
             cr,
             field_x + 6,
             baseline_y,
             text,
-            field_w - 12,
+            field_w - 12 - caret_room,
             font_size,
             color,
         )
+        if choices:
+            self._draw_field_caret(cr, pal, field_x, field_y, field_w, field_h)
 
     def _draw_path_picker(self, cr, pal, nid):
         """The folder button a `picker` spec draws beside its field: a
@@ -6268,6 +6304,19 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         if not field:
             return
 
+        if field == "title":
+            # Titles come from the live graph, so ask the daemon for them and
+            # open the dropdown when the answer lands (see on_titles).
+            self._pending_title_select = (node_id, screen_x, screen_y)
+            self.client.send({"command": "get_titles"})
+            return
+
+        if field == "app_name":
+            # Same for the application names (see on_applications).
+            self._pending_app_name_select = (node_id, screen_x, screen_y)
+            self.client.send({"command": "get_applications"})
+            return
+
         if field == "media_class":
             # Media class is a fixed set of PipeWire media.class
             # strings, not free text - show the same kind of
@@ -6319,11 +6368,18 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # entry unfocused and hard to click into.
         self.popup_context_menu(popover, screen_x, screen_y, focus_widget=entry)
 
-    def _show_choice_popover(self, screen_x, screen_y, title, choices, on_pick):
+    def _show_choice_popover(self, screen_x, screen_y, title, choices, on_pick,
+                             search_hint=None):
         """`choices` is a list of (label, value) tuples. Shared by
-        device/app/codec selection so there's exactly one place that
-        builds this kind of list, instead of three near-identical
-        popovers that can drift apart."""
+        device/app/codec/title selection so there's exactly one place that
+        builds this kind of list, instead of four near-identical popovers
+        that can drift apart.
+
+        `search_hint` turns the list into a searchable dropdown: a search
+        entry filters the rows (scrolled, since a live title list is long) as
+        you type, and whatever is typed is offered as a choice of its own when
+        it isn't already one - these fields match *substrings*, so "YouTube"
+        has to stay settable even though every live title is longer."""
         popover = Gtk.Popover()
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         box.set_margin_top(6)
@@ -6335,17 +6391,87 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             lbl = Gtk.Label(label=title)
             lbl.set_halign(Gtk.Align.START)
             box.append(lbl)
+
+        rows = []          # (button, label, value)
+        entry = None
+        typed_btn = None
+        empty = None
+        target = box
+        if search_hint:
+            entry = Gtk.SearchEntry()
+            entry.set_placeholder_text(search_hint)
+            box.append(entry)
+            scroller = Gtk.ScrolledWindow()
+            scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+            scroller.set_min_content_height(140)
+            scroller.set_max_content_height(320)
+            scroller.set_propagate_natural_height(True)
+            listing = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            scroller.set_child(listing)
+            box.append(scroller)
+            target = listing
+            typed_btn = Gtk.Button(label="")
+            typed_btn.connect(
+                "clicked",
+                lambda _b: (on_pick(entry.get_text().strip()), popover.popdown()),
+            )
+            typed_btn.set_visible(False)
+            target.append(typed_btn)
+
         if not choices:
             empty = Gtk.Label(label="(none found)")
             empty.set_halign(Gtk.Align.START)
-            box.append(empty)
+            empty.set_visible(not search_hint)
+            target.append(empty)
         for label, value in choices:
             btn = Gtk.Button(label=label)
             btn.connect("clicked", lambda _b, v=value: (on_pick(v), popover.popdown()))
-            box.append(btn)
+            target.append(btn)
+            rows.append((btn, label, value))
+
+        if search_hint:
+            def refilter(*_args):
+                matching, typed = choice_row_visibility(
+                    [label for _, label, _ in rows], entry.get_text()
+                )
+                shown = set(matching)
+                for btn, label, _value in rows:
+                    btn.set_visible(label in shown)
+                typed_btn.set_visible(typed)
+                if typed:
+                    typed_btn.set_label(f'Use "{entry.get_text().strip()}"')
+                if empty is not None:
+                    empty.set_visible(not shown and not typed)
+
+            # "changed", not "search-changed": the latter is debounced by GTK
+            # (~150ms), which only adds lag to filtering a list already in
+            # memory.
+            entry.connect("changed", refilter)
+            refilter()
 
         popover.set_child(box)
-        self.popup_context_menu(popover, screen_x, screen_y)
+        self.popup_context_menu(
+            popover, screen_x, screen_y, focus_widget=entry or None
+        )
+        return popover
+
+    def on_titles(self, titles):
+        """The live stream titles arrived: open the Title classifier's
+        dropdown on them."""
+        pending = getattr(self, "_pending_title_select", None)
+        if not pending:
+            return
+        nid, sx, sy = pending
+        self._pending_title_select = None
+
+        def on_pick(title, nid=nid):
+            self._send_property(nid, "title", title)
+            GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
+
+        self._show_choice_popover(
+            sx, sy, "Title:", [(t, t) for t in titles], on_pick,
+            search_hint="Search titles",
+        )
 
     def _open_device_select(self, nid, screen_x, screen_y):
         node = self.nodes.get(nid)
@@ -6383,6 +6509,33 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._show_choice_popover(sx, sy, "Select device", choices, on_pick)
 
     def on_applications(self, applications):
+        # The Application classifier's dropdown: every live application name,
+        # in either direction, since the classifier matches members of a
+        # source *or* sink bundle.
+        pending_name = getattr(self, "_pending_app_name_select", None)
+        if pending_name:
+            nid, sx, sy = pending_name
+            self._pending_app_name_select = None
+            names = sorted(
+                {
+                    a.get("name")
+                    for direction in ("inputs", "outputs")
+                    for a in applications.get(direction, [])
+                    if a.get("name")
+                },
+                key=str.lower,
+            )
+
+            def on_name_pick(app_name, nid=nid):
+                self._send_property(nid, "app_name", app_name)
+                GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
+
+            self._show_choice_popover(
+                sx, sy, "Application:", [(n, n) for n in names], on_name_pick,
+                search_hint="Search applications",
+            )
+            return
+
         pending = getattr(self, "_pending_app_select", None)
         if not pending:
             return

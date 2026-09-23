@@ -8,6 +8,7 @@ import pytest
 from pwproc import Backoff
 from pwmatch import INTERNAL_MEDIA_CLASS, SOURCE_MEDIA_CLASSES
 from pwnodes import (
+    AppNameClassifierNode,
     TitleClassifierNode,
     PatchSpace,
     InputNode,
@@ -59,6 +60,25 @@ def test_title_classifier_matches_the_stream_title():
     )
     # No title set => matches nothing, like every other classifier.
     assert not TitleClassifierNode("c", "").matches({"media.name": "x"}, "source")
+
+
+def test_app_name_classifier_matches_the_application_name():
+    c = AppNameClassifierNode("c", "Firefox")
+    assert c.matches({"application.name": "Firefox"}, "source")
+    assert not c.matches({"application.name": "Spotify"}, "source")
+    # It matches the *application*, not the stream's title or description.
+    assert not c.matches(
+        {"application.name": "mpv", "media.name": "Firefox", "node.description": "Firefox"},
+        "source",
+    )
+    # No name set => matches nothing, like every other classifier.
+    assert not AppNameClassifierNode("c", "").matches({"application.name": "x"}, "source")
+
+
+def test_app_name_classifier_exclude_switch_flips_it():
+    c = AppNameClassifierNode("c", "Firefox", invert=True)
+    assert not c.classify({"application.name": "Firefox"}, "source")
+    assert c.classify({"application.name": "Spotify"}, "source")
 
 
 def test_title_classifier_exclude_switch_flips_it():
@@ -114,10 +134,12 @@ class FakeGraph:
             out_ports[ch] = pid
         return out_ports
 
-    def add_sink(self, node_id, name, media_class="Audio/Sink", channels=("FL", "FR")):
-        self._nodes[node_id] = {
-            "info": {"props": {"node.name": name, "media.class": media_class}}
-        }
+    def add_sink(self, node_id, name, media_class="Audio/Sink", channels=("FL", "FR"),
+                 media_name=None):
+        props = {"node.name": name, "media.class": media_class}
+        if media_name is not None:
+            props["media.name"] = media_name
+        self._nodes[node_id] = {"info": {"props": props}}
         in_ports = {}
         for ch in channels:
             pid = self._next_port

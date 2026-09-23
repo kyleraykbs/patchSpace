@@ -37,7 +37,8 @@ let
   # here turns a typo into an evaluation error; the flake's checks assert
   # this list still matches the packaged daemon, so it can't silently drift.
   nodeTypes = [
-    "all_apps" "all_inputs" "all_outputs" "app_input" "app_output"
+    "all_apps" "all_inputs" "all_outputs" "app_input" "app_name_classifier"
+    "app_output"
     "bool_panel_in" "bool_panel_out" "bool_warp_in" "bool_warp_out"
     "boolean_and" "boolean_invert" "boolean_or" "boolean_splitter"
     "boolean_switch" "boolean_xor" "bundle" "bundle_output" "bundle_split"

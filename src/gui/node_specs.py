@@ -127,6 +127,7 @@ class NodeSpec:
         "description",
         "setting_tooltips",
         "toggle",
+        "field_choices",
         "indicator",
         "picker",
     )
@@ -151,6 +152,7 @@ class NodeSpec:
         description: str = "",
         setting_tooltips: Optional[Dict[str, str]] = None,
         toggle: Optional[tuple] = None,
+        field_choices: bool = False,
         indicator: Optional[str] = None,
         picker: bool = False,
     ):
@@ -206,6 +208,10 @@ class NodeSpec:
         # which single string property (if any) is edited via an inline
         # text field (the Filter node's title box is one of these).
         self.field = field
+        # Whether the inline field is *chosen* rather than typed: its editor is
+        # a list popover (the Title classifier's list of live stream titles)
+        # and the field draws a caret, so it reads as a dropdown.
+        self.field_choices = bool(field_choices)
         # Optional (attr, label) for a checkbox drawn on the node body,
         # above the field/control row - a boolean property the user flips
         # in place rather than through the Settings dialog (the Sound
@@ -357,7 +363,12 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
         settings=[("invert", "Invert (exclude matches)", "bool")],
     ),
     "title_classifier": NodeSpec(
-        "Title", [], ["out"], field="title",
+        "Title", [], ["out"], field="title", field_choices=True,
+        filter_outputs=["out"],
+        settings=[("invert", "Invert (exclude matches)", "bool")],
+    ),
+    "app_name_classifier": NodeSpec(
+        "Application", [], ["out"], field="app_name", field_choices=True,
         filter_outputs=["out"],
         settings=[("invert", "Invert (exclude matches)", "bool")],
     ),
@@ -792,6 +803,8 @@ NODE_DESCRIPTIONS: Dict[str, str] = {
     "title_classifier": "A filter that matches a stream's title - PipeWire's "
     "media.name, the label a mixer shows for a playing app (\"YouTube\", a "
     "track name).",
+    "app_name_classifier": "A filter that matches a member's application name "
+    "(PipeWire's application.name) - pick one from the live list.",
     "external_only_classifier": "A filter that keeps only real apps and "
     "hardware, stripping Patch Space's own plumbing.",
     "bundle_to_audio": "Converts a source bundle back into one ordinary "
@@ -977,6 +990,7 @@ ADD_NODE_CATEGORIES = [
             ("Media Class Classifier", "media_class_classifier"),
             ("Description Classifier", "description_classifier"),
             ("Title Classifier", "title_classifier"),
+            ("Application Classifier", "app_name_classifier"),
             ("External Only", "external_only_classifier"),
             ("Bundle -> Audio", "bundle_to_audio"),
             ("Bundle Output", "bundle_output"),
@@ -1152,6 +1166,7 @@ NODE_TYPE_ICONS: Dict[str, str] = {
     "media_class_classifier": "view-list-symbolic",
     "description_classifier": "text-x-generic-symbolic",
     "title_classifier": "insert-text-symbolic",
+    "app_name_classifier": "application-x-executable-symbolic",
     "external_only_classifier": "system-users-symbolic",
     "bundle_to_audio": "media-playback-start-symbolic",
     "bundle_output": "audio-card-symbolic",
@@ -1200,6 +1215,7 @@ CLASS_NAME_TO_TYPE = {
     "MediaClassClassifierNode": "media_class_classifier",
     "DescriptionClassifierNode": "description_classifier",
     "TitleClassifierNode": "title_classifier",
+    "AppNameClassifierNode": "app_name_classifier",
     "ExternalOnlyClassifierNode": "external_only_classifier",
     "BundleToAudioNode": "bundle_to_audio",
     "BundleOutputNode": "bundle_output",

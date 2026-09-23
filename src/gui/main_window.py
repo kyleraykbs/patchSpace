@@ -1314,6 +1314,8 @@ class MainWindow(Gtk.ApplicationWindow):
                     self.pw_widget.update_graph(resp["graph"])
                 elif "devices" in resp:
                     self.ps_widget.on_hardware_devices(resp["devices"])
+                elif "titles" in resp:
+                    self.ps_widget.on_titles(resp["titles"])
                 elif "applications" in resp:
                     self.ps_widget.on_applications(resp["applications"])
                 elif "profiles" in resp:

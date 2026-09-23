@@ -338,3 +338,15 @@ gesture accepts; tested only structurally (no touchscreen here).
   user's own label once they rename it.  The face also lifts one grey step while
   `hover_impulse` holds it (`on_motion` sets it, `on_leave`/motion clears it, repaint only
   on the edge); that hover is deliberately the only cue besides the press pulse.
+
+* **Title / Application classifiers are chosen from live lists** (`field_choices=True`):
+  the field shows a caret, and clicking it asks the daemon (`get_titles` - new;
+  `get_applications` - reused, both directions deduped) then opens
+  `_show_choice_popover(..., search_hint=...)`, the shared list popover with a search
+  entry over a `Gtk.ScrolledWindow`.  The typed text is always offered as its own row -
+  these classifiers match substrings.  `choice_row_visibility` holds the rule (tests pin
+  it); connect the entry to `"changed"`, *not* `"search-changed"` (GTK debounces the
+  latter ~150ms, which only adds lag to lists already in memory).
+* A GTK popover has **no offscreen snapshot** without a realized window (WidgetPaintable
+  returns nothing), so the pickers are verified by tests, not by a rendered image;
+  `Gsk.RenderNode.draw(cr)` exists for the cairo-canvas side.

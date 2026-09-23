@@ -83,6 +83,7 @@ from pwnodes import (
     RegexOutputNode,
     MediaClassInputNode,
     MediaClassOutputNode,
+    AppNameClassifierNode,
     TitleClassifierNode,
     DescriptionInputNode,
     DescriptionOutputNode,
@@ -335,6 +336,7 @@ NODE_TYPE_REGISTRY: Dict[str, type] = {
     "media_class_classifier": MediaClassClassifierNode,
     "description_classifier": DescriptionClassifierNode,
     "title_classifier": TitleClassifierNode,
+    "app_name_classifier": AppNameClassifierNode,
     "external_only_classifier": ExternalOnlyClassifierNode,
     "filter": FilterNode,
     "bundle": BundleMergeNode,
@@ -3760,6 +3762,8 @@ class PatchSpaceDaemon:
             return cls(node_id, g("description", ""), g("invert", False))
         if cls is TitleClassifierNode:
             return cls(node_id, g("title", ""), g("invert", False))
+        if cls is AppNameClassifierNode:
+            return cls(node_id, g("app_name", ""), g("invert", False))
         if cls is ExternalOnlyClassifierNode:
             return cls(node_id, g("invert", False))
         if cls is FilterNode:
@@ -4319,6 +4323,10 @@ class PatchSpaceDaemon:
                 node.device_name = value
                 node.resolve_live(None, None)
                 self._try_immediate_resolve(node)
+            elif prop == "app_name" and isinstance(node, AppNameClassifierNode):
+                # The Application classifier's picker value (the live app
+                # node's own app_name is the branch below).
+                node.app_name = value
             elif prop == "app_name" and isinstance(node, LiveResolvableNode):
                 node.app_name = value
                 node.resolve_live(None, None)
@@ -4801,6 +4809,21 @@ class PatchSpaceDaemon:
     def _cmd_get_graph(self, cmd: dict) -> dict:
         return {"status": "ok", "graph": self._serialize_graph()}
 
+    def _cmd_get_titles(self, cmd: dict) -> dict:
+        """The titles of the live streams (``media.name``) for the Title
+        classifier's picker: what a player reports it is playing, which is
+        exactly what that classifier matches.  Streams only - a device's
+        media.name is its description, not a title."""
+        titles = set()
+        for node_data in self.graph.nodes().values():
+            props = node_data.get("info", {}).get("props", {})
+            if not str(props.get("media.class") or "").startswith("Stream/"):
+                continue
+            title = str(props.get("media.name") or "").strip()
+            if title:
+                titles.add(title)
+        return {"status": "ok", "titles": sorted(titles, key=str.lower)}
+
     def _cmd_get_logs(self, cmd: dict) -> dict:
         """Recent daemon log lines for the GUI console.  `since` is the
         last sequence number the caller has seen; lines with a higher
@@ -5178,6 +5201,8 @@ class PatchSpaceDaemon:
                 response = self._cmd_get_nodes(cmd)
             elif command == "get_graph":
                 response = self._cmd_get_graph(cmd)
+            elif command == "get_titles":
+                response = self._cmd_get_titles(cmd)
             elif command == "get_logs":
                 response = self._cmd_get_logs(cmd)
             elif command == "export_config":

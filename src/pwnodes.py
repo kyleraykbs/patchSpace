@@ -1487,6 +1487,24 @@ class TitleClassifierNode(ClassifierNode):
         return pwmatch.matches_source_filter(props, {"mediaName": self.title})
 
 
+class AppNameClassifierNode(ClassifierNode):
+    """Classifier that matches a member's *application name*.
+
+    Substring, case-insensitive, against PipeWire's ``application.name``
+    (falling back to ``node.name``, exactly as the daemon's application list
+    does) - "Firefox", "Spotify".  The substring counterpart of the Regex
+    classifier's ``nameRegex``, and the Application picker's value."""
+
+    def __init__(self, node_id, app_name: str = "", invert: bool = False):
+        super().__init__(node_id, invert)
+        self.app_name = app_name
+
+    def matches(self, props: dict, side: str) -> bool:
+        if not self.app_name:
+            return False
+        return pwmatch.matches_source_filter(props, {"name": self.app_name})
+
+
 class ExternalOnlyClassifierNode(ClassifierNode):
     """Classifier that keeps everything Patch Space doesn't own (real apps
     and hardware), stripping our own built-ins and plumbing.  See
