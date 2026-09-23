@@ -376,3 +376,12 @@ gesture accepts; tested only structurally (no touchscreen here).
 * `Bundle -> Audio` is dummy-backed now (members sum into its internal sink, output = the
   monitor), so its downstream is stable across bundle changes.  Its backing name default
   is `bundle_audio_<id>`.
+
+* **Rule of thumb (Kyle's): every node should have at least one sink; if it has none, give
+  it a dummy sink.**  A private internal null sink whose monitor is the node's output.
+  That is what makes the node's socket stable (upstream churn - members, a Filter's
+  Include/Exclude, a player's sound - never moves the wire downstream) and gives it a
+  private place to do its work (mix, drop, sum) without touching anyone else's links.  A
+  *transparent* node has neither, which is why the Filter used to silence an excluded app
+  globally instead of just dropping it from its own chain.  See `FilterNode`,
+  `BundleToAudioNode`, `BundleOutputNode`, `SplitterNode`, `SoundPlayerNode`.

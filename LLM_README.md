@@ -1361,6 +1361,18 @@ supervision pass then recreates whatever vanished with the old PipeWire.
 - **`node_specs.py` is the UI source of truth.** `NodeSpec(label, inputs, outputs,
   control=..., field=..., settings=[...], boolean_inputs/outputs=..., impulse_inputs/
   outputs=..., toggle=..., indicator=..., socket_labels=...)`.
+  - **Every node gets at least one sink of its own; where it has none, it gets a dummy
+    sink.**  A private internal null sink (media class `pwmatch.INTERNAL_MEDIA_CLASS`, so it
+    never shows up as a device in apps) whose *monitor* is the node's output.  That is what
+    gives a node a stable socket: a Filter, `Bundle -> Audio` and `Bundle Output` all sum
+    what they are fed into their own sink and hand on its monitor, so a change upstream -
+    members coming and going, a Filter's Include/Exclude, a player's sound - never moves the
+    wire downstream.  It is also where a node does its work: the place to mix or drop
+    something *without* touching any other node's links.  A node whose output *is* the
+    upstream members (a transparent node) has neither: its downstream is re-pointed whenever
+    the membership changes, and it has nowhere private to drop a member - which is exactly
+    why the Filter used to have to silence an excluded app globally.  Backing names follow
+    `<kind>_<node_id>` (`filter_<id>`, `bundle_audio_<id>`, `splitter_<id>`, ...).
   - **Ports are named after what they carry**: an audio input is `audio`, an impulse
     input `impulse`, a sound input `sound`, a bundle input `bundle`; auxiliary inputs keep
     their role names (`ctrl` on gate/switcher, `filter1` on a Filter, `in1` on Merge
