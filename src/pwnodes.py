@@ -71,6 +71,7 @@ Node taxonomy
 
 from __future__ import annotations
 
+import array
 import logging
 import os
 import re
@@ -1713,6 +1714,13 @@ class SplitterNode(_SingleSinkNode):
 #: path -> seconds; see probe_duration.  A file doesn't change length.
 _DURATION_CACHE: Dict[str, float] = {}
 
+#: How many (min, max) pairs a waveform is reduced to.  Enough for a wide
+#: timeline to look like a waveform, small enough to hand to the GUI whole.
+PEAK_BUCKETS = 600
+
+#: path -> peaks; see probe_peaks.  A file's shape doesn't change either.
+_PEAKS_CACHE: Dict[str, List[Tuple[float, float]]] = {}
+
 
 def probe_duration(path: str) -> float:
     """How long an audio file is, in seconds, or 0.0 when it can't be read.
@@ -1738,6 +1746,64 @@ def probe_duration(path: str) -> float:
         logger.debug("ffprobe couldn't read %r: %s", resolved, exc)
     _DURATION_CACHE[resolved] = duration
     return duration
+
+
+def probe_peaks(path: str) -> List[Tuple[float, float]]:
+    """A file's waveform as up to ``PEAK_BUCKETS`` (min, max) pairs in -1..1.
+
+    Decoded once per path with ffmpeg to raw mono PCM (a low rate is plenty -
+    this is the *shape* for the Clip timeline, not the audio), then reduced to
+    per-bucket extremes.  Empty when the file can't be read: the GUI draws a
+    flat line rather than reporting an error."""
+    if not path:
+        return []
+    resolved = os.path.expanduser(path.strip())
+    if resolved in _PEAKS_CACHE:
+        return _PEAKS_CACHE[resolved]
+    peaks: List[Tuple[float, float]] = []
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-nostdin", "-v", "error", "-i", resolved,
+             "-ac", "1", "-ar", "4000", "-f", "s16le", "-"],
+            capture_output=True, timeout=30,
+        )
+        if result.returncode == 0 and result.stdout:
+            samples = array.array("h")
+            samples.frombytes(result.stdout[: len(result.stdout) // 2 * 2])
+            if samples:
+                # Ceil, so a long file can't round *up* past the bucket
+                # budget (it did: 800 peaks for a 600 budget).
+                step = max(1, -(-len(samples) // PEAK_BUCKETS))
+                for start in range(0, len(samples), step):
+                    chunk = samples[start:start + step]
+                    peaks.append((
+                        max(-1.0, min(chunk) / 32768.0),
+                        min(1.0, max(chunk) / 32768.0),
+                    ))
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.debug("ffmpeg couldn't read %r for a waveform: %s", resolved, exc)
+    _PEAKS_CACHE[resolved] = peaks
+    return peaks
+
+
+class ClipNode(Node):
+    """A range of a sound: a sound in and a sound out.
+
+    It is a *view* of the sound it is given - the node body IS the timeline
+    (waveform, a draggable selection, the two timestamps) - and what it passes
+    on is the same sound narrowed to ``[start, end]`` seconds.  Because it
+    narrows rather than copies, stacking clips intersects their ranges, and
+    nothing about the audio is touched until a player fires it."""
+
+    def __init__(self, node_id, start: float = 0.0, end: Optional[float] = None):
+        super().__init__(node_id)
+        self.start = max(0.0, float(start or 0.0))
+        self.end = None if end is None else float(end)
+
+    def port_kind(self, port: str, direction: str) -> str:
+        # Both sides carry a sound: in is the file (or a wider clip), out is
+        # the range of it this node selects.
+        return "sound"
 
 
 class SoundNode(Node):
@@ -3516,7 +3582,13 @@ class PatchSpace:
                 raise ValueError(
                     f"cannot connect a {from_kind} output to a {to_kind} input"
                 )
-            if from_kind not in ("boolean", "filter", "impulse", "bundle", "audio"):
+            if (from_kind == "sound") != (to_kind == "sound"):
+                raise ValueError(
+                    f"cannot connect a {from_kind} output to a {to_kind} input"
+                )
+            if from_kind not in (
+                "boolean", "filter", "impulse", "sound", "bundle", "audio"
+            ):
                 raise ValueError(f"unknown port kind {from_kind!r}")
             if to_kind in ("boolean", "impulse"):
                 # A boolean input is usually a single control signal, not a
@@ -3532,6 +3604,12 @@ class PatchSpace:
                             raise ValueError(
                                 f"{to_node}.{to_port} is already driven"
                             )
+            elif to_kind == "sound":
+                # A sound input takes exactly one sound: it is a reference to
+                # a file (plus a range), not something to mix.
+                for existing in self._edges_into.get(to_node, []):
+                    if existing.to_port == to_port and self._edge_is_sound(existing):
+                        raise ValueError(f"{to_node}.{to_port} is already driven")
             elif to_kind == "filter":
                 # A classifier input is a single control slot, separate
                 # from the node's bundle/audio upstream (a Filter node's
@@ -4025,6 +4103,19 @@ class PatchSpace:
             return None
         if isinstance(source, SoundNode):
             return {"path": source.path, "start": 0.0, "end": None}
+        if isinstance(source, ClipNode):
+            # A clip narrows whatever reaches it, in the *incoming* file's own
+            # time base - so clips stacked behind one another intersect.
+            upstream = self.resolve_sound(source.id, "in", seen)
+            if upstream is None:
+                return None
+            base = float(upstream.get("start") or 0.0)
+            ceiling = upstream.get("end")
+            start = base + source.start
+            end = None if source.end is None else base + source.end
+            if ceiling is not None:
+                end = float(ceiling) if end is None else min(end, float(ceiling))
+            return {"path": upstream["path"], "start": start, "end": end}
         # Anything else between a Sound and the player hands it on unchanged.
         return self.resolve_sound(source.id, port, seen)
 
@@ -4844,20 +4935,3 @@ class PatchSpace:
 
     def mark_graph_loaded(self) -> None:
         self._graph_loaded = True
-
-
-class SoundEffectNode(SoundPlayerNode):
-    """The pre-split sound effect: it stored its ``path`` itself and had
-    nothing on a sound input.  Kept so saved sessions and panel files still
-    load - new graphs use a Sound node into a Sound Player - and it behaves
-    exactly as it always did: the impulse plays its own file, whole."""
-
-    def __init__(self, node_id, backing_node_name: str, path: str = "",
-                 overlap: bool = False,
-                 pw_cli_command=("pw-cli",), settle: float = 0.3):
-        super().__init__(node_id, backing_node_name, overlap, pw_cli_command,
-                         settle)
-        self.path = path or ""
-
-    def on_impulse(self, sound: Optional[dict] = None) -> None:
-        super().on_impulse({"path": self.path})

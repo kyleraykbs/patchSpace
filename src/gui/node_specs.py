@@ -522,6 +522,17 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
     # A Sound *Player*: the old sound effect's trigger behaviour, but it plays
     # whatever sound arrives on its sound input (see the Sound and Clip nodes),
     # so what a button fires is now a graph decision rather than a file path.
+    # A Clip: a sound in, a sound out, and the node body IS the timeline -
+    # waveform, a draggable selection, timestamps - so it reserves the tall
+    # "clip" control area instead of a field row.
+    "clip": NodeSpec(
+        "Clip",
+        ["in"],
+        ["out"],
+        sound_inputs=["in"],
+        sound_outputs=["out"],
+        control="clip",
+    ),
     "sound_player": NodeSpec(
         "Sound Player",
         ["in", "sound"],
@@ -532,24 +543,6 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
         # the green dot + play count is the live read-out (_draw_play_indicator).
         toggle=("overlap", "Stack"),
         indicator="playing",
-    ),
-    "sound_effect": NodeSpec(
-        "Sound Effect",
-        ["in"],
-        ["out"],
-        field="path",
-        impulse_inputs=["in"],
-        # The Stack switch is on the node body (above the path box); the
-        # green dot + play count beside the path box is the live read-out
-        # (see patchspace_widget._draw_play_indicator), and the folder
-        # button there opens the desktop file chooser.
-        toggle=("overlap", "Stack"),
-        indicator="playing",
-        picker=True,
-        settings=[
-            ("path", "Sound file:", "text"),
-            ("overlap", "Stack (don't restart)", "bool"),
-        ],
     ),
 }
 
@@ -923,26 +916,20 @@ NODE_DESCRIPTIONS: Dict[str, str] = {
     "sound": "A sound: an audio file of known length, on its own port kind.  "
     "It makes no noise itself - a Sound Player fires it, a Clip node returns "
     "part of it - so it has no inputs, just a sound output.",
+    "clip": "A range of a sound: sound in, sound out.  The node is a "
+    "timeline of the file - waveform, a yellow selection you drag the sides "
+    "of, and the selection's start/end times - and what it passes on is that "
+    "part of the sound.",
     "sound_player": "Plays the sound wired into it whenever an impulse "
     "arrives: a sound input, an impulse input, an audio output.  The Stack "
     "switch picks whether a new impulse restarts it or stacks another take.",
-    "sound_effect": "Plays an audio file whenever an impulse arrives: give "
-    "it a file and wire its audio out wherever the sound should go.",
 }
 
 # Per-Settings-row hover text, keyed by node type then daemon property name.
 # Rows without an entry fall back to their label text (see
 # show_settings_dialog), so every row has a tooltip.
 SETTING_TOOLTIPS: Dict[str, Dict[str, str]] = {
-    "sound_effect": {
-        "path": "Path to the audio file played on each impulse. A leading "
-        "~ means your home directory; the folder button beside the box "
-        "picks a file for you.",
-        "overlap": "On: a new impulse starts the sound again while the "
-        "current one keeps playing, so they stack. Off: it restarts the "
-        "file.",
-    },
-    "echo_cancel": {
+"echo_cancel": {
         "library_name": "The AEC implementation to load. 'aec/libspa-aec-"
         "webrtc' is the WebRTC echo canceller.",
         "aec_args": "Extra options passed to the AEC library, e.g. "
@@ -1077,7 +1064,7 @@ ADD_NODE_CATEGORIES = [
             ("Button", "button"),
             ("Sound", "sound"),
             ("Sound Player", "sound_player"),
-            ("Sound Effect", "sound_effect"),
+            ("Clip", "clip"),
         ],
     ),
     (
@@ -1228,8 +1215,8 @@ NODE_TYPE_ICONS: Dict[str, str] = {
     "bundle_output": "audio-card-symbolic",
     "button": "media-playback-start-symbolic",
     "sound": "audio-x-generic-symbolic",
+    "clip": "edit-select-all-symbolic",
     "sound_player": "media-playback-start-symbolic",
-    "sound_effect": "audio-x-generic-symbolic",
 }
 
 _DEFAULT_ADD_NODE_ICON = "list-add-symbolic"
@@ -1307,6 +1294,7 @@ CLASS_NAME_TO_TYPE = {
     "ButtonNode": "button",
     "SoundNode": "sound",
     "SoundPlayerNode": "sound_player",
+    "ClipNode": "clip",
     "SoundEffectNode": "sound_effect",
 }
 

@@ -55,9 +55,13 @@ def test_main_strict_check_rejects_a_config_that_needs_repairs(tmp_path):
     valid = _config(
         nodes={
             "kick": {"type": "button", "params": {}},
-            "boom": {"type": "sound_effect", "params": {}},
+            "boom": {"type": "sound_player", "params": {}},
+            "clang": {"type": "sound", "params": {"path": "/sounds/clang.wav"}},
         },
-        edges=[{"from": "kick", "to": "boom"}],
+        edges=[
+            {"from": "kick", "to": "boom"},
+            {"from": "clang", "to": "boom", "to_port": "sound"},
+        ],
     )
     path.write_text(json.dumps(valid))
     assert session_repair.main([str(path), "--check", "--strict"]) == 0

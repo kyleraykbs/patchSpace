@@ -103,7 +103,7 @@ from pwnodes import (
     BundleSplitNode,
     BundleOutputNode,
     SplitterNode,
-    SoundEffectNode,
+    ClipNode,
     SoundNode,
     SoundPlayerNode,
     ButtonNode,
@@ -350,8 +350,8 @@ NODE_TYPE_REGISTRY: Dict[str, type] = {
     "bundle_output": BundleOutputNode,
     "splitter": SplitterNode,
     "button": ButtonNode,
-    "sound_effect": SoundEffectNode,
     "sound": SoundNode,
+    "clip": ClipNode,
     "sound_player": SoundPlayerNode,
     "gate": GateNode,
     "switcher": SwitcherNode,
@@ -441,6 +441,8 @@ _SERIAL_ATTRS = (
     "device_name",
     "app_name",
     "app_key",
+    "start",
+    "end",
     "device_label",
     "device_volume",
     "profile_index",
@@ -3790,15 +3792,10 @@ class PatchSpaceDaemon:
             return cls(node_id)
         if cls is SoundPlayerNode:
             return cls(node_id, backing, g("overlap", False))
+        if cls is ClipNode:
+            return cls(node_id, g("start", 0.0), g("end"))
         if cls is SoundNode:
             return cls(node_id, g("path", ""))
-        if cls is SoundEffectNode:
-            return cls(
-                node_id,
-                backing,
-                g("path", ""),
-                g("overlap", False),
-            )
         if cls is GateNode:
             return cls(node_id, g("enabled", True))
         if cls in (SwitcherNode, InverseSwitcherNode):
@@ -4314,10 +4311,10 @@ class PatchSpaceDaemon:
                         "status": "error",
                         "message": f"Node has no {prop!r} property",
                     }
-            elif prop == "overlap" and isinstance(node, SoundEffectNode):
+            elif prop == "overlap" and isinstance(node, SoundPlayerNode):
                 # Retrigger behaviour (the node's Stack switch): off
                 # (default) restarts the sound, on lets impulses stack
-                # (see SoundEffectNode).
+                # (see SoundPlayerNode).
                 node.overlap = bool(value)
             elif prop == "invert" and isinstance(node, ClassifierNode):
                 node.invert = bool(value)
@@ -4842,6 +4839,29 @@ class PatchSpaceDaemon:
                 titles.add(title)
         return {"status": "ok", "titles": sorted(titles, key=str.lower)}
 
+    def _cmd_get_peaks(self, cmd: dict) -> dict:
+        """The waveform (and length) of the sound reaching a Clip node.
+
+        The GUI draws the timeline from this, so it is asked for when the clip's
+        source changes rather than shipped in every poll.  An unwired clip, or
+        a file that can't be read, answers with empty peaks - the timeline then
+        draws a flat line."""
+        node_id = cmd.get("node_id")
+        with self._lock:
+            node = self.space.nodes.get(node_id)
+            if not isinstance(node, ClipNode):
+                return {"status": "ok", "node_id": node_id, "path": "",
+                        "duration": 0.0, "peaks": []}
+            sound = self.space.resolve_sound(node_id, "in")
+        path = str((sound or {}).get("path") or "")
+        return {
+            "status": "ok",
+            "node_id": node_id,
+            "path": path,
+            "duration": pwnodes.probe_duration(path),
+            "peaks": pwnodes.probe_peaks(path),
+        }
+
     def _cmd_get_apps(self, cmd: dict) -> dict:
         """The applications behind the live audio streams, as the desktop names
         them (``pwmatch.app_key``), for the Application classifier's picker.
@@ -5095,15 +5115,19 @@ class PatchSpaceDaemon:
                 data["health"] = self._node_health(node)
             if isinstance(node, SoundPlayerNode):
                 data["playing"] = node.playing
+            if isinstance(node, ClipNode):
+                # What the clip is showing: the GUI re-asks for the waveform
+                # (get_peaks) whenever this changes.
+                sound = self.space.resolve_sound(node_id, "in") or {}
+                data["source_path"] = str(sound.get("path") or "")
+                # A clip's own times are seconds into *what it is given*, so
+                # the timeline needs that sound's start to place them on the
+                # file's waveform.  Zero unless clips are stacked.
+                data["source_start"] = float(sound.get("start") or 0.0)
             if isinstance(node, SoundNode):
                 # The file's length, so the node can show it and the Clip
                 # timeline knows how much sound there is to select from.
                 data["duration"] = node.duration
-            if isinstance(node, SoundEffectNode):
-                # How many playback streams are live right now, so the
-                # GUI can light the node's play indicator (see
-                # SoundEffectNode.playing).
-                data["playing"] = node.playing
             if isinstance(node, FilterNode):
                 # One dynamic filter socket per wired classifier plus a
                 # spare, so a single Filter can hold many classifiers.
@@ -5241,6 +5265,8 @@ class PatchSpaceDaemon:
                 response = self._cmd_get_nodes(cmd)
             elif command == "get_graph":
                 response = self._cmd_get_graph(cmd)
+            elif command == "get_peaks":
+                response = self._cmd_get_peaks(cmd)
             elif command == "get_apps":
                 response = self._cmd_get_apps(cmd)
             elif command == "get_titles":

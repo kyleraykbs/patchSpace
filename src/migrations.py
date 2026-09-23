@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 # Bump when a migration is added.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 @dataclass
@@ -178,11 +178,59 @@ def _migrate_legacy_filter_leaves(config: dict) -> List[str]:
     return fixes
 
 
+def _migrate_sound_effect_split(config: dict) -> List[str]:
+    """Split the old Sound Effect into the pair that replaced it.
+
+    It used to hold its own file *and* be fired directly.  Now the file is a
+    Sound node and the trigger is a Sound Player, so the legacy node becomes
+    the player - keeping its id, position, Stack switch, impulse input and
+    audio output, i.e. every edge it had - and a Sound node beside it carries
+    the path into the player's new sound input.
+    """
+    fixes: List[str] = []
+    nodes: Dict[str, dict] = config.get("nodes", {}) or {}
+    edges: List[dict] = config.get("edges", []) or []
+    legacy = [nid for nid, node in nodes.items()
+              if node.get("type") == "sound_effect"]
+    if not legacy:
+        return fixes
+    taken = set(nodes)
+
+    for nid in legacy:
+        params = dict(nodes[nid].get("params") or {})
+        prefix, local = _split_id(nid)
+        sound_id = _unique(f"{prefix}sound__{local}", taken)
+        taken.add(sound_id)
+        sound_params: Dict[str, object] = {"path": params.pop("path", "")}
+        # Put the Sound node in clear space beside the player, so the new wire
+        # is visible rather than hidden under an existing node.
+        if params.get("x") is not None:
+            sound_params["x"] = float(params["x"]) - 240.0
+        if params.get("y") is not None:
+            sound_params["y"] = float(params["y"]) + 40.0
+        nodes[sound_id] = {"type": "sound", "params": sound_params}
+        nodes[nid] = {"type": "sound_player", "params": params}
+        edges.append({"from": sound_id, "to": nid, "to_port": "sound"})
+        fixes.append(
+            f"migration: sound_effect {nid!r} -> sound {sound_id!r} + "
+            f"sound_player"
+        )
+
+    config["nodes"] = nodes
+    config["edges"] = edges
+    return fixes
+
+
 MIGRATIONS: List[Migration] = [
     Migration(
         version=1,
         description="legacy regex/media class/description leaves -> bundles",
         apply=_migrate_legacy_filter_leaves,
+    ),
+    Migration(
+        version=2,
+        description="sound effect -> sound node + sound player",
+        apply=_migrate_sound_effect_split,
     ),
 ]
 

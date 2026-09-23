@@ -42,7 +42,7 @@ let
     "bool_panel_in" "bool_panel_out" "bool_warp_in" "bool_warp_out"
     "boolean_and" "boolean_invert" "boolean_or" "boolean_splitter"
     "boolean_switch" "boolean_xor" "bundle" "bundle_output" "bundle_split"
-    "bundle_to_audio" "button" "description_classifier" "description_input"
+    "bundle_to_audio" "button" "clip" "description_classifier" "description_input"
     "description_output" "device_input" "device_output" "echo_cancel"
     "exclude_filter" "external_only_classifier" "filter" "gate"
     "inverse_switcher" "light_noise_cancel" "media_class_classifier"

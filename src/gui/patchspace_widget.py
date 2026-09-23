@@ -376,6 +376,16 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self.drag_start_xy = (0, 0)
         self.drag_current_xy = (0, 0)
         self.hover_target_node = None
+        # Clip timelines: the window into the file each Clip node is showing
+        # (start, span in seconds - a *view*, kept locally rather than in the
+        # graph) and the waveform the daemon sent for the sound reaching it
+        # (path, duration, peaks).
+        self._clip_views: Dict[str, tuple] = {}
+        self._clip_waves: Dict[str, dict] = {}
+        self._clip_wave_pending: set = set()
+        #: ("start"|"end"|"pan", node_id) while a Clip selection is dragged.
+        self.clip_dragging = None
+        self._clip_drag_origin = (0.0, 0.0)
         # The Button node whose face the pointer is over (see on_motion and
         # _draw_impulse_button): its face lifts a step to read as pressable.
         self.hover_impulse = None
@@ -649,6 +659,16 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         motion.connect("motion", self.on_motion)
         motion.connect("leave", self.on_leave)
         self.add_controller(motion)
+
+        # Wheel over a Clip timeline zooms that timeline; the capture phase
+        # means it sees the event first and can claim it, while everywhere else
+        # scrolling is left to whatever handles the canvas.
+        clip_scroll = Gtk.EventControllerScroll.new(
+            Gtk.EventControllerScrollFlags.BOTH_AXES
+        )
+        clip_scroll.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        clip_scroll.connect("scroll", self.on_clip_scroll)
+        self.add_controller(clip_scroll)
 
         click = Gtk.GestureClick(button=1)
         click.connect("pressed", self.on_click)
@@ -1442,6 +1462,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     # The Filter node's Include/Exclude switch (absent on
                     # every other type).
                     "exclude": ndata.get("exclude", False),
+                    # A Clip's own range (its times are seconds into what it is
+                    # given), the base of that sound, and the file's length -
+                    # everything the timeline scales and draws against.
+                    "start": ndata.get("start", 0.0),
+                    "end": ndata.get("end"),
+                    "duration": ndata.get("duration", 0.0),
+                    "source_start": ndata.get("source_start", 0.0),
+                    "source_path": ndata.get("source_path", ""),
                     "connected": ndata.get("connected", False),
                     "is_bluetooth": ndata.get("is_bluetooth", False),
                     "selection_label": ndata.get("selection_label", ""),
@@ -1527,6 +1555,26 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                         node["overlap"] = bool(overlap)
                 # Filter: its Include/Exclude switch, same echo guard as the
                 # other boolean body controls (only Filter nodes send it).
+                if ndata.get("type") == "clip":
+                    # The poll's copy of the selection, unless it is being
+                    # dragged right now (the same rule the volume slider uses).
+                    if self.clip_dragging is None or self.clip_dragging[1] != nid:
+                        node["start"] = ndata.get("start", node.get("start", 0.0))
+                        node["end"] = ndata.get("end", node.get("end"))
+                        node["duration"] = ndata.get("duration", 0.0)
+                        node["source_start"] = ndata.get("source_start", 0.0)
+                    # The timeline needs the waveform of whatever reaches this
+                    # clip: ask when the source changes (not every poll - it is
+                    # a few hundred peaks).
+                    source = str(ndata.get("source_path") or "")
+                    known = (self._clip_waves.get(nid) or {}).get("path")
+                    if (source and source != known
+                            and nid not in self._clip_wave_pending):
+                        self._clip_wave_pending.add(nid)
+                        self.client.send({"command": "get_peaks", "node_id": nid})
+                    elif not source:
+                        self._clip_waves.pop(nid, None)
+                        self._clip_views.pop(nid, None)
                 if "exclude" in ndata:
                     exclude = self._accept_bool_echo(
                         nid, "exclude", ndata.get("exclude", False)
@@ -2194,6 +2242,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             # nothing is wired into the ctrl input, and a read-only white
             # state indicator once a boolean signal drives the node.
             return self.GATE_AREA_HEIGHT
+        if spec.control == "clip":
+            # The Clip's timeline owns the bottom of the node and is taller
+            # than the button faces.
+            return self.CLIP_AREA_HEIGHT
         if spec.control in ("gate", "switcher", "boolean", "impulse",
                             "filter_mode"):
             # The impulse Button's face and the Filter node's Include/Exclude
@@ -2211,6 +2263,17 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 + (extra if spec.toggle else 0)
             )
         return 0
+
+    @staticmethod
+    def _readout_above_switch(node) -> bool:
+        """Whether a node draws its live read-out *above* its switch.
+
+        A node whose bottom block is only those two rows - the Sound Player -
+        puts the read-out on top and the switch under it: with the switch up
+        there it sat right under the socket labels and read as crowding
+        them."""
+        spec = spec_for(node["type"])
+        return bool(spec.toggle and spec.indicator and not spec.field)
 
     def _toggle_switch_rect(self, nid):
         """Geometry of a `toggle` row's inline on/off switch - single
@@ -2230,6 +2293,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             node["y"] + self.node_height(nid)
             - (self._bottom_control_height(node) + 2)
         )
+        if self._readout_above_switch(node):
+            # The read-out has the upper row; the switch takes the field row
+            # at the bottom (see _play_indicator_rect).
+            y = (
+                node["y"] + self.node_height(nid)
+                - self.FIELD_HEIGHT - self.FIELD_BOTTOM_PAD
+                + (self.FIELD_HEIGHT - self.TOGGLE_SWITCH_HEIGHT) / 2.0
+            )
         return (x, y, self.TOGGLE_SWITCH_WIDTH, self.TOGGLE_SWITCH_HEIGHT)
 
     def _header_stack_height(self, node_id, node):
@@ -2497,8 +2568,58 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         fx, fy, _fw, fh = self._field_rect(nid)
         dot_r = 5.0
         dot_x = node["x"] + self.NODE_WIDTH - self.FIELD_MARGIN - dot_r
-        dot_y = fy + fh / 2.0
+        if self._readout_above_switch(node):
+            _tx, ty, _tw, th = self._toggle_switch_rect(nid)
+            dot_y = ty + th / 2.0
+        else:
+            dot_y = fy + fh / 2.0
         return (dot_x, dot_y, dot_r, dot_x - dot_r - 5.0)
+
+    def _clip_rect(self, nid):
+        """Geometry of a Clip node's timeline strip: the widest rectangle that
+        fits in the node body above its bottom block."""
+        node = self.nodes[nid]
+        x = node["x"] + self.CLIP_MARGIN
+        w = self.NODE_WIDTH - 2 * self.CLIP_MARGIN
+        y = node["y"] + self.node_height(nid) - self.CLIP_HEIGHT - 10
+        return (x, y, w, self.CLIP_HEIGHT)
+
+    def _clip_span(self, nid):
+        """(view_start, view_span) for a Clip's timeline, defaulting to the
+        whole file and clamped to it."""
+        node = self.nodes.get(nid) or {}
+        total = float(node.get("duration", 0.0) or 0.0) or 1.0
+        start, span = self._clip_views.get(nid, (0.0, total))
+        span = max(self.CLIP_MIN_SPAN, min(total, span))
+        start = max(0.0, min(total - span, start))
+        return start, span
+
+    def _clip_time_at(self, nid, x):
+        """The time (seconds into the file) at a world x inside a timeline."""
+        rx, _ry, rw, _rh = self._clip_rect(nid)
+        if rw <= 0:
+            return 0.0
+        start, span = self._clip_span(nid)
+        return start + (x - rx) / rw * span
+
+    def _clip_x_at(self, nid, seconds):
+        """Where a time lands inside a timeline, in world units."""
+        rx, _ry, rw, _rh = self._clip_rect(nid)
+        start, span = self._clip_span(nid)
+        return rx + (seconds - start) / span * rw
+
+    def _clip_selection(self, nid):
+        """(start, end) of the selection *in the file*, which is what the
+        timeline draws against: the node's own range, shifted by where the
+        sound reaching it begins (0 unless clips are stacked), with an unset
+        end meaning "to the end of the file"."""
+        node = self.nodes.get(nid) or {}
+        total = float(node.get("duration", 0.0) or 0.0) or 1.0
+        base = float(node.get("source_start", 0.0) or 0.0)
+        start = base + max(0.0, float(node.get("start", 0.0) or 0.0))
+        end = node.get("end")
+        end = total if end is None else max(start, base + float(end))
+        return min(start, total), min(end, total)
 
     def _gate_rect(self, nid):
         """Geometry of the big gate toggle - single source of truth
@@ -4131,6 +4252,49 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 return nid
         return None
 
+    def find_clip_handle_at(self, x, y):
+        """(node_id, "start"|"end") for a selection side under the pointer."""
+        for nid, node in self._hit_nodes(x, y, require_ready=False):
+            if spec_for(node["type"]).control != "clip":
+                continue
+            rx, ry, rw, rh = self._clip_rect(nid)
+            if not (rx <= x <= rx + rw and ry <= y <= ry + rh):
+                continue
+            sel_start, sel_end = self._clip_selection(nid)
+            for part, seconds in (("start", sel_start), ("end", sel_end)):
+                if abs(x - self._clip_x_at(nid, seconds)) <= self.CLIP_HANDLE_W:
+                    return (nid, part)
+            return None
+        return None
+
+    def find_clip_body_at(self, x, y):
+        """The Clip node whose timeline is under the pointer: dragging there
+        pans the view, the wheel zooms it."""
+        for nid, node in self._hit_nodes(x, y, require_ready=False):
+            if spec_for(node["type"]).control != "clip":
+                continue
+            rx, ry, rw, rh = self._clip_rect(nid)
+            if rx <= x <= rx + rw and ry <= y <= ry + rh:
+                return nid
+        return None
+
+    def zoom_clip_at(self, x, y, factor):
+        """Zoom a timeline about the pointer.  False when no timeline is under
+        it, so the caller can zoom the canvas instead."""
+        nid = self.find_clip_body_at(x, y)
+        if nid is None:
+            return False
+        node = self.nodes.get(nid) or {}
+        total = float(node.get("duration", 0.0) or 0.0) or 1.0
+        anchor = self._clip_time_at(nid, x)
+        _start, span = self._clip_span(nid)
+        span = max(self.CLIP_MIN_SPAN, min(total, span * factor))
+        rx, _ry, rw, _rh = self._clip_rect(nid)
+        # Keep the time under the pointer where it is.
+        self._clip_views[nid] = (anchor - (x - rx) / rw * span, span)
+        self.queue_draw()
+        return True
+
     def find_filter_mode_at(self, x, y):
         """The Filter node's Include/Exclude button - same geometry as the
         gate toggle (see _gate_rect)."""
@@ -5013,6 +5177,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             )
         elif spec.control == "impulse":
             self._draw_impulse_button(cr, nid, node)
+        elif spec.control == "clip":
+            self._draw_clip_timeline(cr, pal, nid, node)
         elif spec.control == "filter_mode":
             self._draw_filter_mode_button(cr, pal, nid, node.get("exclude", False))
         elif spec.field:
@@ -5306,6 +5472,16 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         scale = size / px
         drawn_h = pixbuf.get_height() * scale
         return (x, y + (size - drawn_h) / 2.0, scale)
+
+    # The Clip node's timeline: a strip tall enough for a waveform, a
+    # yellow selection and its two timestamps.
+    CLIP_HEIGHT = 104
+    CLIP_AREA_HEIGHT = CLIP_HEIGHT + 14
+    CLIP_MARGIN = 10
+    #: Draggable side band of the selection, in world units.
+    CLIP_HANDLE_W = 9.0
+    #: Never zoom in past this many seconds of file on screen.
+    CLIP_MIN_SPAN = 0.02
 
     #: Symbolic icons are rasterised at this many pixels regardless of the
     #: size they are drawn at.  GTK returns a *different* pixbuf size for
@@ -5632,6 +5808,101 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         cr.set_source_rgb(*text_color)
         cr.move_to(text_x, text_y)
         cr.show_text(label)
+
+    @staticmethod
+    def _clip_stamp(seconds: float) -> str:
+        """A timestamp for the selection's corners: m:ss.t (or h:mm:ss.t)."""
+        seconds = max(0.0, seconds)
+        minutes, rest = divmod(seconds, 60.0)
+        hours, minutes = divmod(int(minutes), 60)
+        head = f"{hours}:{minutes:02d}" if hours else f"{minutes}"
+        return f"{head}:{rest:04.1f}"
+
+    @staticmethod
+    def _mix(a, b, amount):
+        """Blend two palette colors (amount 0 = a, 1 = b)."""
+        return tuple(x + (y - x) * amount for x, y in zip(a, b))
+
+    def _draw_clip_timeline(self, cr, pal, nid, node):
+        """A Clip node's body: the waveform of the sound reaching it, the
+        selection over it (yellow, sides draggable, start/end stamped at its
+        bottom corners), all inside the window this node is showing."""
+        x, y, w, h = self._clip_rect(nid)
+        draw_rounded_rect(cr, x, y, w, h, 5)
+        cr.set_source_rgb(*pal["field_bg"])
+        cr.fill_preserve()
+        cr.set_source_rgb(*pal["node_border"])
+        cr.set_line_width(1)
+        cr.stroke()
+
+        start, span = self._clip_span(nid)
+        wave = self._clip_waves.get(nid) or {}
+        peaks = wave.get("peaks") or []
+        total = (float(wave.get("duration", 0.0) or 0.0)
+                 or float(node.get("duration", 0.0) or 0.0) or 1.0)
+        mid = y + h / 2.0
+
+        # The waveform goes on *over* the selection wash: a tint the sound
+        # can't be read through is worse than no selection at all.
+        sel_start, sel_end = self._clip_selection(nid)
+        sx0 = max(x, self._clip_x_at(nid, sel_start))
+        sx1 = min(x + w, self._clip_x_at(nid, sel_end))
+        cr.save()
+        cr.rectangle(x, y, w, h)
+        cr.clip()
+        if sx1 > sx0:
+            cr.set_source_rgba(0.95, 0.82, 0.25, 0.14)
+            cr.rectangle(sx0, y + 1, sx1 - sx0, h - 2)
+            cr.fill()
+        cr.set_line_width(1.0)
+        cr.set_source_rgb(*self._mix(pal["sound_port"], pal["text"], 0.25))
+        if peaks:
+            buckets = len(peaks)
+            for column in range(int(w)):
+                t0 = start + column / w * span
+                t1 = start + (column + 1) / w * span
+                i0 = int(t0 / total * buckets)
+                i1 = max(i0 + 1, int(t1 / total * buckets))
+                chunk = peaks[max(0, i0):min(buckets, i1)]
+                if not chunk:
+                    continue
+                low = min(peak[0] for peak in chunk)
+                high = max(peak[1] for peak in chunk)
+                cx = x + column + 0.5
+                cr.move_to(cx, mid - high * (h / 2.0 - 4))
+                cr.line_to(cx, mid - low * (h / 2.0 - 4))
+        else:
+            # Nothing to draw yet (no sound wired, or a file that can't be
+            # read): a flat line says "there is a timeline here".
+            cr.move_to(x, mid)
+            cr.line_to(x + w, mid)
+        cr.stroke()
+
+        for sx in (sx0, sx1):
+            if sx < x or sx > x + w:
+                continue
+            cr.set_source_rgb(0.95, 0.82, 0.25)
+            cr.set_line_width(max(1.0, self.CLIP_HANDLE_W / 3.0))
+            cr.move_to(sx, y + 1)
+            cr.line_to(sx, y + h - 1)
+            cr.stroke()
+        cr.restore()
+
+        # Timestamps at the selection's bottom corners, kept inside the strip
+        # when an edge is scrolled off it.
+        cr.select_font_face("sans")
+        cr.set_font_size(9)
+        cr.set_source_rgb(0.95, 0.82, 0.25)
+        left = self._clip_stamp(sel_start)
+        right = self._clip_stamp(sel_end)
+        cr.move_to(max(x + 4, min(x + w - 44, sx0 + 4)), y + h - 4)
+        cr.show_text(left)
+        extents = cr.text_extents(right)
+        cr.move_to(
+            max(x + 4, min(x + w - extents.width - 4, sx1 - extents.width - 4)),
+            y + h - 4,
+        )
+        cr.show_text(right)
 
     def _draw_filter_mode_button(self, cr, pal, nid, exclude):
         """The Filter node's Include/Exclude switch - the gate toggle's big
@@ -6014,6 +6285,16 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     # ---------- pointer / click handling ----------
 
+    def on_clip_scroll(self, controller, dx, dy):
+        """Wheel over a Clip timeline: zoom it about the pointer.  Returns
+        True (claimed) only there, so nowhere else changes behavior."""
+        px, py = getattr(self, "_last_pointer", (None, None))
+        if px is None or not dy:
+            return False
+        wx, wy = self.to_world(px, py)
+        factor = 0.85 if dy > 0 else 1.0 / 0.85
+        return self.zoom_clip_at(wx, wy, factor)
+
     def on_motion(self, controller, x, y):
         self.track_pointer(x, y)
         wx, wy = self.to_world(x, y)
@@ -6042,7 +6323,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             # cursor doesn't flicker.
             return
 
-        if (
+        if self.find_clip_handle_at(wx, wy) is not None:
+            self.set_cursor(Gdk.Cursor.new_from_name("ew-resize", None))
+        elif self.find_clip_body_at(wx, wy) is not None:
+            self.set_cursor(Gdk.Cursor.new_from_name("grab", None))
+        elif (
             self.find_slider_at(wx, wy) is not None
             or self.find_wetdry_slider_at(wx, wy) is not None
             or self.find_sensitivity_slider_at(wx, wy) is not None
@@ -6499,6 +6784,20 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             popover, screen_x, screen_y, focus_widget=entry or None
         )
         return popover
+
+    def on_peaks(self, resp):
+        """A Clip's waveform arrived: remember it (and the file's length, which
+        is what the timeline scales against) and repaint."""
+        nid = resp.get("node_id")
+        self._clip_wave_pending.discard(nid)
+        if not nid:
+            return
+        self._clip_waves[nid] = {
+            "path": resp.get("path") or "",
+            "duration": float(resp.get("duration") or 0.0),
+            "peaks": resp.get("peaks") or [],
+        }
+        self.queue_draw()
 
     def on_apps(self, apps):
         """The live applications arrived: open the Application classifier's
@@ -7187,6 +7486,37 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     # ---------- drag handling ----------
 
+    def _drag_clip(self, wx, _wy):
+        """Move one side of a Clip's selection, or pan its view.
+
+        The two times are sent as they change: they only say what the node
+        produces, and a player reads them when it fires (nothing re-wires)."""
+        part, nid = self.clip_dragging
+        node = self.nodes.get(nid)
+        if node is None:
+            return
+        if part == "pan":
+            origin_x, origin_start = self._clip_drag_origin
+            _rx, _ry, rw, _rh = self._clip_rect(nid)
+            _start, span = self._clip_span(nid)
+            total = float(node.get("duration", 0.0) or 0.0) or 1.0
+            shift = -(wx - origin_x) / rw * span
+            self._clip_views[nid] = (
+                max(0.0, min(total - span, origin_start + shift)), span
+            )
+            self.queue_draw()
+            return
+        base = float(node.get("source_start", 0.0) or 0.0)
+        seconds = max(0.0, self._clip_time_at(nid, wx) - base)
+        sel_start, sel_end = self._clip_selection(nid)
+        if part == "start":
+            seconds = min(seconds, sel_end - base)
+        else:
+            seconds = max(seconds, sel_start - base)
+        node[part] = seconds
+        self._send_property(nid, part, seconds)
+        self.queue_draw()
+
     def _reset_drag_state(self):
         """Forget any in-progress drag/connection.  Called at the start
         of every new press and whenever the drag gesture is cancelled,
@@ -7196,6 +7526,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         "panning" mode with no way to click out of it."""
         self.connecting_from = None
         self.detaching_edge = None
+        self.clip_dragging = None
         self.dragging_node = None
         self.dragging_panel = None
         self.dragging_port = None
@@ -7289,6 +7620,22 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self.queue_draw()
             logger.debug("Started dragging slider for node %s", slider_hit)
             self.pinned_nodes.add(slider_hit)
+            return
+
+        clip_handle = self.find_clip_handle_at(wx, wy)
+        if clip_handle is not None:
+            part, nid = clip_handle
+            self.clip_dragging = (part, nid)
+            self.pinned_nodes.add(nid)
+            self.queue_draw()
+            return
+
+        clip_body = self.find_clip_body_at(wx, wy)
+        if clip_body is not None:
+            self.clip_dragging = ("pan", clip_body)
+            self.pinned_nodes.add(clip_body)
+            self._clip_drag_origin = (wx, self._clip_span(clip_body)[0])
+            self.queue_draw()
             return
 
         device_slider_hit = self.find_device_volume_slider_at(wx, wy)
@@ -7472,6 +7819,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._set_selection(())
 
     def on_drag_update(self, gesture, offset_x, offset_y):
+        if self.clip_dragging is not None:
+            self._drag_clip(*self.to_world(
+                self._clip_drag_origin[0] + offset_x,
+                0.0,
+            )[0:1], self.to_world(0.0, 0.0)[1])
+            return
         if self.dragging_port is not None:
             node = self.nodes.get(self.dragging_port)
             if node is not None:
@@ -7645,10 +7998,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     def _ports_compatible(self, from_nid, from_port, to_nid, to_port):
         """Whether an edge from (from_nid, from_port) to (to_nid,
-        to_port) is legal.  Mirrors the daemon's add_edge check: boolean
-        pairs only with boolean, impulse only with impulse and filter only
-        with filter, while audio and bundle ports may pair either way (a
-        bundle is a set of audio streams; one stream is a bundle of one)."""
+        to_port) is legal.  Mirrors the daemon's add_edge check: boolean,
+        impulse, filter and sound pairs only with their own kind, while audio
+        and bundle ports may pair either way (a bundle is a set of audio
+        streams; one stream is a bundle of one)."""
         src = self.nodes.get(from_nid)
         dst = self.nodes.get(to_nid)
         if src is None or dst is None:
@@ -7660,6 +8013,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         if (from_kind == "impulse") != (to_kind == "impulse"):
             return False
         if (from_kind == "filter") != (to_kind == "filter"):
+            return False
+        if (from_kind == "sound") != (to_kind == "sound"):
             return False
         return True
 

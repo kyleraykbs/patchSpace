@@ -73,16 +73,19 @@ def _ok(d, **cmd):
 
 
 def _daemon_with_pair(path="/sounds/clang.wav"):
-    """A Button wired to a Sound Effect, with `path` set."""
+    """A Button wired to a Sound Player, and a Sound wired into it."""
     d = PatchSpaceDaemon()
     _ok(d, command="add_node", node_type="button", node_id="btn")
     _ok(
         d,
         command="add_node",
-        node_type="sound_effect",
-        node_id="fx",
+        node_type="sound",
+        node_id="snd",
         config={"path": path},
     )
+    _ok(d, command="add_node", node_type="sound_player", node_id="fx")
+    _ok(d, command="add_edge", from_node="snd", to_node="fx",
+        from_port="out", to_port="sound")
     _ok(
         d,
         command="add_edge",
@@ -96,7 +99,7 @@ def _daemon_with_pair(path="/sounds/clang.wav"):
 
 def test_impulse_pairs_only_with_impulse():
     d = PatchSpaceDaemon()
-    for node_id, node_type in (("btn", "button"), ("fx", "sound_effect"),
+    for node_id, node_type in (("btn", "button"), ("fx", "sound_player"),
                                ("vol", "volume")):
         _ok(d, command="add_node", node_type=node_type, node_id=node_id)
     # An impulse output only accepts an impulse input...
@@ -247,36 +250,32 @@ def test_a_tilde_path_is_expanded_at_play_time():
         os.path.expanduser("~"), "sounds", "clang.wav"
     )
     # The stored value is untouched, and only a *leading* ~ expands.
-    assert fx.path == "~/sounds/clang.wav"
-    _ok(d, command="set_node_property", node_id="fx", property="path",
+    assert d.space.nodes["snd"].path == "~/sounds/clang.wav"
+    _ok(d, command="set_node_property", node_id="snd", property="path",
         value="/tmp/a~b.wav")
     _ok(d, command="impulse", node_id="btn")
     assert FakeProc.commands[1][-1] == "/tmp/a~b.wav"
 
 
-def test_sound_effect_config_round_trips():
+def test_sound_pair_config_round_trips():
     d, fx = _daemon_with_pair(path="/a/b.wav")
     _ok(d, command="set_node_property", node_id="fx", property="overlap", value=True)
     exported = d._build_export_config()
-    params = exported["nodes"]["fx"]["params"]
-    assert params["path"] == "/a/b.wav"
-    assert params["overlap"] is True
+    assert exported["nodes"]["snd"]["params"]["path"] == "/a/b.wav"
+    assert exported["nodes"]["fx"]["params"]["overlap"] is True
 
-    # Replaying that config onto a fresh daemon reproduces the node.
+    # Replaying that config onto a fresh daemon reproduces both nodes.
     d2 = PatchSpaceDaemon()
-    _ok(
-        d2,
-        command="add_node",
-        node_type="sound_effect",
-        node_id="fx",
-        config=params,
-    )
-    assert d2.space.nodes["fx"].path == "/a/b.wav"
+    _ok(d2, command="add_node", node_type="sound", node_id="snd",
+        config={"path": "/a/b.wav"})
+    _ok(d2, command="add_node", node_type="sound_player", node_id="fx",
+        config={"overlap": True})
+    assert d2.space.nodes["snd"].path == "/a/b.wav"
     assert d2.space.nodes["fx"].overlap is True
 
 
 def test_a_loaded_session_brings_an_impulse_chain_back(monkeypatch):
-    """The impulse wire and the sound effect's settings must survive a
+    """The impulse wire and the sound pair's settings must survive a
     session save/load - the load path is a different code path from
     add_node (it stages nodes and replays their params)."""
     d = PatchSpaceDaemon()
@@ -288,6 +287,8 @@ def test_a_loaded_session_brings_an_impulse_chain_back(monkeypatch):
             "nodes": {
                 "kick": {"type": "button", "params": {"label": "Kick"}},
                 "boom": {
+                    # The pre-split type: the migration has to turn this into
+                    # a Sound node + a Sound Player (see migrations.py).
                     "type": "sound_effect",
                     "params": {"path": "/sounds/boom.wav", "overlap": True},
                 },
@@ -299,28 +300,32 @@ def test_a_loaded_session_brings_an_impulse_chain_back(monkeypatch):
         },
         migrate=True,
     )
-    assert set(d.space.nodes) == {"kick", "boom"}
+    # The legacy sound effect is split by the migration: the player keeps the
+    # live id (so the button still fires it), a Sound node carries the path.
+    assert set(d.space.nodes) == {"kick", "boom", "sound__boom"}
     fx = d.space.nodes["boom"]
-    assert fx.path == "/sounds/boom.wav" and fx.overlap is True
+    assert fx.overlap is True and not hasattr(fx, "path")
+    assert d.space.nodes["sound__boom"].path == "/sounds/boom.wav"
     assert "kick->boom" in d.space.edges
+    assert "sound__boom->boom:sound" in d.space.edges
     assert d.space.pulse("kick") == ["boom"]
     assert len(FakeProc.commands) == 1
 
 
 def test_gui_mirrors_the_impulse_port_kind():
     assert node_specs.port_kind("button", "out", "out") == "impulse"
-    assert node_specs.port_kind("sound_effect", "in", "in") == "impulse"
-    assert node_specs.port_kind("sound_effect", "out", "out") == "audio"
-    assert node_specs.ports_compatible("button", "out", "sound_effect", "in")
+    assert node_specs.port_kind("sound_player", "in", "in") == "impulse"
+    assert node_specs.port_kind("sound_player", "out", "out") == "audio"
+    assert node_specs.ports_compatible("button", "out", "sound_player", "in")
     assert not node_specs.ports_compatible("button", "out", "volume", "in")
-    assert not node_specs.ports_compatible("splitter", "out", "sound_effect", "in")
+    assert not node_specs.ports_compatible("splitter", "out", "sound_player", "in")
 
 
 def test_session_repair_accepts_an_impulse_wire():
     cfg = {
         "nodes": {
             "btn": {"type": "button", "params": {}},
-            "fx": {"type": "sound_effect", "params": {"path": "/a/b.wav"}},
+            "fx": {"type": "sound_player", "params": {"path": "/a/b.wav"}},
         },
         "edges": [
             {"from": "btn", "to": "fx", "from_port": "out", "to_port": "in"},
