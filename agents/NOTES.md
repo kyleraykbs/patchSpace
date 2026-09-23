@@ -472,3 +472,18 @@ gesture accepts; tested only structurally (no touchscreen here).
 * ffmpeg reads a WAV whose header is not finalised yet (a recording in
   progress): `probe_peaks` on a live take returns its buckets so far.  That is
   what makes the waveform fill in as it records.
+
+* **Never do slow work holding the command lock.**  `_cmd_get_peaks` ran
+  `probe_peaks` (an ffmpeg pass over the *whole* file) inside `with self._lock`
+  for a Recorder, and the GUI asks for a take's waveform on every poll while it
+  is being recorded: every other command - the GUI's own polls included -
+  queued behind one decode after another.  That is perceptible only in the
+  sound chain, and it compounds with the number of sound nodes.  Resolve the
+  path under the lock, decode outside it.
+* **Apply the newest state, not every snapshot of it.**  `process_responses`
+  applied every queued reply, so a backlog became a storm of full UI updates
+  that could only end up showing the newest one anyway.  Poll replies coalesce
+  to the last; events stay in order.
+* A file that changes on every poll (a take being recorded) should be *loaded
+  on a leash* - at most once per interval - with an exemption for the moment it
+  stops, which is the state the user is waiting for.
