@@ -627,3 +627,35 @@ def test_a_clip_handle_dragged_past_the_sound_selects_all_of_it():
     w._clip_drag_origin = (rx, 1.0)
     w._drag_clip(rx + rw * 0.5, 0.0)
     assert node["end"] is not None and 0.0 < node["end"] <= 8.0
+
+
+def test_a_new_sound_in_a_clip_resets_its_zoom_to_the_whole_file():
+    """Kyle: "when a new clip is received in the clip node it resets to the
+    furthest out zoom."
+
+    A timeline zoomed into the last take must show all of the new one, or the
+    thing that just arrived is off-screen in a view set up for something else.
+    The stored view is dropped, so _clip_span falls back to the whole file."""
+    w, client = _recorder_and_clip()
+
+    def poll(path, duration=8.0):
+        w.update_from_daemon({"nodes": {"clip1": {
+            "id": "clip1", "type": "clip", "label": "Clip", "x": 0.0, "y": 0.0,
+            "ready": True, "connected": True, "declarative": False,
+            "selection_label": "Clip", "description": "", "start": 0.0,
+            "end": None, "duration": duration, "source_start": 0.0,
+            "source_path": path}}, "edges": {}, "panels": [], "groups": []})
+
+    poll("/recordings/one.wav")
+    # Zoom into the middle of the first take.
+    w._clip_views["clip1"] = (3.0, 2.0)
+    assert w._clip_span("clip1") == (3.0, 2.0), "the zoom should stick while it lasts"
+
+    # The same file, still growing: the view is the user's, leave it alone.
+    w._clip_waves.setdefault("clip1", {})["path"] = "/recordings/one.wav"
+    poll("/recordings/one.wav")
+    assert w._clip_span("clip1") == (3.0, 2.0), "progress must not reset the zoom"
+
+    # A *new* sound arrives: back to the whole of it.
+    poll("/recordings/two.wav", duration=30.0)
+    assert w._clip_span("clip1") == (0.0, 30.0), "the new sound should be shown whole"

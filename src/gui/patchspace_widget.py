@@ -1658,6 +1658,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     source = str(ndata.get("source_path") or "")
                     rev = str(ndata.get("source_rev") or "")
                     known = (self._clip_waves.get(nid) or {}).get("path")
+                    if source and source != known:
+                        # A *new* sound arrived: show the whole of it, whatever
+                        # the last one was zoomed into.  The view is dropped
+                        # rather than set, so _clip_span falls back to its
+                        # default - the whole file, the furthest-out zoom - and
+                        # that is the view that shows what just landed.
+                        self._clip_views.pop(nid, None)
                     stale = bool(source) and (
                         source != known or rev != self._clip_wave_rev.get(nid)
                     )
