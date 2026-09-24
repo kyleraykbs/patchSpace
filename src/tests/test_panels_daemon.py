@@ -911,3 +911,28 @@ def test_a_panel_with_its_own_coordinates_is_left_alone(tmp_path):
     tree = d._load_panels_tree()
     assert (tree["kit"].x, tree["kit"].y) == (7.0, 9.0)
     assert tree["other"].placed and tree["other"].x > 7.0
+
+
+def test_exclude_is_written_live_inside_a_panel(tmp_path):
+    """Kyle: "the exclude state on filter nodes isn't saved inside of panels
+    too."
+
+    Toggling Include/Exclude is the filter's *membership* - which streams it
+    lets through - rather than a knob a runtime tweak turns, so it is written
+    with the layout instead of frozen with the other params.  The same toggle
+    at the root level always stuck, which is what the "too" pointed at."""
+    d, root, pdir = _daemon(tmp_path)
+    d.panels = d._load_panels_tree()
+    d.handle_command({"command": "add_node", "node_type": "filter",
+                      "node_id": "f", "config": {}})
+    assert d._cmd_create_panel({"name": "kit", "node_ids": ["f"]})["status"] == "ok"
+    kit_path = os.path.join(pdir, "kit.json")
+
+    node = d.space.nodes["kit::f"]
+    assert node.exclude is False
+    # A live flip, exactly as the body's Include/Exclude switch does it.
+    node.exclude = True
+    d._write_panels()
+
+    params = json.load(open(kit_path))["config"]["nodes"]["f"]["params"]
+    assert params["exclude"] is True

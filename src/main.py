@@ -505,7 +505,7 @@ _SERIAL_ATTRS = (
 # GUI layout state a node may carry.  Serialized separately (only when
 # set) rather than via _SERIAL_ATTRS so a node the GUI hasn't positioned
 # yet doesn't emit x:null / y:null / anchored:null into every export.
-_LAYOUT_ATTRS = ("x", "y", "anchored")
+_LAYOUT_ATTRS = ("x", "y", "anchored", "exclude")
 
 
 def _apply_layout_attrs(node, config: dict) -> None:
@@ -1615,6 +1615,13 @@ class PatchSpaceDaemon:
                 # Outside a panel's edit mode, write the file's committed
                 # parameter values (only layout stays live), so runtime
                 # knob/switch tweaks aren't persisted until you edit.
+                #
+                # "exclude" stays live with the layout even though it is a
+                # stored param: it is the filter's *membership* - which streams
+                # it lets through - rather than a knob a runtime tweak turns.
+                # Freezing it meant flipping Include/Exclude on a filter inside
+                # a panel was silently lost the next time the file was written,
+                # while the same flip at the root level stuck.
                 if (
                     freeze_params
                     and pid not in self._edit_panels
@@ -1624,7 +1631,7 @@ class PatchSpaceDaemon:
                     snap_node = snap.nodes.get(panels.local_of(nid)) if snap else None
                     if snap_node:
                         frozen = dict(snap_node.get("params") or {})
-                        for key in ("x", "y", "anchored"):
+                        for key in ("x", "y", "anchored", "exclude"):
                             if key in inner:
                                 frozen[key] = inner[key]
                         entry["params"] = frozen
