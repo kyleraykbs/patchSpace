@@ -6709,10 +6709,31 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             if spec_for(self.nodes[nid]["type"]).control == "dump"
             else "Play"
         )
+        # The press pulse the Button node's face has: eased in and back out so
+        # it reads as a press rather than a one-frame blink (the tick repaints
+        # while it runs - see _impulse_flash).
+        t = self._impulse_flash_progress(nid)
+        glow = 1.0 - abs(2.0 * t - 1.0) if t is not None else 0.0
+        if glow > 0.0:
+            hot_fill = (0.30, 0.72, 0.42)
+            hot_border = (0.20, 0.46, 0.28)
+            cr.set_source_rgb(*tuple(
+                0.30 + (hot - 0.30) * glow for hot in hot_fill
+            ))
+            cr.fill_preserve()
+            cr.set_source_rgb(*tuple(
+                0.46 + (hot - 0.46) * glow for hot in hot_border
+            ))
+            cr.set_line_width(1.5)
+            cr.stroke()
+
         cr.select_font_face("sans")
         cr.set_font_size(12)
         extents = cr.text_extents(label)
-        cr.set_source_rgb(0.78, 0.78, 0.80)
+        if glow > 0.5:
+            cr.set_source_rgb(0.06, 0.16, 0.09)
+        else:
+            cr.set_source_rgb(0.78, 0.78, 0.80)
         cr.move_to(x + (w - extents.width) / 2 - extents.x_bearing,
                    y + (h - extents.height) / 2 - extents.y_bearing)
         cr.show_text(label)
@@ -6962,6 +6983,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
         impulse_hit = self.find_impulse_fallback_at(wx, wy)
         if impulse_hit is not None:
+            # Light the face *now*: the command's round trip is not what the
+            # press should feel like (see _impulse_flash / _anim_tick).
+            self._impulse_flash[impulse_hit] = time.monotonic()
+            self.queue_draw()
             self.client.send({"command": "impulse", "node_id": impulse_hit})
             return
 

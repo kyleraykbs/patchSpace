@@ -306,3 +306,36 @@ def test_a_sound_dumps_face_and_rows_do_not_overlap():
     assert fy + fh <= dy + 0.01, "the Save face overlaps the folder row"
     assert dy + dh <= ny + 0.01, "the folder row overlaps the name row"
     assert ny + nh <= w.nodes["d1"]["y"] + w.node_height("d1") + 0.01
+
+
+def test_clicking_a_dumps_save_face_lights_it_up():
+    """Kyle: "make it responsive immediately as in make the button light up when
+    clicked."  The press pulses the face itself, the way a Button node does -
+    it must not wait for the command's round trip (or for the encode)."""
+    w, client = _widget()
+    w.update_from_daemon({
+        "nodes": {"d1": {
+            "id": "d1", "type": "sound_dump", "label": "Sound Dump",
+            "x": 0.0, "y": 0.0, "ready": True, "connected": True,
+            "declarative": False, "selection_label": "Sound Dump",
+            "description": "", "folder": "~/Dumps", "name": "take 1",
+            "dump_path": "", "dump_state": "idle"}},
+        "edges": {}, "panels": [], "groups": []})
+
+    assert w._impulse_flash_progress("d1") is None      # not pressed yet
+
+    fx, fy, fw, fh = w._impulse_face_rect("d1")
+    w.on_click(None, 1, fx + fw / 2.0, fy + fh / 2.0)
+
+    # Lit at once, and the command went out.
+    assert "d1" in w._impulse_flash
+    assert w._impulse_flash_progress("d1") is not None
+    assert [c for c in client.sent if c.get("command") == "impulse"]
+
+    # It ages out on its own (the tick does that - see _anim_tick).
+    import time
+    from gui import constants
+    w._impulse_flash["d1"] = time.monotonic() - (
+        constants.IMPULSE_FLASH_MS / 1000.0
+    )
+    assert w._impulse_flash_progress("d1") is None
