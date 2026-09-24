@@ -608,6 +608,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         #: _canvas_signature): a poll that changed nothing visible must not
         #: repaint.
         self._canvas_sig = None
+        #: The structural part of that signature, and when the canvas was last
+        #: repainted for a non-structural change (see update_from_daemon).
+        self._canvas_structure_sig = None
+        self._canvas_drawn_at = 0.0
         self.physics_active = True
         # Consecutive awake layout ticks since the last settle/sleep -
         # capped in on_layout_tick so a non-converging layout can't
@@ -1908,10 +1912,51 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # repaint pinned the main thread and froze the UI.  The signature is
         # the same cheap per-node value the geometry caches are keyed on, plus
         # everything else the frame reads.
+        # A poll that changed something *structural* - a node appeared or went,
+        # an edge moved, the view changed - is shown at once.  The rest is
+        # progress: a recording Replay Buffer's duration and file revision change
+        # on every poll, so its read-out moves continuously and there is nothing
+        # to be gained from repainting the whole canvas at the poll rate.  Those
+        # are leashed, which caps the main thread's cost on a graph that is
+        # never idle (the buffer is always capturing).
         signature = self._canvas_signature(daemon_nodes)
-        if signature != self._canvas_sig:
-            self._canvas_sig = signature
+        structure = self._canvas_structure(daemon_nodes)
+        if signature == self._canvas_sig:
+            return
+        self._canvas_sig = signature
+        now = time.monotonic()
+        if structure != self._canvas_structure_sig:
+            self._canvas_structure_sig = structure
+            self._canvas_drawn_at = now
             self.queue_draw()
+        elif now - self._canvas_drawn_at >= self.SOUND_WAVE_MIN_INTERVAL_MS / 1000.0:
+            self._canvas_drawn_at = now
+            self.queue_draw()
+
+    def _canvas_structure(self, daemon_nodes):
+        """The part of the canvas signature that is a *change* rather than
+        *progress*: what is on the canvas and how it is arranged, ignoring the
+        values that move on their own while a buffer records."""
+        return (
+            tuple(sorted(daemon_nodes)),
+            tuple(
+                (nid, ndata.get("type"), ndata.get("label"),
+                 ndata.get("ready"), ndata.get("health"),
+                 ndata.get("connected"), ndata.get("x"), ndata.get("y"))
+                for nid, ndata in sorted(daemon_nodes.items())
+            ),
+            tuple(
+                (eid, e.get("from_node"), e.get("to_node"),
+                 e.get("to_port"), e.get("from_port"))
+                for eid, e in sorted(self.edges.items())
+            ),
+            tuple(sorted(self.panels)),
+            self.loading, self.canvas_opacity_from_daemon,
+            tuple(sorted(self.selected_nodes)),
+            tuple(sorted(self.anchored_nodes)),
+            len(self._revealed) if self._revealed is not None else -1,
+            self.connecting_from, self.hover_target_node, self.hover_impulse,
+        )
 
     def _canvas_signature(self, daemon_nodes):
         """A cheap fingerprint of everything one frame draws.

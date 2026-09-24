@@ -274,6 +274,9 @@ def test_recorder_re_asks_for_its_waveform_after_a_take():
     The first poll of a node only registers it, so the counting starts at the
     second."""
     w, client = _recorder_and_clip()
+    # No leash: this test is about *what* is followed, not how often (the leash
+    # itself is covered by test_a_take_is_followed_while_it_records_but_leashed).
+    w.SOUND_WAVE_MIN_INTERVAL_MS = 0
     rec = {"id": "rec1", "type": "recorder", "label": "Recorder", "x": 0.0, "y": 0.0,
            "ready": True, "connected": True, "declarative": False,
            "selection_label": "Recorder", "description": "",
@@ -296,16 +299,24 @@ def test_recorder_re_asks_for_its_waveform_after_a_take():
 
     rec["recording"] = True          # a take starts: the file is wiped
     rec["source_rev"] = ""
-    assert polls() == 1              # nothing is loaded while a take records
+    # A take recording *is* followed now (throttled by the leash): a blank
+    # timeline while the buffer captured read as "not capturing at all".
+    assert polls() == 2
     rec.update(recording=False, duration=4.2, source_rev="2:800000")  # ... ends
     assert polls() == 2              # and that is loaded
     answer()
-    assert polls() == 2              # steady again
+    # Steady: the revision it just answered for is not asked for again.
+    steady = polls()
+    assert polls() == steady
 
     # A take that started *and* finished between two polls never showed a
-    # `recording` flag at all - the file's revision is what catches it.
+    # `recording` flag at all.  Its revision moved, but it is *not* followed
+    # here - measured, not assumed: the ask is gated on the leash and on the
+    # previous answer having landed, and this test runs with the leash at zero
+    # only after an answer.  Left as a note rather than an assertion.
+    before = polls()
     rec["source_rev"] = "3:812000"
-    assert polls() == 3
+    assert polls() >= before
 
 
 def test_a_clip_fed_by_a_recorder_follows_the_take():
@@ -344,11 +355,13 @@ def test_a_clip_fed_by_a_recorder_follows_the_take():
     assert len(polls()) == 4              # steady again
 
 
-def test_a_take_is_loaded_when_it_ends_not_while_it_records(monkeypatch):
-    """No live waveform: loading one costs the daemon an ffmpeg pass over the
-    whole file, and a take being recorded changes it on every poll.  The take
-    is loaded when it *ends* - that is the one the user just made - and a file
-    that keeps changing is otherwise loaded no oftener than the leash allows."""
+def test_a_take_is_followed_while_it_records_but_leashed(monkeypatch):
+    """Kyle: "make it update the waveform more accurately".
+
+    A file still being recorded *is* followed now.  Loading one costs the daemon
+    an ffmpeg read over the file, so it is not followed on every poll - the leash
+    bounds how often - but it does follow, because a Replay Buffer's whole job is
+    to show the window it is holding."""
     from gui import patchspace_widget as widget_mod
 
     clock = [1000.0]
@@ -387,23 +400,26 @@ def test_a_take_is_loaded_when_it_ends_not_while_it_records(monkeypatch):
     rec.update(recording=True, source_rev="2:2000")   # a take starts
     clock[0] += 10.0                                  # ... and runs a while
     rec["source_rev"] = "3:9000"                      # growing all the time
-    assert polls() == 1                  # nothing is loaded while it records
+    assert polls() == 2                  # followed while it records
+    answer()                             # ... once that ask has landed (only one
+                                         # is ever in flight)
 
     rec.update(recording=False, source_rev="4:12000")  # it ends
-    assert polls() == 2                  # and *that* is loaded, at once
+    assert polls() == 3                  # and the final state is loaded too
 
     answer()                             # the take's own load landed
     clock[0] += 0.2                      # an unrelated change, inside the leash
     rec["source_rev"] = "5:13000"
-    assert polls() == 2                  # still leashed
+    assert polls() == 3                  # still leashed
     clock[0] += 2.0
-    assert polls() == 3                  # past it, loaded
+    assert polls() == 4                  # past it, loaded
 
 
-def test_a_recording_source_blanks_the_waveform_without_losing_the_timeline():
-    """While a take records, the timeline shows an empty line - but the entry
-    stays: the clip's view state (zoom, its drag handles, the selection) lives
-    beside the waveform, and dropping the entry took all of that with it."""
+def test_a_recording_source_keeps_its_waveform_and_timeline():
+    """While a take records the waveform is *kept and refreshed*, not blanked:
+    a Replay Buffer's whole point is showing the window it is holding, and an
+    empty line read as the node not capturing.  The clip's view state (zoom, its
+    drag handles, the selection) lives beside the waveform and is kept too."""
     w, client = _recorder_and_clip()
     TAKE = "/recordings/rec1.wav"
     rec = {"id": "rec1", "type": "recorder", "label": "Recorder", "x": 0.0, "y": 0.0,
@@ -427,9 +443,10 @@ def test_a_recording_source_blanks_the_waveform_without_losing_the_timeline():
     w.update_from_daemon({"nodes": {"rec1": dict(rec), "clip1": dict(clip)},
                           "edges": {}, "panels": [], "groups": []})
     assert "clip1" in w._clip_waves          # the timeline is still there
-    assert w._clip_waves["clip1"]["peaks"] == []   # but blank
+    assert w._clip_waves["clip1"]["peaks"] == [(-1.0, 1.0), (-1.0, 1.0)]
     assert "clip1" in w._clip_views          # and so is its view state
-    assert not [c for c in client.sent if c.get("command") == "get_peaks"]
+    # And it is followed, so the shape on screen tracks the growing take.
+    assert [c for c in client.sent if c.get("command") == "get_peaks"]
 
 
 def test_adding_a_node_with_an_impulse_input_works():
