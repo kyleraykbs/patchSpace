@@ -8318,15 +8318,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             cr.set_line_width(1.2)
             cr.stroke()
 
-        cr.set_source_rgb(*pal["field_fg"])
-        cr.set_line_width(1.6)
-        inset = pw * 0.3
-        cr.move_to(px + inset, py + ph - inset)
-        cr.line_to(px + pw - inset, py + ph - inset)
-        cr.line_to(px + pw - inset, py + inset + 3)
-        cr.move_to(px + inset, py + inset + 3)
-        cr.line_to(px + pw - inset, py + inset + 3)
-        cr.stroke()
+        # The same folder glyph a `picker` spec draws (see _draw_path_picker),
+        # so both folder buttons read as the same control.
+        self._draw_node_icon(
+            cr, "folder-open-symbolic", px, py, pw, pal["subtext"]
+        )
 
     def find_dump_field_at(self, x, y):
         """(node_id, field) for the Sound Dump field box under the pointer."""
