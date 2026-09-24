@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import collections
 import queue
 import select
 import socket
@@ -41,10 +42,91 @@ logger = logging.getLogger(__name__)
 RECONNECT_INTERVAL_S = 0.5
 
 
+class CommandQueue:
+    """The client's outgoing commands, newest-state-wins.
+
+    A plain queue let commands pile up behind a slow daemon - the poll alone
+    enqueues one every 400ms, a slider drag one per motion - so every later
+    click waited behind the backlog ("the longer the program is open, the
+    longer an interaction takes to send"): nothing ever went *wrong*, the queue
+    simply grew without limit and the daemon could not outrun it.
+
+    A *state* command is replaced in place here, which keeps its position in the
+    order - a layout save that arrived before a click still goes out before it.
+    Actions are never coalesced: an impulse, a record, a panel-file delete all
+    matter, and the log read is *incremental*, so coalescing it would drop
+    lines.
+    """
+
+    #: What makes two commands "the same question": the fields whose values have
+    #: to match for the older one to be pointless.  () means the command name
+    #: alone is enough (a poll asks for the whole state; a catalogue is a
+    #: catalogue).  Anything not listed is never coalesced.
+    COALESCING = {
+        # Polls and catalogues: only the newest answer can be wanted.
+        "get_nodes": (),
+        "get_apps": (),
+        "get_applications": (),
+        "get_titles": (),
+        "get_hardware_devices": (),
+        # Per-node reads.
+        "get_peaks": ("node_id",),
+        "get_device_profiles": ("node_id",),
+        # Per-node state writes: a drag sends one per motion.
+        "set_node_layout": ("node_id",),
+        "set_panel_layout": ("panel_id",),
+        "set_node_property": ("node_id", "property"),
+        "set_volume": ("node_id",),
+        "set_volume_range": ("node_id",),
+        "set_gate": ("node_id",),
+    }
+
+    def __init__(self) -> None:
+        self._keys: "collections.deque" = collections.deque()
+        self._commands: dict = {}
+        self._cond = threading.Condition()
+
+    def _key(self, cmd):
+        """The coalescing key for ``cmd``, or None when it never coalesces."""
+        if not isinstance(cmd, dict):
+            return None
+        fields = self.COALESCING.get(cmd.get("command"))
+        if fields is None:
+            return None
+        return (cmd["command"],) + tuple(str(cmd.get(f)) for f in fields)
+
+    def put(self, cmd) -> None:
+        key = self._key(cmd)
+        with self._cond:
+            if key is not None and key in self._commands:
+                # Superseded, but it keeps its turn: the replacement goes where
+                # the command it replaces already was.
+                self._commands[key] = cmd
+            else:
+                if key is not None:
+                    self._commands[key] = cmd
+                else:
+                    # Actions need a key of their own to sit in the order.
+                    key = object()
+                    self._commands[key] = cmd
+                self._keys.append(key)
+            self._cond.notify()
+
+    def get(self, timeout=None):
+        with self._cond:
+            if not self._keys:
+                if not self._cond.wait(timeout):
+                    raise queue.Empty
+            if not self._keys:
+                raise queue.Empty
+            key = self._keys.popleft()
+            return self._commands.pop(key)
+
+
 class PatchSpaceClient:
     def __init__(self, path: str = SOCKET_PATH):
         self.path = path
-        self.cmd_queue: "queue.Queue" = queue.Queue()
+        self.cmd_queue = CommandQueue()
         self.resp_queue: "queue.Queue" = queue.Queue()
         self.running = True
         self.connected = False

@@ -6,10 +6,13 @@ module run with the ``gui`` directory on the path), so put that
 directory on ``sys.path`` before importing it."""
 
 import os
+import queue
 import socket
 import sys
 import threading
 import time
+
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gui"))
 
@@ -148,3 +151,38 @@ def test_command_round_trip_after_connect(tmp_path):
     finally:
         client.stop()
         daemon.stop()
+
+
+def test_a_newer_state_command_replaces_an_older_one_in_place():
+    """Kyle: "the longer the program is open, the longer an interaction takes
+    to send."
+
+    The poll enqueues one command every 400ms and a slider drag one per motion,
+    so a daemon slower than that let them pile up behind a plain queue and every
+    later click waited for the backlog.  A newer *state* command replaces the
+    older one where it already sat - it does not jump in front of commands that
+    arrived between them - so the queue cannot grow."""
+    from socket_client import CommandQueue
+
+    q = CommandQueue()
+    q.put({"command": "set_node_layout", "node_id": "a", "x": 1})
+    q.put({"command": "impulse", "node_id": "b"})
+    q.put({"command": "set_node_layout", "node_id": "a", "x": 2})
+    q.put({"command": "set_node_layout", "node_id": "c", "x": 9})
+
+    first = q.get(timeout=1)
+    assert (first["node_id"], first["x"]) == ("a", 2), "newest layout, same turn"
+    assert q.get(timeout=1)["command"] == "impulse"
+    assert q.get(timeout=1)["node_id"] == "c", "a different node is a different question"
+    with pytest.raises(queue.Empty):
+        q.get(timeout=0.01)
+
+
+def test_the_log_read_is_never_coalesced():
+    """It is incremental - coalescing it would drop lines."""
+    from socket_client import CommandQueue
+
+    q = CommandQueue()
+    for since in (0.0, 1.0, 2.0):
+        q.put({"command": "get_logs", "since": since})
+    assert [q.get(timeout=1)["since"] for _ in range(3)] == [0.0, 1.0, 2.0]
