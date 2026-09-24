@@ -605,3 +605,17 @@ gesture accepts; tested only structurally (no touchscreen here).
   predicate the External Only classifier already used) and All Apps / All Inputs
   / All Outputs ask for it.  Mic sinks and virtual speakers were never members:
   Audio/Source and Audio/Sink are not Stream/Output/Audio.
+
+* **A control can be shadowed by a *generic* branch above it.**  The Sound Dump's
+  own height branch was unreachable because `_bottom_control_height` checks "an
+  impulse input with nothing wired" first, and a dump matches that too - so the
+  node never grew and its face crowded the socket labels.  Put the specific case
+  first; and put clearance in the *node's* height rather than in the block's own
+  rows, or growing it cancels out and nothing moves.
+* **The XDG portal's FileChooser has `OpenFile`, `SaveFile`, `SaveFiles` - there
+  is no plain `Open`.**  Calling a method that doesn't exist fails into the
+  fallback, which looks exactly like "no file picker available" while the same
+  dialog works elsewhere.
+* A name that carries an audio extension should have it *replaced* by the
+  encoder's, not appended: "take.mp3" means "take", and "take.mp3.opus" is a
+  file nobody goes looking for.
