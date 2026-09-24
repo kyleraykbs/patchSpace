@@ -368,10 +368,15 @@ def test_a_clip_previous_shows_its_window_on_its_body():
 
     # One row on the body, holding the seconds, and the status light inside the
     # node beside it - the row gives up the room, so it can't fall off the edge.
-    x, y, width, height = w._clip_row_rect("c1")
+    x, y, width, height = w._clip_prev_row_rect("c1")
     assert w.find_clip_field_at(x + 2, y + height / 2.0) == "c1"
     light_x = x + width + w.DUMP_LIGHT_GAP + w.DUMP_LIGHT_R
     assert light_x + w.DUMP_LIGHT_R <= w.nodes["c1"]["x"] + w.NODE_WIDTH + 0.01
+
+    # The Clip face is *reachable*: pressing it is the only way to fire a clip,
+    # since the node has no impulse output to pulse and no impulse input either.
+    fx, fy, fw, fh = w._impulse_face_rect("c1")
+    assert w.find_impulse_fallback_at(fx + fw / 2, fy + fh / 2) == "c1"
 
     # It draws without error, which is what puts the row and the Clip face on
     # screen.
@@ -389,7 +394,7 @@ def test_a_clip_previouss_face_and_row_do_not_overlap():
                           "edges": {}, "panels": [], "groups": []})
 
     fx, fy, fw, fh = w._impulse_face_rect("c1")
-    rx, ry, rw, rh = w._clip_row_rect("c1")
+    rx, ry, rw, rh = w._clip_prev_row_rect("c1")
 
     assert fy + fh <= ry + 0.01, "the Clip face overlaps the window row"
     assert ry + rh <= w.nodes["c1"]["y"] + w.node_height("c1") + 0.01

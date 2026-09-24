@@ -1,6 +1,7 @@
 """Tests for PatchSpace reconciliation + supervision, using a fake
 in-memory PipeWire graph (no real pw-dump / pw-cli involved)."""
 
+import os
 import time
 
 import pytest
@@ -1642,3 +1643,38 @@ def test_clip_previous_drops_a_partial_frame(tmp_path, monkeypatch):
     tail = node._read_tail(1.0)
     assert len(tail) % node.bytes_per_frame == 0
     assert len(tail) >= node.frame_bytes - node.bytes_per_frame
+
+
+def test_pressing_clip_writes_the_clip_file(tmp_path, monkeypatch):
+    """The whole point of the node: press Clip and the last window's worth of
+    what it recorded becomes a file the sound output points at.
+
+    start_clip runs off the caller's thread (the take is restarted afterwards,
+    which stops and starts a pw-cat child), so this waits for it - a press that
+    produced nothing has to be able to look like one."""
+    node = ClipPreviousNode("cp3", 2.0)
+    monkeypatch.setattr(ClipPreviousNode, "RECORD_DIR", str(tmp_path))
+    # No PipeWire here: stand in for the take's lifecycle so the worker clips
+    # what is already on disk.
+    monkeypatch.setattr(ClipPreviousNode, "start_take", lambda self: False)
+    monkeypatch.setattr(ClipPreviousNode, "stop_take", lambda self: False)
+
+    frames = b"\x01\x00" * (node.RECORD_CHANNELS * node.RECORD_RATE * 5)
+    with open(node.take_path, "wb") as handle:
+        handle.write(ClipPreviousNode._wav_header(
+            len(frames), node.RECORD_RATE, node.RECORD_CHANNELS
+        ))
+        handle.write(frames)
+
+    assert node.state == "idle"
+    node.start_clip()
+    for _ in range(200):
+        if node.state in ("saved", "failed"):
+            break
+        time.sleep(0.02)
+
+    assert node.state == "saved", node._last_error
+    assert os.path.exists(node.clip_target)
+    assert node.clip_path == node.clip_target
+    raw = open(node.clip_target, "rb").read()
+    assert len(raw) == 44 + node.frame_bytes * 2

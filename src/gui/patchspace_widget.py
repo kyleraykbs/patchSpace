@@ -2916,12 +2916,25 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
              - self.GATE_HEIGHT - self.GATE_BOTTOM_MARGIN)
         return (x, y, w, self.GATE_HEIGHT)
 
+    #: Controls whose node *is* a button: a dump saves what arrives, and a Clip
+    #: Previous clips what it recorded.  Neither has an impulse output to pulse,
+    #: and a Clip Previous has no impulse *input* either - what it works on is
+    #: its own recording, not a wire - so it can't be recognised by
+    #: `impulse_inputs` alone.
+    FACE_CONTROLS = ("dump", "clip_previous")
+
+    def _has_face(self, nid) -> bool:
+        """Whether this node shows its own press face (see _impulse_face_rect):
+        the node's own control, or an impulse input with nothing wired."""
+        spec = spec_for(self.nodes[nid]["type"])
+        if spec.control in self.FACE_CONTROLS:
+            return True
+        return bool(spec.impulse_inputs) and not self._impulse_wired(nid)
+
     def find_impulse_fallback_at(self, x, y):
         """The node whose own impulse face is under the pointer."""
         for nid, node in self._hit_nodes(x, y, require_ready=False):
-            if not spec_for(node["type"]).impulse_inputs:
-                continue
-            if self._impulse_wired(nid):
+            if not self._has_face(nid):
                 continue
             fx, fy, fw, fh = self._impulse_face_rect(nid)
             if fx <= x <= fx + fw and fy <= y <= fy + fh:
@@ -5618,7 +5631,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self._draw_recorder(cr, pal, nid, node)
         elif spec.control == "clip":
             self._draw_clip_timeline(cr, pal, nid, node)
-        if spec.impulse_inputs and not self._impulse_wired(nid):
+        if self._has_face(nid):
             self._draw_impulse_fallback(cr, nid)
         elif spec.control == "filter_mode":
             self._draw_filter_mode_button(cr, pal, nid, node.get("exclude", False))
@@ -8392,7 +8405,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         popover.set_child(box)
         self.popup_context_menu(popover, screen_x, screen_y)
 
-    def _clip_row_rect(self, nid):
+    def _clip_prev_row_rect(self, nid):
         """Geometry of a Clip Previous's one row: the seconds box, which gives
         up room at its right end for the status light - the same light, in the
         same place, a Sound Dump shows beside its folder row."""
@@ -8416,7 +8429,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         """A Clip Previous's body: a box holding how many seconds it keeps, and
         the light that says what the last Clip did (idle / saving / saved /
         failed, the same amber-green-red a dump shows)."""
-        x, y, w, h = self._clip_row_rect(nid)
+        x, y, w, h = self._clip_prev_row_rect(nid)
         draw_rounded_rect(cr, x, y, w, h, 4)
         cr.set_source_rgb(*pal["field_bg"])
         cr.fill_preserve()
@@ -8450,7 +8463,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         for nid, node in self._hit_nodes(x, y, require_ready=False):
             if spec_for(node["type"]).control != "clip_previous":
                 continue
-            fx, fy, fw, fh = self._clip_row_rect(nid)
+            fx, fy, fw, fh = self._clip_prev_row_rect(nid)
             if fx <= x <= fx + fw and fy <= y <= fy + fh:
                 return nid
         return None

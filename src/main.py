@@ -496,6 +496,7 @@ _SERIAL_ATTRS = (
     "invert",
     "title",
     "exclude",
+    "window",
     "declarative",
     "path",
     "overlap",
