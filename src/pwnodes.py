@@ -1862,6 +1862,9 @@ class SoundDumpNode(Node):
         self.name = name or "sound"
         #: The last file written ("" until one is), which the node shows.
         self.last_path = ""
+        #: "idle" | "saving" | "saved" | "failed" - what the lights show.
+        self.state = "idle"
+        self._last_error = ""
 
     def port_kind(self, port: str, direction: str) -> str:
         if direction == "out":
@@ -1887,6 +1890,29 @@ class SoundDumpNode(Node):
             name = f"{name}.{self.DEFAULT_EXT}"
         return os.path.join(os.path.expanduser(self.folder or "~"), name)
 
+    #: What the node reports so the GUI can show a light: "idle", "saving",
+    #: "saved" or "failed" (see `state`).
+    def start_dump(self, sound: Optional[dict] = None) -> None:
+        """Save the sound that arrived, off the caller's thread.
+
+        The encode is an ffmpeg run over a whole file, so it must not happen
+        while the daemon holds its command lock - and doing it in the background
+        is what lets the node show a saving state at all."""
+        self.state = "saving"
+        self._last_error = ""
+        worker = threading.Thread(
+            target=self._dump, args=(dict(sound or {}),), daemon=True
+        )
+        worker.start()
+
+    def _dump(self, sound: dict) -> None:
+        try:
+            self.on_impulse(sound)
+        except Exception:
+            logger.exception("Dump %r failed", self.id)
+            self.state = "failed"
+            self._last_error = "unexpected error"
+
     def on_impulse(self, sound: Optional[dict] = None) -> None:
         """Save the sound that arrived.  ffmpeg does the encode; a Clip's range
         is honoured by taking just that part of the file."""
@@ -1894,6 +1920,8 @@ class SoundDumpNode(Node):
         source = str(sound.get("path") or "").strip()
         if not source:
             logger.warning("Dump %r was triggered with no sound wired", self.id)
+            self.state = "failed"
+            self._last_error = "no sound wired"
             return
         target = self.target_path
         folder = os.path.dirname(target)
@@ -1903,6 +1931,8 @@ class SoundDumpNode(Node):
             logger.warning(
                 "Dump %r couldn't create %r: %s", self.id, folder, exc
             )
+            self.state = "failed"
+            self._last_error = f"couldn't create {folder}"
             return
         command = ["ffmpeg", "-nostdin", "-v", "error", "-y"]
         start = float(sound.get("start") or 0.0)
@@ -1919,14 +1949,21 @@ class SoundDumpNode(Node):
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             logger.warning("Dump %r couldn't write %r: %s", self.id, target, exc)
+            self.state = "failed"
+            self._last_error = str(exc)
             return
         if result.returncode != 0:
+            detail = (result.stderr or "").strip().splitlines()
+            self.state = "failed"
+            self._last_error = detail[-1] if detail else "ffmpeg failed"
             logger.warning(
                 "Dump %r: ffmpeg couldn't write %r: %s",
-                self.id, target, (result.stderr or "").strip()[:200],
+                self.id, target, self._last_error[:200],
             )
             return
         self.last_path = target
+        self.state = "saved"
+        self._last_error = ""
         logger.info("Dump %r wrote %r", self.id, target)
 
 

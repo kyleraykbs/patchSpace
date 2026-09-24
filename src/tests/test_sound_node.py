@@ -622,3 +622,45 @@ def test_a_sound_dump_writes_what_is_wired_into_it(tmp_path):
     # Nothing wired: nothing written, and no crash.
     node.on_impulse({})
     assert node.last_path == str(written)
+
+
+def test_the_impulse_command_fires_a_dump(tmp_path, monkeypatch):
+    """Kyle: "the save button still doesn't fully work, no file gets written."
+    The Save face sends an impulse command, and that path only self-fired a
+    *player* - a dump fell through to the impulse-edge walk and a dump has no
+    impulse output, so nothing ever ran.  (The earlier test called on_impulse
+    directly, which is exactly why it passed while the button did nothing.)"""
+    import time
+    from main import PatchSpaceDaemon
+    from tests.test_pwnodes import FakeGraph
+
+    src = tmp_path / "in.wav"
+    with wave.open(str(src), "w") as f:
+        f.setnchannels(1)
+        f.setsampwidth(2)
+        f.setframerate(48000)
+        f.writeframes(b"\x00\x00" * 4800)
+
+    d = PatchSpaceDaemon()
+    d.space.graph = FakeGraph()
+    d.space.mark_graph_loaded()
+    for cmd in (
+        {"command": "add_node", "node_type": "sound", "node_id": "snd",
+         "config": {"path": str(src)}},
+        {"command": "add_node", "node_type": "sound_dump", "node_id": "dmp",
+         "config": {"folder": str(tmp_path), "name": "saved"}},
+        {"command": "add_edge", "from_node": "snd", "to_node": "dmp",
+         "to_port": "sound"},
+    ):
+        assert d.handle_command(cmd)["status"] == "ok", cmd
+
+    resp = d.handle_command({"command": "impulse", "node_id": "dmp"})
+    assert resp["status"] == "ok" and resp["fired"] == ["dmp"]
+
+    written = tmp_path / "saved.opus"
+    for _ in range(100):                      # the encode runs on its own thread
+        if written.exists():
+            break
+        time.sleep(0.05)
+    assert written.exists() and written.stat().st_size > 0
+    assert d.space.nodes["dmp"].state == "saved"

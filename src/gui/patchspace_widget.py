@@ -1613,6 +1613,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     node["name"] = str(ndata.get("name") or "")
                 if "dump_path" in ndata:
                     node["dump_path"] = str(ndata.get("dump_path") or "")
+                if "dump_state" in ndata:
+                    node["dump_state"] = str(ndata.get("dump_state") or "idle")
                 if "overlap" in ndata:
                     overlap = self._accept_bool_echo(
                         nid, "overlap", ndata.get("overlap", False)
@@ -2491,6 +2493,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             ndata.get("gate"), ndata.get("warp_name"), ndata.get("port_name"),
             ndata.get("path"), ndata.get("duration"), ndata.get("source_path"),
             ndata.get("folder"), ndata.get("name"), ndata.get("dump_path"),
+            ndata.get("dump_state"),
             tuple(ndata.get("inputs") or ()),
             tuple(ndata.get("outputs") or ()),
             tuple(ndata.get("bundle_inputs") or ()),
@@ -8262,6 +8265,25 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         cr.set_source_rgb(*pal["node_border"])
         cr.set_line_width(1)
         cr.stroke()
+        # The saving light, right of the row: grey when idle, amber while the
+        # encode runs, green once it has written, red if it failed - so a press
+        # that did nothing can't look like one that worked.
+        state = str(node.get("dump_state") or "idle")
+        colour = {
+            "saving": (0.95, 0.76, 0.20),
+            "saved": pal["success"],
+            "failed": pal["error"],
+        }.get(state, (0.40, 0.40, 0.44))
+        lx = fx + fw + self.PICKER_GAP + pw * 0.5 + 12.0
+        ly = fy + fh / 2.0
+        cr.arc(lx, ly, 5.0, 0, 2 * math.pi)
+        cr.set_source_rgb(*colour)
+        cr.fill()
+        if state == "saving":
+            cr.arc(lx, ly, 7.5, 0, 2 * math.pi)
+            cr.set_line_width(1.2)
+            cr.stroke()
+
         cr.set_source_rgb(*pal["field_fg"])
         cr.set_line_width(1.6)
         inset = pw * 0.3
@@ -11516,6 +11538,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             "folder": config.get("folder", "~"),
             "name": config.get("name", ""),
             "dump_path": "",
+            "dump_state": "idle",
             "connected": False,
             "is_bluetooth": False,
             "selection_label": "",

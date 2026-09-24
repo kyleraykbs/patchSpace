@@ -4374,11 +4374,17 @@ class PatchSpaceDaemon:
         if not node_id:
             return {"status": "error", "message": "node_id required"}
         node = self.space.nodes.get(node_id)
-        if isinstance(node, SoundPlayerNode):
-            # A player's own Play face fires *that* node (it has no impulse
-            # output to pulse - the wire would be what triggers it).
-            with self._lock:
-                node.on_impulse(self.space.resolve_sound(node_id))
+        if isinstance(node, (SoundPlayerNode, SoundDumpNode)):
+            # A node whose *own face* fires it: a player's Play and a dump's
+            # Save (neither has an impulse output to pulse - a wire would be
+            # what triggers them).  A dump's encode runs on its own thread, so
+            # this must not hold the lock across it.
+            sound = self.space.resolve_sound(node_id)
+            if isinstance(node, SoundDumpNode):
+                node.start_dump(sound)
+            else:
+                with self._lock:
+                    node.on_impulse(sound)
             return {"status": "ok", "fired": [node_id]}
         if not isinstance(node, ButtonNode):
             return {
@@ -5271,8 +5277,10 @@ class PatchSpaceDaemon:
                 # the neutral "not connected yet" badge. See _node_health.
                 data["health"] = self._node_health(node)
             if isinstance(node, SoundDumpNode):
-                # The last file it wrote, so the node can show it.
+                # Where it last wrote, and what it is doing - the node shows the
+                # path and a status light (idle / saving / saved / failed).
                 data["dump_path"] = node.last_path
+                data["dump_state"] = node.state
                 data["duration"] = 0.0
             if isinstance(node, SoundPlayerNode):
                 data["playing"] = node.playing
