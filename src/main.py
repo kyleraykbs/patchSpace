@@ -105,7 +105,7 @@ from pwnodes import (
     BundleOutputNode,
     SplitterNode,
     ClipNode,
-    ClipPreviousNode,
+    ReplayBufferNode,
     RecorderNode,
     SoundNode,
     SoundPlayerNode,
@@ -356,7 +356,7 @@ NODE_TYPE_REGISTRY: Dict[str, type] = {
     "button": ButtonNode,
     "sound": SoundNode,
     "recorder": RecorderNode,
-    "clip_previous": ClipPreviousNode,
+    "replay_buffer": ReplayBufferNode,
     "clip": ClipNode,
     "sound_player": SoundPlayerNode,
     "sound_dump": SoundDumpNode,
@@ -404,6 +404,9 @@ CLASS_TO_TYPE = {cls: key for key, cls in NODE_TYPE_REGISTRY.items()}
 for _legacy_key, _canonical_key in {
     "patchbay_device": "patchspace_device",
     "patchbay_mic_device": "patchspace_mic_device",
+    # A Clip Previous was renamed to Replay Buffer; sessions saved under the
+    # old name still load.
+    "clip_previous": "replay_buffer",
 }.items():
     NODE_TYPE_REGISTRY[_legacy_key] = NODE_TYPE_REGISTRY[_canonical_key]
 
@@ -1619,12 +1622,14 @@ class PatchSpaceDaemon:
                 # parameter values (only layout stays live), so runtime
                 # knob/switch tweaks aren't persisted until you edit.
                 #
-                # "exclude" stays live with the layout even though it is a
-                # stored param: it is the filter's *membership* - which streams
-                # it lets through - rather than a knob a runtime tweak turns.
-                # Freezing it meant flipping Include/Exclude on a filter inside
-                # a panel was silently lost the next time the file was written,
-                # while the same flip at the root level stuck.
+                # "exclude" and "window" stay live with the layout even though
+                # they are stored params: they are the node's own configuration
+                # - which streams a filter lets through, how much a Replay
+                # Buffer holds - rather than a knob a runtime tweak turns, and
+                # both are edited from the node body while the graph is running.
+                # Freezing them meant setting either inside a panel was silently
+                # lost the next time the file was written, while the same change
+                # at the root level stuck.
                 if (
                     freeze_params
                     and pid not in self._edit_panels
@@ -1634,7 +1639,8 @@ class PatchSpaceDaemon:
                     snap_node = snap.nodes.get(panels.local_of(nid)) if snap else None
                     if snap_node:
                         frozen = dict(snap_node.get("params") or {})
-                        for key in ("x", "y", "anchored", "exclude"):
+                        for key in ("x", "y", "anchored", "exclude",
+                                    "window"):
                             if key in inner:
                                 frozen[key] = inner[key]
                         entry["params"] = frozen
@@ -3844,7 +3850,7 @@ class PatchSpaceDaemon:
             return cls(node_id, g("folder", "~"), g("name", "sound"))
         if cls is ClipNode:
             return cls(node_id, g("start", 0.0), g("end"))
-        if cls is ClipPreviousNode:
+        if cls is ReplayBufferNode:
             return cls(node_id, g("window", 60.0), backing)
         if cls is RecorderNode:
             return cls(node_id, backing)
@@ -4387,13 +4393,13 @@ class PatchSpaceDaemon:
             return {"status": "error", "message": "node_id required"}
         node = self.space.nodes.get(node_id)
         if isinstance(node, (SoundPlayerNode, SoundDumpNode,
-                            ClipPreviousNode)):
+                            ReplayBufferNode)):
             # A node whose *own face* fires it: a player's Play, a dump's Save
-            # and a Clip Previous's Clip (none has an impulse output to pulse -
+            # and a Replay Buffer's Clip (none has an impulse output to pulse -
             # a wire would be what triggers them).  The work runs on the node's
             # own thread, so this must not hold the lock across it.
             sound = self.space.resolve_sound(node_id)
-            if isinstance(node, ClipPreviousNode):
+            if isinstance(node, ReplayBufferNode):
                 # It clips what it was *recording*, not what arrives here.
                 node.start_clip()
             elif isinstance(node, SoundDumpNode):
@@ -4477,8 +4483,8 @@ class PatchSpaceDaemon:
                 # The Filter node's Include/Exclude switch: on = keep
                 # everything the title box / classifiers do *not* match.
                 node.exclude = bool(value)
-            elif prop == "window" and isinstance(node, ClipPreviousNode):
-                # How much a Clip Previous holds, in seconds.  Changing it
+            elif prop == "window" and isinstance(node, ReplayBufferNode):
+                # How much a Replay Buffer holds, in seconds.  Changing it
                 # applies to the *next* clip: the take already on disk stays as
                 # long as it is.
                 try:
@@ -5309,7 +5315,7 @@ class PatchSpaceDaemon:
                 data["dump_path"] = node.last_path
                 data["dump_state"] = node.state
                 data["duration"] = 0.0
-            if isinstance(node, ClipPreviousNode):
+            if isinstance(node, ReplayBufferNode):
                 # The file the last Clip wrote, what it is doing (idle /
                 # saving / saved / failed, the same light a dump shows), and
                 # how much it holds.

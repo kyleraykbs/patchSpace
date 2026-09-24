@@ -2499,7 +2499,7 @@ class RecorderNode(_SingleSinkNode):
         if self._recorder is not None and not self._recorder.is_alive:
             self._recorder = None
 
-class ClipPreviousNode(RecorderNode):
+class ReplayBufferNode(RecorderNode):
     """Keeps the last few seconds of what is wired into it, and hands them out.
 
     A retrospective take: it is a Recorder that never stops, so the clip is
@@ -2577,7 +2577,7 @@ class ClipPreviousNode(RecorderNode):
             if not frames:
                 self.state = "failed"
                 self._last_error = "nothing recorded yet"
-                logger.warning("Clip Previous %r had nothing to clip", self.id)
+                logger.warning("Replay Buffer %r had nothing to clip", self.id)
                 return
             target = self.clip_target
             os.makedirs(self.RECORD_DIR, exist_ok=True)
@@ -2592,7 +2592,7 @@ class ClipPreviousNode(RecorderNode):
         except Exception as exc:  # noqa: BLE001 - reported, not swallowed
             self.state = "failed"
             self._last_error = str(exc)
-            logger.warning("Clip Previous %r couldn't clip: %s", self.id, exc)
+            logger.warning("Replay Buffer %r couldn't clip: %s", self.id, exc)
         finally:
             self._clipping = False
 
@@ -4704,8 +4704,8 @@ class PatchSpace:
             return None
         if isinstance(source, SoundNode):
             return {"path": source.path, "start": 0.0, "end": None}
-        if isinstance(source, ClipPreviousNode):
-            # A Clip Previous hands on the clip, not the take behind it: the
+        if isinstance(source, ReplayBufferNode):
+            # A Replay Buffer hands on the clip, not the take behind it: the
             # clip is what a player should hear, and it is 0.0 until one is
             # made (checked before RecorderNode, which it subclasses).
             return {"path": source.clip_path, "start": 0.0, "end": None}

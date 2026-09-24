@@ -1937,3 +1937,25 @@ def test_the_autosave_waits_for_a_quiet_moment(monkeypatch):
 
     d._tick()
     assert exports == [True]         # and not again: nothing is dirty
+
+
+def test_a_replay_buffers_window_survives_a_round_trip():
+    """Kyle: "on launch it didn't follow the value I set."
+
+    The window is a normal stored setting: it is written to the file, and the
+    node is rebuilt from it.  The GUI side of the report was the read-out never
+    reaching the node (see test_gui_interaction); this is the file side."""
+    d = PatchSpaceDaemon()
+    resp = d.handle_command({"command": "add_node", "node_type": "replay_buffer",
+                             "node_id": "rb", "config": {"window": 12.5}})
+    assert resp["status"] == "ok", resp
+    node = d.space.nodes["rb"]
+    assert node.window == 12.5, "the configured window was ignored"
+
+    assert d._export_node_params("rb", node)["params"]["window"] == 12.5
+
+    # And a session saved under the node's old name still builds it.
+    resp = d.handle_command({"command": "add_node", "node_type": "clip_previous",
+                             "node_id": "rb2", "config": {"window": 7}})
+    assert resp["status"] == "ok", resp
+    assert d.space.nodes["rb2"].window == 7

@@ -1545,6 +1545,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     "codec_label": ndata.get("profile_description", ""),
                     "volume_locked": ndata.get("volume_locked", True),
                     "force_default": ndata.get("force_default", True),
+                    # A Replay Buffer's own read-out: how much it holds, the
+                    # file the last Clip wrote, and what it is doing.  Without
+                    # these the body drew its defaults - the box read "0 s"
+                    # however many seconds the node was actually keeping, while
+                    # the editor (which falls back to 60) said something else.
+                    "window": ndata.get("window") or 60.0,
+                    "clip_path": ndata.get("clip_path", ""),
+                    "clip_state": ndata.get("clip_state", "idle"),
                 }
                 self._apply_dynamic_ports(self.nodes[nid], ndata)
                 # A node the GUI itself asked the daemon to create is a
@@ -2385,8 +2393,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 + self.DUMP_FACE_GAP
                 + self._dump_rows_height()
             )
-        if spec.control == "clip_previous":
-            # A Clip Previous's body: the same face, and one row under it.
+        if spec.control == "replay_buffer":
+            # A Replay Buffer's body: the same face, and one row under it.
             return (
                 self.GATE_AREA_HEIGHT
                 + self.DUMP_FACE_GAP
@@ -2508,7 +2516,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             ndata.get("gate"), ndata.get("warp_name"), ndata.get("port_name"),
             ndata.get("path"), ndata.get("duration"), ndata.get("source_path"),
             ndata.get("folder"), ndata.get("name"), ndata.get("dump_path"),
-            ndata.get("dump_state"),
+            ndata.get("dump_state"), ndata.get("window"),
+            ndata.get("clip_path"), ndata.get("clip_state"),
             tuple(ndata.get("inputs") or ()),
             tuple(ndata.get("outputs") or ()),
             tuple(ndata.get("bundle_inputs") or ()),
@@ -2927,7 +2936,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             # clearance for the socket labels is in the *node's* height, not
             # here, so growing it moves the face down rather than cancelling.
             rows = self._dump_rows_height() + self.FIELD_BOTTOM_PAD
-        if spec.control == "clip_previous":
+        if spec.control == "replay_buffer":
             rows = self._clip_rows_height() + self.FIELD_BOTTOM_PAD
         x = node["x"] + self.GATE_MARGIN
         w = self.NODE_WIDTH - 2 * self.GATE_MARGIN
@@ -2937,10 +2946,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     #: Controls whose node *is* a button: a dump saves what arrives, and a Clip
     #: Previous clips what it recorded.  Neither has an impulse output to pulse,
-    #: and a Clip Previous has no impulse *input* either - what it works on is
+    #: and a Replay Buffer has no impulse *input* either - what it works on is
     #: its own recording, not a wire - so it can't be recognised by
     #: `impulse_inputs` alone.
-    FACE_CONTROLS = ("dump", "clip_previous")
+    FACE_CONTROLS = ("dump", "replay_buffer")
 
     def _has_face(self, nid) -> bool:
         """Whether this node shows its own press face (see _impulse_face_rect):
@@ -5634,7 +5643,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             )
         elif spec.control == "dump":
             self._draw_dump_fields(cr, pal, nid, node)
-        elif spec.control == "clip_previous":
+        elif spec.control == "replay_buffer":
             self._draw_clip_fields(cr, pal, nid, node)
         elif spec.control == "gain":
             # Normalize's boost, drawn as a plain 0..1 slider (fraction
@@ -6751,10 +6760,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # What pressing the face *does*, which differs by node: a player
         # plays, a dump saves.
         # What pressing the face does, which is the node's *kind* rather than
-        # its type name: a player plays, a dump saves, a Clip Previous clips.
+        # its type name: a player plays, a dump saves, a Replay Buffer clips.
         label = {
             "dump": "Save",
-            "clip_previous": "Clip",
+            "replay_buffer": "Clip",
         }.get(spec_for(self.nodes[nid]["type"]).control, "Play")
         # The press pulse the Button node's face has: eased in and back out so
         # it reads as a press rather than a one-frame blink (the tick repaints
@@ -8428,7 +8437,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self.popup_context_menu(popover, screen_x, screen_y)
 
     def _clip_prev_row_rect(self, nid):
-        """Geometry of a Clip Previous's one row: the seconds box, which gives
+        """Geometry of a Replay Buffer's one row: the seconds box, which gives
         up room at its right end for the status light - the same light, in the
         same place, a Sound Dump shows beside its folder row."""
         node = self.nodes[nid]
@@ -8444,11 +8453,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         return (x, y, w, self.FIELD_HEIGHT)
 
     def _clip_rows_height(self):
-        """A Clip Previous has one row, where a dump has two."""
+        """A Replay Buffer has one row, where a dump has two."""
         return self.FIELD_HEIGHT + self.FIELD_BOTTOM_PAD
 
     def _draw_clip_fields(self, cr, pal, nid, node):
-        """A Clip Previous's body: a box holding how many seconds it keeps, and
+        """A Replay Buffer's body: a box holding how many seconds it keeps, and
         the light that says what the last Clip did (idle / saving / saved /
         failed, the same amber-green-red a dump shows)."""
         x, y, w, h = self._clip_prev_row_rect(nid)
@@ -8458,7 +8467,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         cr.set_source_rgb(*pal["node_border"])
         cr.set_line_width(1)
         cr.stroke()
-        seconds = float(node.get("window") or 0.0)
+        # 60, not 0: the node's own default.  Showing 0 for a window that is
+        # simply not in this payload reads as "keeps nothing".
+        seconds = float(node.get("window") or 60.0)
         draw_text_ellipsized(
             cr, x + 6, y + (h - 10) // 2, f"{seconds:g} s", w - 12, 10,
             pal["field_fg"],
@@ -8481,9 +8492,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             cr.stroke()
 
     def find_clip_field_at(self, x, y):
-        """The Clip Previous whose seconds box is under the pointer."""
+        """The Replay Buffer whose seconds box is under the pointer."""
         for nid, node in self._hit_nodes(x, y, require_ready=False):
-            if spec_for(node["type"]).control != "clip_previous":
+            if spec_for(node["type"]).control != "replay_buffer":
                 continue
             fx, fy, fw, fh = self._clip_prev_row_rect(nid)
             if fx <= x <= fx + fw and fy <= y <= fy + fh:
@@ -8491,7 +8502,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         return None
 
     def _edit_clip_window(self, nid, screen_x, screen_y):
-        """Type how many seconds a Clip Previous keeps - a spin button, the
+        """Type how many seconds a Replay Buffer keeps - a spin button, the
         same widget the settings dialog builds for a `number` spec."""
         node = self.nodes.get(nid) or {}
         popover = Gtk.Popover()

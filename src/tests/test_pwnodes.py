@@ -10,7 +10,7 @@ from pwproc import Backoff
 from pwmatch import INTERNAL_MEDIA_CLASS, SOURCE_MEDIA_CLASSES
 from pwnodes import (
     AppClassifierNode,
-    ClipPreviousNode,
+    ReplayBufferNode,
     AppNameClassifierNode,
     TitleClassifierNode,
     PatchSpace,
@@ -1597,20 +1597,20 @@ def test_panel_boolean_input_accepts_multiple_edges():
     assert space.nodes["gate"].bool_state is False
 
 
-def test_clip_previous_keeps_the_last_window_of_a_take(tmp_path, monkeypatch):
-    """A Clip Previous is a retrospective take: it records continuously, and
+def test_replay_buffer_keeps_the_last_window_of_a_take(tmp_path, monkeypatch):
+    """A Replay Buffer is a retrospective take: it records continuously, and
     Clip keeps the last ``window`` seconds of what it recorded.
 
     The take is a plain WAV of raw s16 frames, so the clip is the *tail* of the
     file rather than a re-encode - the bytes are already there when you press
     Clip, which is the whole point of the node."""
-    node = ClipPreviousNode("cp1", 2.0)
-    monkeypatch.setattr(ClipPreviousNode, "RECORD_DIR", str(tmp_path))
+    node = ReplayBufferNode("cp1", 2.0)
+    monkeypatch.setattr(ReplayBufferNode, "RECORD_DIR", str(tmp_path))
 
     # Five seconds of a recognisable pattern as the take.
     frames = b"\x01\x00" * (node.RECORD_CHANNELS * node.RECORD_RATE * 5)
     with open(node.take_path, "wb") as handle:
-        handle.write(ClipPreviousNode._wav_header(
+        handle.write(ReplayBufferNode._wav_header(
             len(frames), node.RECORD_RATE, node.RECORD_CHANNELS
         ))
         handle.write(frames)
@@ -1627,15 +1627,15 @@ def test_clip_previous_keeps_the_last_window_of_a_take(tmp_path, monkeypatch):
     assert raw[44:] == frames[len(frames) - len(tail):], "the tail of the take"
 
 
-def test_clip_previous_drops_a_partial_frame(tmp_path, monkeypatch):
+def test_replay_buffer_drops_a_partial_frame(tmp_path, monkeypatch):
     """The take is read *while* it is being written, so its last frame can be
     half there.  A partial frame is not audio and would skew everything after
     it, so only whole frames are taken."""
-    node = ClipPreviousNode("cp2", 1.0)
-    monkeypatch.setattr(ClipPreviousNode, "RECORD_DIR", str(tmp_path))
+    node = ReplayBufferNode("cp2", 1.0)
+    monkeypatch.setattr(ReplayBufferNode, "RECORD_DIR", str(tmp_path))
     frames = b"\x00\x00" * (node.RECORD_CHANNELS * node.RECORD_RATE * 3)
     with open(node.take_path, "wb") as handle:
-        handle.write(ClipPreviousNode._wav_header(
+        handle.write(ReplayBufferNode._wav_header(
             len(frames), node.RECORD_RATE, node.RECORD_CHANNELS
         ))
         handle.write(frames + b"\x00")  # half a frame
@@ -1652,16 +1652,16 @@ def test_pressing_clip_writes_the_clip_file(tmp_path, monkeypatch):
     start_clip runs off the caller's thread (the take is restarted afterwards,
     which stops and starts a pw-cat child), so this waits for it - a press that
     produced nothing has to be able to look like one."""
-    node = ClipPreviousNode("cp3", 2.0)
-    monkeypatch.setattr(ClipPreviousNode, "RECORD_DIR", str(tmp_path))
+    node = ReplayBufferNode("cp3", 2.0)
+    monkeypatch.setattr(ReplayBufferNode, "RECORD_DIR", str(tmp_path))
     # No PipeWire here: stand in for the take's lifecycle so the worker clips
     # what is already on disk.
-    monkeypatch.setattr(ClipPreviousNode, "start_take", lambda self: False)
-    monkeypatch.setattr(ClipPreviousNode, "stop_take", lambda self: False)
+    monkeypatch.setattr(ReplayBufferNode, "start_take", lambda self: False)
+    monkeypatch.setattr(ReplayBufferNode, "stop_take", lambda self: False)
 
     frames = b"\x01\x00" * (node.RECORD_CHANNELS * node.RECORD_RATE * 5)
     with open(node.take_path, "wb") as handle:
-        handle.write(ClipPreviousNode._wav_header(
+        handle.write(ReplayBufferNode._wav_header(
             len(frames), node.RECORD_RATE, node.RECORD_CHANNELS
         ))
         handle.write(frames)

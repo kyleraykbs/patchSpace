@@ -563,16 +563,16 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
             ("name", "Name:", "text"),
         ],
     ),
-    # A Clip Previous: audio in, a *sound* out.  It records what is wired into
+    # A Replay Buffer: audio in, a *sound* out.  It records what is wired into
     # it continuously - a retrospective take - so the last few seconds are
     # always there to keep: pressing Clip locks the last `window` seconds in as
     # a file the sound output points at, ready for a player or a Clip.
-    "clip_previous": NodeSpec(
-        "Clip Previous",
+    "replay_buffer": NodeSpec(
+        "Replay Buffer",
         ["audio"],
         ["out"],
         sound_outputs=["out"],
-        control="clip_previous",
+        control="replay_buffer",
         settings=[
             (
                 "window",
@@ -980,7 +980,7 @@ NODE_DESCRIPTIONS: Dict[str, str] = {
     "recorder": "Records what is wired into it: an audio input, and a sound "
     "output pointing at the take.  Record starts a fresh take (overwriting the "
     "last), Stop finishes it, and the node shows the take's waveform and length.",
-    "clip_previous": "Keeps the last few seconds of what is wired into it: "
+    "replay_buffer": "Keeps the last few seconds of what is wired into it: "
     "an audio input, and a sound output pointing at the clip.  It records "
     "continuously, so the clip is already there when you want it - press Clip "
     "and the last N seconds become a file, a retrospective take you make "
@@ -1137,7 +1137,7 @@ ADD_NODE_CATEGORIES = [
             ("Sound Dump", "sound_dump"),
             ("Recorder", "recorder"),
             ("Clip", "clip"),
-            ("Clip Previous", "clip_previous"),
+            ("Replay Buffer", "replay_buffer"),
         ],
     ),
     (
@@ -1372,6 +1372,7 @@ CLASS_NAME_TO_TYPE = {
     "SoundPlayerNode": "sound_player",
     "SoundDumpNode": "sound_dump",
     "RecorderNode": "recorder",
+    "ReplayBufferNode": "replay_buffer",
     "ClipNode": "clip",
     "SoundEffectNode": "sound_effect",
 }

@@ -343,9 +343,9 @@ def test_clicking_a_dumps_save_face_lights_it_up():
 
 def _clip_node(**extra):
     node = {
-        "id": "c1", "type": "clip_previous", "label": "Clip Previous",
+        "id": "c1", "type": "replay_buffer", "label": "Replay Buffer",
         "x": 0.0, "y": 0.0, "ready": True, "connected": True,
-        "declarative": False, "selection_label": "Clip Previous",
+        "declarative": False, "selection_label": "Replay Buffer",
         "description": "", "window": 60.0, "clip_path": "",
         "clip_state": "idle",
     }
@@ -353,14 +353,14 @@ def _clip_node(**extra):
     return node
 
 
-def test_a_clip_previous_shows_its_window_on_its_body():
+def test_a_replay_buffer_shows_its_window_on_its_body():
     """Kyle: "add a clip previous node that allows me to quick clip the last N
     seconds, it should have a number box with the number of seconds it holds,
     there should be a clip button that when pressed locks in the last 60 seconds
     into its output sound"."""
     from gui import node_specs
 
-    assert node_specs.spec_for("clip_previous").control == "clip_previous"
+    assert node_specs.spec_for("replay_buffer").control == "replay_buffer"
 
     w, client = _widget()
     w.update_from_daemon({"nodes": {"c1": _clip_node()},
@@ -385,7 +385,7 @@ def test_a_clip_previous_shows_its_window_on_its_body():
     w.on_draw(w, cairo.Context(surf), 700, 600)
 
 
-def test_a_clip_previouss_face_and_row_do_not_overlap():
+def test_a_replay_buffers_face_and_row_do_not_overlap():
     """The Clip face and the window row are stacked on the body: the face
     first, then the row.  The same mistake a dump made - leaving the face out of
     the node's height - drew them on top of each other."""
@@ -462,3 +462,32 @@ def test_a_lone_socket_sits_below_a_wrapped_header():
     import cairo
     surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, 700, 500)
     w.on_draw(w, cairo.Context(surf), 700, 500)
+
+
+def test_a_replay_buffer_keeps_the_window_the_daemon_reports():
+    """Kyle: "when I click the textbox says 60s but the field shows 0s and on
+    launch it didn't follow the value I set."
+
+    The GUI keeps only the daemon fields it knows about for each node, and
+    `window` was not among them: the body's box fell back to 0 however many
+    seconds the node was keeping, while the editor (which falls back to 60) said
+    something else.  The node's own read-out has to survive the merge."""
+    w, client = _widget()
+    w.update_from_daemon({
+        "nodes": {"c1": dict(_clip_node(), window=12.5, clip_path="/tmp/x.wav",
+                             clip_state="saved")},
+        "edges": {}, "panels": [], "groups": []})
+
+    assert w.nodes["c1"]["window"] == 12.5
+    assert w.nodes["c1"]["clip_state"] == "saved"
+    assert w.nodes["c1"]["clip_path"] == "/tmp/x.wav"
+
+
+def test_the_old_clip_previous_type_key_still_loads():
+    """It was renamed to Replay Buffer, so a session saved under the old key has
+    to keep working."""
+    import main
+
+    assert "replay_buffer" in main.NODE_TYPE_REGISTRY
+    assert main.NODE_TYPE_REGISTRY.get("clip_previous") is \
+        main.NODE_TYPE_REGISTRY["replay_buffer"]

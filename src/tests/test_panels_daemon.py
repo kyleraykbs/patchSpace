@@ -936,3 +936,27 @@ def test_exclude_is_written_live_inside_a_panel(tmp_path):
 
     params = json.load(open(kit_path))["config"]["nodes"]["f"]["params"]
     assert params["exclude"] is True
+
+
+def test_a_replay_buffers_window_is_saved_live_inside_a_panel(tmp_path):
+    """Kyle: "it should persist across reboots & be stored in the node."
+
+    The window is the node's own setting - edited from its body while the graph
+    runs - so it is written with the layout rather than frozen with the params
+    the snapshot holds, the same as a filter's exclude switch."""
+    d, root, pdir = _daemon(tmp_path)
+    d.panels = d._load_panels_tree()
+    d.handle_command({"command": "add_node", "node_type": "replay_buffer",
+                      "node_id": "rb", "config": {"window": 60.0}})
+    assert d._cmd_create_panel({"name": "kit", "node_ids": ["rb"]})["status"] == "ok"
+    kit_path = os.path.join(pdir, "kit.json")
+
+    node = d.space.nodes["kit::rb"]
+    assert node.window == 60.0, "the default is a minute"
+    node.window = 12.5
+    d._write_panels()
+
+    params = json.load(open(kit_path))["config"]["nodes"]["rb"]["params"]
+    assert params["window"] == 12.5
+    # And it comes back: the file is what a reboot reads.
+    assert d._export_node_params("kit::rb", node)["params"]["window"] == 12.5
