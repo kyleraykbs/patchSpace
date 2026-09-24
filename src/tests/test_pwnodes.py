@@ -9,6 +9,7 @@ from pwproc import Backoff
 from pwmatch import INTERNAL_MEDIA_CLASS, SOURCE_MEDIA_CLASSES
 from pwnodes import (
     AppClassifierNode,
+    ClipPreviousNode,
     AppNameClassifierNode,
     TitleClassifierNode,
     PatchSpace,
@@ -1593,3 +1594,51 @@ def test_panel_boolean_input_accepts_multiple_edges():
     space.sync()
     assert space.nodes["gate"].bool_driven is True
     assert space.nodes["gate"].bool_state is False
+
+
+def test_clip_previous_keeps_the_last_window_of_a_take(tmp_path, monkeypatch):
+    """A Clip Previous is a retrospective take: it records continuously, and
+    Clip keeps the last ``window`` seconds of what it recorded.
+
+    The take is a plain WAV of raw s16 frames, so the clip is the *tail* of the
+    file rather than a re-encode - the bytes are already there when you press
+    Clip, which is the whole point of the node."""
+    node = ClipPreviousNode("cp1", 2.0)
+    monkeypatch.setattr(ClipPreviousNode, "RECORD_DIR", str(tmp_path))
+
+    # Five seconds of a recognisable pattern as the take.
+    frames = b"\x01\x00" * (node.RECORD_CHANNELS * node.RECORD_RATE * 5)
+    with open(node.take_path, "wb") as handle:
+        handle.write(ClipPreviousNode._wav_header(
+            len(frames), node.RECORD_RATE, node.RECORD_CHANNELS
+        ))
+        handle.write(frames)
+
+    tail = node._read_tail(2.0)
+    assert len(tail) == node.frame_bytes * 2, "exactly the window's worth"
+
+    # What it writes is a readable WAV of those frames.
+    target = node.clip_target
+    node._write_wav(target, tail)
+    raw = open(target, "rb").read()
+    assert raw[:4] == b"RIFF" and raw[8:12] == b"WAVE"
+    assert raw.find(b"data") == 36
+    assert raw[44:] == frames[len(frames) - len(tail):], "the tail of the take"
+
+
+def test_clip_previous_drops_a_partial_frame(tmp_path, monkeypatch):
+    """The take is read *while* it is being written, so its last frame can be
+    half there.  A partial frame is not audio and would skew everything after
+    it, so only whole frames are taken."""
+    node = ClipPreviousNode("cp2", 1.0)
+    monkeypatch.setattr(ClipPreviousNode, "RECORD_DIR", str(tmp_path))
+    frames = b"\x00\x00" * (node.RECORD_CHANNELS * node.RECORD_RATE * 3)
+    with open(node.take_path, "wb") as handle:
+        handle.write(ClipPreviousNode._wav_header(
+            len(frames), node.RECORD_RATE, node.RECORD_CHANNELS
+        ))
+        handle.write(frames + b"\x00")  # half a frame
+
+    tail = node._read_tail(1.0)
+    assert len(tail) % node.bytes_per_frame == 0
+    assert len(tail) >= node.frame_bytes - node.bytes_per_frame

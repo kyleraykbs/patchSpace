@@ -2499,6 +2499,155 @@ class RecorderNode(_SingleSinkNode):
         if self._recorder is not None and not self._recorder.is_alive:
             self._recorder = None
 
+class ClipPreviousNode(RecorderNode):
+    """Keeps the last few seconds of what is wired into it, and hands them out.
+
+    A retrospective take: it is a Recorder that never stops, so the clip is
+    already there when you want it - you press Clip *after* the thing you
+    wanted to keep happened.  ``window`` is how much it holds, and pressing
+    Clip locks the last ``window`` seconds in as a file the sound output then
+    points at, ready for a Sound Player or a Clip.
+
+    The take is a plain WAV of raw ``s16`` frames (see RecorderNode), so the
+    clip is byte arithmetic rather than a re-encode: the last ``window``
+    seconds are the last ``window * rate * channels * 2`` bytes of the file,
+    behind a header this node writes itself.  The file being written *is* read
+    while it is being written - fine on Linux - and the take is restarted on
+    every clip, which is what keeps it from growing without limit."""
+
+    DEFAULT_WINDOW_S = 60.0
+    #: Clips land here, one fixed file per node like the take itself.
+    CLIP_STATE = ("idle", "saving", "saved", "failed")
+
+    def __init__(self, node_id, window: float = DEFAULT_WINDOW_S,
+                 backing_node_name: Optional[str] = None,
+                 pw_cli_command=("pw-cli",), settle: float = 0.3):
+        super().__init__(node_id, backing_node_name, pw_cli_command, settle)
+        self.window = max(1.0, float(window or self.DEFAULT_WINDOW_S))
+        #: The file the last clip wrote ("" until one has), which is what the
+        #: sound output resolves to.
+        self.clip_path = ""
+        #: "idle" | "saving" | "saved" | "failed" - what the light shows.
+        self.state = "idle"
+        self._last_error = ""
+        self._clipping = False
+
+    @property
+    def clip_ext(self) -> str:
+        return ".wav"
+
+    @property
+    def bytes_per_frame(self) -> int:
+        return self.RECORD_CHANNELS * 2  # s16
+
+    @property
+    def frame_bytes(self) -> int:
+        """How many bytes one second of this take is."""
+        return self.RECORD_RATE * self.bytes_per_frame
+
+    @property
+    def clip_target(self) -> str:
+        """Where the next clip lands (the same file every time)."""
+        safe = re.sub(r"[^A-Za-z0-9_.-]", "_", str(self.id))
+        return os.path.join(
+            self.RECORD_DIR, f"{safe}_clip{self.clip_ext}"
+        )
+
+    def start_clip(self) -> None:
+        """Lock the last ``window`` seconds in - off the caller's thread.
+
+        Reading the tail is quick, but restarting the take stops and starts a
+        ``pw-cat`` child and relinks its ports, which is not something to do
+        while the daemon holds its command lock (the same reason a dump's
+        encode runs on its own thread)."""
+        if self._clipping:
+            return
+        self._clipping = True
+        self.state = "saving"
+        threading.Thread(target=self._clip_worker, daemon=True).start()
+
+    def _clip_worker(self) -> None:
+        try:
+            self._prune_recorder()
+            if not self.recording:
+                # Nothing has been captured yet: start a take and clip what
+                # there is of it, rather than pretending a clip was made.
+                self.start_take()
+            frames = self._read_tail(self.window)
+            if not frames:
+                self.state = "failed"
+                self._last_error = "nothing recorded yet"
+                logger.warning("Clip Previous %r had nothing to clip", self.id)
+                return
+            target = self.clip_target
+            os.makedirs(self.RECORD_DIR, exist_ok=True)
+            self._write_wav(target, frames)
+            self.clip_path = target
+            self.state = "saved"
+            self._last_error = ""
+            # Start the window over: the bytes just clipped are behind us, and
+            # this is what stops the take growing for as long as it runs.
+            self.stop_take()
+            self.start_take()
+        except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+            self.state = "failed"
+            self._last_error = str(exc)
+            logger.warning("Clip Previous %r couldn't clip: %s", self.id, exc)
+        finally:
+            self._clipping = False
+
+    def _read_tail(self, seconds: float) -> bytes:
+        """The last ``seconds`` of the take, as whole frames.
+
+        The footer is found rather than assumed at 44 bytes, and a partial
+        final frame is dropped, so the answer is always a readable WAV body."""
+        path = self.take_path
+        if not os.path.exists(path):
+            return b""
+        size = os.path.getsize(path)
+        with open(path, "rb") as handle:
+            header = handle.read(4096)
+            index = header.find(b"data")
+            offset = index + 8 if index >= 0 else 44
+            available = size - offset
+            if available <= 0:
+                return b""
+            want = int(seconds * self.frame_bytes)
+            take = min(want, available)
+            take -= take % self.bytes_per_frame
+            if take <= 0:
+                return b""
+            handle.seek(size - take)
+            return handle.read(take)
+
+    @staticmethod
+    def _wav_header(data_bytes: int, rate: int, channels: int) -> bytes:
+        """A canonical 44-byte WAV header for ``data_bytes`` of s16 PCM."""
+        import struct
+        block = channels * 2
+        return b"".join((
+            b"RIFF", struct.pack("<I", 36 + data_bytes), b"WAVE",
+            b"fmt ", struct.pack("<IHHIIHH", 16, 1, channels, rate,
+                                 rate * block, block, 16),
+            b"data", struct.pack("<I", data_bytes),
+        ))
+
+    def _write_wav(self, path: str, frames: bytes) -> None:
+        """Write ``frames`` as a WAV at ``path``, atomically enough that a
+        reader never sees half a header."""
+        temp = f"{path}.part"
+        with open(temp, "wb") as handle:
+            handle.write(self._wav_header(
+                len(frames), self.RECORD_RATE, self.RECORD_CHANNELS
+            ))
+            handle.write(frames)
+        os.replace(temp, path)
+
+    def port_kind(self, port: str, direction: str) -> str:
+        return "sound" if direction == "out" else "audio"
+
+
+
     def refresh_live(self) -> None:
         self._prune_recorder()
 
@@ -4555,6 +4704,11 @@ class PatchSpace:
             return None
         if isinstance(source, SoundNode):
             return {"path": source.path, "start": 0.0, "end": None}
+        if isinstance(source, ClipPreviousNode):
+            # A Clip Previous hands on the clip, not the take behind it: the
+            # clip is what a player should hear, and it is 0.0 until one is
+            # made (checked before RecorderNode, which it subclasses).
+            return {"path": source.clip_path, "start": 0.0, "end": None}
         if isinstance(source, RecorderNode):
             # A recorder's "file" is its take (and it only exists once one has
             # been made).

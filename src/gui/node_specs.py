@@ -553,6 +553,25 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
             ("name", "Name:", "text"),
         ],
     ),
+    # A Clip Previous: audio in, a *sound* out.  It records what is wired into
+    # it continuously - a retrospective take - so the last few seconds are
+    # always there to keep: pressing Clip locks the last `window` seconds in as
+    # a file the sound output points at, ready for a player or a Clip.
+    "clip_previous": NodeSpec(
+        "Clip Previous",
+        ["audio"],
+        ["out"],
+        sound_outputs=["out"],
+        control="clip_previous",
+        settings=[
+            (
+                "window",
+                "Window (seconds):",
+                "number",
+                {"min": 1, "max": 3600, "step": 1},
+            ),
+        ],
+    ),
     "recorder": NodeSpec(
         "Recorder",
         ["audio"],
@@ -951,6 +970,11 @@ NODE_DESCRIPTIONS: Dict[str, str] = {
     "recorder": "Records what is wired into it: an audio input, and a sound "
     "output pointing at the take.  Record starts a fresh take (overwriting the "
     "last), Stop finishes it, and the node shows the take's waveform and length.",
+    "clip_previous": "Keeps the last few seconds of what is wired into it: "
+    "an audio input, and a sound output pointing at the clip.  It records "
+    "continuously, so the clip is already there when you want it - press Clip "
+    "and the last N seconds become a file, a retrospective take you make "
+    "*after* the thing you wanted happened.",
     "sound_dump": "Writes the sound wired into it to a file whenever an "
     "impulse arrives: a sound input, an impulse input, and no outputs at all.  "
     "It saves to its folder and name as Opus, so what it writes is small and "
@@ -1103,6 +1127,7 @@ ADD_NODE_CATEGORIES = [
             ("Sound Dump", "sound_dump"),
             ("Recorder", "recorder"),
             ("Clip", "clip"),
+            ("Clip Previous", "clip_previous"),
         ],
     ),
     (

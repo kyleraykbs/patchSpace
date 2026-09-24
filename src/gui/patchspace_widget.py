@@ -2377,6 +2377,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 + self.DUMP_FACE_GAP
                 + self._dump_rows_height()
             )
+        if spec.control == "clip_previous":
+            # A Clip Previous's body: the same face, and one row under it.
+            return (
+                self.GATE_AREA_HEIGHT
+                + self.DUMP_FACE_GAP
+                + self._clip_rows_height()
+            )
         if spec.impulse_inputs and not self._impulse_wired(node["id"]):
             # An impulse input with nothing wired shows the node's own face to
             # fire it, above the read-out/switch rows (see _impulse_face_rect).
@@ -2901,6 +2908,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             # clearance for the socket labels is in the *node's* height, not
             # here, so growing it moves the face down rather than cancelling.
             rows = self._dump_rows_height() + self.FIELD_BOTTOM_PAD
+        if spec.control == "clip_previous":
+            rows = self._clip_rows_height() + self.FIELD_BOTTOM_PAD
         x = node["x"] + self.GATE_MARGIN
         w = self.NODE_WIDTH - 2 * self.GATE_MARGIN
         y = (node["y"] + self.node_height(nid) - rows
@@ -5593,6 +5602,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             )
         elif spec.control == "dump":
             self._draw_dump_fields(cr, pal, nid, node)
+        elif spec.control == "clip_previous":
+            self._draw_clip_fields(cr, pal, nid, node)
         elif spec.control == "gain":
             # Normalize's boost, drawn as a plain 0..1 slider (fraction
             # of the plugin's 0..30 dB range - see find_gain_slider_at).
@@ -6704,11 +6715,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         cr.stroke()
         # What pressing the face *does*, which differs by node: a player
         # plays, a dump saves.
-        label = (
-            "Save"
-            if spec_for(self.nodes[nid]["type"]).control == "dump"
-            else "Play"
-        )
+        # What pressing the face does, which is the node's *kind* rather than
+        # its type name: a player plays, a dump saves, a Clip Previous clips.
+        label = {
+            "dump": "Save",
+            "clip_previous": "Clip",
+        }.get(spec_for(self.nodes[nid]["type"]).control, "Play")
         # The press pulse the Button node's face has: eased in and back out so
         # it reads as a press rather than a one-frame blink (the tick repaints
         # while it runs - see _impulse_flash).
@@ -6890,7 +6902,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             return
 
         if (self.find_dump_picker_at(wx, wy) is not None
-                or self.find_dump_field_at(wx, wy) is not None):
+                or self.find_dump_field_at(wx, wy) is not None
+                or self.find_clip_field_at(wx, wy) is not None):
             self.set_cursor(Gdk.Cursor.new_from_name("pointer", None))
         elif self.find_record_button_at(wx, wy) is not None:
             self.set_cursor(Gdk.Cursor.new_from_name("pointer", None))
@@ -6955,6 +6968,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         dump_pick = self.find_dump_picker_at(wx, wy)
         if dump_pick is not None:
             self._pick_dump_folder(dump_pick)
+            return
+        clip_field = self.find_clip_field_at(wx, wy)
+        if clip_field is not None:
+            self._edit_clip_window(clip_field, x, y)
             return
         dump_field = self.find_dump_field_at(wx, wy)
         if dump_field is not None:
@@ -8369,6 +8386,97 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
         entry.connect("activate", apply)
         box.append(entry)
+        set_btn = Gtk.Button(label="Set")
+        set_btn.connect("clicked", apply)
+        box.append(set_btn)
+        popover.set_child(box)
+        self.popup_context_menu(popover, screen_x, screen_y)
+
+    def _clip_row_rect(self, nid):
+        """Geometry of a Clip Previous's one row: the seconds box, which gives
+        up room at its right end for the status light - the same light, in the
+        same place, a Sound Dump shows beside its folder row."""
+        node = self.nodes[nid]
+        x = node["x"] + self.FIELD_MARGIN
+        w = (
+            self.NODE_WIDTH - 2 * self.FIELD_MARGIN
+            - 2 * self.DUMP_LIGHT_R - self.DUMP_LIGHT_GAP
+        )
+        y = (
+            node["y"] + self.node_height(nid)
+            - self.FIELD_BOTTOM_PAD - self.FIELD_HEIGHT
+        )
+        return (x, y, w, self.FIELD_HEIGHT)
+
+    def _clip_rows_height(self):
+        """A Clip Previous has one row, where a dump has two."""
+        return self.FIELD_HEIGHT + self.FIELD_BOTTOM_PAD
+
+    def _draw_clip_fields(self, cr, pal, nid, node):
+        """A Clip Previous's body: a box holding how many seconds it keeps, and
+        the light that says what the last Clip did (idle / saving / saved /
+        failed, the same amber-green-red a dump shows)."""
+        x, y, w, h = self._clip_row_rect(nid)
+        draw_rounded_rect(cr, x, y, w, h, 4)
+        cr.set_source_rgb(*pal["field_bg"])
+        cr.fill_preserve()
+        cr.set_source_rgb(*pal["node_border"])
+        cr.set_line_width(1)
+        cr.stroke()
+        seconds = float(node.get("window") or 0.0)
+        draw_text_ellipsized(
+            cr, x + 6, y + (h - 10) // 2, f"{seconds:g} s", w - 12, 10,
+            pal["field_fg"],
+        )
+
+        state = str(node.get("clip_state") or "idle")
+        colour = {
+            "saving": (0.95, 0.76, 0.20),
+            "saved": pal["success"],
+            "failed": pal["error"],
+        }.get(state, (0.40, 0.40, 0.44))
+        lx = x + w + self.DUMP_LIGHT_GAP + self.DUMP_LIGHT_R
+        ly = y + h / 2.0
+        cr.arc(lx, ly, self.DUMP_LIGHT_R, 0, 2 * math.pi)
+        cr.set_source_rgb(*colour)
+        cr.fill()
+        if state == "saving":
+            cr.arc(lx, ly, self.DUMP_LIGHT_R + 2.5, 0, 2 * math.pi)
+            cr.set_line_width(1.2)
+            cr.stroke()
+
+    def find_clip_field_at(self, x, y):
+        """The Clip Previous whose seconds box is under the pointer."""
+        for nid, node in self._hit_nodes(x, y, require_ready=False):
+            if spec_for(node["type"]).control != "clip_previous":
+                continue
+            fx, fy, fw, fh = self._clip_row_rect(nid)
+            if fx <= x <= fx + fw and fy <= y <= fy + fh:
+                return nid
+        return None
+
+    def _edit_clip_window(self, nid, screen_x, screen_y):
+        """Type how many seconds a Clip Previous keeps - a spin button, the
+        same widget the settings dialog builds for a `number` spec."""
+        node = self.nodes.get(nid) or {}
+        popover = Gtk.Popover()
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        box.set_margin_top(6)
+        box.set_margin_bottom(6)
+        box.set_margin_start(6)
+        box.set_margin_end(6)
+        spin = Gtk.SpinButton.new_with_range(1.0, 3600.0, 1.0)
+        spin.set_value(float(node.get("window") or 60.0))
+
+        def apply(*_args):
+            value = float(spin.get_value())
+            node["window"] = value
+            self._send_property(nid, "window", value)
+            self.queue_draw()
+            popover.popdown()
+
+        spin.connect("activate", apply)
+        box.append(spin)
         set_btn = Gtk.Button(label="Set")
         set_btn.connect("clicked", apply)
         box.append(set_btn)

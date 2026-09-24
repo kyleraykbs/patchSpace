@@ -105,6 +105,7 @@ from pwnodes import (
     BundleOutputNode,
     SplitterNode,
     ClipNode,
+    ClipPreviousNode,
     RecorderNode,
     SoundNode,
     SoundPlayerNode,
@@ -355,6 +356,7 @@ NODE_TYPE_REGISTRY: Dict[str, type] = {
     "button": ButtonNode,
     "sound": SoundNode,
     "recorder": RecorderNode,
+    "clip_previous": ClipPreviousNode,
     "clip": ClipNode,
     "sound_player": SoundPlayerNode,
     "sound_dump": SoundDumpNode,
@@ -3841,6 +3843,8 @@ class PatchSpaceDaemon:
             return cls(node_id, g("folder", "~"), g("name", "sound"))
         if cls is ClipNode:
             return cls(node_id, g("start", 0.0), g("end"))
+        if cls is ClipPreviousNode:
+            return cls(node_id, g("window", 60.0), backing)
         if cls is RecorderNode:
             return cls(node_id, backing)
         if cls is SoundNode:
@@ -4381,13 +4385,17 @@ class PatchSpaceDaemon:
         if not node_id:
             return {"status": "error", "message": "node_id required"}
         node = self.space.nodes.get(node_id)
-        if isinstance(node, (SoundPlayerNode, SoundDumpNode)):
-            # A node whose *own face* fires it: a player's Play and a dump's
-            # Save (neither has an impulse output to pulse - a wire would be
-            # what triggers them).  A dump's encode runs on its own thread, so
-            # this must not hold the lock across it.
+        if isinstance(node, (SoundPlayerNode, SoundDumpNode,
+                            ClipPreviousNode)):
+            # A node whose *own face* fires it: a player's Play, a dump's Save
+            # and a Clip Previous's Clip (none has an impulse output to pulse -
+            # a wire would be what triggers them).  The work runs on the node's
+            # own thread, so this must not hold the lock across it.
             sound = self.space.resolve_sound(node_id)
-            if isinstance(node, SoundDumpNode):
+            if isinstance(node, ClipPreviousNode):
+                # It clips what it was *recording*, not what arrives here.
+                node.start_clip()
+            elif isinstance(node, SoundDumpNode):
                 node.start_dump(sound)
             else:
                 with self._lock:
@@ -4468,6 +4476,17 @@ class PatchSpaceDaemon:
                 # The Filter node's Include/Exclude switch: on = keep
                 # everything the title box / classifiers do *not* match.
                 node.exclude = bool(value)
+            elif prop == "window" and isinstance(node, ClipPreviousNode):
+                # How much a Clip Previous holds, in seconds.  Changing it
+                # applies to the *next* clip: the take already on disk stays as
+                # long as it is.
+                try:
+                    node.window = max(1.0, float(value))
+                except (TypeError, ValueError):
+                    return {
+                        "status": "error",
+                        "message": "window must be a number of seconds",
+                    }
             elif prop in ("folder", "name") and isinstance(node, SoundDumpNode):
                 # Where a Sound Dump writes: its folder and the file's name
                 # (the extension is added when it saves - see target_path).
@@ -5289,6 +5308,14 @@ class PatchSpaceDaemon:
                 data["dump_path"] = node.last_path
                 data["dump_state"] = node.state
                 data["duration"] = 0.0
+            if isinstance(node, ClipPreviousNode):
+                # The file the last Clip wrote, what it is doing (idle /
+                # saving / saved / failed, the same light a dump shows), and
+                # how much it holds.
+                data["clip_path"] = node.clip_path
+                data["clip_state"] = node.state
+                data["window"] = node.window
+                data["duration"] = node.duration
             if isinstance(node, SoundPlayerNode):
                 data["playing"] = node.playing
                 # How far into the sound it is, so the node can show a bar

@@ -339,3 +339,57 @@ def test_clicking_a_dumps_save_face_lights_it_up():
         constants.IMPULSE_FLASH_MS / 1000.0
     )
     assert w._impulse_flash_progress("d1") is None
+
+
+def _clip_node(**extra):
+    node = {
+        "id": "c1", "type": "clip_previous", "label": "Clip Previous",
+        "x": 0.0, "y": 0.0, "ready": True, "connected": True,
+        "declarative": False, "selection_label": "Clip Previous",
+        "description": "", "window": 60.0, "clip_path": "",
+        "clip_state": "idle",
+    }
+    node.update(extra)
+    return node
+
+
+def test_a_clip_previous_shows_its_window_on_its_body():
+    """Kyle: "add a clip previous node that allows me to quick clip the last N
+    seconds, it should have a number box with the number of seconds it holds,
+    there should be a clip button that when pressed locks in the last 60 seconds
+    into its output sound"."""
+    from gui import node_specs
+
+    assert node_specs.spec_for("clip_previous").control == "clip_previous"
+
+    w, client = _widget()
+    w.update_from_daemon({"nodes": {"c1": _clip_node()},
+                          "edges": {}, "panels": [], "groups": []})
+
+    # One row on the body, holding the seconds, and the status light inside the
+    # node beside it - the row gives up the room, so it can't fall off the edge.
+    x, y, width, height = w._clip_row_rect("c1")
+    assert w.find_clip_field_at(x + 2, y + height / 2.0) == "c1"
+    light_x = x + width + w.DUMP_LIGHT_GAP + w.DUMP_LIGHT_R
+    assert light_x + w.DUMP_LIGHT_R <= w.nodes["c1"]["x"] + w.NODE_WIDTH + 0.01
+
+    # It draws without error, which is what puts the row and the Clip face on
+    # screen.
+    import cairo
+    surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, 700, 600)
+    w.on_draw(w, cairo.Context(surf), 700, 600)
+
+
+def test_a_clip_previouss_face_and_row_do_not_overlap():
+    """The Clip face and the window row are stacked on the body: the face
+    first, then the row.  The same mistake a dump made - leaving the face out of
+    the node's height - drew them on top of each other."""
+    w, client = _widget()
+    w.update_from_daemon({"nodes": {"c1": _clip_node()},
+                          "edges": {}, "panels": [], "groups": []})
+
+    fx, fy, fw, fh = w._impulse_face_rect("c1")
+    rx, ry, rw, rh = w._clip_row_rect("c1")
+
+    assert fy + fh <= ry + 0.01, "the Clip face overlaps the window row"
+    assert ry + rh <= w.nodes["c1"]["y"] + w.node_height("c1") + 0.01
