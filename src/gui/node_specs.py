@@ -126,6 +126,7 @@ class NodeSpec:
         "sound_inputs",
         "sound_outputs",
         "socket_labels",
+        "label_lone_output",
         "description",
         "setting_tooltips",
         "toggle",
@@ -153,6 +154,7 @@ class NodeSpec:
         sound_inputs: Optional[List[str]] = None,
         sound_outputs: Optional[List[str]] = None,
         socket_labels: bool = True,
+        label_lone_output: bool = False,
         description: str = "",
         setting_tooltips: Optional[Dict[str, str]] = None,
         toggle: Optional[tuple] = None,
@@ -178,6 +180,11 @@ class NodeSpec:
         # for the symmetric boolean logic gates, whose two inputs are
         # interchangeable so "a"/"b" labels are just noise.
         self.socket_labels = socket_labels
+        # Whether a lone output socket is still named.  Off everywhere by
+        # default (a single "out" needs no label), but a Split Bundle's lines
+        # each carry a *different* member, so with one member the name is the
+        # only thing that says which one it is.
+        self.label_lone_output = label_lone_output
         # Which of inputs/outputs carry a *boolean control signal*
         # rather than audio (gray sockets, gray edges, never a PipeWire
         # link).  Every port not listed here is audio.
@@ -344,6 +351,9 @@ NODE_TYPE_SPECS: Dict[str, NodeSpec] = {
     "bundle_split": NodeSpec(
         "Split Bundle", ["bundle"], [],
         bundle_inputs=["bundle"],
+        # One output socket per live member, each named after the member: with
+        # a single member that name is still the point of the line.
+        label_lone_output=True,
     ),
     "bundle_to_audio": NodeSpec(
         "Bundle -> Audio", ["bundle"], ["out"],

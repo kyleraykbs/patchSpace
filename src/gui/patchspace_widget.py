@@ -2323,6 +2323,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             else:
                 need = top + bottom + self.SOCKET_MIN_STEP * (socket_count + 1)
             base = max(base, int(need))
+        elif socket_count == 1:
+            # A lone socket still has to fit *inside* its insets.  They are
+            # symmetric so it centres on the node, but reserving the wrapped
+            # header can push the insets past the height - which leaves the
+            # socket outside the band it is supposed to live in, drawn up
+            # against the header.  Same floor the multi-socket case uses.
+            top, bottom = self._socket_margins(node_id, node)
+            base = max(base, int(top + bottom + 2 * self.SOCKET_RADIUS))
         return base
 
     def _uses_compact_sockets(self, node):
@@ -2564,7 +2572,18 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             offset += self._device_header_bonus(node)
             offset += self._header_extra_height(node_id)
             offset += self._bottom_control_height(node)
-            return offset, offset
+            # The symmetric insets only hold while they cover the header: they
+            # cancel out of the centre, so the socket lands on the node's
+            # middle whatever they are, and a node whose header wraps to several
+            # lines (a Split Bundle's type name, its label, its id) had them
+            # centre it *inside* the title.  Raising `top` to clear the header
+            # moves the socket down to where the free space is; `bottom` keeps
+            # the old value so the body below is untouched.
+            # +14, not +4: the socket's own label is drawn *above* its centre
+            # (see _draw_node), so the clearance has to cover the label too, not
+            # just the circle.
+            header = self._header_stack_height(node_id, node) + 14
+            return max(offset, header), max(offset, 8)
 
         # Labelled sockets (more than one on a side, e.g. Echo Cancel or
         # a Split Bundle):
@@ -5706,7 +5725,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             # node body: the Switcher's short "a"/"b" right-aligned in a
             # narrow box, a Split Bundle's member lines in a wider box so
             # an app name is readable.  A lone "out" socket needs no label.
-            if multi_output and spec.socket_labels:
+            # A Split Bundle's lines each carry a *different* member, so its
+            # sockets are named even when there is only one line (see
+            # spec.label_lone_output); everywhere else a lone socket needs none.
+            if spec.socket_labels and (multi_output or spec.label_lone_output):
                 labels = node.get("output_labels")
                 if labels:
                     draw_text_ellipsized(

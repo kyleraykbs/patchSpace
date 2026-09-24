@@ -398,3 +398,67 @@ def test_a_clip_previouss_face_and_row_do_not_overlap():
 
     assert fy + fh <= ry + 0.01, "the Clip face overlaps the window row"
     assert ry + rh <= w.nodes["c1"]["y"] + w.node_height("c1") + 0.01
+
+
+def _split_widget(members):
+    """A Split Bundle reporting `members` as its live outputs."""
+    w, client = _widget()
+    ports = [f"m{i}" for i in range(len(members))]
+    w.update_from_daemon({
+        "nodes": {"s1": {
+            "id": "s1", "type": "bundle_split", "label": "Split Bundle",
+            "x": 0.0, "y": 0.0, "ready": True, "connected": True,
+            "declarative": False, "selection_label": "Split Bundle",
+            "description": "", "inputs": ["in"], "outputs": ports,
+            "bundle_members": [
+                {"port": p, "label": m} for p, m in zip(ports, members)
+            ]}},
+        "edges": {}, "panels": [], "groups": []})
+    return w
+
+
+def test_a_split_bundle_names_its_line_with_a_single_member():
+    """Kyle: "make split bundles always show the name and be positioned properly
+    even when there is only one node."
+
+    A Split Bundle reports one output per live member, and each line's name is
+    its member - the only thing that says which member it carries.  With a lone
+    member the label was skipped (labels were only drawn for 2+ sockets), so the
+    line was anonymous."""
+    w = _split_widget(["Firefox"])
+
+    assert w.nodes["s1"]["outputs"] == ["m0"]
+    assert w.nodes["s1"]["output_labels"] == {"m0": "Firefox"}, "the name to show"
+    from gui import node_specs
+
+    assert node_specs.spec_for("bundle_split").label_lone_output
+
+    # And it is the *drawn* rule, not just the data: with one socket the label
+    # is still wanted.
+    spec = node_specs.spec_for("bundle_split")
+    assert spec.socket_labels and (len(w.nodes["s1"]["outputs"]) > 1
+                                   or spec.label_lone_output)
+
+
+def test_a_lone_socket_sits_below_a_wrapped_header():
+    """The socket insets for a single socket are symmetric, which cancels out of
+    the centre - so the socket landed on the node's middle whatever they were.
+    A node whose header wraps to several lines (a Split Bundle's type name, its
+    label, its id) therefore centred the socket *inside its own title*."""
+    w = _split_widget(["Firefox"])
+    node = w.nodes["s1"]
+
+    sx, sy = w._socket_position("s1", "out", 0)
+    header = w._header_stack_height("s1", node)
+    assert sy - node["y"] > header, "the lone socket sits inside the header"
+    # The socket's own label hangs 5px above its centre, so the clearance has to
+    # cover the label too - not just the circle.
+    assert sy - node["y"] - 5 >= header
+    assert sy < node["y"] + w.node_height("s1"), "and stays on the node"
+    # Inside its own insets, not squeezed past them.
+    top, _bottom = w._socket_margins("s1", node)
+    assert top <= sy - node["y"]
+
+    import cairo
+    surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, 700, 500)
+    w.on_draw(w, cairo.Context(surf), 700, 500)
