@@ -612,6 +612,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         #: repainted for a non-structural change (see update_from_daemon).
         self._canvas_structure_sig = None
         self._canvas_drawn_at = 0.0
+        #: Pending one-shot post-mutation refresh (see schedule_refresh).
+        self._refresh_source = 0
         self.physics_active = True
         # Consecutive awake layout ticks since the last settle/sleep -
         # capped in on_layout_tick so a non-converging layout can't
@@ -703,6 +705,29 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
         GLib.timeout_add(REFRESH_INTERVAL_MS, self.refresh)
         GLib.timeout_add(LAYOUT_TICK_MS, self.on_layout_tick)
+
+    def schedule_refresh(self) -> None:
+        """Ask for a fresh snapshot once, shortly after a mutation.
+
+        Bursts collapse: many mutations in a row leave exactly one request
+        pending.  It is a one-shot, and that matters more than it looks -
+        `refresh` returns True (it is the periodic poll's callback), so the
+        mutation sites used to hand it straight to timeout_add and every action
+        the user took spawned one more *permanent* get_nodes poll timer.  They
+        accumulated with use, each one more request in flight and one more full
+        update per reply, which is what made the UI degrade the longer it was
+        used and froze it outright during a load (a load is a burst of
+        mutations)."""
+        if self._refresh_source:
+            return
+        self._refresh_source = GLib.timeout_add(
+            POST_MUTATION_REFRESH_MS, self._refresh_once
+        )
+
+    def _refresh_once(self) -> bool:
+        self._refresh_source = 0
+        self.refresh()
+        return False
 
     def refresh(self):
         self.client.send({"command": "get_nodes"})
@@ -998,7 +1023,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             node["meta"]["path"] = value
             self._send_property(nid, "path", value)
             self.queue_draw()
-            GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
+            self.schedule_refresh()
 
         open_file(
             self.get_root(),
@@ -7277,7 +7302,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self.nodes[nid]["force_default"] = enabled
             self._send_property(nid, "force_default", enabled)
             self.queue_draw()
-            GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
+            self.schedule_refresh()
             return
 
         nid = self.find_volume_lock_at(wx, wy)
@@ -7287,7 +7312,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             node["volume_locked"] = locked
             self._send_property(nid, "volume_locked", locked)
             self.queue_draw()
-            GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
+            self.schedule_refresh()
             return
 
         hit = self.find_device_row_at(wx, wy)
@@ -7344,7 +7369,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self._impulse_flash[nid] = time.monotonic()
             self._send_impulse(nid)
             self.queue_draw()
-            GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
+            self.schedule_refresh()
             return
 
         nid = self.find_toggle_switch_at(wx, wy)
@@ -7359,7 +7384,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self._pending_bool[(nid, attr)] = value
             self._send_property(nid, attr, value)
             self.queue_draw()
-            GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
+            self.schedule_refresh()
             return
 
         nid = self.find_mute_checkbox_at(wx, wy)
@@ -7428,7 +7453,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             # target - see node_specs.media_class_choices_for).
             def on_pick(value):
                 self._send_property(node_id, field, value)
-                GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
+                self.schedule_refresh()
 
             self._show_choice_popover(
                 screen_x,
@@ -7454,7 +7479,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         def apply_and_close(*_args):
             self._send_property(node_id, field, entry.get_text())
             popover.popdown()
-            GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
+            self.schedule_refresh()
 
         entry.connect("activate", apply_and_close)
         box.append(entry)
@@ -7631,7 +7656,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
         def on_pick(app_key, nid=nid):
             self._send_property(nid, "app_key", app_key)
-            GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
+            self.schedule_refresh()
 
         self._show_choice_popover(
             sx, sy, "Application:", [(a, a) for a in apps], on_pick,
@@ -7649,7 +7674,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
         def on_pick(title, nid=nid):
             self._send_property(nid, "title", title)
-            GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
+            self.schedule_refresh()
 
         self._show_choice_popover(
             sx, sy, "Title:", [(t, t) for t in titles], on_pick,
@@ -7687,7 +7712,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
         def on_pick(device_name, nid=nid):
             self._send_property(nid, "device_name", device_name)
-            GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
+            self.schedule_refresh()
 
         self._show_choice_popover(sx, sy, "Select device", choices, on_pick)
 
@@ -7711,7 +7736,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
             def on_name_pick(app_name, nid=nid):
                 self._send_property(nid, "app_name", app_name)
-                GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
+                self.schedule_refresh()
 
             self._show_choice_popover(
                 sx, sy, "Application:", [(n, n) for n in names], on_name_pick,
@@ -7728,7 +7753,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
         def on_pick(app_name, nid=nid):
             self._send_property(nid, "app_name", app_name)
-            GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
+            self.schedule_refresh()
 
         self._show_choice_popover(sx, sy, "Select application", choices, on_pick)
 
@@ -7897,7 +7922,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         land, so there's no separate "done" signal to wait for here."""
         self.client.send({"command": "load_session", "config": config})
         self._begin_load()
-        GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
+        self.schedule_refresh()
 
     # ------------------------------------------------------------------
     # panel files
@@ -8257,7 +8282,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         the bulk-load path so it's obvious work is happening."""
         self.client.send({"command": "rebuild"})
         self._begin_load()
-        GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
+        self.schedule_refresh()
 
     # ---------- export/import helpers (clipboard, file chooser) ----------
 
@@ -9361,11 +9386,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                                     "from_port": source_port,
                                 }
                             )
-                        GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
+                        self.schedule_refresh()
                 else:
                     self._retire_edge(eid)
                     self.client.send({"command": "remove_edge", "edge_id": eid})
-                    GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
+                    self.schedule_refresh()
             elif target_nid is not None:
                 if out_nid != target_nid:
                     existing_eid = self._edge_id(
@@ -9391,7 +9416,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                                 "from_port": source_port,
                             }
                         )
-                    GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
+                    self.schedule_refresh()
 
             self.connecting_from = None
             self.detaching_edge = None
@@ -9481,7 +9506,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         popover.popdown()
         self._start_node_ghost(node_id)
         self.client.send({"command": "remove_node", "node_id": node_id})
-        GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
+        self.schedule_refresh()
 
     def confirm_delete_selection(self):
         """Ask before deleting every selected node (the floating
@@ -9519,7 +9544,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 self._start_node_ghost(nid)
                 self.client.send({"command": "remove_node", "node_id": nid})
         self._set_selection(())
-        GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
+        self.schedule_refresh()
 
     def _on_open_settings(self, button, node_id, popover):
         popover.popdown()
@@ -9984,7 +10009,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                             meta[attr] = new_value
                             self._send_property(node_id, attr, new_value)
 
-            GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
+            self.schedule_refresh()
 
         dialog.destroy()
 
@@ -10942,7 +10967,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 },
             }
         )
-        GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
+        self.schedule_refresh()
 
     def _draw_panel_grid(self, cr, x, y, w, h, rgb):
         spacing = 40
@@ -11594,7 +11619,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         if eid:
             self._retire_edge(eid)
             self.client.send({"command": "remove_edge", "edge_id": eid})
-            GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
+            self.schedule_refresh()
             return
 
         nid = self.find_node_at(wx, wy, require_ready=False)
@@ -11784,7 +11809,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             }
         )
         popover.popdown()
-        GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
+        self.schedule_refresh()
 
     def _add_placeholder_node(self, real_type, node_id, config, cx, cy):
         """Show a node the instant the user adds it, translucent and
@@ -11874,7 +11899,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 "config": config,
             }
         )
-        GLib.timeout_add(POST_MUTATION_REFRESH_MS, self.refresh)
+        self.schedule_refresh()
 
     def _on_node_type_dropped(self, drop_target, value, x, y):
         wx, wy = self.to_world(x, y)

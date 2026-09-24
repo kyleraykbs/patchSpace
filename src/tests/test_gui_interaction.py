@@ -596,3 +596,38 @@ def test_the_layout_tick_does_not_repaint_a_settled_graph():
     w._hierarchical_step = lambda: 3.0
     w.on_layout_tick()
     assert drawn, "a moving layout did not repaint"
+
+
+def test_a_burst_of_mutations_leaves_no_polling_behind():
+    """Kyle: "ensure there is nothing else thats gonna freeze my ui".
+
+    The post-mutation refresh sites handed `refresh` straight to timeout_add -
+    but `refresh` returns True ("keep calling me"), because it is also the
+    periodic poll's callback.  So every action the user took spawned one more
+    *permanent* get_nodes poll timer, and they accumulated with use: more
+    requests in flight and more full updates per reply, the longer it ran."""
+    w, client = _widget()
+    w.update_from_daemon({"nodes": {"r1": {
+        "id": "r1", "type": "sound", "label": "Sound", "x": 0.0, "y": 0.0,
+        "ready": True, "connected": True, "declarative": False,
+        "selection_label": "Sound", "description": "", "path": "/tmp/x.wav"}},
+        "edges": {}, "panels": [], "groups": []})
+    sent = []
+    client.send = lambda cmd: sent.append(cmd)
+
+    # Ten actions leave exactly one pending refresh, not ten timers.
+    ids = set()
+    for _ in range(10):
+        w.schedule_refresh()
+        ids.add(w._refresh_source)
+    assert len(ids) == 1 and 0 not in ids, "ten mutations scheduled %d timers" % len(ids)
+
+    # That refresh runs once and leaves nothing behind.
+    src = w._refresh_source
+    assert w._refresh_once() is False, "a scheduled refresh must not repeat"
+    assert w._refresh_source == 0
+    assert len([c for c in sent if c.get("command") == "get_nodes"]) == 1
+
+    # A later mutation schedules again on its own.
+    w.schedule_refresh()
+    assert w._refresh_source not in (0, src)
