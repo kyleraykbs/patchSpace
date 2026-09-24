@@ -4,16 +4,35 @@ layer and serialization shapes the GUI depends on."""
 
 import os
 import pathlib
+import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+
+import pytest
 
 from main import PatchSpaceDaemon
 from pwnodes import BackedNode, Node
 import main as main_mod
 from pwgraph import PipewireGraph
+
+
+@pytest.fixture
+def short_socket_dir():
+    """A directory short enough for an AF_UNIX socket.
+
+    pytest's tmp_path already runs to ~70 characters here, and the test's own
+    name is appended to it - so a long name pushed the socket path past the
+    108-character limit and these tests failed with "AF_UNIX path too long"
+    depending only on where the run happened."""
+    directory = tempfile.mkdtemp(prefix="ps-")
+    try:
+        yield directory
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
 
 
 def fresh_daemon():
@@ -1456,10 +1475,10 @@ def test_validate_session_reports_without_mutating(monkeypatch):
     assert set(d.space.edges) == before
 
 
-def test_another_daemon_running_detects_live_listener(monkeypatch, tmp_path):
+def test_another_daemon_running_detects_live_listener(monkeypatch, short_socket_dir):
     """A live listener on the socket counts; a bare leftover socket file
     (crashed run) does not."""
-    path = str(tmp_path / "patchspace.sock")
+    path = os.path.join(short_socket_dir, "patchspace.sock")
     monkeypatch.setattr(main_mod, "SOCKET_PATH", path)
     assert main_mod.PatchSpaceDaemon._another_daemon_running() is False
 
@@ -1472,10 +1491,11 @@ def test_another_daemon_running_detects_live_listener(monkeypatch, tmp_path):
         srv.close()
 
 
-def test_start_refuses_when_another_daemon_is_listening(monkeypatch, tmp_path):
+def test_start_refuses_when_another_daemon_is_listening(
+        monkeypatch, short_socket_dir):
     """A second daemon must not unlink the live socket and start up; it
     should bail out before touching the graph."""
-    path = str(tmp_path / "patchspace.sock")
+    path = os.path.join(short_socket_dir, "patchspace.sock")
     monkeypatch.setattr(main_mod, "SOCKET_PATH", path)
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     srv.bind(path)
