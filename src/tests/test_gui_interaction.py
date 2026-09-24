@@ -566,3 +566,33 @@ def test_a_replay_buffers_light_follows_what_it_is_doing():
     assert green == pal["success"], "a landed clip should read green"
     assert red == pal["error"], "a failure should read red"
     assert len({amber, green, red, grey}) == 4, "the four states must differ"
+
+
+def test_the_layout_tick_does_not_repaint_a_settled_graph():
+    """Kyle: "If I resize it a whole bunch then scroll out the ui freezes."
+
+    The layout tick repainted unconditionally, and it runs at 30Hz whether or not
+    the graph has settled - so a still canvas was redrawn about twice a second
+    for ever, and those redraws queued up behind each other while a resize was in
+    flight."""
+    w, client = _widget()
+    w.update_from_daemon({"nodes": {"r1": {
+        "id": "r1", "type": "sound", "label": "Sound", "x": 0.0, "y": 0.0,
+        "ready": True, "connected": True, "declarative": False,
+        "selection_label": "Sound", "description": "", "path": "/tmp/x.wav"}},
+        "edges": {}, "panels": [], "groups": []})
+
+    w.layout_awake = True
+    drawn = []
+    w.queue_draw = lambda *a, **k: drawn.append(1)
+
+    # A step that moves nothing must not repaint...
+    w._hierarchical_step = lambda: 0.0
+    for _ in range(5):
+        w.on_layout_tick()
+    assert drawn == [], "a settled layout repainted the canvas"
+
+    # ...and one that moves something must.
+    w._hierarchical_step = lambda: 3.0
+    w.on_layout_tick()
+    assert drawn, "a moving layout did not repaint"

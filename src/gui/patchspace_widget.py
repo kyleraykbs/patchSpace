@@ -2027,7 +2027,14 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self._settle_ticks = 0
             self._mark_layout_dirty()
 
-        self.queue_draw()
+        # Repaint only when the step actually moved something.  This tick runs
+        # at 30Hz whether or not the layout is settled, and a frame costs tens
+        # of milliseconds on a large graph (measured 26-47ms at 105 nodes), so
+        # an unconditional repaint redrew the whole canvas about twice a second
+        # for ever - and while a window resize is in flight those redraws queue
+        # up behind each other, which is what makes the window stop responding.
+        if max_delta > 0.0:
+            self.queue_draw()
         return True
 
     def _hierarchical_step(self):
