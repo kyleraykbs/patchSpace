@@ -610,9 +610,14 @@ def test_a_sound_dump_writes_what_is_wired_into_it(tmp_path):
     assert written.exists() and written.stat().st_size > 0
     assert node.last_path == str(written)
 
-    # An explicit extension is left alone rather than doubled.
+    # An audio extension is *replaced*: the name is the user's, the extension
+    # is what the file is.
     node.name = "named.opus"
     assert node.target_path == str(tmp_path / "named.opus")
+    node.name = "sound.mp3"
+    assert node.target_path == str(tmp_path / "sound.opus")
+    node.name = "no extension"
+    assert node.target_path == str(tmp_path / "no extension.opus")
 
     # Nothing wired: nothing written, and no crash.
     node.on_impulse({})

@@ -1868,11 +1868,22 @@ class SoundDumpNode(Node):
             return "impulse"
         return "sound" if port == "sound" else "impulse"
 
+    #: Extensions the encoder replaces rather than appends to: a name of
+    #: "take.mp3" lands as "take.opus", not "take.mp3.opus".
+    REPLACED_EXTS = (".wav", ".mp3", ".flac", ".ogg", ".oga", ".opus", ".m4a",
+                     ".aac", ".aiff", ".aif", ".wma", ".opus")
+
     @property
     def target_path(self) -> str:
-        """Where the next dump lands: the folder, the name, and the extension."""
+        """Where the next dump lands: the folder, the name, and the extension.
+
+        The extension is what the file *is*, so a name carrying an audio one has
+        it replaced by the encoder's, and one without gets it appended."""
         name = str(self.name or "sound").strip() or "sound"
-        if not name.endswith("." + self.DEFAULT_EXT):
+        stem, ext = os.path.splitext(name)
+        if ext.lower() in self.REPLACED_EXTS:
+            name = f"{stem}.{self.DEFAULT_EXT}"
+        elif not ext:
             name = f"{name}.{self.DEFAULT_EXT}"
         return os.path.join(os.path.expanduser(self.folder or "~"), name)
 

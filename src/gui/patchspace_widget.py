@@ -2365,6 +2365,16 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 len(rows) * (self.FIELD_HEIGHT + 4) + self.FIELD_BOTTOM_PAD
             )
         spec = spec_for(node["type"])
+        if spec.control == "dump":
+            # A Sound Dump's own body: the face, its two rows, and clearance
+            # between the face and the socket labels above it.  This has to be
+            # checked *before* the generic impulse-face branch below, which a
+            # dump also matches - it has an unwired impulse input.
+            return (
+                self.GATE_AREA_HEIGHT
+                + self.DUMP_FACE_GAP
+                + self._dump_rows_height()
+            )
         if spec.impulse_inputs and not self._impulse_wired(node["id"]):
             # An impulse input with nothing wired shows the node's own face to
             # fire it, above the read-out/switch rows (see _impulse_face_rect).
@@ -2389,14 +2399,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             # The Clip's timeline owns the bottom of the node and is taller
             # than the button faces.
             return self.CLIP_AREA_HEIGHT
-        if spec.control == "dump":
-            # The impulse face *and* two text rows (folder, then name) below it
-            # - see _dump_row_rect.  Leaving the face out put it on top of the
-            # rows, which is what drew them on top of each other.
-            return (
-                self.GATE_AREA_HEIGHT
-                + self._dump_rows_height()
-            )
         if spec.control in ("gate", "switcher", "boolean", "impulse",
                             "filter_mode"):
             # The impulse Button's face and the Filter node's Include/Exclude
@@ -2892,7 +2894,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         if spec.toggle:
             rows += self.TOGGLE_ROW_GAP + self.TOGGLE_ROW_HEIGHT
         if spec.control == "dump":
-            # A Sound Dump's own two rows sit there instead of one field.
+            # A Sound Dump's own two rows sit there instead of one field.  The
+            # clearance for the socket labels is in the *node's* height, not
+            # here, so growing it moves the face down rather than cancelling.
             rows = self._dump_rows_height() + self.FIELD_BOTTOM_PAD
         x = node["x"] + self.GATE_MARGIN
         w = self.NODE_WIDTH - 2 * self.GATE_MARGIN
@@ -8194,6 +8198,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     #: Gap between those rows, pixels.
     DUMP_ROW_GAP = 6.0
+
+    #: Clearance between a Sound Dump's face and the socket labels above it.
+    #: The body of a dump is two rows of text tall, so without this the last
+    #: socket's label hangs into the Save button.
+    DUMP_FACE_GAP = 14.0
 
     def _dump_rows_height(self) -> float:
         """How tall a Sound Dump's rows are, in total - the one place that

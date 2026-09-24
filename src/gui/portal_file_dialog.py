@@ -207,7 +207,9 @@ def select_folder(
     if folder:
         # The portal takes a path as a byte array with a trailing NUL.
         options["current_folder"] = GLib.Variant("ay", folder.encode() + b"\x00")
-    _call_portal("Open", title, options, handle_paths, handle_unavailable)
+    # The interface's method is OpenFile (there is no plain "Open"); the
+    # directory option is what makes it pick a folder.
+    _call_portal("OpenFile", title, options, handle_paths, handle_unavailable)
 
 
 def open_file(
