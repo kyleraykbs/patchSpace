@@ -1678,7 +1678,7 @@ _DURATION_CACHE: Dict[str, float] = {}
 
 #: How many (min, max) pairs a waveform is reduced to.  Enough for a wide
 #: timeline to look like a waveform, small enough to hand to the GUI whole.
-PEAK_BUCKETS = 600
+PEAK_BUCKETS = 900
 
 def sound_rev(path: str) -> str:
     """A revision for the file behind a sound path: mtime and size.
@@ -2531,6 +2531,9 @@ class ReplayBufferNode(RecorderNode):
         self.state = "idle"
         self._last_error = ""
         self._clipping = False
+        #: When the last clip landed, so the read-out can show green for a
+        #: moment before going back to "capturing" (see sync_take).
+        self._saved_at = 0.0
 
     @property
     def clip_ext(self) -> str:
@@ -2553,22 +2556,44 @@ class ReplayBufferNode(RecorderNode):
             self.RECORD_DIR, f"{safe}_clip{self.clip_ext}"
         )
 
-    def sync_take(self, wired: bool) -> None:
-        """Keep a take running exactly while something is wired in.
+    #: How many windows' worth of take to keep before restarting it.  The clip
+    #: only ever reads the *tail*, so a longer file is harmless; this just stops
+    #: it growing without bound over a long session.
+    TAKE_WINDOWS = 4
 
-        A Replay Buffer has no Record button: the whole point is that the take
-        was *already* running when the thing you wanted to keep happened, so it
-        starts the moment its input is connected and stops when the wire goes
-        away - which is also what makes its indicator read grey rather than
-        green for an unplugged node."""
+    def sync_take(self) -> None:
+        """Keep capturing, so the buffer always holds the last ``window``.
+
+        A Replay Buffer has no Record button: the point of a retrospective take
+        is that it was *already* running when the thing you wanted to keep
+        happened.  So it simply always tries to capture - plugged in or not, in
+        which case it is holding silence - and the read-out says whether it is
+        actually capturing rather than this deciding for it.
+
+        The take is *not* restarted on each clip (that left the window short for
+        a second or so after every press, which reads as the node "not
+        capturing").  It is only restarted once it has grown past
+        ``TAKE_WINDOWS`` windows, so the window is essentially always full."""
         self._prune_recorder()
-        if not wired:
-            if self.recording:
-                self.stop_take()
-            return
-        if not self.recording:
-            if not self.start_take():
-                logger.warning("Replay Buffer %r couldn't start recording", self.id)
+        # A clip that just landed stays shown as such for a moment, so pressing
+        # Clip is visibly acknowledged before the read-out goes back to saying it
+        # is capturing.
+        if self.state == "saved" and _time.monotonic() - self._saved_at > 1.5:
+            self.state = "capturing"
+        if self.recording:
+            try:
+                grown = os.path.getsize(self.take_path) > (
+                    self.TAKE_WINDOWS * self.window * self.frame_bytes
+                )
+            except OSError:
+                grown = False
+            if not grown:
+                return
+            self.stop_take()
+        if not self.start_take():
+            logger.warning("Replay Buffer %r couldn't start recording", self.id)
+        elif self.state == "idle":
+            self.state = "capturing"
 
     def start_clip(self) -> None:
         """Lock the last ``window`` seconds in - off the caller's thread.
@@ -2583,8 +2608,18 @@ class ReplayBufferNode(RecorderNode):
         self.state = "saving"
         threading.Thread(target=self._clip_worker, daemon=True).start()
 
+    #: How long to let the capture settle before reading the tail.  What the
+    #: user is *hearing* is behind what has been captured (the output chain has
+    #: latency of its own), so a press should include the moment they pressed
+    #: rather than cut just before it.  Small enough not to be felt as a delay.
+    CAPTURE_SETTLE_S = 0.12
+
     def _clip_worker(self) -> None:
         try:
+            # Let the last fraction of a second reach the file first, so the
+            # clip contains the audio the user was listening to when they
+            # pressed rather than stopping just short of it.
+            _time.sleep(self.CAPTURE_SETTLE_S)
             self._prune_recorder()
             if not self.recording:
                 # Nothing has been captured yet: start a take and clip what
@@ -2601,11 +2636,12 @@ class ReplayBufferNode(RecorderNode):
             self._write_wav(target, frames)
             self.clip_path = target
             self.state = "saved"
+            self._saved_at = _time.monotonic()
             self._last_error = ""
-            # Start the window over: the bytes just clipped are behind us, and
-            # this is what stops the take growing for as long as it runs.
-            self.stop_take()
-            self.start_take()
+            # The take keeps running: restarting it here left the window short
+            # for a moment after every press, which reads as the node having
+            # stopped capturing.  sync_take restarts it only once the file has
+            # grown well past the window, so the window stays full.
         except Exception as exc:  # noqa: BLE001 - reported, not swallowed
             self.state = "failed"
             self._last_error = str(exc)
@@ -5139,7 +5175,7 @@ class PatchSpace:
                 if not isinstance(node, ReplayBufferNode):
                     continue
                 try:
-                    node.sync_take(self._node_has_input(node.id))
+                    node.sync_take()
                 except Exception as exc:
                     logger.warning("Replay Buffer %r failed: %s", node.id, exc)
 

@@ -1657,28 +1657,19 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     stale = bool(source) and (
                         source != known or rev != self._clip_wave_rev.get(nid)
                     )
-                    # Loading a waveform costs the daemon an ffmpeg pass over
-                    # the whole file, so a file still being recorded is not
-                    # followed at all - the timeline shows an empty line while
-                    # the take runs, and the waveform lands when it ends.
-                    # Beyond that, a file that changes is loaded no oftener
-                    # than the leash allows.
-                    being_recorded = source in recording_paths
-                    if being_recorded and nid in self._clip_waves:
-                        # Blank it - the previous take's shape is not this one -
-                        # but *keep the entry*: the timeline's view state (zoom,
-                        # the drag handles, the selection) is kept beside it, and
-                        # dropping the entry took those with it.
-                        self._clip_waves[nid]["peaks"] = []
-                        self._clip_waves[nid]["duration"] = 0.0
+                    # A file still being recorded *is* followed, throttled by the
+                    # same leash: a Replay Buffer's whole job is to show you the
+                    # window it is holding, and a blank timeline while it
+                    # captured read as "not capturing at all".  The pass costs
+                    # the daemon an ffmpeg read over the file, so the leash (and
+                    # the daemon's own probe floor) bound how often.
                     was_recording = self._sound_recording.get(nid)
                     now_recording = bool(ndata.get("recording", False))
                     self._sound_recording[nid] = now_recording
                     take_ended = was_recording is True and not now_recording
                     due = (now - self._clip_wave_asked.get(nid, 0.0)
                            >= self.SOUND_WAVE_MIN_INTERVAL_MS / 1000.0)
-                    if stale and source not in recording_paths \
-                            and (due or take_ended) \
+                    if stale and (due or take_ended) \
                             and nid not in self._clip_wave_pending:
                         self._clip_wave_pending.add(nid)
                         self._clip_wave_asked[nid] = now
@@ -8522,17 +8513,24 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             cr.stroke()
 
     def _replay_light_colour(self, node, pal):
-        """A Replay Buffer's status light.
+        """A Replay Buffer's status light, in four states:
 
-        Green while it is actually recording, red when a clip failed, grey when
-        nothing is plugged in (the node stops its take when its input goes away,
-        see ReplayBufferNode.sync_take) - so the light says whether the buffer is
-        *holding* anything, which is the only thing worth knowing about it."""
-        if node.get("recording"):
+        amber while it is *capturing* the sliding window, green once a clip has
+        landed, red when capturing or writing failed, grey when it is holding
+        nothing at all - so one glance says whether the buffer is ready to give
+        you the last N seconds or not."""
+        state = str(node.get("clip_state") or "idle")
+        if state == "failed":
+            return pal["error"]              # red: it could not capture or write
+        if state == "saved":
+            # Green just after a clip lands - it outranks the amber below, or a
+            # press could never be seen at all on a node that is always
+            # capturing.  The daemon drops it back to "capturing" after a
+            # moment.
             return pal["success"]
-        if str(node.get("clip_state") or "idle") == "failed":
-            return pal["error"]
-        return (0.40, 0.40, 0.44)
+        if node.get("recording"):
+            return (0.95, 0.76, 0.20)        # amber: capturing the window
+        return (0.40, 0.40, 0.44)            # grey: not capturing
 
     def find_clip_field_at(self, x, y):
         """The Replay Buffer whose seconds box is under the pointer."""

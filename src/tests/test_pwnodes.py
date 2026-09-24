@@ -1681,7 +1681,7 @@ def test_pressing_clip_writes_the_clip_file(tmp_path, monkeypatch):
     assert len(raw) == 44 + node.frame_bytes * 2
 
 
-def test_a_replay_buffer_records_while_something_is_wired_in(monkeypatch):
+def test_a_replay_buffer_keeps_capturing_its_window(tmp_path, monkeypatch):
     """Kyle: "Make sure the replay buffer is running by default when something
     is plugged in."
 
@@ -1700,22 +1700,32 @@ def test_a_replay_buffer_records_while_something_is_wired_in(monkeypatch):
             self.is_alive = False
 
     started = []
-    monkeypatch.setattr(ReplayBufferNode, "start_take",
-                        lambda self: started.append(self.id) or True)
 
-    # Nothing wired in: it must not record.
+    def _start(self):
+        started.append(self.id)
+        self._recorder = _Proc()
+        return True
+
+    monkeypatch.setattr(ReplayBufferNode, "start_take", _start)
+
+    # It captures whether or not anything is wired in: an unplugged buffer is
+    # holding silence, and the read-out is what says it is not getting anything
+    # useful.  (It used to stop its take when the wire went away, which left the
+    # window empty - the node read as "not capturing at all".)
     space.supervise()
-    assert started == []
-    assert rb.recording is False
+    assert started == ["rb"], "the buffer did not start capturing"
 
-    # Something wired in: it starts.
-    space.nodes["src"] = InputNode("src")
-    space.edges["e1"] = Edge("e1", "src", "rb")
+    # It keeps capturing: the take is not restarted on every tick.
     space.supervise()
-    assert started == ["rb"], "the buffer did not start recording"
+    assert started == ["rb"], "the take was restarted for nothing"
 
-    # The wire goes away again: the take stops.
+    # Only a take that has grown well past the window is restarted, so the
+    # window stays full instead of empty after every clip.
     rb._recorder = _Proc()
-    space.edges = {}
+    rb.window = 1.0
+    monkeypatch.setattr(ReplayBufferNode, "take_path",
+                        property(lambda self: str(tmp_path / "take.wav")))
+    with open(tmp_path / "take.wav", "wb") as fh:
+        fh.write(b"\x00" * (ReplayBufferNode.TAKE_WINDOWS * rb.frame_bytes + 1))
     space.supervise()
-    assert rb.recording is False, "an unplugged buffer kept recording"
+    assert started == ["rb", "rb"], "a full take was never rotated"

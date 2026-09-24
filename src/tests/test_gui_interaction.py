@@ -545,7 +545,7 @@ def test_an_idle_poll_does_not_repaint_the_canvas():
     assert drawn, "a real change did not repaint"
 
 
-def test_a_replay_buffers_light_follows_recording():
+def test_a_replay_buffers_light_follows_what_it_is_doing():
     """Green while it is recording, red when a clip failed, grey when nothing is
     plugged in."""
     w, client = _widget()
@@ -553,12 +553,16 @@ def test_a_replay_buffers_light_follows_recording():
     from render_utils import theme_palette
 
     pal = theme_palette(w)
-    green = w._replay_light_colour(dict(_clip_node(), recording=True), pal)
+    amber = w._replay_light_colour(dict(_clip_node(), recording=True), pal)
+    green = w._replay_light_colour(
+        dict(_clip_node(), recording=True, clip_state="saved"), pal)
     red = w._replay_light_colour(dict(_clip_node(), recording=False,
                                       clip_state="failed"), pal)
     grey = w._replay_light_colour(dict(_clip_node(), recording=False), pal)
 
-    assert green == pal["success"], "recording should read green"
-    assert red == pal["error"], "a failed clip should read red"
-    assert grey not in (pal["success"], pal["error"]), "unplugged should read grey"
-    assert green != grey and red != grey
+    # Amber while it is capturing the window, green once a clip has landed,
+    # red when capturing or writing failed, grey when it is capturing nothing.
+    assert amber == (0.95, 0.76, 0.20), "capturing should read amber"
+    assert green == pal["success"], "a landed clip should read green"
+    assert red == pal["error"], "a failure should read red"
+    assert len({amber, green, red, grey}) == 4, "the four states must differ"
