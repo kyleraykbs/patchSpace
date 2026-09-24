@@ -10,6 +10,7 @@ from pwproc import Backoff
 from pwmatch import INTERNAL_MEDIA_CLASS, SOURCE_MEDIA_CLASSES
 from pwnodes import (
     AppClassifierNode,
+    Edge,
     ReplayBufferNode,
     AppNameClassifierNode,
     TitleClassifierNode,
@@ -1678,3 +1679,43 @@ def test_pressing_clip_writes_the_clip_file(tmp_path, monkeypatch):
     assert node.clip_path == node.clip_target
     raw = open(node.clip_target, "rb").read()
     assert len(raw) == 44 + node.frame_bytes * 2
+
+
+def test_a_replay_buffer_records_while_something_is_wired_in(monkeypatch):
+    """Kyle: "Make sure the replay buffer is running by default when something
+    is plugged in."
+
+    It is a retrospective take, so there is no Record button: the take has to be
+    running *before* the thing you wanted to keep happened.  It starts with an
+    input and stops without one, which is what makes an unplugged buffer read
+    grey instead of green."""
+    space = PatchSpace(FakeGraph())
+    rb = ReplayBufferNode("rb")
+    space.nodes["rb"] = rb
+
+    class _Proc:
+        is_alive = True
+
+        def destroy(self):
+            self.is_alive = False
+
+    started = []
+    monkeypatch.setattr(ReplayBufferNode, "start_take",
+                        lambda self: started.append(self.id) or True)
+
+    # Nothing wired in: it must not record.
+    space.supervise()
+    assert started == []
+    assert rb.recording is False
+
+    # Something wired in: it starts.
+    space.nodes["src"] = InputNode("src")
+    space.edges["e1"] = Edge("e1", "src", "rb")
+    space.supervise()
+    assert started == ["rb"], "the buffer did not start recording"
+
+    # The wire goes away again: the take stops.
+    rb._recorder = _Proc()
+    space.edges = {}
+    space.supervise()
+    assert rb.recording is False, "an unplugged buffer kept recording"

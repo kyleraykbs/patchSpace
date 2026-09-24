@@ -604,6 +604,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # Physics runs by default; the top-right pause button (and the
         # hamburger "Physics" check) turns it off.  New panels start
         # anchored/paused regardless (see _panel_is_paused).
+        #: Last signature the canvas was repainted for (see
+        #: _canvas_signature): a poll that changed nothing visible must not
+        #: repaint.
+        self._canvas_sig = None
         self.physics_active = True
         # Consecutive awake layout ticks since the last settle/sleep -
         # capped in on_layout_tick so a non-converging layout can't
@@ -1906,7 +1910,41 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # Keep panel port squares centered on their edges as boxes change.
         self._layout_panel_ports()
 
-        self.queue_draw()
+        # Repaint only when something *drawn* changed.  This runs on every poll
+        # (2.5/s idle, far more during a load) and a frame costs tens of
+        # milliseconds on a large graph - 47ms measured at 105 nodes, because
+        # every node's text and every socket is redrawn - so an unconditional
+        # repaint pinned the main thread and froze the UI.  The signature is
+        # the same cheap per-node value the geometry caches are keyed on, plus
+        # everything else the frame reads.
+        signature = self._canvas_signature(daemon_nodes)
+        if signature != self._canvas_sig:
+            self._canvas_sig = signature
+            self.queue_draw()
+
+    def _canvas_signature(self, daemon_nodes):
+        """A cheap fingerprint of everything one frame draws.
+
+        Keyed on the same per-node value the geometry caches use, so a poll that
+        changed nothing visible compares equal and the canvas is left alone."""
+        return (
+            tuple(
+                (nid, self._node_fingerprint(ndata),
+                 ndata.get("x"), ndata.get("y"))
+                for nid, ndata in sorted(daemon_nodes.items())
+            ),
+            tuple(
+                (eid, e.get("from_node"), e.get("to_node"),
+                 e.get("to_port"), e.get("from_port"))
+                for eid, e in sorted(self.edges.items())
+            ),
+            tuple(sorted(self.panels)),
+            self.loading, self.canvas_opacity_from_daemon,
+            tuple(sorted(self.selected_nodes)),
+            tuple(sorted(self.anchored_nodes)),
+            len(self._revealed) if self._revealed is not None else -1,
+            self.connecting_from, self.hover_target_node, self.hover_impulse,
+        )
 
     def on_layout_tick(self):
         if not self.layout_awake:
@@ -2331,14 +2369,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             else:
                 need = top + bottom + self.SOCKET_MIN_STEP * (socket_count + 1)
             base = max(base, int(need))
-        elif socket_count == 1:
-            # A lone socket still has to fit *inside* its insets.  They are
-            # symmetric so it centres on the node, but reserving the wrapped
-            # header can push the insets past the height - which leaves the
-            # socket outside the band it is supposed to live in, drawn up
-            # against the header.  Same floor the multi-socket case uses.
-            top, bottom = self._socket_margins(node_id, node)
-            base = max(base, int(top + bottom + 2 * self.SOCKET_RADIUS))
         return base
 
     def _uses_compact_sockets(self, node):
@@ -2575,24 +2605,26 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # Split Bundle's many outputs, ...) labels them and must clear the
         # header below it.
         if max(len(node.get("inputs", [])), len(node.get("outputs", []))) <= 1:
-            offset = 0
+            # A lone socket is centred on the *body*: clear of the header above
+            # it and of the bottom control below, exactly like a labelled
+            # multi-socket side.  The insets used to be symmetric - the same
+            # value for both - which cancelled out of the centre so the socket
+            # landed on the node's middle whatever they were, and the value
+            # counted the bottom control *twice*: a node was inflated by its own
+            # control, which is the dead space between the header and the body
+            # on the Recorder and the Replay Buffer.
+            # +14: the socket's label is drawn *above* its centre (see
+            # _draw_node), so the clearance covers the label, not just the
+            # circle.
+            pad = 0
             if node.get("meta", {}).get("description") or node.get("label"):
-                offset += 20
-            offset += self._device_header_bonus(node)
-            offset += self._header_extra_height(node_id)
-            offset += self._bottom_control_height(node)
-            # The symmetric insets only hold while they cover the header: they
-            # cancel out of the centre, so the socket lands on the node's
-            # middle whatever they are, and a node whose header wraps to several
-            # lines (a Split Bundle's type name, its label, its id) had them
-            # centre it *inside* the title.  Raising `top` to clear the header
-            # moves the socket down to where the free space is; `bottom` keeps
-            # the old value so the body below is untouched.
-            # +14, not +4: the socket's own label is drawn *above* its centre
-            # (see _draw_node), so the clearance has to cover the label too, not
-            # just the circle.
-            header = self._header_stack_height(node_id, node) + 14
-            return max(offset, header), max(offset, 8)
+                pad += 20
+            pad += self._device_header_bonus(node)
+            pad += self._header_extra_height(node_id)
+            top = max(
+                pad + 4, self._header_stack_height(node_id, node) + 14
+            )
+            return top, 8 + self._bottom_control_height(node)
 
         # Labelled sockets (more than one on a side, e.g. Echo Cancel or
         # a Split Bundle):
@@ -8475,21 +8507,32 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             pal["field_fg"],
         )
 
-        state = str(node.get("clip_state") or "idle")
-        colour = {
-            "saving": (0.95, 0.76, 0.20),
-            "saved": pal["success"],
-            "failed": pal["error"],
-        }.get(state, (0.40, 0.40, 0.44))
+        colour = self._replay_light_colour(node, pal)
         lx = x + w + self.DUMP_LIGHT_GAP + self.DUMP_LIGHT_R
         ly = y + h / 2.0
         cr.arc(lx, ly, self.DUMP_LIGHT_R, 0, 2 * math.pi)
         cr.set_source_rgb(*colour)
         cr.fill()
-        if state == "saving":
+        # A ring while the clip is being written, the cue a dump shows: the
+        # colour above says whether it is *recording*, this says a press is
+        # in flight.
+        if str(node.get("clip_state") or "idle") == "saving":
             cr.arc(lx, ly, self.DUMP_LIGHT_R + 2.5, 0, 2 * math.pi)
             cr.set_line_width(1.2)
             cr.stroke()
+
+    def _replay_light_colour(self, node, pal):
+        """A Replay Buffer's status light.
+
+        Green while it is actually recording, red when a clip failed, grey when
+        nothing is plugged in (the node stops its take when its input goes away,
+        see ReplayBufferNode.sync_take) - so the light says whether the buffer is
+        *holding* anything, which is the only thing worth knowing about it."""
+        if node.get("recording"):
+            return pal["success"]
+        if str(node.get("clip_state") or "idle") == "failed":
+            return pal["error"]
+        return (0.40, 0.40, 0.44)
 
     def find_clip_field_at(self, x, y):
         """The Replay Buffer whose seconds box is under the pointer."""

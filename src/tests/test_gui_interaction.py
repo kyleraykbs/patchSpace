@@ -491,3 +491,74 @@ def test_the_old_clip_previous_type_key_still_loads():
     assert "replay_buffer" in main.NODE_TYPE_REGISTRY
     assert main.NODE_TYPE_REGISTRY.get("clip_previous") is \
         main.NODE_TYPE_REGISTRY["replay_buffer"]
+
+
+def test_a_node_with_a_bottom_control_is_not_inflated_by_it():
+    """Kyle: "there is wayy too much dead space in all these nodes make them a
+    lil less tall."
+
+    A lone socket's insets were symmetric - the same value top and bottom -
+    which cancels out of the centre so the socket lands on the node's middle
+    whatever they are.  The value counted the node's bottom control, so the node
+    was inflated by its own control: that is the gap between the header and the
+    body on a Recorder or a Replay Buffer."""
+    w, client = _widget()
+    w.update_from_daemon({"nodes": {"r1": {
+        "id": "r1", "type": "recorder", "label": "Recorder", "x": 0.0, "y": 0.0,
+        "ready": True, "connected": True, "declarative": False,
+        "selection_label": "Recorder", "description": ""}},
+        "edges": {}, "panels": [], "groups": []})
+
+    top, bottom = w._socket_margins("r1", w.nodes["r1"])
+    # The bottom inset is the control plus its pad - not the control twice.
+    # The bottom inset is the control plus its 8px pad - not the control twice.
+    assert bottom == 8 + w._bottom_control_height(w.nodes["r1"])
+    assert w.node_height("r1") <= w._base_node_height("r1") + 2
+    # And the socket still clears the header.
+    _x, sy = w._socket_position("r1", "out", 0)
+    assert sy >= w._header_stack_height("r1", w.nodes["r1"])
+
+
+def test_an_idle_poll_does_not_repaint_the_canvas():
+    """Kyle: "the UI is VERY prone to locking up entirely now when left alone in
+    the bg for awhile or during load."
+
+    The poll repainted unconditionally, and a frame costs tens of milliseconds
+    on a large graph (47ms measured at 105 nodes: every node's text and every
+    socket is redrawn).  At 2.5 polls/s idle - far more during a load - that
+    pinned the main thread."""
+    w, client = _widget()
+    payload = {"nodes": {"r1": {
+        "id": "r1", "type": "sound", "label": "Sound", "x": 0.0, "y": 0.0,
+        "ready": True, "connected": True, "declarative": False,
+        "selection_label": "Sound", "description": "", "path": "/tmp/x.wav"}},
+        "edges": {}, "panels": [], "groups": []}
+    w.update_from_daemon(payload)
+
+    drawn = []
+    w.queue_draw = lambda *a, **k: drawn.append(1)
+    w.update_from_daemon(payload)            # the same state again
+    assert drawn == [], "an unchanged poll repainted the canvas"
+
+    payload["nodes"]["r1"]["label"] = "Renamed"   # something visible changed
+    w.update_from_daemon(payload)
+    assert drawn, "a real change did not repaint"
+
+
+def test_a_replay_buffers_light_follows_recording():
+    """Green while it is recording, red when a clip failed, grey when nothing is
+    plugged in."""
+    w, client = _widget()
+
+    from render_utils import theme_palette
+
+    pal = theme_palette(w)
+    green = w._replay_light_colour(dict(_clip_node(), recording=True), pal)
+    red = w._replay_light_colour(dict(_clip_node(), recording=False,
+                                      clip_state="failed"), pal)
+    grey = w._replay_light_colour(dict(_clip_node(), recording=False), pal)
+
+    assert green == pal["success"], "recording should read green"
+    assert red == pal["error"], "a failed clip should read red"
+    assert grey not in (pal["success"], pal["error"]), "unplugged should read grey"
+    assert green != grey and red != grey

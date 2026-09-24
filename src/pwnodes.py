@@ -2553,6 +2553,23 @@ class ReplayBufferNode(RecorderNode):
             self.RECORD_DIR, f"{safe}_clip{self.clip_ext}"
         )
 
+    def sync_take(self, wired: bool) -> None:
+        """Keep a take running exactly while something is wired in.
+
+        A Replay Buffer has no Record button: the whole point is that the take
+        was *already* running when the thing you wanted to keep happened, so it
+        starts the moment its input is connected and stops when the wire goes
+        away - which is also what makes its indicator read grey rather than
+        green for an unplugged node."""
+        self._prune_recorder()
+        if not wired:
+            if self.recording:
+                self.stop_take()
+            return
+        if not self.recording:
+            if not self.start_take():
+                logger.warning("Replay Buffer %r couldn't start recording", self.id)
+
     def start_clip(self) -> None:
         """Lock the last ``window`` seconds in - off the caller's thread.
 
@@ -5092,6 +5109,10 @@ class PatchSpace:
                 props = live.get(live_id, {}).get("info", {}).get("props", {})
                 node.resolve_live(live_id, props)
 
+    def _node_has_input(self, node_id: NodeId) -> bool:
+        """Whether anything at all is wired into ``node_id``."""
+        return any(e.to_node == node_id for e in self.edges.values())
+
     def supervise(self) -> None:
         """Health pass.  Called by the daemon's tick thread under no
         lock held by the caller."""
@@ -5110,6 +5131,17 @@ class PatchSpace:
                     self._supervise_node(node)
                 except Exception as exc:
                     logger.warning("Supervision of %r failed: %s", node.id, exc)
+
+            # A Replay Buffer records what is wired into it continuously, so it
+            # is kept in step with its input here rather than by a Record button
+            # the node does not have.
+            for node in list(self.nodes.values()):
+                if not isinstance(node, ReplayBufferNode):
+                    continue
+                try:
+                    node.sync_take(self._node_has_input(node.id))
+                except Exception as exc:
+                    logger.warning("Replay Buffer %r failed: %s", node.id, exc)
 
             # Re-bind device nodes whose hardware object changed/returned
             # under a different name, before re-applying their settings
