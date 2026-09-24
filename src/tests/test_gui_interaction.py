@@ -272,6 +272,13 @@ def test_a_sound_dump_shows_its_two_fields_on_its_body():
     assert w.find_dump_field_at(px + pw / 2.0, py + ph / 2.0) is None
     assert w.find_dump_picker_at(fx + 2, fy + fh / 2.0) is None
 
+    # The status light sits beside the folder button, inside the node - the
+    # row gives up the room for it, so it can't fall off the edge.
+    w.nodes["d1"]["dump_state"] = "saving"
+    light_x = px + pw + w.DUMP_LIGHT_GAP + w.DUMP_LIGHT_R
+    assert light_x + w.DUMP_LIGHT_R <= w.nodes["d1"]["x"] + w.NODE_WIDTH + 0.01
+    assert px >= fx + fw - 0.01                      # and it misses the row
+
     # It draws without error, which is what puts them on screen.
     import cairo
     surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, 700, 500)

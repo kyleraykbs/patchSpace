@@ -8202,6 +8202,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     #: Gap between those rows, pixels.
     DUMP_ROW_GAP = 6.0
 
+    #: Radius of a Sound Dump's status light, and the gap before it.  The
+    #: folder row gives up room for it, the way it does for its button.
+    DUMP_LIGHT_R = 5.0
+    DUMP_LIGHT_GAP = 8.0
+
     #: Clearance between a Sound Dump's face and the socket labels above it.
     #: The body of a dump is two rows of text tall, so without this the last
     #: socket's label hangs into the Save button.
@@ -8223,6 +8228,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         w = self.NODE_WIDTH - 2 * self.FIELD_MARGIN
         if which == "folder":
             w -= self.PICKER_SIZE + self.PICKER_GAP
+            w -= 2 * self.DUMP_LIGHT_R + self.DUMP_LIGHT_GAP
         step = self.FIELD_HEIGHT + self.DUMP_ROW_GAP
         y = (
             node["y"] + self.node_height(nid)
@@ -8274,13 +8280,16 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             "saved": pal["success"],
             "failed": pal["error"],
         }.get(state, (0.40, 0.40, 0.44))
-        lx = fx + fw + self.PICKER_GAP + pw * 0.5 + 12.0
-        ly = fy + fh / 2.0
-        cr.arc(lx, ly, 5.0, 0, 2 * math.pi)
+        # Beside the folder row's button, on that row's centre line, inside the
+        # node - the row gave up the room for it (see _dump_row_rect).
+        _rx, ry, _rw, rh = self._dump_row_rect(nid, "folder")
+        lx = px + pw + self.DUMP_LIGHT_GAP + self.DUMP_LIGHT_R
+        ly = ry + rh / 2.0
+        cr.arc(lx, ly, self.DUMP_LIGHT_R, 0, 2 * math.pi)
         cr.set_source_rgb(*colour)
         cr.fill()
         if state == "saving":
-            cr.arc(lx, ly, 7.5, 0, 2 * math.pi)
+            cr.arc(lx, ly, self.DUMP_LIGHT_R + 2.5, 0, 2 * math.pi)
             cr.set_line_width(1.2)
             cr.stroke()
 
