@@ -8339,13 +8339,24 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         origin_x, origin_seconds = self._clip_drag_origin
         _rx, _ry, rw, _rh = self._clip_rect(nid)
         _start, span = self._clip_span(nid)
-        seconds = max(0.0, origin_seconds + (wx - origin_x) / rw * span)
+        total = float(node.get("duration", 0.0) or 0.0) or 1.0
+        seconds = origin_seconds + (wx - origin_x) / rw * span
         sel_start, sel_end = self._clip_selection(nid)
         base = float(node.get("source_start", 0.0) or 0.0)
         if part == "start":
             seconds = min(seconds, sel_end)
         else:
             seconds = max(seconds, sel_start)
+        # A side dragged off either end of the sound selects the whole of it,
+        # rather than going out of bounds with it.  The end was not clamped at
+        # all before: dragging it past the sound left the handle outside the
+        # timeline and the selection somewhere the next drag measured from.
+        if seconds < 0.0 or seconds > total:
+            node["start"] = 0.0
+            node["end"] = None
+            self._clip_pending_send.add(nid)
+            self.queue_draw()
+            return
         node[part] = seconds - base
         self._clip_pending_send.add(nid)
         self.queue_draw()

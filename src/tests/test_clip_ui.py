@@ -577,3 +577,53 @@ def test_a_clip_drag_sends_its_times_once_on_release():
     sent = [c for c in client.sent if c.get("command") == "set_node_property"]
     assert [c["property"] for c in sent] == ["start", "end"]
     assert sent[0]["value"] == pytest.approx(w.nodes["clip1"]["start"])
+
+
+def test_a_clip_handle_dragged_past_the_sound_selects_all_of_it():
+    """Kyle: "change the regular clip node to have it on an update that makes one
+    of the handle ends go off the screen it should just make the selection
+    select all again so it stays in bounds."
+
+    The start was clamped at zero but the end was not clamped at all, so
+    dragging it past the sound left the handle drawn outside the timeline and
+    the selection somewhere the next drag measured from."""
+    w, client = _recorder_and_clip()
+    w.update_from_daemon({"nodes": {"clip1": {
+        "id": "clip1", "type": "clip", "label": "Clip", "x": 0.0, "y": 0.0,
+        "ready": True, "connected": True, "declarative": False,
+        "selection_label": "Clip", "description": "", "start": 1.0, "end": 4.0,
+        "duration": 8.0, "source_start": 0.0, "source_path": TAKE}},
+        "edges": {}, "panels": [], "groups": []})
+    node = w.nodes["clip1"]
+    node["duration"] = 8.0
+    node["source_start"] = 0.0
+    node["start"] = 1.0
+    node["end"] = 4.0
+
+    rx, _ry, rw, _rh = w._clip_rect("clip1")
+    _span_start, span = w._clip_span("clip1")
+    # Start a drag of the end side from well inside the timeline.
+    w.clip_dragging = ("end", "clip1")
+    w._clip_drag_origin = (rx + rw * 0.5, 4.0)
+
+    # Drag far to the right: past the end of the sound.
+    w._drag_clip(rx + rw * 40.0, 0.0)
+    assert node["start"] == 0.0, "it should select all"
+    assert node["end"] is None, "an unset end means to the end of the sound"
+
+    # And a drag the other way, past the start, does the same.
+    node["start"] = 1.0
+    node["end"] = 4.0
+    w.clip_dragging = ("start", "clip1")
+    w._clip_drag_origin = (rx + rw * 0.5, 4.0)
+    w._drag_clip(rx - rw * 40.0, 0.0)
+    assert node["start"] == 0.0
+    assert node["end"] is None
+
+    # Inside the sound it still just moves that side.
+    node["start"] = 1.0
+    node["end"] = 4.0
+    w.clip_dragging = ("end", "clip1")
+    w._clip_drag_origin = (rx, 1.0)
+    w._drag_clip(rx + rw * 0.5, 0.0)
+    assert node["end"] is not None and 0.0 < node["end"] <= 8.0

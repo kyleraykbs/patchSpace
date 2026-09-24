@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 # Bump when a migration is added.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 @dataclass
@@ -221,6 +221,23 @@ def _migrate_sound_effect_split(config: dict) -> List[str]:
     return fixes
 
 
+def _migrate_replay_buffer_label(config: dict) -> List[str]:
+    """A node saved as "Clip Previous" keeps that name on its body.
+
+    The type was renamed to Replay Buffer; the spec's name is what a node shows
+    until the user renames it themselves, and a label saved before the rename
+    pinned the old one.  Rewriting it here is what keeps an existing session
+    looking like the current build."""
+    fixes: List[str] = []
+    for nid, node in (config.get("nodes") or {}).items():
+        params = node.get("params") or {}
+        if str(params.get("label") or "") == "Clip Previous":
+            params["label"] = "Replay Buffer"
+            fixes.append(f"migration: {nid!r} label 'Clip Previous' -> "
+                         f"'Replay Buffer'")
+    return fixes
+
+
 MIGRATIONS: List[Migration] = [
     Migration(
         version=1,
@@ -231,6 +248,11 @@ MIGRATIONS: List[Migration] = [
         version=2,
         description="sound effect -> sound node + sound player",
         apply=_migrate_sound_effect_split,
+    ),
+    Migration(
+        version=3,
+        description="Clip Previous -> Replay Buffer (node label)",
+        apply=_migrate_replay_buffer_label,
     ),
 ]
 

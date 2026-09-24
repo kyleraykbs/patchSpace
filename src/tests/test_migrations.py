@@ -115,3 +115,29 @@ def test_repair_is_clean_after_migration():
     result = repair(cfg)
     # No bad-port/unknown-type errors from the rewritten pipeline.
     assert result.errors == []
+
+
+def test_a_node_labelled_clip_previous_catches_up_with_the_rename():
+    """The type was renamed to Replay Buffer; a node saved before that keeps the
+    old name on its body, because the label is stored with the node."""
+    from migrations import migrate
+
+    config = {
+        "schema_version": 2,
+        "nodes": {
+            "rb": {"type": "replay_buffer",
+                   "params": {"label": "Clip Previous", "window": 60.0}},
+            "other": {"type": "sound", "params": {"label": "Keep me"}},
+        },
+        "edges": [],
+    }
+    migrated, fixes = migrate(config)
+
+    assert migrated["nodes"]["rb"]["params"]["label"] == "Replay Buffer"
+    assert migrated["nodes"]["other"]["params"]["label"] == "Keep me"
+    assert any("Clip Previous" in f for f in fixes)
+
+    # Idempotent: a second pass changes nothing.
+    again, more = migrate(migrated)
+    assert again["nodes"]["rb"]["params"]["label"] == "Replay Buffer"
+    assert not [f for f in more if "Clip Previous" in f]
