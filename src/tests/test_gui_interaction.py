@@ -154,6 +154,46 @@ def test_a_take_ending_on_its_own_reaches_the_button():
     assert w.nodes["rec1"]["recording"] is False
 
 
+def test_a_stop_the_daemon_did_not_take_gives_the_button_back():
+    """"The stop button stops working and appears to get detached from the
+    running recording": the press is optimistic and the daemon's answer was only
+    taken when it *agreed*, so a Stop the daemon could not carry out - its
+    take's pw-cat outlived the kill - held the button on Record for ever.  The
+    button then belonged to no take at all: pressing it asked the daemon to
+    *start* one, which it read as "already recording" and ignored."""
+    w, client = _widget()
+    _poll(w, _recorder(recording=True))
+
+    bx, by, bw, bh = w._record_button_rect("rec1")
+    w.on_click(None, 1, bx + bw / 2.0, by + bh / 2.0)      # the real Stop
+    assert client.sent[-1]["recording"] is False
+    assert w.nodes["rec1"]["recording"] is False           # optimistic
+
+    # The daemon answers that press: the take is still running.
+    w.on_record_reply({"status": "ok", "node_id": "rec1", "recording": True,
+                       "path": "/recordings/rec1.wav"})
+    assert w.nodes["rec1"]["recording"] is True            # back on the take
+    _poll(w, _recorder(recording=True))                    # and the polls follow
+    assert w.nodes["rec1"]["recording"] is True
+
+
+def test_a_press_the_daemon_never_answers_does_not_freeze_the_button():
+    """The reply is what normally settles a press, but a command the daemon
+    drops (the connection went) is never answered, so the optimistic value needs
+    an end of its own - otherwise the button goes on showing a press that never
+    happened for the life of the window."""
+    w, _ = _widget()
+    w.PENDING_BOOL_TTL_S = 0.0            # no grace period: the poll is the answer
+    _poll(w, _recorder(recording=True))
+
+    bx, by, bw, bh = w._record_button_rect("rec1")
+    w.on_click(None, 1, bx + bw / 2.0, by + bh / 2.0)      # Stop, never answered
+    assert w.nodes["rec1"]["recording"] is False
+
+    _poll(w, _recorder(recording=True))                    # the daemon still records
+    assert w.nodes["rec1"]["recording"] is True
+
+
 def test_responses_coalesce_to_the_newest_state():
     """A backlog of polls is the same state repeated; applying each one costs a
     full UI update and they can only end up showing the newest.  Waveforms are

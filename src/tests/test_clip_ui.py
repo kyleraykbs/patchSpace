@@ -504,7 +504,7 @@ def test_a_press_is_not_undone_by_a_poll_taken_before_it():
 
     # What the press does: flip, and say what we asked for.
     w.nodes["rec1"]["recording"] = True
-    w._pending_bool[("rec1", "recording")] = True
+    w._set_pending_bool("rec1", "recording", True)
 
     stale = _recorder_at(False)                 # taken before the press
     w.update_from_daemon({"nodes": {"rec1": stale}, "edges": {},

@@ -4328,13 +4328,18 @@ class PatchSpaceDaemon:
             if not isinstance(node, RecorderNode):
                 return {
                     "status": "error",
+                    "node_id": node_id,
                     "message": f"Node {node_id} is not a recorder",
                 }
             if cmd.get("recording", True):
                 started = node.start_take()
                 if not started:
+                    # `node_id` too: the GUI matches this reply to the press it
+                    # made, so a press the daemon refused has to be recognisable
+                    # (see patchspace_widget.on_record_reply).
                     return {
                         "status": "error",
+                        "node_id": node_id,
                         "message": f"Recorder {node_id} could not start "
                                    "(its sink is not up yet?)",
                     }

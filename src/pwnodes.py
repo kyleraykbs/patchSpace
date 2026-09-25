@@ -2486,11 +2486,24 @@ class RecorderNode(_SingleSinkNode):
         return False
 
     def stop_take(self) -> bool:
-        """Finish the take.  True when something was actually recording."""
+        """Finish the take.  True when something was actually recording.
+
+        The take is only given up once its helper is really gone (see
+        OwnedPwProcess.destroy): a pw-cat that outlived the kill is still
+        writing the file, so the node keeps reporting it - and a second Stop
+        tries again - rather than reporting an idle node with a take still
+        running and nothing left to stop it."""
         was = self.recording
-        proc, self._recorder = self._recorder, None
+        proc = self._recorder
         if proc is not None:
             proc.destroy()
+            if proc.is_alive:
+                logger.warning(
+                    "Recorder %r could not stop its take: %r is still running",
+                    self.id, proc.name,
+                )
+                return was
+            self._recorder = None
         return was
 
     def _prune_recorder(self) -> None:

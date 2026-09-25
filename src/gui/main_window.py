@@ -93,6 +93,12 @@ def _coalesce_responses(queued):
         if resp.get("status") != "ok":
             if resp.get("status") == "error":
                 logger.warning("daemon error: %s", resp.get("message"))
+                if resp.get("node_id"):
+                    # A refused *press* (main.py's _cmd_record is the only error
+                    # reply that names its node): the button has to hear that its
+                    # press did not take, or it holds an optimistic value the
+                    # daemon will never echo.
+                    events.append(resp)
             continue
         if "nodes" in resp:
             latest_nodes = resp
@@ -1350,6 +1356,12 @@ class MainWindow(Gtk.ApplicationWindow):
                     self.ps_widget.on_applications(resp["applications"])
                 elif "profiles" in resp:
                     self.ps_widget.on_device_profiles(resp)
+                elif "recording" in resp and "node_id" in resp:
+                    # A Record/Stop press answered (only that reply carries
+                    # `recording`): the daemon has processed it, so the button
+                    # follows this rather than the optimistic value it pressed
+                    # (see patchspace_widget.on_record_reply).
+                    self.ps_widget.on_record_reply(resp)
                 elif "config" in resp:
                     self.ps_widget.on_export_config(resp["config"])
                 elif resp.get("panel_files"):

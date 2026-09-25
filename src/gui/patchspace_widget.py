@@ -424,12 +424,25 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self._pending_effect_slider = {}
 
         # Boolean on/off toggles (gate `enabled`, switcher / On-Off source
-        # `output`) we just flipped optimistically.  (node_id, field) ->
-        # value.  A get_nodes poll racing our in-flight set command would
-        # otherwise report the pre-click value and the switch would flash
-        # back to the opposite for a poll or two; keep our value until the
-        # daemon echoes it (see _accept_bool_echo).
+        # `output`, a Recorder's `recording`) we just flipped optimistically.
+        # (node_id, field) -> (value, deadline).  A get_nodes poll racing our
+        # in-flight set command would otherwise report the pre-click value and
+        # the control would flash back to the opposite for a poll or two; keep
+        # our value until the daemon echoes it (see _accept_bool_echo).
+        #
+        # The deadline is what keeps that from becoming a freeze: an optimistic
+        # value the daemon never confirms (a command it refused, or one dropped
+        # while it was down) must not outlive every poll that disagrees with it.
+        # The reply to the command is the real answer and lands first in the
+        # normal case - see on_record_reply, which is the fence that makes it
+        # exact for the Recorder's button.
         self._pending_bool = {}
+        self.PENDING_BOOL_TTL_S = 2.0
+        #: The `recording` values we have pressed, oldest first.  The daemon
+        #: answers a command on the same connection it was sent on, in order,
+        #: so the next `record` reply belongs to the oldest press here (see
+        #: on_record_reply).
+        self._record_asks: list = []
 
         self.pinned_nodes = set()
 
@@ -922,7 +935,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         it (see _accept_bool_echo)."""
         node = self.nodes[nid]
         node["enabled"] = not node.get("enabled", True)
-        self._pending_bool[(nid, "enabled")] = node["enabled"]
+        self._set_pending_bool(nid, "enabled", node["enabled"])
         self._send_set_gate(nid, node["enabled"])
 
     def _toggle_filter_mode(self, nid):
@@ -930,7 +943,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         value until the daemon echoes it (see _accept_bool_echo)."""
         node = self.nodes[nid]
         node["exclude"] = not node.get("exclude", False)
-        self._pending_bool[(nid, "exclude")] = node["exclude"]
+        self._set_pending_bool(nid, "exclude", node["exclude"])
         self._send_property(nid, "exclude", node["exclude"])
 
     def _toggle_switch_state(self, nid):
@@ -938,7 +951,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         the daemon echoes it (see _accept_bool_echo)."""
         node = self.nodes[nid]
         node["output"] = 0 if node.get("output") else 1
-        self._pending_bool[(nid, "output")] = node["output"]
+        self._set_pending_bool(nid, "output", node["output"])
         self._send_switcher_output(nid, node["output"])
 
     # ---------- Sensitivity Gate slider ----------
@@ -1093,14 +1106,62 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         a command; the daemon's reply lands a poll or two later.  Keep the
         optimistic value until the daemon reports it back, so the switch
         can't flash to the opposite and back while the command is in
-        flight."""
-        pending = self._pending_bool.get((node_id, field))
+        flight.
+
+        Not for ever, though: an optimistic value the daemon never confirms
+        froze the control in the direction the user pressed - a Recorder whose
+        take outlived its Stop kept showing Record, and pressing it asked the
+        daemon to start a take that was already running ("the stop button stops
+        working and appears to get detached from the running recording").  Past
+        the deadline the daemon's own state wins, whichever way it disagrees."""
+        key = (node_id, field)
+        pending = self._pending_bool.get(key)
         if pending is not None:
-            if bool(reported) == bool(pending):
-                del self._pending_bool[(node_id, field)]
+            value, expires = pending
+            if time.monotonic() >= expires:
+                del self._pending_bool[key]
+                return reported
+            if bool(reported) == bool(value):
+                del self._pending_bool[key]
                 return reported
             return None
         return reported
+
+    def _set_pending_bool(self, node_id, field, value):
+        """Hold an optimistic boolean against the daemon's polls (bounded - see
+        _accept_bool_echo)."""
+        self._pending_bool[(node_id, field)] = (
+            value, time.monotonic() + self.PENDING_BOOL_TTL_S,
+        )
+
+    def on_record_reply(self, resp):
+        """The daemon's answer to a Record/Stop press (see main_window's
+        response routing).
+
+        Replies come back in the order their commands were sent on the one
+        connection, so this one is a fence: any poll taken *before* the press
+        has already been delivered, and everything the daemon says afterwards
+        is its own state.  That makes the reply authoritative, which is what
+        lets a press the daemon did not carry out - a Stop whose pw-cat
+        outlived the kill, a Record it refused - put the button back on what is
+        actually happening, instead of holding our value until the daemon
+        happens to agree (which never came)."""
+        if not self._record_asks:
+            return
+        asked, _at = self._record_asks.pop(0)
+        nid = resp.get("node_id")
+        if not nid:
+            return
+        pending = self._pending_bool.get((nid, "recording"))
+        if pending is not None and bool(pending[0]) == bool(asked):
+            # Nothing has been pressed since, so this reply answers the press
+            # the button is showing and decides what it shows.
+            del self._pending_bool[(nid, "recording")]
+            reported = resp.get("recording")
+            node = self.nodes.get(nid)
+            if node is not None and isinstance(reported, bool):
+                node["recording"] = reported
+            self.queue_draw()
 
     # ---------- daemon state -> local model ----------
 
@@ -7133,7 +7194,17 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             node = self.nodes.get(record_hit) or {}
             recording = not bool(node.get("recording"))
             node["recording"] = recording          # optimistic; the poll confirms
-            self._pending_bool[(record_hit, "recording")] = recording
+            self._set_pending_bool(record_hit, "recording", recording)
+            # Which press each reply belongs to: replies keep their command
+            # order, and a press whose reply outlives the optimistic deadline
+            # can only be one the daemon never answered (it drops a command
+            # when the connection goes), so it is dropped here too.
+            now = time.monotonic()
+            self._record_asks = [
+                (v, at) for v, at in self._record_asks
+                if now - at < self.PENDING_BOOL_TTL_S
+            ]
+            self._record_asks.append((recording, now))
             self.client.send({"command": "record", "node_id": record_hit,
                               "recording": recording})
             self.queue_draw()
@@ -7381,7 +7452,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             # Same optimistic-echo guard as the other boolean switches: a
             # poll that raced our in-flight command would otherwise flip
             # the switch back for a beat (see _accept_bool_echo).
-            self._pending_bool[(nid, attr)] = value
+            self._set_pending_bool(nid, attr, value)
             self._send_property(nid, attr, value)
             self.queue_draw()
             self.schedule_refresh()

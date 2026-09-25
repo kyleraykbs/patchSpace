@@ -619,3 +619,54 @@ gesture accepts; tested only structurally (no touchscreen here).
 * A name that carries an audio extension should have it *replaced* by the
   encoder's, not appended: "take.mp3" means "take", and "take.mp3.opus" is a
   file nobody goes looking for.
+## A press, its reply, and the stale GUI (2026-09-24)
+
+"Sometimes the stop button stops working and appears to get detached from the running
+recording."  Three separate faults, all real, all fixed here:
+
+* **Ownership is given up only when the process is really gone.**  `OwnedPwProcess.destroy`
+  cleared `_proc` *before* signalling and `RecorderNode.stop_take` dropped `_recorder`
+  before calling it, so a take whose `pw-cat` survived SIGTERM+SIGKILL (a child stuck in the
+  kernel, e.g. writing to a disk that filled) read as idle: `recording` False, no handle
+  left to signal, the file still being written, and the next press asked the daemon to
+  *start* a take it thought nothing was doing (`start_take` early-returns, so the button
+  did nothing at all).  Now both keep their handle when the kill did not take, log it, and
+  report the truth - so a second press tries again.  `ReplayBufferNode.sync_take` gets the
+  same protection for free: it used to spawn a *second* pw-cat on the same file.
+* **Known leftover, deliberately not touched:** `_coalesce_responses` drops superseded
+  `get_nodes` replies but *applies the surviving one last*, after the events.  A pre-press
+  poll that lands in the same drain batch as the press's reply is therefore applied after it,
+  which can flip a button for one frame (~50 ms) before the next poll corrects it.  Fixing it
+  means applying each nodes reply at its arrival position (skipping only superseded ones),
+  which also moves the peaks/nodes order - worth doing on purpose, not as a drive-by.
+* **The reply to a press is a fence.**  The GUI's optimistic value was only released when a
+  poll *agreed* with it, which never happened when the daemon had not done what was asked -
+  the button held the press for ever.  A command's reply comes back on the same connection,
+  in order, so every poll taken before the press has already been delivered: the reply is
+  authoritative.  `PatchSpaceGraphWidget.on_record_reply` (routed by `main_window`, matched
+  to the press by the `_record_asks` FIFO) releases it, and `_pending_bool` entries now
+  expire after `PENDING_BOOL_TTL_S` for the commands that are never answered at all (the
+  client drops a command when the connection goes).  `_cmd_record`'s error replies carry
+  `node_id` for exactly this, and `_coalesce_responses` passes error replies that name a
+  node through instead of only logging them.
+
+**Diagnose a stale GUI before believing a UI report.**  The daemon and the GUI are launched
+separately (service vs `systemd-run --scope` from the session), so a GUI started before the
+last activation goes on running the *old* store path for the life of the session - on
+2026-09-24 the running GUI was two commits behind, missing the fix for the permanent
+poll-timer-per-action leak that makes the UI degrade with use.  `which` and the profile
+cannot tell you; the argv can:
+
+```bash
+ps -o cmd= -p "$(pgrep -f patchspace_gui.py | head -1)"          # which src?
+nix-store -q --references /run/current-system/sw/bin/patchspace  # which src the profile runs
+```
+
+Same check after every activation, and treat a mismatch as "restart the GUI" before
+debugging anything visual.
+
+**Proving a regression test is red:** `git stash push -- <the fixed files>` (leave the new
+tests in the tree), run them, `git stash pop`.  Both GUI tests here failed that way -
+`assert False is True` on the frozen button, and `AttributeError` for the method that did
+not exist yet - and the daemon test failed on `node.recording is True` while its own
+stubborn fake pw-cat was still alive.

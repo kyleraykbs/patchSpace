@@ -379,15 +379,34 @@ class OwnedPwProcess(OwnedPwNode):
                 pass
 
     def destroy(self) -> None:
-        proc, self._proc = self._proc, None
+        """Terminate the helper, escalating to SIGKILL.
+
+        Ownership is given up only once the process is really gone.  Clearing
+        ``_proc`` first lost that fact: a child that survived even SIGKILL (a
+        pw-cat stuck in the kernel, say) then read as stopped - ``is_alive``
+        False, nothing left to signal - while it was still running, so a
+        recorder reported an idle node with a take still being written and no
+        way to stop it.  The handle stays owned in that case, so `is_alive`
+        keeps saying so and a later destroy tries again."""
+        proc = self._proc
         if proc is None:
             return
-        proc.terminate()
-        try:
-            proc.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=1)
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                try:
+                    proc.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    logger.warning(
+                        "Helper process %r (pid %s) survived SIGKILL - keeping "
+                        "it owned so it can be stopped again",
+                        self.name, proc.pid,
+                    )
+                    return
+        self._proc = None
         logger.info("Stopped helper process %r", self.name)
         self.node_id = None
 

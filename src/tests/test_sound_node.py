@@ -309,6 +309,86 @@ def test_a_recorder_takes_an_audio_input_and_gives_a_sound(monkeypatch):
     assert d.handle_command({"command": "record", "node_id": "nope"})["status"] == "error"
 
 
+class _StubbornRecorder(_FakeRecorder):
+    """A take whose pw-cat will not die: the kill returns and it keeps writing,
+    which is what a process stuck in the kernel (a disk that filled up) looks
+    like from here."""
+
+    def __init__(self, *args, **kwargs):
+        _FakeRecorder.__init__(self, *args, **kwargs)
+        self.stubborn = True
+
+    def destroy(self):
+        if self.stubborn:
+            return                       # still alive afterwards
+        _FakeRecorder.destroy(self)
+
+
+class _DeadRecorder(_FakeRecorder):
+    """A recorder whose pw-cat cannot be started at all (no dummy sink yet)."""
+
+    def create(self, command, quiet=False):
+        return False
+
+
+def _recorder_daemon(monkeypatch, process=_FakeRecorder, take_dir=None):
+    """A daemon with one recorder node in it, wired to a fake pw-cat."""
+    from main import PatchSpaceDaemon
+    from tests.test_pwnodes import FakeGraph
+
+    _FakeRecorder.commands.clear()
+    monkeypatch.setattr(pwnodes, "OwnedPwProcess", process)
+    monkeypatch.setattr(pwnodes, "_recorder_input_ports",
+                        lambda name: [("_FL", f"{name}:input_FL")])
+    monkeypatch.setattr(pwnodes, "_run_pw_link", lambda out, inp: True)
+    if take_dir is not None:
+        monkeypatch.setattr(pwnodes.RecorderNode, "RECORD_DIR", str(take_dir))
+
+    d = PatchSpaceDaemon()
+    d.space.graph = FakeGraph()
+    d.space.mark_graph_loaded()
+    d.handle_command({"command": "add_node", "node_type": "recorder", "node_id": "rec"})
+    return d, d.space.nodes["rec"]
+
+
+def test_a_take_that_outlived_its_stop_stays_owned(monkeypatch):
+    """A stop only counts once the take is really gone.  Clearing the handle
+    before the kill read the node as idle while its pw-cat was still writing the
+    file, so nothing could stop it any more: "the stop button stops working and
+    appears to get detached from the running recording"."""
+    d, node = _recorder_daemon(monkeypatch, _StubbornRecorder)
+    _ok = lambda **cmd: d.handle_command(cmd)  # noqa: E731
+
+    assert _ok(command="record", node_id="rec", recording=True)["recording"] is True
+
+    # Stop: the kill does not take, so the daemon has to keep saying it is
+    # still recording - and keep the take, so another press can try again.
+    resp = _ok(command="record", node_id="rec", recording=False)
+    assert resp["status"] == "ok"
+    assert resp["recording"] is True
+    assert node.recording is True
+    assert _ok(command="get_nodes")["nodes"]["rec"]["recording"] is True
+
+    # The next press retries the kill, and this time it takes.
+    node._recorder.stubborn = False
+    resp = _ok(command="record", node_id="rec", recording=False)
+    assert resp["recording"] is False
+    assert node.recording is False
+    assert _ok(command="get_nodes")["nodes"]["rec"]["recording"] is False
+
+
+def test_a_refused_record_press_names_its_node(monkeypatch):
+    """The GUI matches the reply to the press it made, so a press the daemon
+    could not carry out has to be recognisable - otherwise the button holds the
+    press for ever instead of going back to what is actually happening."""
+    d, node = _recorder_daemon(monkeypatch, _DeadRecorder)
+
+    resp = d.handle_command({"command": "record", "node_id": "rec", "recording": True})
+    assert resp["status"] == "error"
+    assert resp["node_id"] == "rec"
+    assert node.recording is False
+
+
 def test_recording_again_overwrites_the_take(tmp_path, monkeypatch):
     """One fixed file per node: Record clears it first, so a new take replaces
     the old one rather than piling up beside it.  (That the new take also
