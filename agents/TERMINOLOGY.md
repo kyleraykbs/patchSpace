@@ -24,6 +24,7 @@ that isn't here, ask (and then add it).  When a mapping here is a guess, it is m
 | "connection type" | **port kind**: `audio` / `bundle` / `boolean` / `filter` / `impulse` |
 | "wire" / "connection" / "edge" | `Edge` (id `from->to[:port][@port]`) |
 | "audio out / audio in" | an `audio` port (`out` is a source, `in` a sink) |
+| "mono node" / "capture_MONO" | a port whose `audio.channel` is `MONO` (no FL/FR peer); `resolve_channel_pairs` bridges every channel of the stereo/multichannel peer through it (**confirm**) |
 | "impulse" | the momentary event kind: `ButtonNode` out → `SoundEffectNode` in |
 | "fires / pulses / triggers" | `PatchSpace.pulse()` → `on_impulse()` |
 | "stack" (the switch) | `SoundEffectNode.overlap`: On = takes stack, Off = restart |

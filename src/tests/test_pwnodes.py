@@ -7,7 +7,11 @@ import time
 import pytest
 
 from pwproc import Backoff
-from pwmatch import INTERNAL_MEDIA_CLASS, SOURCE_MEDIA_CLASSES
+from pwmatch import (
+    INTERNAL_MEDIA_CLASS,
+    SOURCE_MEDIA_CLASSES,
+    resolve_channel_pairs,
+)
 from pwnodes import (
     AppClassifierNode,
     Edge,
@@ -443,6 +447,45 @@ def test_sync_connects_matching_channels():
     # Every shared channel between the two nodes got linked.
     assert (src_ports["FL"], sink_ports["FL"]) in g.linked_pairs()
     assert (src_ports["FR"], sink_ports["FR"]) in g.linked_pairs()
+
+
+def test_a_mono_node_gets_every_channel_of_its_peer():
+    """A MONO port ("capture_MONO") shares no channel name with FL/FR, so
+    channel matching found no pairs at all and the mono node ended up wired
+    to nothing.  The mono endpoint is bridged instead: a mono source fans
+    out to every channel of its target, a mono target takes every channel
+    of its source (PipeWire sums the links on one input port)."""
+    g = FakeGraph()
+    mic = g.add_source(10, "app1", channels=("MONO",))
+    sinks = g.add_sink(20, "sink1")
+    assert resolve_channel_pairs(g, 10, 20) == {
+        (mic["MONO"], sinks["FL"]),
+        (mic["MONO"], sinks["FR"]),
+    }
+
+    g2 = FakeGraph()
+    srcs = g2.add_source(30, "app1")
+    mono = g2.add_sink(40, "sink1", channels=("MONO",))
+    assert resolve_channel_pairs(g2, 30, 40) == {
+        (srcs["FL"], mono["MONO"]),
+        (srcs["FR"], mono["MONO"]),
+    }
+
+
+def test_sync_dumps_both_channels_through_a_mono_endpoint():
+    g = FakeGraph()
+    mic_ports = g.add_source(10, "app1", channels=("MONO",))
+    sink_ports = g.add_sink(20, "sink1")
+    space = make_space(g)
+    space.mark_graph_loaded()
+    space.add_node(SrcNode("src"))
+    space.add_node(SinkNode("snk"))
+    space.add_edge("src", "snk")
+    space.sync()
+
+    # The single mono output feeds both stereo inputs.
+    assert (mic_ports["MONO"], sink_ports["FL"]) in g.linked_pairs()
+    assert (mic_ports["MONO"], sink_ports["FR"]) in g.linked_pairs()
 
 
 def test_sync_idempotent_second_pass_does_not_relink():

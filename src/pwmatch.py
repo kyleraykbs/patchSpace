@@ -218,6 +218,12 @@ PID_SCOPE_TTL = 5.0
 # groups[group_name][channel] -> port id
 PortGroups = Dict[str, Dict[str, int]]
 
+#: The single-channel layout name (a port named "capture_MONO" carries no
+#: FL/FR peer).  A mono endpoint shares no channel name with a stereo or
+#: multichannel peer, so plain channel matching finds nothing and the mono
+#: node ends up wired to nothing at all - see resolve_channel_pairs.
+MONO_CHANNEL = "MONO"
+
 _TARGET_IDENTITY_KEYS = (
     "id",
     "name",
@@ -448,7 +454,14 @@ def resolve_channel_pairs(
 ) -> Set[Tuple[int, int]]:
     """The concrete (output_port, input_port) pairs connecting
     source_node_id to target_node_id, matched up by shared audio.channel
-    within the selected port groups."""
+    within the selected port groups.
+
+    A mono endpoint (a lone MONO port, the "capture_MONO" layout) shares
+    no channel name with anything else, so channel matching alone would
+    leave it unlinked.  It is bridged instead: every channel of the
+    multichannel side goes through the one MONO port - into it when the
+    mono node is the target (PipeWire sums the links arriving on an input
+    port), out of it when it is the source (one output may fan out)."""
     source_groups = port_groups_for_node(graph, source_node_id, "out")
     target_groups = port_groups_for_node(graph, target_node_id, "in")
     source_group = select_group(source_groups, None, source_node_id)
@@ -456,13 +469,16 @@ def resolve_channel_pairs(
     if not source_group or not target_group:
         return set()
 
-    channels = set(source_group) & set(target_group)
-    if not channels:
-        return set()
+    pairs = {
+        (source_group[ch], target_group[ch])
+        for ch in set(source_group) & set(target_group)
+    }
+    source_is_mono = set(source_group) == {MONO_CHANNEL}
+    target_is_mono = set(target_group) == {MONO_CHANNEL}
+    if target_is_mono and not source_is_mono:
+        pairs.update((port, target_group[MONO_CHANNEL]) for port in source_group.values())
+    elif source_is_mono and not target_is_mono:
+        pairs.update((source_group[MONO_CHANNEL], port) for port in target_group.values())
 
     current = set(graph.ports().keys())
-    return {
-        (source_group[ch], target_group[ch])
-        for ch in channels
-        if source_group[ch] in current and target_group[ch] in current
-    }
+    return {(out, inn) for out, inn in pairs if out in current and inn in current}

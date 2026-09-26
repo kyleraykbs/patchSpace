@@ -28,7 +28,7 @@ patchspace_gui.py  ──(unix socket, JSON lines, /tmp/patchspace.sock)──  
 |---|---|---|
 | Substrate | `pwproc.py` | Owns real PipeWire objects: `OwnedPwNode` (a pw-cli session holding a created node), `OwnedPwProcess` (pw-cat/pw-loopback), `Backoff`, `Ticker`. |
 | Graph snapshot | `pwgraph.py` | `pw-dump -m` stream → live nodes/ports/links; connect/disconnect; node-created/removed callbacks. |
-| Matching | `pwmatch.py` | Filter dicts → live node ids; port groups → channel pairs; which objects are Patch Space's own. |
+| Matching | `pwmatch.py` | Filter dicts → live node ids; port groups → channel pairs (a lone `MONO` endpoint bridges every channel of its peer); which objects are Patch Space's own. |
 | Model | `pwnodes.py` | `Node` taxonomy + `PatchSpace` (the reconcile/supervise engine: `sync_locked` = structure, `supervise` = health). |
 | Containers | `panels.py` | Panel tree, namespaced ids, edge ownership (LCA), read-only snapshots, legacy migration. |
 | Daemon | `main.py` | Socket protocol, node factory (`NODE_TYPE_REGISTRY`/`_create_node`), property handling, session load, watchdogs, built-in devices. |

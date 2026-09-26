@@ -670,3 +670,18 @@ tests in the tree), run them, `git stash pop`.  Both GUI tests here failed that 
 `assert False is True` on the frozen button, and `AttributeError` for the method that did
 not exist yet - and the daemon test failed on `node.recording is True` while its own
 stubborn fake pw-cat was still alive.
+
+
+## Mono nodes bridge both channels (2026-09-26)
+
+`resolve_channel_pairs` matched ports by shared `audio.channel`, so a node whose port is
+`capture_MONO` (a mono mic / a mono layout) shared no channel name with FL/FR and resolved
+to **no pairs at all**: a mono source fed silence, a mono sink received nothing.  A lone
+MONO port is now bridged - when the mono side is the *target* every channel of the other
+side is linked into it, when it is the *source* the one MONO output fans out to every
+channel of the target.  PipeWire accepts and mixes both (verified on a private instance:
+two `monitor_FL` -> one `playback_MONO`, and one `monitor_MONO` -> both `playback_FL/FR`;
+every `pw-link` exited 0 and `pw-link -l` lists all of them).  Detection is by
+`audio.channel == "MONO"` only (`pwmatch.MONO_CHANNEL`): a single port with *no* channel -
+a filter-chain module's bare `Input`/`Output` - is still skipped by
+`port_groups_for_node`, unchanged.
