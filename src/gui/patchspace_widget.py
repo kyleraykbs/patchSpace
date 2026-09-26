@@ -2026,6 +2026,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self._canvas_drawn_at = now
             self.queue_draw()
 
+    def _note_painted(self) -> None:
+        """A direct repaint (a handler's own queue_draw) counts for the floor
+        too, so a busy UI never stacks floor repaints on top of its own."""
+        self._canvas_drawn_at = time.monotonic()
+
     def _canvas_structure(self, daemon_nodes):
         """The part of the canvas signature that is a *change* rather than
         *progress*: what is on the canvas and how it is arranged, ignoring the
@@ -5598,7 +5603,26 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     active = True
         if active:
             self.queue_draw()
+        self._paint_floor()
         return True
+
+    def _paint_floor(self) -> None:
+        """Repaint at least this often while the window exists.
+
+        A canvas that goes completely quiet is not merely static, it is dead to
+        the compositor: on Wayland a surface that never draws never
+        acknowledges a configure, so the window cannot be resized and its
+        updates stop however healthy the loop and the daemon are - which is
+        exactly what "it loads all the nodes then it becomes unresponsive"
+        looked like.  Every gate added to keep the canvas *cheap* (the poll
+        signature, the layout tick) removed repaints, and together they starved
+        it.  Two frames a second is a bounded cost that keeps the pipeline fed
+        and, as a bonus, means any state change that somehow misses its own
+        repaint is visible within half a second anyway."""
+        if time.monotonic() - self._canvas_drawn_at < self.PROGRESS_REPAINT_S:
+            return
+        self._canvas_drawn_at = time.monotonic()
+        self.queue_draw()
 
     @staticmethod
     def _grow_split(points, target, fade):

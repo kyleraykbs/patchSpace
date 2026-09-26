@@ -709,3 +709,42 @@ def test_a_poll_that_changes_a_drawn_field_repaints():
                               "edges": {}, "panels": [], "groups": []})
         assert drawn, "%s changed and the canvas did not repaint" % field
         drawn.clear()
+
+
+def test_the_canvas_repaints_on_a_floor_even_when_nothing_changes():
+    """Kyle: "it loads all the nodes then it becomes so unresponsive".
+
+    A canvas that goes completely quiet is not merely static - it is dead to the
+    compositor.  On Wayland a surface that never draws never acknowledges a
+    configure, so the window cannot be resized and nothing it does is ever
+    visible, however healthy the loop and the daemon are.  Every gate added to
+    keep painting cheap (the poll signature, the layout tick) removed repaints,
+    and together they starved the window."""
+    w, client = _widget()
+    w.update_from_daemon({"nodes": {"r1": {
+        "id": "r1", "type": "sound", "label": "Sound", "x": 0.0, "y": 0.0,
+        "ready": True, "connected": True, "declarative": False,
+        "selection_label": "Sound", "description": "", "path": "/tmp/x.wav"}},
+        "edges": {}, "panels": [], "groups": []})
+    # Settle every animation first, so the only thing that can repaint is the
+    # floor itself.
+    w._anim_seen.update(w.nodes)
+    for nid in w.nodes:
+        w._node_alpha[nid] = 1.0
+        w._node_fade[nid] = {"target": 1.0, "from": 1.0, "t0": 0.0}
+        w._node_born.pop(nid, None)
+
+    drawn = []
+    w.queue_draw = lambda *a, **k: drawn.append(1)
+
+    # Nothing is animating and nothing is changing - and the canvas must still
+    # repaint, on a floor.
+    w._canvas_drawn_at = 0.0
+    w._anim_tick()
+    assert drawn, "a quiet canvas never repainted"
+
+    # The floor is a floor, not a storm: it does not fire on every tick.
+    drawn.clear()
+    for _ in range(10):
+        w._anim_tick()
+    assert drawn == [], "the floor repainted on every tick"
