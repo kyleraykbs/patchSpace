@@ -2022,7 +2022,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self._canvas_structure_sig = structure
             self._canvas_drawn_at = now
             self.queue_draw()
-        elif now - self._canvas_drawn_at >= self.SOUND_WAVE_MIN_INTERVAL_MS / 1000.0:
+        elif now - self._canvas_drawn_at >= self.PROGRESS_REPAINT_S:
             self._canvas_drawn_at = now
             self.queue_draw()
 
@@ -2052,22 +2052,24 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         )
 
     def _canvas_signature(self, daemon_nodes):
-        """A cheap fingerprint of everything one frame draws.
+        """Everything one frame draws, as one comparable value.
 
-        Keyed on the same per-node value the geometry caches use, so a poll that
-        changed nothing visible compares equal and the canvas is left alone."""
+        The payload is compared *whole*, per node.  Hand-picking fields here is
+        what made the canvas stop updating after loading: bool_state,
+        device_volume, progress, gain, sensitivity and force_default are all
+        drawn and were all missing, so poll-driven changes to them were never
+        repainted - the nodes appeared once and then nothing about them moved
+        again.  Whatever the draw reads, comparing the payload covers it."""
         return (
             tuple(
-                (nid, self._node_fingerprint(ndata),
-                 ndata.get("x"), ndata.get("y"))
+                (nid, repr(sorted(ndata.items())))
                 for nid, ndata in sorted(daemon_nodes.items())
             ),
             tuple(
-                (eid, e.get("from_node"), e.get("to_node"),
-                 e.get("to_port"), e.get("from_port"))
-                for eid, e in sorted(self.edges.items())
+                (nid, self._clip_wave_rev.get(nid),
+                 len((self._clip_waves.get(nid) or {}).get("peaks") or ()))
+                for nid in sorted(self._clip_waves)
             ),
-            tuple(sorted(self.panels)),
             self.loading, self.canvas_opacity_from_daemon,
             tuple(sorted(self.selected_nodes)),
             tuple(sorted(self.anchored_nodes)),
@@ -3117,6 +3119,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
     #: and a Replay Buffer has no impulse *input* either - what it works on is
     #: its own recording, not a wire - so it can't be recognised by
     #: `impulse_inputs` alone.
+    #: How often a *progress* change (a bar filling, a slider the daemon moved,
+    #: a take growing) may repaint the canvas.  A frame costs tens of
+    #: milliseconds, so progress is coalesced to a couple of draws a second -
+    #: a structural change (a node appearing, an edge moving) is shown at once
+    #: regardless.  See _canvas_signature.
+    PROGRESS_REPAINT_S = 0.5
+
     FACE_CONTROLS = ("dump", "replay_buffer")
 
     def _has_face(self, nid) -> bool:

@@ -671,3 +671,41 @@ def test_a_burst_of_mutations_leaves_no_polling_behind():
     # A later mutation schedules again on its own.
     w.schedule_refresh()
     assert w._refresh_source not in (0, src)
+
+
+def test_a_poll_that_changes_a_drawn_field_repaints():
+    """Kyle: "it loads all the nodes then it becomes so unresponsive".
+
+    The repaint gate compared a hand-picked per-node signature, and what the
+    frame draws outran it: bool_state, device_volume, progress, gain,
+    sensitivity and force_default are all read by _draw_node and none of them
+    were in the signature.  A poll-driven change to any of them therefore never
+    repainted - the nodes appeared once and then nothing about them moved again,
+    which is what made a perfectly healthy GUI look dead."""
+    w, client = _widget()
+    base = {
+        "id": "g1", "type": "gate", "label": "Gate", "x": 0.0, "y": 0.0,
+        "ready": True, "connected": True, "declarative": False,
+        "selection_label": "Gate", "description": "",
+        "bool_state": False, "device_volume": 0.5, "progress": 0.0,
+    }
+    w.update_from_daemon({"nodes": {"g1": dict(base)},
+                          "edges": {}, "panels": [], "groups": []})
+
+    drawn = []
+    w.queue_draw = lambda *a, **k: drawn.append(1)
+
+    # The same state again: nothing to draw, so nothing drawn.
+    w.update_from_daemon({"nodes": {"g1": dict(base)},
+                          "edges": {}, "panels": [], "groups": []})
+    assert drawn == [], "an unchanged poll repainted"
+
+    # A field the frame draws changed: it must show (past the progress leash,
+    # which is about how *often*, not whether).
+    for field, value in (("bool_state", True), ("device_volume", 0.9),
+                         ("progress", 0.5)):
+        w._canvas_drawn_at = 0.0
+        w.update_from_daemon({"nodes": {"g1": dict(base, **{field: value})},
+                              "edges": {}, "panels": [], "groups": []})
+        assert drawn, "%s changed and the canvas did not repaint" % field
+        drawn.clear()
