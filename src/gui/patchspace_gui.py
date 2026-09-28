@@ -106,7 +106,45 @@ def _resolve_canvas_opacity(argv, environ=None):
     return cleaned, None
 
 
+#: Where the NVIDIA kernel module announces itself.  Its presence is the
+#: only reliable "this machine runs the NVIDIA driver" signal that needs
+#: no dependencies (no lspci, no nvidia-smi).
+NVIDIA_VERSION_PATH = "/proc/driver/nvidia/version"
+
+
+def _apply_nvidia_render_fallback(environ=None, proc_path=NVIDIA_VERSION_PATH):
+    """Force software rendering when the NVIDIA driver is loaded; leave
+    every other GPU alone.
+
+    Why: the NVIDIA driver keeps freed video buffers in its own heap
+    instead of returning them (the ``GLVidHeapReuseRatio`` quirk the niri
+    wiki works around with an application profile).  Under capture load -
+    a screenshare running - that heap inflates until EGL allocations fail
+    outright (``EGL_BAD_ALLOC``; watched it take a Qt shell down in the
+    journal while this GUI's surface wedged: Python healthy, main loop
+    pumping, window dead even to fullscreen, because a CSD window cannot
+    ack a configure without fresh buffers).  Moving this app's GL onto
+    llvmpipe takes every allocation off the NVIDIA driver, so the
+    starvation cannot reach it.  The canvas is a cairo DrawingArea that
+    repaints at 2 fps when idle - the GPU was never doing meaningful work
+    here, so the CPU cost is small and the wall-clock behaviour is the
+    same on every card.
+
+    AMD/Intel (Mesa) are untouched: Mesa manages VRAM properly and the
+    bug does not exist there, so those keep their real GPU path.  An
+    explicit environment always wins - this only fills in what is unset -
+    so ``GSK_RENDERER=gl`` from the session and any user override stand."""
+    environ = os.environ if environ is None else environ
+    if not os.path.exists(proc_path):
+        return False
+    for key, value in (("LIBGL_ALWAYS_SOFTWARE", "1"), ("GSK_RENDERER", "cairo")):
+        if not environ.get(key):
+            environ[key] = value
+    return True
+
+
 def main():
+    _apply_nvidia_render_fallback()
     argv, opacity = _resolve_canvas_opacity(sys.argv)
     if opacity is not None:
         try:
