@@ -111,6 +111,31 @@ def _resolve_canvas_opacity(argv, environ=None):
 #: no dependencies (no lspci, no nvidia-smi).
 NVIDIA_VERSION_PATH = "/proc/driver/nvidia/version"
 
+#: Where glvnd's EGL vendor JSONs live.  glvnd - the dispatch layer libEGL
+#: resolves to on NixOS and every modern distro - picks the EGL vendor
+#: *implementation* independently of anything Mesa's own loader does, and
+#: it happily loads every vendor it finds.  Pinning the vendor to Mesa's
+#: JSON is the only thing that keeps the NVIDIA EGL implementation out of
+#: the process at all.
+EGL_VENDOR_DIRS = (
+    "/run/opengl-driver/share/glvnd/egl_vendor.d",  # NixOS driver link farm
+    "/usr/share/glvnd/egl_vendor.d",  # FHS distros
+)
+
+
+def _mesa_egl_vendor_json():
+    """The Mesa EGL vendor JSON on this machine, or None if there isn't
+    one (a distro glvnd is happy to enumerate for itself)."""
+    for directory in EGL_VENDOR_DIRS:
+        try:
+            names = sorted(os.listdir(directory))
+        except OSError:
+            continue
+        for name in names:
+            if "mesa" in name and name.endswith(".json"):
+                return os.path.join(directory, name)
+    return None
+
 
 def _apply_nvidia_render_fallback(environ=None, proc_path=NVIDIA_VERSION_PATH):
     """Force software rendering when the NVIDIA driver is loaded; leave
@@ -123,12 +148,21 @@ def _apply_nvidia_render_fallback(environ=None, proc_path=NVIDIA_VERSION_PATH):
     outright (``EGL_BAD_ALLOC``; watched it take a Qt shell down in the
     journal while this GUI's surface wedged: Python healthy, main loop
     pumping, window dead even to fullscreen, because a CSD window cannot
-    ack a configure without fresh buffers).  Moving this app's GL onto
-    llvmpipe takes every allocation off the NVIDIA driver, so the
-    starvation cannot reach it.  The canvas is a cairo DrawingArea that
-    repaints at 2 fps when idle - the GPU was never doing meaningful work
-    here, so the CPU cost is small and the wall-clock behaviour is the
-    same on every card.
+    ack a configure without fresh buffers).  The canvas is a cairo
+    DrawingArea that repaints at 2 fps when idle - the GPU was never doing
+    meaningful work here - so software rendering costs little and behaves
+    the same on every card.
+
+    Two layers are needed, because two layers pick the renderer:
+
+    * ``LIBGL_ALWAYS_SOFTWARE=1`` makes *Mesa* use llvmpipe, and
+      ``GSK_RENDERER=cairo`` keeps GSK's compositing on the CPU;
+    * ``__EGL_VENDOR_LIBRARY_FILENAMES`` pins glvnd's EGL to Mesa's vendor
+      JSON.  Without it glvnd still loads libEGL_nvidia for the Wayland
+      surface - measured: the NVIDIA EGL stack in /proc/<pid>/maps even
+      with both flags above set - and every buffer allocation stays on the
+      driver we are trying to starve-proof.  With it the surface is
+      presented through Mesa (wl_shm), off the NVIDIA heap entirely.
 
     AMD/Intel (Mesa) are untouched: Mesa manages VRAM properly and the
     bug does not exist there, so those keep their real GPU path.  An
@@ -140,6 +174,10 @@ def _apply_nvidia_render_fallback(environ=None, proc_path=NVIDIA_VERSION_PATH):
     for key, value in (("LIBGL_ALWAYS_SOFTWARE", "1"), ("GSK_RENDERER", "cairo")):
         if not environ.get(key):
             environ[key] = value
+    if not environ.get("__EGL_VENDOR_LIBRARY_FILENAMES"):
+        json_path = _mesa_egl_vendor_json()
+        if json_path:
+            environ["__EGL_VENDOR_LIBRARY_FILENAMES"] = json_path
     return True
 
 
