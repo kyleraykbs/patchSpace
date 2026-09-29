@@ -99,10 +99,25 @@
               # Sound nodes: ffprobe reports a file's length, ffmpeg decodes
               # one when only part of it is played (see pwnodes.SoundNode).
               pkgs.ffmpeg-headless
+              # Video nodes (VirtualCameraNode): gst-launch runs the
+              # camera -> v4l2 pipeline.  pipewiresrc (in the pipewire
+              # package) consumes a camera stream; videoconvert and
+              # v4l2sink come from base/good.
+              pkgs.gst_all_1.gstreamer
+              pkgs.gst_all_1.gst-plugins-base
+              pkgs.gst_all_1.gst-plugins-good
             ];
             text = ''
               export LADSPA_PATH="${ladspaPath}''${LADSPA_PATH:+:$LADSPA_PATH}"
               export LV2_PATH="${lv2Path}''${LV2_PATH:+:$LV2_PATH}"
+              export GST_PLUGIN_SYSTEM_PATH_1_0="${
+                pkgs.lib.concatStringsSep ":" [
+                  "${pkgs.pipewire}/lib/gstreamer-1.0"
+                  "${pkgs.gst_all_1.gst-plugins-base}/lib/gstreamer-1.0"
+                  "${pkgs.gst_all_1.gst-plugins-good}/lib/gstreamer-1.0"
+                  "${pkgs.gst_all_1.gstreamer}/lib/gstreamer-1.0"
+                ]
+              }''${GST_PLUGIN_SYSTEM_PATH_1_0:+:$GST_PLUGIN_SYSTEM_PATH_1_0}"
               exec ${python}/bin/python3 ${source}/main.py "$@"
             '';
           };

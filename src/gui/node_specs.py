@@ -125,6 +125,8 @@ class NodeSpec:
         "filter_outputs",
         "sound_inputs",
         "sound_outputs",
+        "camera_inputs",
+        "camera_outputs",
         "socket_labels",
         "label_lone_output",
         "description",
@@ -153,6 +155,8 @@ class NodeSpec:
         filter_outputs: Optional[List[str]] = None,
         sound_inputs: Optional[List[str]] = None,
         sound_outputs: Optional[List[str]] = None,
+        camera_inputs: Optional[List[str]] = None,
+        camera_outputs: Optional[List[str]] = None,
         socket_labels: bool = True,
         label_lone_output: bool = False,
         description: str = "",
@@ -211,6 +215,14 @@ class NodeSpec:
         # audio crosses one - and only ever paired with another sound port.
         self.sound_inputs = set(sound_inputs or ())
         self.sound_outputs = set(sound_outputs or ())
+        # *Camera* ports carry a live video stream (a selected camera
+        # feed, see the Camera In / Virtual Camera nodes).  Data-plane
+        # like audio, but its own kind: paired only with another camera
+        # port, and - no PipeWire null-video-sink exists to dummy around
+        # - wired by the consuming node's own video stream rather than by
+        # daemon-made port pairs (see pwnodes.VirtualCameraNode).
+        self.camera_inputs = set(camera_inputs or ())
+        self.camera_outputs = set(camera_outputs or ())
         # None | "gate" | "volume" | "wetdry" | "sensitivity" - which
         # inline control (if any) is drawn on the node body and wired
         # to a daemon command. "gate" is the on/off toggle, "volume"
@@ -849,6 +861,10 @@ NODE_TYPE_SPECS.update(
             "Virtual Speaker", ["audio"], ["out"], field="device_label"
         ),
         "virtual_mic": NodeSpec("Virtual Mic", ["audio"], ["out"], field="device_label"),
+        "camera_input": NodeSpec("Camera In", [], ["out"], camera_outputs=["out"]),
+        "virtual_camera": NodeSpec(
+            "Virtual Camera", ["in"], [], camera_inputs=["in"]
+        ),
     }
 )
 
@@ -967,6 +983,11 @@ NODE_DESCRIPTIONS: Dict[str, str] = {
     "play into.",
     "virtual_mic": "A named virtual microphone other applications can "
     "record from.",
+    "camera_input": "A camera feed: one selected video source (webcam, "
+    "capture card, virtual camera, ...) carried on a camera wire.",
+    "virtual_camera": "A virtual camera: republishes the camera feed wired "
+    "into it on a v4l2 output device, so other apps can pick it up as a "
+    "camera.",
     # Impulse
     "button": "A momentary button: press it to fire an impulse down its "
     "wire. It holds no state - the pulse is the whole signal.",
@@ -1165,6 +1186,7 @@ ADD_NODE_CATEGORIES = [
         [
             ("Hardware Input", "device_input"),
             ("Hardware Output", "device_output"),
+            ("Camera In", "camera_input"),
             ("App Playback", "app_input"),
             ("App Mic", "app_output"),
             ("Speaker Line", "patchspace_device"),
@@ -1176,6 +1198,7 @@ ADD_NODE_CATEGORIES = [
         [
             ("Virtual Speaker", "virtual_speaker"),
             ("Virtual Mic", "virtual_mic"),
+            ("Virtual Camera", "virtual_camera"),
         ],
     ),
 ]
@@ -1269,6 +1292,8 @@ NODE_TYPE_ICONS: Dict[str, str] = {
     "patchspace_mic_device": "audio-input-microphone-symbolic",
     "virtual_speaker": "audio-speakers-symbolic",
     "virtual_mic": "audio-input-microphone-symbolic",
+    "camera_input": "camera-photo-symbolic",
+    "virtual_camera": "camera-video-symbolic",
     # All Inputs covers mics, interfaces, virtual mics AND app playback
     # streams, so it gets a general multimedia glyph rather than a mic.
     "all_inputs": "applications-multimedia-symbolic",
@@ -1387,6 +1412,8 @@ CLASS_NAME_TO_TYPE.update(
         "PatchSpaceMicDeviceNode": "patchspace_mic_device",
         "VirtualSpeakerNode": "virtual_speaker",
         "VirtualMicNode": "virtual_mic",
+        "CameraInputNode": "camera_input",
+        "VirtualCameraNode": "virtual_camera",
     }
 )
 
@@ -1428,14 +1455,14 @@ def port_kind(node_type: str, port: str, direction: str) -> str:
     if node_type == "filter" and direction == "in" and port.startswith("filter"):
         return "filter"
     if direction == "in":
-        kinds, bundles, filters, impulses, sounds = (
+        kinds, bundles, filters, impulses, sounds, cameras = (
             spec.boolean_inputs, spec.bundle_inputs, spec.filter_inputs,
-            spec.impulse_inputs, spec.sound_inputs,
+            spec.impulse_inputs, spec.sound_inputs, spec.camera_inputs,
         )
     else:
-        kinds, bundles, filters, impulses, sounds = (
+        kinds, bundles, filters, impulses, sounds, cameras = (
             spec.boolean_outputs, spec.bundle_outputs, spec.filter_outputs,
-            spec.impulse_outputs, spec.sound_outputs,
+            spec.impulse_outputs, spec.sound_outputs, spec.camera_outputs,
         )
     if port in kinds:
         return "boolean"
@@ -1445,6 +1472,8 @@ def port_kind(node_type: str, port: str, direction: str) -> str:
         return "filter"
     if port in sounds:
         return "sound"
+    if port in cameras:
+        return "camera"
     if port in bundles:
         return "bundle"
     return "audio"
@@ -1466,6 +1495,8 @@ def ports_compatible(from_type: str, from_port: str, to_type: str,
     if (from_kind == "filter") != (to_kind == "filter"):
         return False
     if (from_kind == "sound") != (to_kind == "sound"):
+        return False
+    if (from_kind == "camera") != (to_kind == "camera"):
         return False
     return True
 

@@ -561,7 +561,15 @@ class PipewireGraph:
             if not cmdline:
                 continue
             prog = os.path.basename(cmdline[0])
-            if prog not in ("pw-loopback", "pw-cat"):
+            # gst-launch counts as a helper too: a Virtual Camera's
+            # GStreamer pipeline is the video twin of pw-cat/pw-loopback,
+            # and its argv carries the node's backing name (the v4l2sink
+            # element name - see pwnodes.VirtualCameraNode).  The nix
+            # wrapper execs a ".gst-launch-1.0-wrapped" binary, hence the
+            # leading-dot strip.
+            if prog not in ("pw-loopback", "pw-cat") and not prog.lstrip(
+                "."
+            ).startswith("gst-launch"):
                 continue
             args_text = " ".join(cmdline)
             if not any(marker in args_text for marker in markers):

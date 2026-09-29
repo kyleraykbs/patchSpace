@@ -1354,6 +1354,10 @@ class MainWindow(Gtk.ApplicationWindow):
                     self.ps_widget.on_titles(resp["titles"])
                 elif "applications" in resp:
                     self.ps_widget.on_applications(resp["applications"])
+                elif "cameras" in resp:
+                    self.ps_widget.on_cameras(resp)
+                elif "camera_outputs" in resp:
+                    self.ps_widget.on_camera_outputs(resp)
                 elif "profiles" in resp:
                     self.ps_widget.on_device_profiles(resp)
                 elif "recording" in resp and "node_id" in resp:

@@ -2923,6 +2923,195 @@ class VirtualMicNode(_SinkVolumeMixin, BackedNode):
 
 
 # ---------------------------------------------------------------------------
+# Cameras (live video)
+# ---------------------------------------------------------------------------
+#
+# A *camera* wire (its own port kind - see add_edge) carries a live video
+# stream: a Camera In node exposes one selected camera feed, and a Virtual
+# Camera node consumes one such feed and republishes it as a virtual
+# camera.  Unlike audio there is no PipeWire null-video-sink to use as a
+# stable dummy, so the consuming node's own GStreamer stream is both the
+# socket and the interior; the visible link in the PipeWire graph is the
+# stream's `target.object` binding to the camera node (rewire = the daemon
+# respawns the interior with the new target - see ensure_structural).
+
+
+class CameraInputNode(InputNode, LiveResolvableNode):
+    """A camera feed: one selected video source on a ``camera`` output.
+
+    ``device_name`` is the live PipeWire video source's node.name (a
+    WirePlumber-published camera - every v4l2 camera and every virtual
+    camera shows up as one); ``source_mode="v4l2"`` instead reads a raw
+    /dev/videoN directly (``device_path``) for cameras no PipeWire node
+    covers.  The node owns nothing: like DeviceInputNode it is a stable
+    reference to a live object, so it survives replug/rename."""
+
+    def __init__(self, node_id, device_name: str = "", description: str = "",
+                 source_mode: str = "pipewire", device_path: str = ""):
+        InputNode.__init__(self, node_id)
+        LiveResolvableNode.__init__(self)
+        self.device_name = device_name
+        self.description = description
+        self.source_mode = source_mode
+        self.device_path = device_path
+
+    def port_kind(self, port: str, direction: str) -> str:
+        return "camera"
+
+    def source_identity(self) -> dict:
+        """What a consuming video node should point its stream at: the
+        live node name for a PipeWire source, or the raw device path for
+        a v4l2-only one.  Shaped like a source filter so it travels
+        through ``_resolve_sources`` unchanged."""
+        if self.source_mode == "v4l2":
+            return {"v4l2Device": self.device_path} if self.device_path else {}
+        return {"nodeName": self.device_name} if self.device_name else {}
+
+    def source_filters(self):
+        identity = self.source_identity()
+        return [identity] if identity else []
+
+    def matches_live_node(self, props):
+        return bool(self.device_name) and props.get("node.name") == self.device_name
+
+    def _on_live_resolved(self):
+        if self.live_props:
+            self.description = (
+                self.live_props.get("node.description")
+                or self.live_props.get("node.nick")
+                or self.description
+            )
+        super()._on_live_resolved()
+
+
+class VirtualCameraNode(BackedNode):
+    """A virtual camera: whatever camera feed is wired into its ``camera``
+    input, republished on a v4l2 output device (a VirtualCamN loopback
+    from the machine's v4l2loopback pool).
+
+    The interior is one GStreamer pipeline - a PipeWire video stream
+    consuming the camera (its ``target.object`` binding *is* the visible
+    link in the PipeWire graph) feeding ``v4l2sink`` on the output
+    device.  The loopback is then simultaneously a v4l2 device (what OBS
+    lists as a camera) and a PipeWire Video/Source (WirePlumber publishes
+    every v4l2 capture node), so one write serves both worlds.
+
+    The stream's node.name comes from the launcher binary and is the same
+    for every instance, so nothing here resolves a live node id - a
+    backing that is simply running is healthy (see dead_backings).
+    ``structural_ok`` additionally checks the running pipeline still
+    matches the resolved camera/output device, so an upstream rewire is
+    repaired on the next supervision tick by respawning the interior -
+    the one replaceable part of the node."""
+
+    def __init__(self, node_id, backing_node_name: str,
+                 output_device: str = "",
+                 pw_cli_command=("gst-launch-1.0",), settle: float = 0.3):
+        super().__init__(node_id, backing_node_name)
+        self.output_device = output_device
+        self._pw_cli_command = pw_cli_command
+        self._settle = settle
+        # The camera identity the daemon last resolved for us ({"nodeName"}
+        # or {"v4l2Device"} - see CameraInputNode.source_identity), and
+        # what the running interior was actually spawned with.
+        self._camera_source: Optional[dict] = None
+        self._spawned_command: Optional[List[str]] = None
+
+    # -- ports ------------------------------------------------------------
+
+    def port_kind(self, port: str, direction: str) -> str:
+        return "camera"
+
+    def set_camera_source(self, source: Optional[dict]) -> None:
+        """Point this node at a camera identity (None = nothing wired).
+        Idempotent; structural_ok() compares against what the running
+        interior was spawned with, so a change is picked up as a repair."""
+        self._camera_source = dict(source) if source else None
+
+    # -- interior ---------------------------------------------------------
+
+    def _pipeline_command(self, source: dict) -> List[str]:
+        """The GStreamer argv for one camera -> output device run.
+
+        The v4l2sink element's ``name`` is this node's backing name: it
+        is how the startup orphan sweep recognises a crashed daemon's
+        leftover pipeline (see pwgraph._terminate_orphan_helpers), and it
+        is a valid element property, so it costs nothing."""
+        if source.get("v4l2Device"):
+            capture = ["v4l2src", f'device={source["v4l2Device"]}']
+        else:
+            capture = ["pipewiresrc", f'target-object={source["nodeName"]}']
+        return [
+            "gst-launch-1.0", "-q",
+            *capture,
+            "!", "videoconvert", "!",
+            "v4l2sink", f"name={self.backing_node_name}",
+            f"device={self.output_device}",
+        ]
+
+    def _desired_command(self) -> Optional[List[str]]:
+        if not self._camera_source or not self.output_device:
+            return None
+        return self._pipeline_command(self._camera_source)
+
+    def dead_backings(self) -> List[OwnedPwNode]:
+        """Only a real process death counts - never "stuck".
+
+        The GStreamer stream's node.name is derived from the launcher
+        binary and is identical for every instance, so resolve_backing
+        never matches it and node_id stays None; without this override
+        the shared stuck() check would restart a perfectly healthy
+        pipeline every RESOLVE_GRACE_S."""
+        return [b for b in self.backings if b.owns_process and not b.is_alive]
+
+    def structural_ok(self) -> bool:
+        desired = self._desired_command()
+        if desired is None:
+            # No camera wired / no output device chosen: nothing should
+            # be running, and "nothing" is healthy for a configured-but-
+            # idle node.
+            return not self.backings
+        return (
+            self._spawned_command == desired
+            and len(self.backings) == 1
+            and self.backings[0].owns_process
+            and self.backings[0].is_alive
+        )
+
+    def ensure_structural(self) -> None:
+        self._prune_dead()
+        desired = self._desired_command()
+        if desired is None:
+            for owned in self.owned_backings():
+                owned.destroy()
+            self._spawned_command = None
+            return
+        if self._spawned_command != desired:
+            # A rewire or output-device change: the interior is the one
+            # replaceable piece (it holds no user edges - the camera edge
+            # resolves to the stream's target), so swap it in place.
+            for owned in self.owned_backings():
+                owned.destroy()
+            self._spawned_command = None
+        if not self.backings:
+            owned = OwnedPwProcess(
+                self.backing_node_name, self._pw_cli_command, self._settle
+            )
+            if owned.create(desired):
+                self.backings.append(owned)
+                self._spawned_command = desired
+            else:
+                logger.error(
+                    "Virtual camera pipeline failed for %r", self.id)
+
+    def config_fields(self):
+        out = super().config_fields()
+        out["backing_node_name"] = self.backing_node_name
+        out["output_device"] = self.output_device
+        return out
+
+
+# ---------------------------------------------------------------------------
 # Effects (real DSP sandwiches)
 # ---------------------------------------------------------------------------
 
@@ -4233,8 +4422,17 @@ class PatchSpace:
                 raise ValueError(
                     f"cannot connect a {from_kind} output to a {to_kind} input"
                 )
+            if (from_kind == "camera") != (to_kind == "camera"):
+                # A *camera* wire carries a video stream - a live camera
+                # feed (see CameraInputNode) into whatever consumes it
+                # (VirtualCameraNode today).  Like sound it pairs only
+                # with its own kind: audio never crosses it.
+                raise ValueError(
+                    f"cannot connect a {from_kind} output to a {to_kind} input"
+                )
             if from_kind not in (
-                "boolean", "filter", "impulse", "sound", "bundle", "audio"
+                "boolean", "filter", "impulse", "sound", "camera", "bundle",
+                "audio",
             ):
                 raise ValueError(f"unknown port kind {from_kind!r}")
             if to_kind in ("boolean", "impulse"):
@@ -4256,6 +4454,12 @@ class PatchSpace:
                 # a file (plus a range), not something to mix.
                 for existing in self._edges_into.get(to_node, []):
                     if existing.to_port == to_port and self._edge_is_sound(existing):
+                        raise ValueError(f"{to_node}.{to_port} is already driven")
+            elif to_kind == "camera":
+                # A camera input takes exactly one feed: a Virtual Camera
+                # publishes one stream, it does not composite.
+                for existing in self._edges_into.get(to_node, []):
+                    if existing.to_port == to_port and self._edge_is_camera(existing):
                         raise ValueError(f"{to_node}.{to_port} is already driven")
             elif to_kind == "filter":
                 # A classifier input is a single control slot, separate
@@ -4522,6 +4726,19 @@ class PatchSpace:
         if src is not None and src.port_kind(edge.from_port, "out") == "sound":
             return True
         return dst is not None and dst.port_kind(edge.to_port, "in") == "sound"
+
+    def _edge_is_camera(self, edge: "Edge") -> bool:
+        """Whether `edge` carries a *camera* feed (a live video stream -
+        see CameraInputNode/VirtualCameraNode).  Camera edges are
+        data-plane like audio, but the link is owned by the consuming
+        node's own stream, which targets the camera by name (see
+        VirtualCameraNode._pipeline_command) - so sync_locked derives no
+        port pairs for them, same as the control-plane kinds."""
+        src = self.nodes.get(edge.from_node)
+        if src is not None and src.port_kind(edge.from_port, "out") == "camera":
+            return True
+        dst = self.nodes.get(edge.to_node)
+        return dst is not None and dst.port_kind(edge.to_port, "in") == "camera"
 
     def _edge_is_impulse(self, edge: "Edge") -> bool:
         """Whether `edge` is a momentary impulse wire rather than audio.
@@ -5158,6 +5375,31 @@ class PatchSpace:
                 props = live.get(live_id, {}).get("info", {}).get("props", {})
                 node.resolve_live(live_id, props)
 
+    def _sync_camera_targets(self) -> None:
+        """Point every Virtual Camera node at the camera feed currently
+        wired into it (None when nothing is).
+
+        The consuming node's GStreamer stream targets the camera by name
+        (see VirtualCameraNode._pipeline_command), so the edge's source
+        resolution is interior config rather than link pairs.  Running
+        before the structural checks in _supervise_node means a rewire is
+        seen as "the running pipeline no longer matches" and repaired by
+        respawn on the same tick.
+
+        Runs every supervise() tick, before sync()."""
+        for node in list(self.nodes.values()):
+            if not isinstance(node, VirtualCameraNode):
+                continue
+            source: Optional[dict] = None
+            for edge in self._edges_into.get(node.id, []):
+                if not self._edge_is_camera(edge):
+                    continue
+                candidates = self._resolve_sources(edge.from_node, edge.from_port)
+                if candidates:
+                    source = candidates[0]
+                    break
+            node.set_camera_source(source)
+
     def _node_has_input(self, node_id: NodeId) -> bool:
         """Whether anything at all is wired into ``node_id``."""
         return any(e.to_node == node_id for e in self.edges.values())
@@ -5166,6 +5408,11 @@ class PatchSpace:
         """Health pass.  Called by the daemon's tick thread under no
         lock held by the caller."""
         with self._lock:
+            # Re-point video interiors at whatever camera edge is wired
+            # *before* the structural health loop: a rewire then shows up
+            # as "the running pipeline no longer matches" and is repaired
+            # by respawn on this same tick.
+            self._sync_camera_targets()
             for node in list(self.nodes.values()):
                 if not isinstance(node, BackedNode):
                     continue
@@ -5417,6 +5664,13 @@ class PatchSpace:
                     # resolve into links.  (A sound effect's only input is
                     # an impulse, so without this every press-drag would
                     # also try to wire the button into the dummy sink.)
+                    continue
+                if self._edge_is_camera(edge):
+                    # A camera feed is data-plane like audio, but the
+                    # link is owned by the consuming node's own video
+                    # stream (its target-object points at the camera -
+                    # see VirtualCameraNode._pipeline_command), so there
+                    # are no port pairs to derive here.
                     continue
                 try:
                     sink_filters = (

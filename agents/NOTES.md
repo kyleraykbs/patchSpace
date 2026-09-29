@@ -84,7 +84,15 @@ pipewire &  ;  wireplumber &
 * `sync_locked` only visits `OutputNode`/`BackedNode`s; a control-plane edge that reaches a
   backed node must be skipped there (`_edge_is_control`) or it will be resolved as audio.
 * Anything a node owns that can exit on its own belongs in `owned_backings()`, **not**
-  `backings` — `dead_backings()`/`_node_is_ready` treat a dead backing as a fault.
+  `backings` - `dead_backings()`/`_node_is_ready` treat a dead backing as a fault.
+* Video interiors (VirtualCameraNode) are `gst-launch-1.0` pipelines: the
+  v4l2sink element's `name=` is the node's backing name so the startup
+  orphan sweep can reap a crashed daemon's pipeline (gst counts as a
+  helper next to pw-cat/pw-loopback), and the GStreamer stream's
+  node.name is the *wrapped binary's* - it never resolves to a graph id,
+  so VirtualCameraNode overrides `dead_backings()` (a live process is
+  healthy; no "stuck" restarts) and `structural_ok()` compares the
+  spawned argv, which is how a camera rewire gets repaired by respawn.
 * `_apply_node_config` (shared by add/load/panel-param-sync) copies any config key with a
   matching attr onto the node, so a new serialized attribute usually needs only
   `_SERIAL_ATTRS` + a `_create_node` argument + a `set_node_property` branch.

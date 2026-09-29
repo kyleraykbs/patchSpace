@@ -2848,6 +2848,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             return pal["filter_port"]
         if kind == "sound":
             return pal["sound_port"]
+        if kind == "camera":
+            return pal["camera_port"]
         if kind == "impulse":
             return pal["impulse_port"]
         return pal["output_port"] if is_output else pal["input_port"]
@@ -2890,7 +2892,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             kinds.append(port_kind(src["type"], edge.get("from_port", "out"), "out"))
         if dst is not None:
             kinds.append(port_kind(dst["type"], edge.get("to_port", "in"), "in"))
-        for special in ("sound", "filter", "bundle", "boolean", "impulse"):
+        for special in ("sound", "camera", "filter", "bundle", "boolean", "impulse"):
             if special in kinds:
                 return special
         return "audio"
@@ -2905,6 +2907,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             return pal["filter_port"]
         if kind == "sound":
             return pal["sound_port"]
+        if kind == "camera":
+            return pal["camera_port"]
         if kind == "impulse":
             return pal["impulse_port"]
         return pal["link"]
@@ -4758,6 +4762,11 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             # Speaker Line / Mic Line nodes always show the shared
             # built-in device's volume + lock.
             return ["volume"]
+        if ntype in ("camera_input", "virtual_camera"):
+            # One select row: a Camera In picks its feed, a Virtual
+            # Camera picks the output device it publishes on.  No volume
+            # row - there is no device volume to drive.
+            return ["select"]
         if ntype not in ("device_input", "device_output", "app_input", "app_output"):
             return []
         rows = ["select"]
@@ -7087,7 +7096,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
         if row_kind == "select":
             text = node.get("selection_label") or "(click to select)"
-            placeholder = not (node.get("device_name") or node.get("app_name"))
+            placeholder = not node.get("selection_label")
         else:  # codec
             text = node.get("codec_label") or "(click to select codec)"
             placeholder = not node.get("codec_label")
@@ -7794,6 +7803,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             direction = "inputs" if ntype == "device_input" else "outputs"
             self._pending_device_select = (nid, direction, screen_x, screen_y)
             self.client.send({"command": "get_hardware_devices"})
+        elif ntype == "camera_input":
+            self._pending_camera_select = (nid, screen_x, screen_y)
+            self.client.send({"command": "get_cameras"})
+        elif ntype == "virtual_camera":
+            self._pending_camera_output_select = (nid, screen_x, screen_y)
+            self.client.send({"command": "get_camera_outputs"})
         else:
             direction = "outputs" if ntype == "app_input" else "inputs"
             self._pending_app_select = (nid, direction, screen_x, screen_y)
@@ -7819,6 +7834,63 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             self.schedule_refresh()
 
         self._show_choice_popover(sx, sy, "Select device", choices, on_pick)
+
+    def on_cameras(self, payload):
+        # A Camera In's feed picker: every live PipeWire video source,
+        # plus raw v4l2 capture devices for the secondary "v4l2" mode
+        # (labelled, so the two are told apart in one list).
+        pending = getattr(self, "_pending_camera_select", None)
+        if not pending:
+            return
+        nid, sx, sy = pending
+        self._pending_camera_select = None
+        choices = [
+            (c.get("description") or c["name"], ("pipewire", c["name"]))
+            for c in payload.get("cameras", [])
+        ]
+        choices += [
+            ((d.get("description") or d["path"]) + " (v4l2)", ("v4l2", d["path"]))
+            for d in payload.get("v4l2_inputs", [])
+        ]
+
+        def on_pick(choice, nid=nid):
+            kind, ident = choice
+            if kind == "v4l2":
+                self._send_property(nid, "source_mode", "v4l2")
+                self._send_property(nid, "device_path", ident)
+                self._send_property(nid, "device_name", "")
+            else:
+                self._send_property(nid, "source_mode", "pipewire")
+                self._send_property(nid, "device_name", ident)
+                self._send_property(nid, "device_path", "")
+            self.schedule_refresh()
+
+        self._show_choice_popover(
+            sx, sy, "Select camera", choices, on_pick,
+            search_hint="Search cameras",
+        )
+
+    def on_camera_outputs(self, payload):
+        # A Virtual Camera's output-device picker: the v4l2 devices it
+        # can publish on (the machine's v4l2loopback pool).
+        pending = getattr(self, "_pending_camera_output_select", None)
+        if not pending:
+            return
+        nid, sx, sy = pending
+        self._pending_camera_output_select = None
+        choices = [
+            (d.get("description") or d["path"], d["path"])
+            for d in payload.get("camera_outputs", [])
+        ]
+
+        def on_pick(path, nid=nid):
+            self._send_property(nid, "output_device", path)
+            self.schedule_refresh()
+
+        self._show_choice_popover(
+            sx, sy, "Select output device", choices, on_pick,
+            search_hint="Search devices",
+        )
 
     def on_applications(self, applications):
         # The Application classifier's dropdown: every live application name,
@@ -9329,6 +9401,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         if (from_kind == "filter") != (to_kind == "filter"):
             return False
         if (from_kind == "sound") != (to_kind == "sound"):
+            return False
+        if (from_kind == "camera") != (to_kind == "camera"):
             return False
         return True
 

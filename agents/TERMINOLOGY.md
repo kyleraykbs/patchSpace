@@ -30,6 +30,10 @@ that isn't here, ask (and then add it).  When a mapping here is a guess, it is m
 | "stack" (the switch) | `SoundEffectNode.overlap`: On = takes stack, Off = restart |
 | "bundle" | one wire standing for a *set* of endpoints (`all_inputs`, `bundle`, …) |
 | "bool" / "control signal" | the `boolean` kind driving gates/switchers |
+| "connection type for cameras" / "camera wire" | the **`camera`** port kind: a live video feed (Camera In -> Virtual Camera), paired only with camera ports |
+| "Camera In" / "input node for cams" | `camera_input` node ("Camera In"): one selected camera stream on a camera out |
+| "virtual output node for cams" / "Virtual Camera" | `virtual_camera` node ("Virtual Camera"): republishes the wired camera feed on an output device |
+| "output device" (video) | a v4l2 output-capable device (the VirtualCamN loopback pool) the Virtual Camera writes - visible to apps as both a v4l2 camera and a PipeWire video source |
 
 ## Node-body widgets
 
@@ -56,6 +60,12 @@ that isn't here, ask (and then add it).  When a mapping here is a guess, it is m
 | "reload the interior" | `_coalesce_reload` → `reload_module()` (load-time controls) |
 | "wiring" / "it's wiring" | `edge_wired` (a poll-level "this edge's links aren't live yet") |
 | "declare" | the declarative panel files (`--panel-dir`, read-only panels) |
+
+## Other repos Kyle references
+
+| Kyle says | Where |
+|---|---|
+| "the nvidia tag" | `~/projects/mycelion` `config/tags/hardware/nvidia.nix` — the clan tag module that applies to every NVIDIA machine (amanita, psilocybe). "under config" = that repo's `config/` tree. |
 
 ## To confirm (guessed, not yet heard from Kyle)
 

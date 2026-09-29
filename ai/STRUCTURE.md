@@ -52,7 +52,12 @@ Consequences worth remembering:
 ## Control plane vs audio plane
 
 Ports have a *kind* (`Node.port_kind`): `audio`, `bundle`, `boolean`, `filter`,
-`impulse`.  `audio`/`bundle` become PipeWire links; the other three never do.
+`impulse`, `sound`, `camera`.  `audio`/`bundle` become PipeWire links; the
+control-plane kinds never do.  `sound` is a file reference.  `camera` is
+data-plane like audio but carries a live video stream (Camera In ->
+Virtual Camera): its link is owned by the consuming node's own GStreamer
+stream (its `target.object` points at the camera node), so sync derives no
+port pairs for it - see `pwnodes.VirtualCameraNode`.
 
 | kind | direction | how it flows |
 |---|---|---|

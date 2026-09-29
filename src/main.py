@@ -75,6 +75,8 @@ from pwnodes import (
     LightNoiseCancelNode,
     VirtualSpeakerNode,
     VirtualMicNode,
+    CameraInputNode,
+    VirtualCameraNode,
     DeviceInputNode,
     DeviceOutputNode,
     AppInputNode,
@@ -393,6 +395,8 @@ NODE_TYPE_REGISTRY: Dict[str, type] = {
     "patchspace_mic_device": PatchSpaceMicDeviceNode,
     "virtual_speaker": VirtualSpeakerNode,
     "virtual_mic": VirtualMicNode,
+    "camera_input": CameraInputNode,
+    "virtual_camera": VirtualCameraNode,
 }
 CLASS_TO_TYPE = {cls: key for key, cls in NODE_TYPE_REGISTRY.items()}
 
@@ -503,6 +507,11 @@ _SERIAL_ATTRS = (
     "declarative",
     "path",
     "overlap",
+    # Camera nodes: a Camera In's source identity (PipeWire node name or
+    # raw v4l2 device path/mode) and a Virtual Camera's output device.
+    "source_mode",
+    "device_path",
+    "output_device",
     # A Sound Dump's own fields, so the node can show them on its body.
     "folder",
     "name",
@@ -3969,6 +3978,16 @@ class PatchSpaceDaemon:
                 g("device_volume", 1.0),
                 g("volume_locked", True),
             )
+        if cls is CameraInputNode:
+            return cls(
+                node_id,
+                g("device_name", ""),
+                g("description", ""),
+                g("source_mode", "pipewire"),
+                g("device_path", ""),
+            )
+        if cls is VirtualCameraNode:
+            return cls(node_id, backing, g("output_device", ""))
         raise AssertionError(f"unhandled node type {node_type}")
 
     # ------------------------------------------------------------------
@@ -4432,6 +4451,13 @@ class PatchSpaceDaemon:
                 "port_name",
                 "default_state",
                 "path",
+                # Camera nodes: a Camera In's pick and a Virtual Camera's
+                # output device.  Setting one re-points the interior on
+                # the next supervision pass (VirtualCameraNode.structural_ok
+                # compares the running pipeline's argv).
+                "device_path",
+                "source_mode",
+                "output_device",
             ):
                 if hasattr(node, prop):
                     setattr(node, prop, value)
@@ -4907,6 +4933,79 @@ class PatchSpaceDaemon:
             ).append(entry)
         return {"status": "ok", "applications": applications}
 
+    # -- cameras / video devices -----------------------------------------
+
+    def _v4l2_device_rows(self) -> List[dict]:
+        """Every v4l2 device WirePlumber enumerated, with its /dev/videoN
+        path and capabilities bitmask parsed from the SPA device props.
+
+        Bit meanings are v4l2's own (VIDIOC_QUERYCAP): bit 0 captures,
+        bit 1 outputs, bits 12/13 the *_MPLANE variants - used to offer a
+        raw device as a camera *input* only when it can capture, and as a
+        virtual-camera *output* target only when it can output."""
+        rows = []
+        for node_id, node_data in self.graph.nodes().items():
+            props = node_data.get("info", {}).get("props", {})
+            if props.get("device.api") != "v4l2":
+                continue
+            path = props.get("api.v4l2.path")
+            if not path:
+                continue
+            raw = props.get("api.v4l2.cap.capabilities")
+            try:
+                caps = int(str(raw), 0) if raw is not None else 0
+            except ValueError:
+                caps = 0
+            rows.append({
+                "path": path,
+                "description": props.get("api.v4l2.cap.card") or path,
+                "caps": caps,
+            })
+        rows.sort(key=lambda r: r["path"])
+        return rows
+
+    def _cmd_get_cameras(self, cmd: dict) -> dict:
+        """Selectable camera feeds: every live PipeWire video source
+        (WirePlumber publishes each v4l2 camera and each virtual camera
+        as one), plus the raw v4l2 capture devices for the secondary
+        "v4l2" source mode (cameras with no PipeWire node, or an
+        exclusive direct read)."""
+        cameras = []
+        for node_id, node_data in self.graph.nodes().items():
+            props = node_data.get("info", {}).get("props", {})
+            if props.get("media.class") not in (
+                "Video/Source", "Stream/Output/Video"
+            ):
+                continue
+            name = props.get("node.name")
+            if not name:
+                continue
+            cameras.append({
+                "name": name,
+                "description": props.get("node.description")
+                or props.get("node.nick")
+                or name,
+            })
+        cameras.sort(key=lambda c: (c["description"] or "").lower())
+        v4l2_inputs = [
+            {"path": r["path"], "description": r["description"]}
+            for r in self._v4l2_device_rows()
+            if r["caps"] & (0x1 | 0x1000)  # VIDEO_CAPTURE(_MPLANE)
+        ]
+        return {"status": "ok", "cameras": cameras, "v4l2_inputs": v4l2_inputs}
+
+    def _cmd_get_camera_outputs(self, cmd: dict) -> dict:
+        """Output-capable v4l2 devices a Virtual Camera can publish on -
+        the machine's v4l2loopback pool (VirtualCamN) and any other
+        video-output device.  Writing one publishes the feed both as a
+        v4l2 camera and as a PipeWire Video/Source."""
+        outputs = [
+            {"path": r["path"], "description": r["description"]}
+            for r in self._v4l2_device_rows()
+            if r["caps"] & (0x2 | 0x2000)  # VIDEO_OUTPUT(_MPLANE)
+        ]
+        return {"status": "ok", "camera_outputs": outputs}
+
     def _cmd_get_device_profiles(self, cmd: dict) -> dict:
         node_id = cmd.get("node_id")
         with self._lock:
@@ -5360,7 +5459,14 @@ class PatchSpaceDaemon:
                     or node.live_props.get("node.nick")
                     or getattr(node, "device_name", "")
                     or getattr(node, "app_name", "")
+                    # A Camera In in v4l2 mode never resolves a live
+                    # PipeWire node - show the raw device it reads.
+                    or getattr(node, "device_path", "")
                 )
+            if isinstance(node, VirtualCameraNode):
+                # What the GUI's select row shows: the output device the
+                # feed publishes on (a VirtualCamN loopback).
+                data["selection_label"] = node.output_device
             result[node_id] = data
         return result
 
@@ -5476,6 +5582,10 @@ class PatchSpaceDaemon:
                 response = self._cmd_get_hardware_devices(cmd)
             elif command == "get_applications":
                 response = self._cmd_get_applications(cmd)
+            elif command == "get_cameras":
+                response = self._cmd_get_cameras(cmd)
+            elif command == "get_camera_outputs":
+                response = self._cmd_get_camera_outputs(cmd)
             elif command == "get_device_profiles":
                 response = self._cmd_get_device_profiles(cmd)
             elif command == "get_nodes":
