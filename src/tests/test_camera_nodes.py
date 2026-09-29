@@ -1,12 +1,15 @@
-"""Camera wires (Camera In -> Virtual Camera).
+"""Camera wires (Camera In -> virtual cameras).
 
 A *camera* feed is its own port kind: data-plane like audio, but paired
 only with another camera port, and - because PipeWire has no null-video-
-sink to dummy around - wired by the consuming node's own GStreamer stream
-rather than by daemon-made port pairs (the stream's target-object binding
-to the camera is the visible link in the PipeWire graph).  These tests
-drive the daemon command layer directly, with the process classes faked
-out so no real PipeWire or GStreamer is touched.
+sink to dummy around - wired by the consuming node's own stream rather
+than by daemon-made port pairs (the stream's target-object binding to the
+camera is the visible link in the PipeWire graph).  Two sinks exist: a
+PipeWire-native Virtual Cam (a pw-loopback republishing the feed as a
+Video/Source) and a V4L2 Virtual Cam (a GStreamer pipeline writing a
+v4l2loopback device).  These tests drive the daemon command layer
+directly, with the process classes faked out so no real PipeWire or
+GStreamer is touched.
 """
 
 import pytest
@@ -21,7 +24,7 @@ class FakeProc:
     instances = []
     commands = []
 
-    def __init__(self, name, command=("gst-launch-1.0",), settle=0.0, **kw):
+    def __init__(self, name, command=("pw-loopback",), settle=0.0, **kw):
         self.name = name
         self.node_id = None
         self.alive = False
@@ -58,13 +61,15 @@ def _ok(d, **cmd):
     return resp
 
 
-def _camera_pair(camera_name="v4l2_input.test_cam", output_device="/dev/video99"):
-    """A Camera In wired into a Virtual Camera."""
+def _camera_pair(sink_type="v4l2_virtual_camera",
+                 camera_name="v4l2_input.test_cam",
+                 sink_config=None):
+    """A Camera In wired into one of the two virtual-camera sinks."""
     d = PatchSpaceDaemon()
     _ok(d, command="add_node", node_type="camera_input", node_id="cam",
         config={"device_name": camera_name})
-    _ok(d, command="add_node", node_type="virtual_camera", node_id="vc",
-        config={"output_device": output_device})
+    _ok(d, command="add_node", node_type=sink_type, node_id="vc",
+        config=sink_config or {"output_device": "/dev/video99"})
     _ok(d, command="add_edge", from_node="cam", to_node="vc",
         from_port="out", to_port="in")
     return d
@@ -100,7 +105,7 @@ def test_camera_pairs_only_with_camera():
 
 
 def test_a_virtual_camera_takes_exactly_one_feed():
-    d = _camera_pair()
+    d = _camera_pair(sink_type="virtual_camera", sink_config={})
     _ok(d, command="add_node", node_type="camera_input", node_id="cam2",
         config={"device_name": "v4l2_input.other_cam"})
     resp = d.handle_command(
@@ -114,18 +119,81 @@ def test_a_virtual_camera_takes_exactly_one_feed():
 def test_gui_mirrors_the_camera_port_kind():
     assert node_specs.port_kind("camera_input", "out", "out") == "camera"
     assert node_specs.port_kind("virtual_camera", "in", "in") == "camera"
+    assert node_specs.port_kind("v4l2_virtual_camera", "in", "in") == "camera"
     assert node_specs.ports_compatible(
         "camera_input", "out", "virtual_camera", "in")
+    assert node_specs.ports_compatible(
+        "camera_input", "out", "v4l2_virtual_camera", "in")
     assert not node_specs.ports_compatible("camera_input", "out", "volume", "in")
     assert not node_specs.ports_compatible("splitter", "out", "virtual_camera", "in")
+    # The labels Kyle named the two sinks.
+    assert node_specs.spec_for("virtual_camera").label == "Virtual Cam"
+    assert node_specs.spec_for("v4l2_virtual_camera").label == "V4L2 Virtual Cam"
 
 
 # ---------------------------------------------------------------------------
-# The interior pipeline
+# The PipeWire-native Virtual Cam (pw-loopback republisher)
 # ---------------------------------------------------------------------------
 
 
-def test_virtual_camera_spawns_one_pipeline_for_its_source():
+def test_virtual_camera_republishes_the_feed_in_pipewire():
+    d = _camera_pair(sink_type="virtual_camera",
+                     sink_config={"device_label": "My Cam"})
+    d.space.supervise()
+    assert len(FakeProc.commands) == 1
+    command = FakeProc.commands[0]
+    assert command[0] == "gst-launch-1.0"
+    # The capture side binds to the camera (that binding is the visible
+    # link)...
+    assert "target-object=v4l2_input.test_cam" in command
+    # ...the publish side is camera-shaped: name + class/role on the
+    # stream properties (bare GstStructure values - no spaces allowed
+    # there), the user's label on client-name (which pipewiresink turns
+    # into node.description, what app pickers show).
+    assert "client-name=My Cam" in command
+    props = next(a for a in command if a.startswith("stream-properties="))
+    assert "node.name=patchspace_vc" in props
+    assert "media.class=Video/Source" in props
+    assert "media.role=Camera" in props
+    assert d.space.nodes["vc"].structural_ok()
+    # A camera edge never becomes daemon-made port pairs.
+    assert d.space._edge_links == {}
+
+
+def test_virtual_camera_needs_no_output_device():
+    d = _camera_pair(sink_type="virtual_camera", sink_config={})
+    d.space.supervise()
+    # Unlike the v4l2 one it publishes straight into PipeWire, so a wired
+    # camera is all it takes - no device to pick.
+    assert len(FakeProc.commands) == 1
+    assert d.space.nodes["vc"].structural_ok()
+
+
+def test_virtual_camera_bridges_raw_v4l2_feeds():
+    # A raw v4l2 feed has no PipeWire node to capture from - but the
+    # pipeline reads it with v4l2src and publishes it into PipeWire all
+    # the same, which is the whole bridge.
+    d = PatchSpaceDaemon()
+    _ok(d, command="add_node", node_type="camera_input", node_id="cam",
+        config={"source_mode": "v4l2", "device_path": "/dev/video7"})
+    _ok(d, command="add_node", node_type="virtual_camera", node_id="vc",
+        config={"device_label": "My Cam"})
+    _ok(d, command="add_edge", from_node="cam", to_node="vc",
+        from_port="out", to_port="in")
+    d.space.supervise()
+    command = FakeProc.commands[0]
+    assert "v4l2src" in command
+    assert "device=/dev/video7" in command
+    assert not any(a.startswith("target-object=") for a in command)
+    assert "client-name=My Cam" in command
+
+
+# ---------------------------------------------------------------------------
+# The V4L2 Virtual Cam (GStreamer -> loopback device)
+# ---------------------------------------------------------------------------
+
+
+def test_v4l2_virtual_camera_spawns_one_pipeline_for_its_source():
     d = _camera_pair()
     d.space.supervise()
     assert len(FakeProc.commands) == 1
@@ -136,15 +204,13 @@ def test_virtual_camera_spawns_one_pipeline_for_its_source():
     # The orphan sweep recognises the pipeline by the node's backing
     # name riding in argv (the v4l2sink element name).
     assert any(a.startswith("name=patchspace_vc") for a in command)
-    node = d.space.nodes["vc"]
-    assert node.structural_ok()
-    # A camera edge never becomes daemon-made port pairs.
+    assert d.space.nodes["vc"].structural_ok()
     assert d.space._edge_links == {}
 
 
 def test_no_pipeline_without_a_camera_or_an_output_device():
     d = PatchSpaceDaemon()
-    _ok(d, command="add_node", node_type="virtual_camera", node_id="vc")
+    _ok(d, command="add_node", node_type="v4l2_virtual_camera", node_id="vc")
     d.space.supervise()
     assert FakeProc.commands == []
     assert d.space.nodes["vc"].structural_ok()  # idle is healthy
@@ -181,7 +247,7 @@ def test_v4l2_mode_reads_the_raw_device():
     d = PatchSpaceDaemon()
     _ok(d, command="add_node", node_type="camera_input", node_id="cam",
         config={"source_mode": "v4l2", "device_path": "/dev/video7"})
-    _ok(d, command="add_node", node_type="virtual_camera", node_id="vc",
+    _ok(d, command="add_node", node_type="v4l2_virtual_camera", node_id="vc",
         config={"output_device": "/dev/video99"})
     _ok(d, command="add_edge", from_node="cam", to_node="vc",
         from_port="out", to_port="in")
@@ -193,7 +259,7 @@ def test_v4l2_mode_reads_the_raw_device():
 
 
 def test_setting_the_output_device_restarts_the_pipeline():
-    d = _camera_pair(output_device="/dev/video98")
+    d = _camera_pair(sink_config={"output_device": "/dev/video98"})
     d.space.supervise()
     assert "device=/dev/video98" in FakeProc.commands[0]
     _ok(d, command="set_node_property", node_id="vc",

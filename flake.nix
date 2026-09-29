@@ -115,7 +115,11 @@
                   "${pkgs.pipewire}/lib/gstreamer-1.0"
                   "${pkgs.gst_all_1.gst-plugins-base}/lib/gstreamer-1.0"
                   "${pkgs.gst_all_1.gst-plugins-good}/lib/gstreamer-1.0"
-                  "${pkgs.gst_all_1.gstreamer}/lib/gstreamer-1.0"
+                  # The "out" output, explicitly: gstreamer's first
+                  # output is "bin", whose lib/gstreamer-1.0 carries no
+                  # plugins - core elements (filesink, queue, ...) live
+                  # in "out".
+                  "${pkgs.gst_all_1.gstreamer.out}/lib/gstreamer-1.0"
                 ]
               }''${GST_PLUGIN_SYSTEM_PATH_1_0:+:$GST_PLUGIN_SYSTEM_PATH_1_0}"
               exec ${python}/bin/python3 ${source}/main.py "$@"

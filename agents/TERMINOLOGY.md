@@ -32,8 +32,9 @@ that isn't here, ask (and then add it).  When a mapping here is a guess, it is m
 | "bool" / "control signal" | the `boolean` kind driving gates/switchers |
 | "connection type for cameras" / "camera wire" | the **`camera`** port kind: a live video feed (Camera In -> Virtual Camera), paired only with camera ports |
 | "Camera In" / "input node for cams" | `camera_input` node ("Camera In"): one selected camera stream on a camera out |
-| "virtual output node for cams" / "Virtual Camera" | `virtual_camera` node ("Virtual Camera"): republishes the wired camera feed on an output device |
-| "output device" (video) | a v4l2 output-capable device (the VirtualCamN loopback pool) the Virtual Camera writes - visible to apps as both a v4l2 camera and a PipeWire video source |
+| "virtual output node for cams" / "Virtual Cam" | `virtual_camera` node ("Virtual Cam"): republishes the wired camera feed *into the PipeWire system* (a video source apps pick as a camera) |
+| "V4L2 Virtual Cam" | `v4l2_virtual_camera` node: republishes the feed on a v4l2 output device (the VirtualCamN loopback pool) |
+| "output device" (video) | a v4l2 output-capable device (the VirtualCamN loopback pool) the **V4L2 Virtual Cam** writes - visible to apps as both a v4l2 camera and a PipeWire video source |
 
 ## Node-body widgets
 

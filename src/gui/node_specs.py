@@ -863,7 +863,10 @@ NODE_TYPE_SPECS.update(
         "virtual_mic": NodeSpec("Virtual Mic", ["audio"], ["out"], field="device_label"),
         "camera_input": NodeSpec("Camera In", [], ["out"], camera_outputs=["out"]),
         "virtual_camera": NodeSpec(
-            "Virtual Camera", ["in"], [], camera_inputs=["in"]
+            "Virtual Cam", ["in"], [], camera_inputs=["in"], field="device_label"
+        ),
+        "v4l2_virtual_camera": NodeSpec(
+            "V4L2 Virtual Cam", ["in"], [], camera_inputs=["in"]
         ),
     }
 )
@@ -985,9 +988,12 @@ NODE_DESCRIPTIONS: Dict[str, str] = {
     "record from.",
     "camera_input": "A camera feed: one selected video source (webcam, "
     "capture card, virtual camera, ...) carried on a camera wire.",
-    "virtual_camera": "A virtual camera: republishes the camera feed wired "
-    "into it on a v4l2 output device, so other apps can pick it up as a "
-    "camera.",
+    "virtual_camera": "A virtual camera in the PipeWire system: republishes "
+    "the camera feed wired into it as a video source other PipeWire-aware "
+    "apps can pick as a camera.",
+    "v4l2_virtual_camera": "A virtual camera on a v4l2 device: republishes "
+    "the camera feed wired into it on an output device (VirtualCamN), so "
+    "other apps can pick it up as a camera.",
     # Impulse
     "button": "A momentary button: press it to fire an impulse down its "
     "wire. It holds no state - the pulse is the whole signal.",
@@ -1198,7 +1204,8 @@ ADD_NODE_CATEGORIES = [
         [
             ("Virtual Speaker", "virtual_speaker"),
             ("Virtual Mic", "virtual_mic"),
-            ("Virtual Camera", "virtual_camera"),
+            ("Virtual Cam", "virtual_camera"),
+            ("V4L2 Virtual Cam", "v4l2_virtual_camera"),
         ],
     ),
 ]
@@ -1294,6 +1301,7 @@ NODE_TYPE_ICONS: Dict[str, str] = {
     "virtual_mic": "audio-input-microphone-symbolic",
     "camera_input": "camera-photo-symbolic",
     "virtual_camera": "camera-video-symbolic",
+    "v4l2_virtual_camera": "camera-video-symbolic",
     # All Inputs covers mics, interfaces, virtual mics AND app playback
     # streams, so it gets a general multimedia glyph rather than a mic.
     "all_inputs": "applications-multimedia-symbolic",
@@ -1414,6 +1422,7 @@ CLASS_NAME_TO_TYPE.update(
         "VirtualMicNode": "virtual_mic",
         "CameraInputNode": "camera_input",
         "VirtualCameraNode": "virtual_camera",
+        "V4l2VirtualCameraNode": "v4l2_virtual_camera",
     }
 )
 

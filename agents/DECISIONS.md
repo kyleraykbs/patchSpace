@@ -24,13 +24,26 @@
   a purpose-built pw-stream helper could replace the pipeline without
   touching node shapes.
 
-## [2026-09-28] Virtual cameras publish through v4l2loopback
-- Decision: a Virtual Camera node writes frames to a v4l2 output device
-  (the machine's v4l2loopback pool, VirtualCamN) rather than publishing a
-  PipeWire stream directly.
-- Why: one write serves both worlds - the loopback is a /dev/videoN for
-  v4l2 apps *and* WirePlumber republishes it as a PipeWire Video/Source
-  (verified: frames written to a loopback round-trip through PipeWire).
-  A PipeWire-only stream would be invisible to v4l2 consumers.
-- Reversible: yes (output_device is a property; a PW-publishing interior
-  is a pipeline swap).
+## [2026-09-28] Two virtual camera nodes: "Virtual Cam" (PipeWire) and "V4L2 Virtual Cam"
+- Decision: split the one virtual-camera node in two: `virtual_camera`
+  ("Virtual Cam") publishes camera-shaped streams *into the PipeWire
+  system* (live, unlimited), `v4l2_virtual_camera` ("V4L2 Virtual Cam")
+  writes a v4l2loopback device (fixed pool).  Both take either feed kind.
+- Why: Kyle wanted the PipeWire-native one primary ("use the pipewire
+  system to create virtual cams") with v4l2 kept as the secondary path;
+  kernel loopback devices cannot be created live, PipeWire nodes can.
+- Reversible: yes (same camera edges, interior swap).
+
+## [2026-09-28] pipewiresink publication via client-name + stream-properties
+- Decision: the PW virtual cam's label rides on `client-name` (plain
+  string property - takes spaces, pipewiresink copies it to
+  node.description, what pickers show); `stream-properties` carries only
+  bare-token fields (node.name, media.class=Video/Source,
+  media.role=Camera).
+- Why: probed against the real stack - the GstStructure parser behind
+  stream-properties stops bare values at whitespace and rejects quoted
+  ones, so a label with spaces cannot live there; pw-loopback was tried
+  first (VirtualMicNode twin) but its video streams never connect at all
+  (no ports, no links - also probed).
+- Reversible: yes (argv shape only).
+

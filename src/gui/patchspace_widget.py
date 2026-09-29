@@ -372,7 +372,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self.drag_node_starts: dict = {}
 
         self.connecting_from = None
-        self.detaching_edge = None
         self.drag_start_xy = (0, 0)
         self.drag_current_xy = (0, 0)
         self.hover_target_node = None
@@ -4215,7 +4214,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         return (
             nodes, edges, tuple(panels), groups,
             None if self._revealed is None else frozenset(self._revealed),
-            None if self.detaching_edge is None else self.detaching_edge[0],
             self.dragging_node,
         )
 
@@ -4296,8 +4294,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # each other settle instead of re-routing every frame.
         evict_cooldown = 0.5
         for eid, edge in self.edges.items():
-            if self.detaching_edge and self.detaching_edge[0] == eid:
-                continue
             if edge["from_node"] not in self.nodes or edge["to_node"] not in self.nodes:
                 continue
             if not (
@@ -4637,22 +4633,34 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             return 0
 
     def find_edge_at(self, x, y):
+        """Whether a press lands on a wire.  Used only by the right-click
+        delete in _open_context_menu - clicking/dragging a wire never
+        grabs it (only nodes are grabbable).
+
+        Tests the *routed* polyline - the A* path actually drawn - and not
+        the straight end-to-end chord, so the hit area follows the wire
+        the user sees (the chord is merely the fallback for a wire no
+        route was computed for yet)."""
         threshold = 6
         for eid, edge in self.edges.items():
             if edge["from_node"] not in self.nodes or edge["to_node"] not in self.nodes:
                 continue
             out_x, out_y, in_x, in_y = self._edge_endpoints(edge)
-            dx, dy = in_x - out_x, in_y - out_y
-            if dx == 0 and dy == 0:
-                dist = math.hypot(x - out_x, y - out_y)
-            else:
-                t = max(
-                    0,
-                    min(1, ((x - out_x) * dx + (y - out_y) * dy) / (dx * dx + dy * dy)),
-                )
-                dist = math.hypot(x - (out_x + t * dx), y - (out_y + t * dy))
-            if dist < threshold:
-                return eid
+            points = self._wire_routes.get(eid) or [
+                (out_x, out_y), (in_x, in_y)
+            ]
+            for (x1, y1), (x2, y2) in zip(points, points[1:]):
+                dx, dy = x2 - x1, y2 - y1
+                if dx == 0 and dy == 0:
+                    dist = math.hypot(x - x1, y - y1)
+                else:
+                    t = max(
+                        0,
+                        min(1, ((x - x1) * dx + (y - y1) * dy) / (dx * dx + dy * dy)),
+                    )
+                    dist = math.hypot(x - (x1 + t * dx), y - (y1 + t * dy))
+                if dist < threshold:
+                    return eid
         return None
 
     def find_slider_at(self, x, y):
@@ -4762,10 +4770,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             # Speaker Line / Mic Line nodes always show the shared
             # built-in device's volume + lock.
             return ["volume"]
-        if ntype in ("camera_input", "virtual_camera"):
-            # One select row: a Camera In picks its feed, a Virtual
-            # Camera picks the output device it publishes on.  No volume
-            # row - there is no device volume to drive.
+        if ntype in ("camera_input", "v4l2_virtual_camera"):
+            # One select row: a Camera In picks its feed, a V4L2 Virtual
+            # Cam picks the output device it publishes on.  No volume
+            # row - there is no device volume to drive.  (The PipeWire-
+            # native Virtual Cam has no select row at all: its camera
+            # name is its inline field, like a Virtual Mic's.)
             return ["select"]
         if ntype not in ("device_input", "device_output", "app_input", "app_output"):
             return []
@@ -5221,8 +5231,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             if eid in self._edge_ghosts:
                 # Already removed locally; the retract animation draws it.
                 continue
-            if self.detaching_edge and self.detaching_edge[0] == eid:
-                continue
             if edge["from_node"] not in self.nodes or edge["to_node"] not in self.nodes:
                 continue
             if not (
@@ -5247,7 +5255,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             if points:
                 wire_pts = points
             else:
-                # Skipped by _route_all_wires (detaching/unrevealed): a
+                # Skipped by _route_all_wires (unrevealed): a
                 # stubbed Z keeps the no-bezier invariant and still exits
                 # each socket sideways.
                 wire_pts = self._stubbed_fallback(out_x, out_y, in_x, in_y)
@@ -7806,7 +7814,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         elif ntype == "camera_input":
             self._pending_camera_select = (nid, screen_x, screen_y)
             self.client.send({"command": "get_cameras"})
-        elif ntype == "virtual_camera":
+        elif ntype == "v4l2_virtual_camera":
             self._pending_camera_output_select = (nid, screen_x, screen_y)
             self.client.send({"command": "get_camera_outputs"})
         else:
@@ -8880,7 +8888,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         ...) can never leave the canvas stuck in "connecting" or
         "panning" mode with no way to click out of it."""
         self.connecting_from = None
-        self.detaching_edge = None
         self._flush_clip_times()
         self.clip_dragging = None
         self.dragging_node = None
@@ -9127,17 +9134,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         if socket_hit and socket_hit[1] == "out":
             nid, _, idx = socket_hit
             self.connecting_from = (nid, idx)
-            self.queue_draw()
-            return
-
-        eid = self.find_edge_at(wx, wy)
-        if eid:
-            edge = self.edges[eid]
-            self.connecting_from = (
-                edge["from_node"],
-                self._edge_from_port_index(edge),
-            )
-            self.detaching_edge = (eid, edge["from_node"])
             self.queue_draw()
             return
 
@@ -9408,8 +9404,8 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     def on_drag_end(self, gesture, offset_x, offset_y):
         # Always clear the transient drag/connection state, even if a
-        # branch below raised (a stale detaching-edge lookup, a node
-        # removed mid-drag, ...).  Leaking it is what left the canvas
+        # branch below raised (a node removed mid-drag, a stale socket
+        # lookup, ...).  Leaking it is what left the canvas
         # unclickable after dropping a connection into empty space.
         try:
             self._handle_drag_end(gesture, offset_x, offset_y)
@@ -9533,43 +9529,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                 else "in"
             )
 
-            if self.detaching_edge:
-                eid, from_nid = self.detaching_edge
-                # The edge can vanish under us (a get_nodes poll landing
-                # mid-drag, the daemon re-syncing) - treat that as "the
-                # thing we were dragging is gone" and just stop.
-                old_edge = self.edges.get(eid)
-                if old_edge is None:
-                    return
-                old_to_nid = old_edge["to_node"]
-                old_to_port = old_edge.get("to_port", "in")
-                if target_nid is not None:
-                    if (
-                        target_nid != old_to_nid or target_port != old_to_port
-                    ) and target_nid != from_nid:
-                        self._retire_edge(eid)
-                        self.client.send({"command": "remove_edge", "edge_id": eid})
-                        if self._ports_compatible(
-                            from_nid, source_port, target_nid, target_port
-                        ):
-                            self._note_new_edge(
-                                from_nid, target_nid, target_port, source_port
-                            )
-                            self.client.send(
-                                {
-                                    "command": "add_edge",
-                                    "from_node": from_nid,
-                                    "to_node": target_nid,
-                                    "to_port": target_port,
-                                    "from_port": source_port,
-                                }
-                            )
-                        self.schedule_refresh()
-                else:
-                    self._retire_edge(eid)
-                    self.client.send({"command": "remove_edge", "edge_id": eid})
-                    self.schedule_refresh()
-            elif target_nid is not None:
+            if target_nid is not None:
                 if out_nid != target_nid:
                     existing_eid = self._edge_id(
                         out_nid, target_nid, target_port, source_port
@@ -9597,7 +9557,6 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     self.schedule_refresh()
 
             self.connecting_from = None
-            self.detaching_edge = None
             self.hover_target_node = None
             self.queue_draw()
             return
@@ -11691,7 +11650,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         self.dismiss_context_popover()
         # A right press *during* a left drag cancels that drag and swallows
         # the click (no marquee, no menu): a held node snaps back to where
-        # it was picked up, and a wire being dragged is just put back.
+        # it was picked up, and a half-made connection is dropped.
         cancelled = False
         if self.dragging_node is not None and self.drag_node_starts:
             for nid, (sx, sy) in self.drag_node_starts.items():
@@ -11700,7 +11659,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     node["x"] = sx
                     node["y"] = sy
             cancelled = True
-        if self.connecting_from is not None or self.detaching_edge is not None:
+        if self.connecting_from is not None:
             cancelled = True
         if not cancelled:
             # No in-progress left drag to cancel: release any lingering

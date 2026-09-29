@@ -2927,13 +2927,16 @@ class VirtualMicNode(_SinkVolumeMixin, BackedNode):
 # ---------------------------------------------------------------------------
 #
 # A *camera* wire (its own port kind - see add_edge) carries a live video
-# stream: a Camera In node exposes one selected camera feed, and a Virtual
-# Camera node consumes one such feed and republishes it as a virtual
-# camera.  Unlike audio there is no PipeWire null-video-sink to use as a
-# stable dummy, so the consuming node's own GStreamer stream is both the
-# socket and the interior; the visible link in the PipeWire graph is the
-# stream's `target.object` binding to the camera node (rewire = the daemon
-# respawns the interior with the new target - see ensure_structural).
+# stream: a Camera In node exposes one selected camera feed, and a virtual
+# camera node consumes one such feed and republishes it as a camera.  Two
+# flavours exist: VirtualCameraNode publishes *into the PipeWire system* (a
+# Video/Source stream other apps pick as a camera) and V4l2VirtualCameraNode
+# publishes onto a v4l2 output device (a VirtualCamN loopback).  Unlike
+# audio there is no PipeWire null-video-sink to use as a stable dummy, so
+# the consuming node's own stream is both the socket and the interior; the
+# visible link in the PipeWire graph is the stream's `target.object`
+# binding to the camera node (rewire = the daemon respawns the interior
+# with the new target - see ensure_structural).
 
 
 class CameraInputNode(InputNode, LiveResolvableNode):
@@ -2984,31 +2987,23 @@ class CameraInputNode(InputNode, LiveResolvableNode):
         super()._on_live_resolved()
 
 
-class VirtualCameraNode(BackedNode):
-    """A virtual camera: whatever camera feed is wired into its ``camera``
-    input, republished on a v4l2 output device (a VirtualCamN loopback
-    from the machine's v4l2loopback pool).
+class _CameraSinkBase(BackedNode):
+    """Shared plumbing for a node that republishes one camera feed.
 
-    The interior is one GStreamer pipeline - a PipeWire video stream
-    consuming the camera (its ``target.object`` binding *is* the visible
-    link in the PipeWire graph) feeding ``v4l2sink`` on the output
-    device.  The loopback is then simultaneously a v4l2 device (what OBS
-    lists as a camera) and a PipeWire Video/Source (WirePlumber publishes
-    every v4l2 capture node), so one write serves both worlds.
-
-    The stream's node.name comes from the launcher binary and is the same
-    for every instance, so nothing here resolves a live node id - a
-    backing that is simply running is healthy (see dead_backings).
-    ``structural_ok`` additionally checks the running pipeline still
-    matches the resolved camera/output device, so an upstream rewire is
-    repaired on the next supervision tick by respawning the interior -
-    the one replaceable part of the node."""
+    The interior is exactly one helper process (``_pipeline_command``)
+    whose stream targets the camera by name - that ``target.object``
+    binding *is* the visible link in the PipeWire graph, so sync derives
+    no port pairs for camera edges.  The stream's node.name comes from
+    the helper binary and is the same for every instance, so nothing here
+    resolves a live node id - a backing that is simply running is healthy
+    (see dead_backings).  ``structural_ok`` additionally checks the
+    running pipeline still matches the resolved camera/target, so an
+    upstream rewire is repaired on the next supervision tick by
+    respawning the interior - the one replaceable part of the node."""
 
     def __init__(self, node_id, backing_node_name: str,
-                 output_device: str = "",
-                 pw_cli_command=("gst-launch-1.0",), settle: float = 0.3):
+                 pw_cli_command, settle: float):
         super().__init__(node_id, backing_node_name)
-        self.output_device = output_device
         self._pw_cli_command = pw_cli_command
         self._settle = settle
         # The camera identity the daemon last resolved for us ({"nodeName"}
@@ -3016,8 +3011,6 @@ class VirtualCameraNode(BackedNode):
         # what the running interior was actually spawned with.
         self._camera_source: Optional[dict] = None
         self._spawned_command: Optional[List[str]] = None
-
-    # -- ports ------------------------------------------------------------
 
     def port_kind(self, port: str, direction: str) -> str:
         return "camera"
@@ -3028,36 +3021,20 @@ class VirtualCameraNode(BackedNode):
         interior was spawned with, so a change is picked up as a repair."""
         self._camera_source = dict(source) if source else None
 
-    # -- interior ---------------------------------------------------------
-
-    def _pipeline_command(self, source: dict) -> List[str]:
-        """The GStreamer argv for one camera -> output device run.
-
-        The v4l2sink element's ``name`` is this node's backing name: it
-        is how the startup orphan sweep recognises a crashed daemon's
-        leftover pipeline (see pwgraph._terminate_orphan_helpers), and it
-        is a valid element property, so it costs nothing."""
-        if source.get("v4l2Device"):
-            capture = ["v4l2src", f'device={source["v4l2Device"]}']
-        else:
-            capture = ["pipewiresrc", f'target-object={source["nodeName"]}']
-        return [
-            "gst-launch-1.0", "-q",
-            *capture,
-            "!", "videoconvert", "!",
-            "v4l2sink", f"name={self.backing_node_name}",
-            f"device={self.output_device}",
-        ]
+    def _pipeline_command(self, source: dict) -> Optional[List[str]]:
+        """The argv for one camera -> target run, or None when this node
+        cannot serve that source kind."""
+        raise NotImplementedError
 
     def _desired_command(self) -> Optional[List[str]]:
-        if not self._camera_source or not self.output_device:
+        if not self._camera_source:
             return None
         return self._pipeline_command(self._camera_source)
 
     def dead_backings(self) -> List[OwnedPwNode]:
         """Only a real process death counts - never "stuck".
 
-        The GStreamer stream's node.name is derived from the launcher
+        The helper stream's node.name is derived from the launcher
         binary and is identical for every instance, so resolve_backing
         never matches it and node_id stays None; without this override
         the shared stuck() check would restart a perfectly healthy
@@ -3067,9 +3044,9 @@ class VirtualCameraNode(BackedNode):
     def structural_ok(self) -> bool:
         desired = self._desired_command()
         if desired is None:
-            # No camera wired / no output device chosen: nothing should
-            # be running, and "nothing" is healthy for a configured-but-
-            # idle node.
+            # No camera wired (or a source kind this node can't serve):
+            # nothing should be running, and "nothing" is healthy for a
+            # configured-but-idle node.
             return not self.backings
         return (
             self._spawned_command == desired
@@ -3087,9 +3064,9 @@ class VirtualCameraNode(BackedNode):
             self._spawned_command = None
             return
         if self._spawned_command != desired:
-            # A rewire or output-device change: the interior is the one
-            # replaceable piece (it holds no user edges - the camera edge
-            # resolves to the stream's target), so swap it in place.
+            # A rewire or retarget: the interior is the one replaceable
+            # piece (it holds no user edges - the camera edge resolves to
+            # the stream's target), so swap it in place.
             for owned in self.owned_backings():
                 owned.destroy()
             self._spawned_command = None
@@ -3102,11 +3079,117 @@ class VirtualCameraNode(BackedNode):
                 self._spawned_command = desired
             else:
                 logger.error(
-                    "Virtual camera pipeline failed for %r", self.id)
+                    "%s pipeline failed for %r", type(self).__name__, self.id)
 
     def config_fields(self):
         out = super().config_fields()
         out["backing_node_name"] = self.backing_node_name
+        return out
+
+
+class VirtualCameraNode(_CameraSinkBase):
+    """A virtual camera *in the PipeWire system*: the camera feed wired
+    into its ``camera`` input, republished as a ``Video/Source`` stream
+    (``media.role = Camera``) that other PipeWire-aware apps pick as a
+    camera.
+
+    The interior is one GStreamer pipeline: a stream consuming the
+    camera (its ``target.object`` binding is the visible link in the
+    graph) republished through ``pipewiresink`` with camera-shaped
+    stream properties - the same property shape a real camera
+    advertises, so app pickers treat it as one.  Nothing kernel-side is
+    involved, so these can be created and destroyed live, as many as
+    wanted (unlike the fixed v4l2loopback pool).
+
+    Two property quirks are load-bearing here (both probed against the
+    real stack): the GstStructure behind ``stream-properties`` stops
+    bare values at whitespace, so the *name* goes there and the user's
+    label rides on ``client-name`` instead - an ordinary string property
+    that takes spaces, which pipewiresink propagates to the stream's
+    ``node.description``, the field app pickers show.
+
+    Takes either source kind: a PipeWire camera via ``pipewiresrc``, or
+    a raw v4l2 feed via ``v4l2src`` (which effectively *bridges* a raw
+    device into the PipeWire system)."""
+
+    def __init__(self, node_id, backing_node_name: str, device_label: str = "",
+                 pw_cli_command=("gst-launch-1.0",), settle: float = 0.3):
+        super().__init__(node_id, backing_node_name, pw_cli_command, settle)
+        self.device_label = device_label
+
+    def _pipeline_command(self, source: dict) -> Optional[List[str]]:
+        desc = self.device_label or self.backing_node_name
+        stream_props = (
+            "camprops"
+            f",node.name={self.backing_node_name}"
+            ",media.class=Video/Source,media.role=Camera"
+        )
+        if source.get("v4l2Device"):
+            capture = ["v4l2src", f'device={source["v4l2Device"]}']
+        elif source.get("nodeName"):
+            capture = ["pipewiresrc", f'target-object={source["nodeName"]}']
+        else:
+            return None
+        return [
+            "gst-launch-1.0", "-q",
+            *capture,
+            "!", "videoconvert", "!",
+            "pipewiresink",
+            f"client-name={desc}",
+            f"stream-properties={stream_props}",
+        ]
+
+    def config_fields(self):
+        out = super().config_fields()
+        out["device_label"] = self.device_label
+        return out
+
+
+class V4l2VirtualCameraNode(_CameraSinkBase):
+    """A virtual camera on a v4l2 output device: whatever camera feed is
+    wired into its ``camera`` input, written to ``output_device`` (a
+    VirtualCamN loopback from the machine's v4l2loopback pool).
+
+    The interior is one GStreamer pipeline - a stream consuming the
+    camera feeding ``v4l2sink`` on the output device (the v4l2sink
+    element's ``name`` is this node's backing name, so the startup orphan
+    sweep can recognise a crashed daemon's pipeline - see
+    pwgraph._terminate_orphan_helpers).  The loopback is then
+    simultaneously a v4l2 device (what OBS lists as a camera) and a
+    PipeWire Video/Source (WirePlumber publishes every v4l2 capture
+    node), so one write serves both worlds - but the device pool is fixed
+    at boot (v4l2loopback devices cannot be created live), which is the
+    one thing the PipeWire-native VirtualCameraNode does not have to
+    live with.
+
+    Takes either source kind: a PipeWire camera via ``pipewiresrc``, or a
+    raw v4l2 feed via ``v4l2src``."""
+
+    def __init__(self, node_id, backing_node_name: str,
+                 output_device: str = "",
+                 pw_cli_command=("gst-launch-1.0",), settle: float = 0.3):
+        super().__init__(node_id, backing_node_name, pw_cli_command, settle)
+        self.output_device = output_device
+
+    def _pipeline_command(self, source: dict) -> Optional[List[str]]:
+        if not self.output_device:
+            return None
+        if source.get("v4l2Device"):
+            capture = ["v4l2src", f'device={source["v4l2Device"]}']
+        elif source.get("nodeName"):
+            capture = ["pipewiresrc", f'target-object={source["nodeName"]}']
+        else:
+            return None
+        return [
+            "gst-launch-1.0", "-q",
+            *capture,
+            "!", "videoconvert", "!",
+            "v4l2sink", f"name={self.backing_node_name}",
+            f"device={self.output_device}",
+        ]
+
+    def config_fields(self):
+        out = super().config_fields()
         out["output_device"] = self.output_device
         return out
 
@@ -5376,11 +5459,11 @@ class PatchSpace:
                 node.resolve_live(live_id, props)
 
     def _sync_camera_targets(self) -> None:
-        """Point every Virtual Camera node at the camera feed currently
-        wired into it (None when nothing is).
+        """Point every camera sink node (Virtual Cam / V4L2 Virtual Cam)
+        at the camera feed currently wired into it (None when nothing is).
 
-        The consuming node's GStreamer stream targets the camera by name
-        (see VirtualCameraNode._pipeline_command), so the edge's source
+        The consuming node's helper stream targets the camera by name
+        (see _CameraSinkBase._pipeline_command), so the edge's source
         resolution is interior config rather than link pairs.  Running
         before the structural checks in _supervise_node means a rewire is
         seen as "the running pipeline no longer matches" and repaired by
@@ -5388,7 +5471,7 @@ class PatchSpace:
 
         Runs every supervise() tick, before sync()."""
         for node in list(self.nodes.values()):
-            if not isinstance(node, VirtualCameraNode):
+            if not isinstance(node, _CameraSinkBase):
                 continue
             source: Optional[dict] = None
             for edge in self._edges_into.get(node.id, []):

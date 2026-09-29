@@ -77,6 +77,7 @@ from pwnodes import (
     VirtualMicNode,
     CameraInputNode,
     VirtualCameraNode,
+    V4l2VirtualCameraNode,
     DeviceInputNode,
     DeviceOutputNode,
     AppInputNode,
@@ -397,6 +398,7 @@ NODE_TYPE_REGISTRY: Dict[str, type] = {
     "virtual_mic": VirtualMicNode,
     "camera_input": CameraInputNode,
     "virtual_camera": VirtualCameraNode,
+    "v4l2_virtual_camera": V4l2VirtualCameraNode,
 }
 CLASS_TO_TYPE = {cls: key for key, cls in NODE_TYPE_REGISTRY.items()}
 
@@ -3987,6 +3989,8 @@ class PatchSpaceDaemon:
                 g("device_path", ""),
             )
         if cls is VirtualCameraNode:
+            return cls(node_id, backing, g("device_label", ""))
+        if cls is V4l2VirtualCameraNode:
             return cls(node_id, backing, g("output_device", ""))
         raise AssertionError(f"unhandled node type {node_type}")
 
@@ -5463,7 +5467,7 @@ class PatchSpaceDaemon:
                     # PipeWire node - show the raw device it reads.
                     or getattr(node, "device_path", "")
                 )
-            if isinstance(node, VirtualCameraNode):
+            if isinstance(node, V4l2VirtualCameraNode):
                 # What the GUI's select row shows: the output device the
                 # feed publishes on (a VirtualCamN loopback).
                 data["selection_label"] = node.output_device
