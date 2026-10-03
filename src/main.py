@@ -46,6 +46,8 @@ from pwnodes import (
     Node,
     BackedNode,
     LiveResolvableNode,
+    profile_is_off,
+    device_profile_label,
     BoolControlledMixin,
     GateNode,
     ABSwitchNode,
@@ -1074,6 +1076,21 @@ class PatchSpaceDaemon:
                 node._auto_profile_at = now + 5.0
                 index = node.profile_index
                 pname = node.profile_description
+                if index is not None and profile_is_off(
+                    name=device_profile_label(device_obj, index),
+                    description=pname,
+                ):
+                    # The pinned profile *is* "off" - a dead end: it
+                    # exports no audio node, so the device also drops out
+                    # of the device picker and there is no way back.
+                    # Forget it and pick a listening profile below.
+                    logger.warning(
+                        "Device %r had the 'off' profile pinned - picking a "
+                        "listening profile", name,
+                    )
+                    node.profile_index = None
+                    node.profile_description = ""
+                    index = pname = None
                 if index is None:
                     picked = pick_auto_a2dp_profile(
                         device_obj, isinstance(node, DeviceOutputNode)
@@ -4878,6 +4895,15 @@ class PatchSpaceDaemon:
                     "status": "error",
                     "message": f"Node {node_id} has no controllable device",
                 }
+            if profile_is_off(name=None,
+                              description=cmd.get("description", "")):
+                # The Bluetooth "off" profile is not a listening mode:
+                # storing it would make the supervision tick re-assert
+                # it forever and the device would never come back.
+                return {
+                    "status": "error",
+                    "message": "that profile is not selectable",
+                }
             node.profile_index = profile_index
             node.profile_description = cmd.get("description", "")
         node.apply_device_settings()
@@ -5010,16 +5036,16 @@ class PatchSpaceDaemon:
         ]
         return {"status": "ok", "camera_outputs": outputs}
 
-    def _cmd_get_device_profiles(self, cmd: dict) -> dict:
-        node_id = cmd.get("node_id")
-        with self._lock:
-            node = self.space.nodes.get(node_id)
-            if not isinstance(node, LiveResolvableNode) or node.live_node_id is None:
-                return {"status": "ok", "node_id": node_id, "profiles": []}
-            live_props = dict(node.live_props)
-        device_id = live_props.get("device.id")
-        if device_id is None:
-            return {"status": "ok", "node_id": node_id, "profiles": []}
+    def _device_profiles(self, device_id) -> List[dict]:
+        """The selectable profiles of one live device, off excluded.
+
+        The Bluetooth stack offers an ``off`` profile (index 0, "Off")
+        that silences the device *and keeps it silenced* - patchspace
+        re-asserts a node's stored profile every tick, so choosing it
+        once left a headset permanently without an audio node.  It is
+        not a listening mode, so it is never offered and never accepted
+        (see _cmd_set_device_profile); picking a real profile is the way
+        back."""
         profiles = []
         for obj_id, obj_data in self.graph.all_objects().items():
             if obj_data.get("type") != DEVICE_OBJ_TYPE or obj_id != device_id:
@@ -5028,6 +5054,8 @@ class PatchSpaceDaemon:
             for p in params.get("EnumProfile", []):
                 index = p.get("index")
                 if index is None:
+                    continue
+                if profile_is_off(p.get("name"), p.get("description")):
                     continue
                 profiles.append(
                     {
@@ -5038,7 +5066,23 @@ class PatchSpaceDaemon:
                     }
                 )
             break
-        return {"status": "ok", "node_id": node_id, "profiles": profiles}
+        return profiles
+
+    def _cmd_get_device_profiles(self, cmd: dict) -> dict:
+        node_id = cmd.get("node_id")
+        with self._lock:
+            node = self.space.nodes.get(node_id)
+            if not isinstance(node, LiveResolvableNode) or node.live_node_id is None:
+                return {"status": "ok", "node_id": node_id, "profiles": []}
+            live_props = dict(node.live_props)
+        device_id = live_props.get("device.id")
+        if device_id is None:
+            return {"status": "ok", "node_id": node_id, "profiles": []}
+        return {
+            "status": "ok",
+            "node_id": node_id,
+            "profiles": self._device_profiles(device_id),
+        }
 
     def _cmd_connect_ports(self, cmd: dict) -> dict:
         out_port, in_port = cmd.get("output_port"), cmd.get("input_port")

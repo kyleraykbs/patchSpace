@@ -1754,6 +1754,114 @@ def test_ensure_device_profiles_reasserts_pinned_profile_when_off(monkeypatch):
     assert node.profile_index == 131076
 
 
+def test_ensure_device_profiles_replaces_a_pinned_off_profile(monkeypatch):
+    """A device pinned to the Bluetooth "off" profile has no way back on
+    its own: applying "off" exports no audio node, so the device also
+    drops out of the device picker.  The recovery pass must forget the
+    pin and pick a listening profile instead of re-asserting "off" on
+    every tick.  (The node here has no stored description - a legacy
+    save - so the index must be resolved through the device.)"""
+    from pwnodes import DeviceOutputNode
+
+    d = fresh_daemon()
+    node = DeviceOutputNode(
+        "bowie", device_name="bluez_output.XX.1",
+        profile_index=0, profile_description="",
+    )
+    node.live_props = {"device.id": 300}
+    node.live_node_id = None
+    d.space.add_node(node)
+
+    dev = _device_snapshot(
+        {"index": 0, "name": "off"},
+        [
+            {"index": 0, "name": "off", "description": "Off",
+             "available": "yes", "priority": 0},
+            {"index": 131076, "name": "a2dp-sink",
+             "available": "yes", "priority": 133},
+        ],
+    )
+    monkeypatch.setattr(d.graph, "all_objects", lambda: {300: dev})
+    calls = []
+    monkeypatch.setattr(
+        main_mod, "_run_wpctl", lambda *a, **k: (calls.append(a), True)[1]
+    )
+
+    d._ensure_device_profiles()
+    assert ("set-profile", 300, 0) not in calls
+    assert ("set-profile", 300, 131076) in calls
+    assert node.profile_index == 131076
+
+
+def test_device_profiles_never_offer_off(monkeypatch):
+    """The profile picker must not offer the Bluetooth "off" profile:
+    choosing it silences the device for good (see profile_is_off)."""
+    from pwnodes import DeviceOutputNode
+
+    d = fresh_daemon()
+    node = DeviceOutputNode("bowie", device_name="bluez_output.XX.1")
+    node.live_props = {"device.id": 300}
+    node.live_node_id = 12
+    d.space.add_node(node)
+    dev = _device_snapshot(
+        {"index": 0, "name": "off"},
+        [
+            {"index": 0, "name": "off", "description": "Off", "available": "yes"},
+            {"index": 131076, "name": "a2dp-sink",
+             "description": "High Fidelity Playback (A2DP Sink, codec AAC)",
+             "available": "yes"},
+        ],
+    )
+    monkeypatch.setattr(d.graph, "all_objects", lambda: {300: dev})
+
+    resp = d.handle_command({"command": "get_device_profiles", "node_id": "bowie"})
+    assert resp["status"] == "ok"
+    assert [p["index"] for p in resp["profiles"]] == [131076]
+
+
+def test_setting_the_off_profile_is_rejected(monkeypatch):
+    from pwnodes import DeviceOutputNode
+
+    d = fresh_daemon()
+    node = DeviceOutputNode("bowie", device_name="bluez_output.XX.1")
+    node.live_node_id = 12
+    d.space.add_node(node)
+    monkeypatch.setattr(main_mod, "_run_wpctl", lambda *a, **k: True)
+
+    resp = d.handle_command({
+        "command": "set_device_profile", "node_id": "bowie",
+        "profile_index": 0, "description": "Off",
+    })
+    assert resp["status"] == "error"
+    assert node.profile_index is None
+
+    # A real profile still goes through.
+    resp = d.handle_command({
+        "command": "set_device_profile", "node_id": "bowie",
+        "profile_index": 131076, "description": "a2dp-sink",
+    })
+    assert resp["status"] == "ok"
+    assert node.profile_index == 131076
+
+
+def test_a_stored_off_profile_is_not_re_asserted(monkeypatch):
+    import pwnodes as pwnodes_mod
+    from pwnodes import DeviceOutputNode
+
+    node = DeviceOutputNode(
+        "bowie", device_name="bluez_output.XX.1",
+        profile_index=0, profile_description="Off",
+    )
+    node.live_props = {"device.id": 300}
+    node.live_node_id = 12
+    calls = []
+    monkeypatch.setattr(
+        pwnodes_mod, "_run_wpctl", lambda *a, **k: (calls.append(a), True)[1]
+    )
+    node.apply_device_settings()
+    assert not [c for c in calls if c and c[0] == "set-profile"]
+
+
 def test_ensure_device_profiles_warns_once_when_unroutable(monkeypatch, caplog):
     import logging
 

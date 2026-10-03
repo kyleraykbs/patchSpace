@@ -103,6 +103,22 @@ _NAME_SUFFIX_RE = re.compile(r"\.\d+$")
 def _base_node_name(name: str) -> str:
     return _NAME_SUFFIX_RE.sub("", name or "")
 
+
+def profile_is_off(name: Optional[str] = None,
+                   description: Optional[str] = None) -> bool:
+    """Whether a device profile is the Bluetooth "off" one.
+
+    The bluez stack offers it (index 0, name/description "off"/"Off") and
+    PipeWire happily applies it - but a node's stored profile is
+    re-asserted every supervision tick, so choosing "off" once left a
+    headset with no audio node and no way back: it is not a listening
+    mode, so it is filtered out of every profile list this project
+    offers or accepts, and never re-asserted on a stored one."""
+    return (
+        str(name or "").strip().lower() == "off"
+        or str(description or "").strip().lower() == "off"
+    )
+
 # Reserved backing names for the daemon's built-in virtual sink/mic.
 # They are ordinary supervised VirtualSpeaker/VirtualMic nodes (added
 # hidden, see PatchSpace.add_node(public=...)) so they get exactly the
@@ -188,6 +204,21 @@ def device_profile_name(device_obj: Optional[dict]) -> Optional[str]:
 def _profile_available(entry: dict) -> bool:
     avail = entry.get("available")
     return avail is True or str(avail).lower() in ("yes", "true")
+
+
+def device_profile_label(device_obj: Optional[dict], index) -> Optional[str]:
+    """The description (or name) a device's profile *index* maps to in
+    ``EnumProfile``, or None when the device/index can't be resolved.
+    Used to recognise a stored profile that is the Bluetooth "off" one
+    (see profile_is_off), which has to be discarded rather than
+    re-asserted."""
+    if not device_obj or index is None:
+        return None
+    params = device_obj.get("info", {}).get("params", {}) or {}
+    for entry in params.get("EnumProfile", []) or []:
+        if entry.get("index") == index:
+            return entry.get("description") or entry.get("name")
+    return None
 
 
 def pick_auto_a2dp_profile(
@@ -459,6 +490,11 @@ class DeviceControlMixin:
             _run_wpctl("set-volume", live_node_id, self.device_volume)
         device_id = getattr(self, "live_props", {}).get("device.id")
         if device_id is None or self.profile_index is None:
+            return
+        if profile_is_off(description=getattr(self, "profile_description", "")):
+            # A session that stored the Bluetooth "off" profile must not
+            # keep re-asserting it (the device would never come back).
+            # It is treated as "no profile chosen" - see profile_is_off.
             return
         target = (device_id, self.profile_index)
         if self._applied_profile == target:
