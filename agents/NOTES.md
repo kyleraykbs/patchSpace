@@ -85,6 +85,40 @@ pipewire &  ;  wireplumber &
   backed node must be skipped there (`_edge_is_control`) or it will be resolved as audio.
 * Anything a node owns that can exit on its own belongs in `owned_backings()`, **not**
   `backings` - `dead_backings()`/`_node_is_ready` treat a dead backing as a fault.
+* **Panel files are the user's graph, and (before this) had no backups.**
+  ``panels.write_file`` overwrites in place (atomic tmp+rename, but no
+  history) - a reload that empties the model and then autosaves is
+  unrecoverable.  It now keeps the previous content as ``<file>.json.bak``
+  (ignored by the panel scan, which matches ``.json`` only).  Recovery
+  material that *did* exist when the Oct 2026 wipe happened, in order of
+  usefulness: the user's own ``~/.local/share/patchspace/declarative/*.json``
+  snapshots (full node configs), the previous boot's user journal
+  (``journalctl --user -b -1 -u patchspace``: ``Wiring N -> N for <edge id>``
+  lines carry fully-qualified ids and their panel path, plus
+  ``Requested node '<backing>'`` lines), the emptied panel files
+  themselves (structure/placements/nesting survive), and ``pw-dump`` /
+  older ``get_nodes`` output for types+labels.  Rebuild with the
+  ``panels`` module itself (``load_panel``/``edge_owner``/``relative_id``/
+  ``write_file``) so ids and edge ownership match what the daemon writes -
+  and note ``Panel.nodes``/``edges`` are copy-returning properties:
+  mutate ``panel.config`` instead.
+* **A "pink" node outline is the pending-wiring state, not a camera
+  color.** `_draw_node` outlines `is_wiring` nodes in `pal["warning"]`,
+  and this user's stylix theme defines `warning_color` as pink
+  (`.config/gtk-4.0/gtk.css`).  When one node's outline stays coloured
+  while others are normal, read the daemon log for that edge id
+  (`journalctl --user -u patchspace`) - `pw-link ... failed: failed to
+  link ports: Success` plus `not confirmed by the live graph within
+  3.0s` means the link object is created but PipeWire cannot allocate
+  its buffers, so it never lands.  `journalctl --user -u pipewire` then
+  says why (`pw.link: (a.b.c -> d.e.f) allocating -> error Buffer
+  allocation failed (-2)`); `invalid mem id N, expected M` means one
+  client's memory-fd table is stale (seen after a device
+  re-enumeration), and recreating the *other* endpoint's client does
+  not clear it.  Verify with `pw-link` by hand - if the same pair keeps
+  failing while neighbouring ports of both nodes link fine, the fix is
+  to rebuild the stale client (restart wireplumber / reconnect the
+  device), not anything in this repo.
 * Video interiors (VirtualCameraNode / V4l2VirtualCameraNode) are
   `gst-launch-1.0` pipelines: the sink's argv carries the node's backing
   name (a v4l2sink element `name=` or a `stream-properties` node.name)

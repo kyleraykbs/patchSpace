@@ -148,6 +148,38 @@ def test_write_file_round_trips_panel(tmp_path):
     assert list(back.nodes) == ["a"]
 
 
+def test_writing_a_panel_keeps_the_previous_content_as_a_backup(tmp_path):
+    """A panel file *is* the user's graph and every autosave overwrites it
+    in place, so the previous content has to survive one write as
+    ``<file>.json.bak`` - it is what recovers an interrupted reload (or any
+    bad write) instead of losing the whole graph."""
+    path = tmp_path / "kit.json"
+    first = Panel(
+        id="kit", parent=ROOT_ID, label="Kitchen", color="#abcdef",
+        mode=MODE_RW,
+        config={"nodes": {"a": {"type": "splitter", "params": {}}},
+                "edges": [], "panels": [], "groups": []},
+    )
+    panels.write_file(str(path), first)
+    original = path.read_text()
+
+    second = Panel(
+        id="kit", parent=ROOT_ID, label="Kitchen", color="#abcdef",
+        mode=MODE_RW,
+        config={"nodes": {"a": {"type": "splitter", "params": {}},
+                          "b": {"type": "volume", "params": {}}},
+                "edges": [], "panels": [], "groups": []},
+    )
+    panels.write_file(str(path), second)
+
+    backup = tmp_path / "kit.json.bak"
+    assert backup.exists()
+    assert backup.read_text() == original
+    assert path.read_text() != original
+    # The .bak is not a panel file: the scanner must ignore it.
+    assert not backup.name.endswith(panels.PANEL_SUFFIX)
+
+
 def test_migrate_legacy_session():
     raw = {
         "nodes": {"a": {"type": "splitter", "params": {}}},

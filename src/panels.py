@@ -57,6 +57,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -405,6 +406,16 @@ def write_file(path: str, panel: Panel) -> None:
     directory = os.path.dirname(path)
     if directory:
         os.makedirs(directory, exist_ok=True)
+    # Keep the previous content beside the file before replacing it.  A
+    # panel file *is* the user's graph and every autosave overwrites it in
+    # place: without this, one bad write - an interrupted reload, a bug -
+    # is unrecoverable.  One previous version is enough to undo one step.
+    # (The .bak never ends up in the panel scan: it doesn't end in .json.)
+    if os.path.exists(path):
+        try:
+            shutil.copy2(path, path + ".bak")
+        except OSError as exc:
+            logger.warning("Could not back up %r before writing: %s", path, exc)
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
         json.dump(build_payload(panel), f, indent=2, sort_keys=True)
