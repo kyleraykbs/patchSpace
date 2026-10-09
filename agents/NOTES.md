@@ -912,3 +912,10 @@ runs — but the **suite** does not:
 
 Do those three first, then the move is mechanical.  Nothing was left half-split:
 `src/gui` and `packaging/` are untouched, and the attempted tree was removed.
+
+* Pre-step (b) of phase 7 is done: `src/tests/catalog.py` is the daemon-side
+  adapter over `modules.pipewire.declarations` (with `graph.kinds_compatible` as
+  the rule), and the daemon tests use it instead of importing
+  `gui.node_catalog`.  The display's parser is the display's business; the
+  daemon asserts what the module *declares*.  When the display moves out, these
+  tests need no change.
