@@ -611,7 +611,7 @@ def test_daemon_registers_and_serializes_bundle_types():
 
 
 def test_node_catalog_declares_bundle_and_filter_ports():
-    import node_catalog
+    from tests import catalog as node_catalog
 
     assert node_catalog.port_kind("all_inputs", "out", "out") == "bundle"
     assert node_catalog.port_kind("all_outputs", "out", "out") == "bundle"
@@ -641,7 +641,7 @@ def test_node_catalog_declares_bundle_and_filter_ports():
 
 
 def test_node_catalog_ports_compatible_matches_daemon_rules():
-    import node_catalog
+    from tests import catalog as node_catalog
 
     # Bundle <-> audio either way.
     assert node_catalog.ports_compatible("all_inputs", "out", "app_output", "in")

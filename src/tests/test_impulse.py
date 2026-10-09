@@ -13,7 +13,7 @@ import pytest
 
 from central import pwnodes
 from central.main import PatchSpaceDaemon
-import node_catalog
+from tests import catalog as node_catalog
 from central.session_repair import ERROR, repair, validate
 
 

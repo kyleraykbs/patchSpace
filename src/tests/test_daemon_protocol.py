@@ -503,7 +503,8 @@ def test_every_node_type_has_a_description_and_setting_tooltips():
     """Every node spec carries hover-ready text: a one-line description
     (shown on the add-node panel and a long hover on the canvas) and a
     tooltip for every Settings row (falling back to the label)."""
-    import node_catalog as ns
+    from tests import catalog as node_catalog
+    ns = node_catalog
 
     missing_desc = [t for t, spec in ns.NODE_TYPE_SPECS.items() if not spec.description]
     assert missing_desc == []
@@ -714,7 +715,7 @@ def test_downstream_edges_walks_signal_order_through_switches():
 
 def test_light_noise_cancel_shares_echo_backing_but_hides_probe():
     from central.pwnodes import EchoCancelNode, LightNoiseCancelNode
-    import node_catalog
+    from tests import catalog as node_catalog
 
     assert main_mod.NODE_TYPE_REGISTRY["light_noise_cancel"] is LightNoiseCancelNode
     # Same backing/machinery as echo cancel, so the careful-node
@@ -986,7 +987,8 @@ def test_device_volume_lock_gates_constant_override(monkeypatch):
 
 def test_normalize_registry_spec_and_control_clamp():
     from central.pwnodes import NormalizeNode
-    import node_catalog as ns
+    from tests import catalog as node_catalog
+    ns = node_catalog
 
     assert main_mod.NODE_TYPE_REGISTRY["normalize"] is NormalizeNode
     assert NormalizeNode in main_mod._CAREFUL_NODE_TYPES
@@ -1059,7 +1061,8 @@ def test_boolean_nodes_registry_specs_and_output_control():
         BooleanOrNode,
         BooleanXorNode,
     )
-    import node_catalog as ns
+    from tests import catalog as node_catalog
+    ns = node_catalog
 
     assert main_mod.NODE_TYPE_REGISTRY["boolean_switch"] is BooleanSourceNode
     assert main_mod.NODE_TYPE_REGISTRY["boolean_splitter"] is BooleanSplitterNode
@@ -1226,7 +1229,8 @@ def test_warp_nodes_registry_specs_and_name_roundtrip():
         BooleanWarpInNode,
         BooleanWarpOutNode,
     )
-    import node_catalog as ns
+    from tests import catalog as node_catalog
+    ns = node_catalog
 
     assert main_mod.NODE_TYPE_REGISTRY["warp_in"] is WarpInNode
     assert main_mod.NODE_TYPE_REGISTRY["warp_out"] is WarpOutNode
@@ -1313,7 +1317,8 @@ def test_get_logs_serves_recent_output():
 
 def test_reverb_spec_and_control_clamp():
     from central.pwnodes import ReverbNode
-    import node_catalog as ns
+    from tests import catalog as node_catalog
+    ns = node_catalog
 
     spec = ns.spec_for("reverb")
     assert spec.control == "wetdry"

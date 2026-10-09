@@ -59,7 +59,7 @@ def test_the_length_of_a_real_file_is_known(tmp_path):
 
 
 def test_sound_ports_pair_only_with_sound_ports():
-    import node_catalog
+    from tests import catalog as node_catalog
 
     assert node_catalog.port_kind("sound", "out", "out") == "sound"
     assert node_catalog.spec_for("sound").sound_outputs == {"out"}

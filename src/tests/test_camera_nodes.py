@@ -16,7 +16,7 @@ import pytest
 
 from central import pwnodes
 from central.main import PatchSpaceDaemon
-import node_catalog
+from tests import catalog as node_catalog
 from tests.test_pwnodes import FakeGraph
 
 
