@@ -38,6 +38,9 @@ from typing import Any, Dict, Optional
 
 from modules.pipewire import pwgraph
 from modules.pipewire import pwmatch
+from central import graph as graph_mod
+from central import protocol as protocol_mod
+from central import registry as registry_mod
 from central import pwnodes
 from modules.pipewire.pwgraph import PipewireGraph
 from modules.pipewire.pwproc import Backoff, Ticker
@@ -547,6 +550,15 @@ class PatchSpaceDaemon:
         self._server: Optional[socket.socket] = None
         self.space = PatchSpace(self.graph)
         self._lock = self.space._lock
+
+        # The module catalogue (attached modules, declared types, instances
+        # and their status) and the generic structure (spaces, placements,
+        # edges) — the PipeWire-agnostic core of agents/PLAN.md.  Distinct
+        # from `self.graph`, which is the LIVE PipeWire object graph (the
+        # module extraction moves that under modules/pipewire).
+        self.registry = registry_mod.Registry()
+        self.topology = graph_mod.Graph()
+        self._protocol = protocol_mod.ProtocolHandler(self.registry)
 
         self._running = False
         self._clients: set[socket.socket] = set()
@@ -5585,7 +5597,14 @@ class PatchSpaceDaemon:
     # command dispatch
     # ------------------------------------------------------------------
 
-    def handle_command(self, cmd: dict) -> dict:
+    def handle_command(self, cmd: dict, conn: Optional[protocol_mod.Connection] = None
+                       ) -> Any:
+        # A message with a "type" key is the module API (hello, declare,
+        # announce, registry_query); one with "command" is the legacy
+        # protocol the GUI still speaks.  The two coexist until phase 2
+        # moves the display over.
+        if "type" in cmd:
+            return self._protocol.handle(cmd, conn or protocol_mod.Connection())
         command = cmd.get("command")
         try:
             if command == "add_node":
@@ -5759,6 +5778,7 @@ class PatchSpaceDaemon:
 
     def _handle_client(self, client_socket: socket.socket) -> None:
         self._clients.add(client_socket)
+        conn = protocol_mod.Connection(socket=client_socket)
         buffer = ""
         try:
             while self._running:
@@ -5773,22 +5793,30 @@ class PatchSpaceDaemon:
                         continue
                     try:
                         cmd = json.loads(line)
-                        response = self.handle_command(cmd)
+                        response = self.handle_command(cmd, conn)
                     except json.JSONDecodeError as exc:
                         response = {
                             "status": "error",
                             "message": f"Invalid JSON: {exc}",
                         }
                     try:
-                        client_socket.sendall(
-                            (json.dumps(response) + "\n").encode("utf-8")
-                        )
+                        # One message in, one *or more* out: `type_declare`
+                        # fans out a migrate per persisted instance.
+                        batch = response if isinstance(response, list) else [response]
+                        for message in batch:
+                            client_socket.sendall(
+                                (json.dumps(message) + "\n").encode("utf-8")
+                            )
                     except OSError:
                         return
         except OSError:
             pass
         finally:
             self._clients.discard(client_socket)
+            if conn.module_id:
+                # A module connection dying takes its nodes offline (their
+                # placements stay, so a reconnect binds them again).
+                self.registry.detach(conn.module_id)
             try:
                 client_socket.close()
             except OSError:

@@ -116,14 +116,18 @@ class Registry:
         #: type_id -> the module that declared it last (kept after detach so
         #: a disabled module's placements report offline_module, not unbacked)
         self._type_owner: Dict[str, str] = {}
-        self._counter = 0
 
     # -- modules ---------------------------------------------------------
 
     def allocate_module_id(self, name: str) -> str:
+        """The id a module connects under.  A module that reconnects (its
+        old record is detached) keeps its id, so its placements and edges
+        stay bound to it across a restart."""
         with self._lock:
-            self._counter += 1
             base = name or "module"
+            for module_id, record in self._modules.items():
+                if record.name == base and not record.connected:
+                    return module_id
             candidate = base
             n = 1
             while candidate in self._modules:
@@ -361,6 +365,24 @@ class Registry:
                 instance = self._instances.get(instance_id)
                 if instance is not None and instance.declared_by == module_id:
                     instance.health = value
+
+    def set_config(self, module_id: str, instance_id: str,
+                   config: Optional[Dict[str, Any]]) -> bool:
+        """Store a config a module returned from migration (or replace the
+        stored one).  ``None`` means the module declined: the daemon keeps
+        the old config and recreates the instance from defaults."""
+        with self._lock:
+            instance = self._instances.get(instance_id)
+            if instance is None:
+                return False
+            # A migration result arrives *before* the announce that binds
+            # the instance, so the type's owner is the authority here, not
+            # `declared_by`.
+            if (instance.declared_by or self._type_owner.get(instance.type_id)) != module_id:
+                return False
+            if isinstance(config, dict):
+                instance.config = dict(config)
+            return True
 
     def instance(self, instance_id: str) -> Optional[InstanceRecord]:
         with self._lock:
