@@ -888,3 +888,27 @@ a filter-chain module's bare `Input`/`Output` - is still skipped by
   `nix build`, or the store copy simply does not contain it (the packaged CLI
   failed with "No module named central.modules_cli" until `modules_cli.py` was
   tracked).
+
+## 2026-10-09 — phase 7 is not a pure move (attempted, reverted)
+
+Tried the `patchSpaceGui` split and backed it out.  The **repo** splits cleanly —
+a tree with `gui/`, `packaging/`, its own flake builds `packages.patchspace` and
+runs — but the **suite** does not:
+
+* nine files under `src/tests/` (test_gui_interaction, test_button_node_ui,
+  test_clip_ui, test_filter_node_ui, test_canvas_opacity, test_view_zoom,
+  test_panel_physics, test_wire_escape, test_classifier_pickers) drive the canvas
+  against *real daemon objects* (`from tests.test_pwnodes import FakeGraph`,
+  `central.main.PatchSpaceDaemon`).  They are integration tests of both halves, so
+  moving them needs a stub-daemon fixture first — they are not display tests.
+* several daemon tests (`test_bundles`, `test_camera_nodes`, `test_impulse`,
+  `test_sound_node`, parts of `test_daemon_protocol`) import `gui.node_catalog` to
+  assert the *display's* view.  After a split they must assert the module's
+  catalog (`modules.pipewire.declarations`) through a small shim — which is the
+  right structure anyway (the display's parser is the display's business).
+* the nix interface changes with it: `clientPackage` must become an explicit
+  option (this flake can no longer supply the GUI), with an assertion when
+  `installClient` is on and it is null, and mycelion gains the second input.
+
+Do those three first, then the move is mechanical.  Nothing was left half-split:
+`src/gui` and `packaging/` are untouched, and the attempted tree was removed.
