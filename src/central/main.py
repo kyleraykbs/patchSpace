@@ -6035,7 +6035,9 @@ class PatchSpaceDaemon:
             self._clients.discard(client_socket)
             if conn.module_id:
                 # A module connection dying takes its nodes offline (their
-                # placements stay, so a reconnect binds them again).
+                # placements stay, so a reconnect binds them again) and
+                # stops being a forwarding target.
+                self._protocol.unregister_module(conn)
                 self.registry.detach(conn.module_id)
             try:
                 client_socket.close()

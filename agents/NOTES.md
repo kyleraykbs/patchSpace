@@ -825,3 +825,22 @@ a filter-chain module's bare `Input`/`Output` - is still skipped by
   daemon's client loop, or a restarted module gets a fresh id (`childmod#2`) and
   its types are refused as already-declared.
 * `number` is now a declared port kind (the primitives module's wire).
+
+## 2026-10-09 — the daemon routes a display's requests to the owning module
+
+* `api.node_control` / `api.node_edge` are the *request* forms (a display
+  asking); `control_set` / `edge_apply` stay the daemon -> module forms.  The
+  daemon looks up `registry.instance(id).declared_by`, validates an edge through
+  `topology.can_connect` (the one authority), records it, and forwards.
+* `Connection.send` is the single forwarding path: a socket connection writes
+  over its socket, an in-process module has a callable (`conn.deliver`).  The
+  in-process provider sets `conn.deliver = self.apply` in `attach`, so the same
+  routing works before and after a module moves to its own process.
+* `ProtocolHandler.register_module/unregister_module` keep the module_id ->
+  connection map; `_hello` registers, the daemon's client loop unregisters on
+  drop (alongside `registry.detach`).
+* Why this had to come before the primitives module: a module-owned node can be
+  *drawn* (phase 2 serves its declared types) but could not be **wired or
+  controlled** — the GUI's legacy commands target the daemon's model, which has
+  no object for a node a module owns.  With this path, a module's nodes are
+  usable, so primitives can land on top of it.

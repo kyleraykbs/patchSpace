@@ -20,11 +20,14 @@ persisted instance its types own, then one terminal ``declared``/``error``
 
 from __future__ import annotations
 
+import json
+import logging
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from central import module_api as api
+from central.graph import edge_id as graph_edge_id
 from central.registry import Registry
 
 Reply = Union[Dict[str, Any], List[Dict[str, Any]]]
@@ -40,6 +43,31 @@ class Connection:
     version: str = ""
     socket: Any = None
     send_lock: threading.Lock = field(default_factory=threading.Lock)
+    #: How to hand a message to this client.  A socket connection writes it;
+    #: an *in-process* module (the built-in PipeWire provider, until it moves
+    #: to its own process) has a callable instead.  One forwarding path for
+    #: both, which is what lets the daemon route a control to a module
+    #: without knowing where it runs.
+    deliver: Optional[Callable[[Dict[str, Any]], None]] = None
+
+    def send(self, message: Dict[str, Any]) -> bool:
+        if self.deliver is not None:
+            try:
+                self.deliver(message)
+                return True
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "delivering %s to %s failed", message.get("type"), self.module_id
+                )
+                return False
+        if self.socket is None:
+            return False
+        try:
+            with self.send_lock:
+                self.socket.sendall((json.dumps(message) + "\n").encode("utf-8"))
+            return True
+        except OSError:
+            return False
 
     @property
     def greeted(self) -> bool:
@@ -55,6 +83,19 @@ class ProtocolHandler:
         #: registry-only test harness needs no graph; a display's snapshot
         #: is empty without it.
         self.topology = topology
+        #: module_id -> the connection to reach it on.  A socket module
+        #: writes to its socket; the in-process provider has a callable
+        #: (`Connection.deliver`).  This is what lets the daemon route a
+        #: display's request to whichever module owns the node.
+        self._module_conns: Dict[str, Connection] = {}
+
+    def register_module(self, conn: Connection) -> None:
+        if conn.module_id:
+            self._module_conns[conn.module_id] = conn
+
+    def unregister_module(self, conn: Connection) -> None:
+        if conn.module_id and self._module_conns.get(conn.module_id) is conn:
+            del self._module_conns[conn.module_id]
 
     # -- entry point -----------------------------------------------------
 
@@ -70,6 +111,8 @@ class ProtocolHandler:
             "registry_query": self._registry_query,
             "catalog_request": self._catalog_request,
             "snapshot_request": self._snapshot_request,
+            "node_control": self._node_control,
+            "node_edge": self._node_edge,
         }.get(kind)
         if handler is None:
             return api.error(f"unknown message type {kind!r}")
@@ -101,6 +144,7 @@ class ProtocolHandler:
         if conn.role == api.ROLE_MODULE:
             conn.module_id = self.registry.allocate_module_id(conn.name)
             self.registry.attach(conn.module_id, conn.name, conn.version, conn.role)
+            self.register_module(conn)
         return api.hello_ok(daemon="patchspaced")
 
     def _type_declare(self, msg: Dict[str, Any], conn: Connection) -> Reply:
@@ -203,6 +247,78 @@ class ProtocolHandler:
             types,
             instances,
         )
+
+    def _node_control(self, msg: Dict[str, Any], conn: Connection) -> Reply:
+        """A display setting one control of one node: routed to whichever
+        module owns it, so the display never has to know (or dial it)."""
+        if not conn.greeted:
+            return api.error("send hello first")
+        instance_id = str(msg.get("instance_id") or "")
+        key = str(msg.get("key") or "")
+        if not instance_id or not key:
+            return api.error("node_control needs an instance_id and a key")
+        instance = self.registry.instance(instance_id)
+        if instance is None:
+            return api.error(f"unknown node {instance_id}")
+        if not instance.declared_by:
+            return api.error(
+                f"{instance_id} is not running ({instance.status}: {instance.reason})"
+            )
+        target = self._module_conns.get(instance.declared_by)
+        if target is None:
+            return api.error(f"{instance.declared_by} is not attached")
+        if not target.send(api.control_set(instance_id, key, msg.get("value"))):
+            return api.error(f"could not reach {instance.declared_by}")
+        return {"type": "ok", "ref": "node_control", "instance_id": instance_id}
+
+    def _node_edge(self, msg: Dict[str, Any], conn: Connection) -> Reply:
+        """A display connecting or disconnecting two nodes.  The daemon
+        validates it (the one authority), records it, and tells the owning
+        modules to realize it."""
+        if not conn.greeted:
+            return api.error("send hello first")
+        if self.topology is None:
+            return api.error("this daemon has no graph")
+        op = str(msg.get("op") or "add")
+        if op not in ("add", "remove"):
+            return api.error(f"unknown edge op {op!r}")
+        from_node = str(msg.get("from_node") or "")
+        to_node = str(msg.get("to_node") or "")
+        to_port = str(msg.get("to_port") or "in")
+        from_port = str(msg.get("from_port") or "out")
+        if not from_node or not to_node:
+            return api.error("node_edge needs both endpoints")
+        eid = graph_edge_id(from_node, to_node, to_port, from_port)
+        edge = {
+            "id": eid,
+            "from_node": from_node,
+            "to_node": to_node,
+            "to_port": to_port,
+            "from_port": from_port,
+        }
+        if op == "add":
+            ok, message = self.topology.can_connect(
+                from_node, to_node, to_port, from_port,
+                self.registry.port_kind, self.registry.port_multi,
+            )
+            if not ok:
+                return api.error(message)
+            self.topology.connect(
+                from_node, to_node, to_port, from_port,
+                self.registry.port_kind, self.registry.port_multi,
+            )
+        else:
+            if not self.topology.disconnect(from_node, to_node, to_port, from_port):
+                return api.error(f"no such edge {eid}")
+        # Every module whose nodes take part has to realize (or drop) it.
+        for instance_id in (from_node, to_node):
+            instance = self.registry.instance(instance_id)
+            if instance is None or not instance.declared_by:
+                continue
+            target = self._module_conns.get(instance.declared_by)
+            if target is not None:
+                target.send(api.edge_apply(edge, op))
+        return {"type": "ok", "ref": "node_edge", "op": op, "edge": edge}
 
     def _catalog_request(self, msg: Dict[str, Any], conn: Connection) -> Reply:
         """The whole type catalog (plus the modules' menu and vocabulary):

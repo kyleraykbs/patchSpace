@@ -171,3 +171,14 @@
 - Why: the primitives module needs a numeric wire; declaring the kind centrally
   is what keeps a display from having to guess.
 - Reversible: yes.
+
+## [2026-10-09] Displays ask; the daemon routes to the owning module
+- Decision: `node_control`/`node_edge` are the display-side request messages; the
+  daemon resolves the owning module from the registry, validates an edge itself,
+  records it in the topology, and forwards `control_set`/`edge_apply` over
+  `Connection.send` (socket write or in-process callable).
+- Why: a display must not know which module owns a node, and must never dial a
+  module — the same reason apps query the registry.  It also means a node a
+  module owns becomes wireable/controllable *before* the PipeWire model moves,
+  which is what unblocks the primitives module.
+- Reversible: yes.

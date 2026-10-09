@@ -76,7 +76,12 @@ class PipewireModule:
         disconnected module keeps its name), so the placements bind again
         instead of being orphaned."""
         self.conn = protocol_mod.Connection()
-        reply = self._call(api.hello(api.ROLE_MODULE, self.name, self.version))
+        # The daemon forwards a display's control/edge requests to the module
+        # that owns the node; in-process that is a callable, out-of-process a
+        # socket write (`Connection.send`).
+        self.conn.deliver = self.apply
+        replies = self._call(api.hello(api.ROLE_MODULE, self.name, self.version))
+        reply = replies[-1] if isinstance(replies, list) else replies
         if reply.get("type") != "hello_ok":
             raise RuntimeError(f"pipewire module refused: {reply}")
         catalog = declarations.declarations(self.type_map)

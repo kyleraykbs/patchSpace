@@ -192,6 +192,26 @@ def value_set(instance_id: str, port: str, value: Any) -> Dict[str, Any]:
     return {"type": "value_set", "instance_id": instance_id, "port": port, "value": value}
 
 
+def node_control(instance_id: str, key: str, value: Any) -> Dict[str, Any]:
+    """A *display* setting one control of one node.
+
+    Distinct from ``control_set`` (daemon -> module): this is the request
+    form.  The daemon routes it to whichever module owns the instance, so a
+    display never has to know which module that is — or dial it.
+    """
+    return {"type": "node_control", "instance_id": instance_id, "key": key,
+            "value": value}
+
+
+def node_edge(from_node: str, to_node: str, to_port: str = "in",
+              from_port: str = "out", op: str = "add") -> Dict[str, Any]:
+    """A display connecting (``op="add"``) or disconnecting (``"remove"``)
+    two nodes.  The daemon validates it against the declared ports — the one
+    authority — records it, and tells the owning modules to realize it."""
+    return {"type": "node_edge", "op": op, "from_node": from_node,
+            "to_node": to_node, "to_port": to_port, "from_port": from_port}
+
+
 def registry_query(type_id: str = "", capability: str = "") -> Dict[str, Any]:
     msg: Dict[str, Any] = {"type": "registry_query"}
     if type_id:
