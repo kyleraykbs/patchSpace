@@ -56,18 +56,17 @@ def daemon_command() -> List[str]:
 
     Order of preference: an explicit path baked in by the packaged GUI
     wrapper (``PATCHSPACE_DAEMON``), a ``patchspace-daemon`` on ``PATH``, and
-    finally running the sibling ``main.py`` with this interpreter - which
-    is what happens when the GUI is run straight from a checkout (e.g.
-    inside ``nix develop``)."""
+    finally running the sibling ``central`` package with this interpreter -
+    which is what happens when the GUI is run straight from a checkout
+    (e.g. inside ``nix develop``; ``start`` sets the working directory to
+    the checkout's ``src/`` so ``-m central.main`` resolves)."""
     explicit = os.environ.get("PATCHSPACE_DAEMON")
     if explicit:
         return shlex.split(explicit)
     found = shutil.which("patchspace-daemon")
     if found:
         return [found]
-    here = os.path.dirname(os.path.abspath(__file__))
-    main_py = os.path.normpath(os.path.join(here, os.pardir, "main.py"))
-    return [sys.executable, main_py]
+    return [sys.executable, "-m", "central.main"]
 
 
 class DaemonManager:
@@ -103,7 +102,11 @@ class DaemonManager:
         cmd = daemon_command()
         logger.info("Starting Patch Space daemon: %s", " ".join(cmd))
         try:
-            self.proc = subprocess.Popen(cmd)
+            # cwd is the checkout's src/ so the dev fallback
+            # (`-m central.main`) resolves; a packaged daemon ignores it.
+            here = os.path.dirname(os.path.abspath(__file__))
+            src_root = os.path.normpath(os.path.join(here, os.pardir))
+            self.proc = subprocess.Popen(cmd, cwd=src_root)
         except OSError as exc:
             logger.error("Could not start the daemon: %s", exc)
             return False

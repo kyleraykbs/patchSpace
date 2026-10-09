@@ -8,7 +8,7 @@ import os
 
 import pytest
 
-from pwgraph import LinkError, PipewireGraph, _name_is_backing_of
+from modules.pipewire.pwgraph import LinkError, PipewireGraph, _name_is_backing_of
 
 
 def fake_run(rc, stdout="", stderr=""):
@@ -18,7 +18,7 @@ def fake_run(rc, stdout="", stderr=""):
 def test_connect_existing_link_is_silent_noop(monkeypatch):
     g = PipewireGraph()
     monkeypatch.setattr(
-        "pwgraph.subprocess.run",
+        "modules.pipewire.pwgraph.subprocess.run",
         lambda *a, **k: fake_run(255, stderr="failed to link ports: File exists\n"),
     )
     assert g.connect(1, 2) is False  # no exception: already linked
@@ -27,7 +27,7 @@ def test_connect_existing_link_is_silent_noop(monkeypatch):
 def test_connect_missing_port_is_silent_noop(monkeypatch):
     g = PipewireGraph()
     monkeypatch.setattr(
-        "pwgraph.subprocess.run",
+        "modules.pipewire.pwgraph.subprocess.run",
         lambda *a, **k: fake_run(255, stderr="no such port 999"),
     )
     assert g.connect(999, 2) is False
@@ -36,7 +36,7 @@ def test_connect_missing_port_is_silent_noop(monkeypatch):
 def test_connect_genuine_failure_raises(monkeypatch):
     g = PipewireGraph()
     monkeypatch.setattr(
-        "pwgraph.subprocess.run",
+        "modules.pipewire.pwgraph.subprocess.run",
         lambda *a, **k: fake_run(1, stderr="port is of wrong direction"),
     )
     with pytest.raises(LinkError):
@@ -46,7 +46,7 @@ def test_connect_genuine_failure_raises(monkeypatch):
 def test_disconnect_already_gone_is_silent(monkeypatch):
     g = PipewireGraph()
     monkeypatch.setattr(
-        "pwgraph.subprocess.run",
+        "modules.pipewire.pwgraph.subprocess.run",
         lambda *a, **k: fake_run(255, stderr="not linked"),
     )
     assert g.disconnect(1, 2) is False
@@ -54,7 +54,7 @@ def test_disconnect_already_gone_is_silent(monkeypatch):
 
 def test_disconnect_success(monkeypatch):
     g = PipewireGraph()
-    monkeypatch.setattr("pwgraph.subprocess.run", lambda *a, **k: fake_run(0))
+    monkeypatch.setattr("modules.pipewire.pwgraph.subprocess.run", lambda *a, **k: fake_run(0))
     assert g.disconnect(1, 2) is True
 
 
@@ -68,7 +68,7 @@ def test_connect_timeout_raises_link_error(monkeypatch):
     def boom(*a, **k):
         raise subprocess.TimeoutExpired(cmd=a[0], timeout=1)
 
-    monkeypatch.setattr("pwgraph.subprocess.run", boom)
+    monkeypatch.setattr("modules.pipewire.pwgraph.subprocess.run", boom)
     with pytest.raises(LinkError):
         g.connect(1, 2)
 
@@ -81,7 +81,7 @@ def test_disconnect_timeout_raises_link_error(monkeypatch):
     def boom(*a, **k):
         raise subprocess.TimeoutExpired(cmd=a[0], timeout=1)
 
-    monkeypatch.setattr("pwgraph.subprocess.run", boom)
+    monkeypatch.setattr("modules.pipewire.pwgraph.subprocess.run", boom)
     with pytest.raises(LinkError):
         g.disconnect(1, 2)
 
@@ -148,7 +148,7 @@ def test_snapshot_stale_is_sibling_scoped(monkeypatch):
         },
     ]
     monkeypatch.setattr(
-        "pwgraph.subprocess.run",
+        "modules.pipewire.pwgraph.subprocess.run",
         lambda *a, **k: fake_run(0, stdout=json.dumps(dump)),
     )
     found, pids = PipewireGraph()._snapshot_stale(["nc_1"])
@@ -187,7 +187,7 @@ def test_snapshot_stale_matches_owned_prefix_markers(monkeypatch):
         for node_id, name in _STALE_NOISE_CANCEL_NODES.items()
     ]
     monkeypatch.setattr(
-        "pwgraph.subprocess.run",
+        "modules.pipewire.pwgraph.subprocess.run",
         lambda *a, **k: fake_run(0, stdout=json.dumps(dump)),
     )
     found, _pids = PipewireGraph()._snapshot_stale([_STARTUP_MARKER])
@@ -234,7 +234,7 @@ _ORPHAN_DUMP = [
 
 def test_owned_sweep_reaps_arbitrary_backing_plumbing(monkeypatch):
     monkeypatch.setattr(
-        "pwgraph.subprocess.run",
+        "modules.pipewire.pwgraph.subprocess.run",
         lambda *a, **k: fake_run(0, stdout=json.dumps(_ORPHAN_DUMP)),
     )
     found, _pids = PipewireGraph()._snapshot_stale([], owned_sweep=True)
@@ -273,7 +273,7 @@ def test_the_reaper_refuses_to_touch_a_live_daemons_graph(monkeypatch):
     gone.  Two daemons at once is not that: one sweeping the other's graph is
     how a second instance left the first running headless while BOTH rebuilt
     the user's nodes."""
-    from pwgraph import AnotherDaemonRunning, PipewireGraph
+    from modules.pipewire.pwgraph import AnotherDaemonRunning, PipewireGraph
 
     g = PipewireGraph()
     monkeypatch.setattr(
@@ -297,7 +297,7 @@ def test_the_reaper_refuses_to_touch_a_live_daemons_graph(monkeypatch):
 def test_the_reaper_still_reaps_genuine_orphans(monkeypatch):
     """The crash-recovery case it exists for: the owning process is gone (its
     parent is init or the user manager, not a daemon), so the leftovers go."""
-    from pwgraph import PipewireGraph
+    from modules.pipewire.pwgraph import PipewireGraph
 
     g = PipewireGraph()
     monkeypatch.setattr(

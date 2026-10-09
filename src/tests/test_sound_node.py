@@ -18,9 +18,9 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pwnodes
+from central import pwnodes
 from tests.test_impulse import FakeCli, FakeProc
-from pwnodes import SoundNode, probe_duration  # noqa: E402
+from central.pwnodes import SoundNode, probe_duration  # noqa: E402
 
 
 def _write_wav(path, seconds=0.25, rate=8000):
@@ -77,7 +77,7 @@ def test_a_sound_edge_is_accepted_and_is_never_a_link():
     sound input, and that wire carries no audio (a real bug: the daemon's
     add_edge rejected the kind outright, so nothing could be plugged in)."""
     from tests.test_pwnodes import FakeGraph
-    from pwnodes import PatchSpace, SoundNode, SoundPlayerNode
+    from central.pwnodes import PatchSpace, SoundNode, SoundPlayerNode
 
     g = FakeGraph()
     space = PatchSpace(g)
@@ -105,7 +105,7 @@ def test_a_clip_narrows_the_sound_it_is_given():
     """A Clip is a range, so clips stack *intersecting* like the Filter
     node's filters do - and the range stays in the file's own time base."""
     from tests.test_pwnodes import FakeGraph
-    from pwnodes import ClipNode, PatchSpace, SoundNode
+    from central.pwnodes import ClipNode, PatchSpace, SoundNode
 
     g = FakeGraph()
     space = PatchSpace(g)
@@ -136,7 +136,7 @@ def test_a_clip_narrows_the_sound_it_is_given():
 def test_a_waveform_is_reduced_to_peaks(tmp_path):
     if not shutil.which("ffmpeg"):
         pytest.skip("ffmpeg not available")
-    from pwnodes import PEAK_BUCKETS, probe_peaks
+    from central.pwnodes import PEAK_BUCKETS, probe_peaks
 
     path = tmp_path / "blip.wav"
     _write_wav(path, seconds=0.4)
@@ -159,7 +159,7 @@ def test_a_daemon_clip_sees_the_sound_wired_into_it(tmp_path):
     perfectly wired.  Wiring through the real port names is what pins it."""
     if not shutil.which("ffmpeg"):
         pytest.skip("ffmpeg not available")
-    from main import PatchSpaceDaemon
+    from central.main import PatchSpaceDaemon
     from tests.test_pwnodes import FakeGraph
 
     path = tmp_path / "blip.wav"
@@ -199,7 +199,7 @@ def test_a_clips_times_are_settable_and_stick():
     poll.  The daemon didn't know the properties, so it answered an error, and
     the GUI's own value was replaced by the stale one on every refresh - the
     selection snapped straight back and the handles looked immovable."""
-    from main import PatchSpaceDaemon
+    from central.main import PatchSpaceDaemon
     from tests.test_pwnodes import FakeGraph
 
     d = PatchSpaceDaemon()
@@ -253,7 +253,7 @@ class _FakeRecorder:
 def test_a_recorder_takes_an_audio_input_and_gives_a_sound(monkeypatch):
     """Record -> Stop, and the take is what the node's sound output points at,
     so a Clip or a Player behind it resolves it like any other sound."""
-    from main import PatchSpaceDaemon
+    from central.main import PatchSpaceDaemon
     from tests.test_pwnodes import FakeGraph
 
     _FakeRecorder.commands.clear()
@@ -333,7 +333,7 @@ class _DeadRecorder(_FakeRecorder):
 
 def _recorder_daemon(monkeypatch, process=_FakeRecorder, take_dir=None):
     """A daemon with one recorder node in it, wired to a fake pw-cat."""
-    from main import PatchSpaceDaemon
+    from central.main import PatchSpaceDaemon
     from tests.test_pwnodes import FakeGraph
 
     _FakeRecorder.commands.clear()
@@ -393,7 +393,7 @@ def test_recording_again_overwrites_the_take(tmp_path, monkeypatch):
     """One fixed file per node: Record clears it first, so a new take replaces
     the old one rather than piling up beside it.  (That the new take also
     *reads* as the new take is the growing-take test's job.)"""
-    from main import PatchSpaceDaemon
+    from central.main import PatchSpaceDaemon
     from tests.test_pwnodes import FakeGraph
 
     _FakeRecorder.commands.clear()
@@ -421,7 +421,7 @@ def test_a_recorders_export_is_json_serialisable(monkeypatch):
     method - the autosave raised, the supervision loop died with it, and every
     node sat "not connected" from then on.  One export check catches it."""
     import json
-    from main import PatchSpaceDaemon
+    from central.main import PatchSpaceDaemon
     from tests.test_pwnodes import FakeGraph
 
     d = PatchSpaceDaemon()
@@ -439,8 +439,8 @@ def test_every_node_type_exports_to_json(monkeypatch):
     name), not just the one that bit us."""
     import json
 
-    import pwnodes as pn
-    from main import NODE_TYPE_REGISTRY, PatchSpaceDaemon
+    from central import pwnodes as pn
+    from central.main import NODE_TYPE_REGISTRY, PatchSpaceDaemon
     from tests.test_pwnodes import FakeGraph
 
     monkeypatch.setattr(pn, "OwnedPwNode", FakeCli)
@@ -461,7 +461,7 @@ def test_source_rev_changes_when_a_take_overwrites_the_file(tmp_path):
     """The GUI's queue to re-ask for a waveform comes from the daemon's
     source_rev, so it has to move when a take rewrites the file - and must not
     move on its own, or every poll would re-ask for a few hundred peaks."""
-    from main import PatchSpaceDaemon
+    from central.main import PatchSpaceDaemon
 
     take = tmp_path / "take.wav"
     assert PatchSpaceDaemon._file_rev(str(take)) == ""      # no take yet
@@ -711,7 +711,7 @@ def test_the_impulse_command_fires_a_dump(tmp_path, monkeypatch):
     impulse output, so nothing ever ran.  (The earlier test called on_impulse
     directly, which is exactly why it passed while the button did nothing.)"""
     import time
-    from main import PatchSpaceDaemon
+    from central.main import PatchSpaceDaemon
     from tests.test_pwnodes import FakeGraph
 
     src = tmp_path / "in.wav"

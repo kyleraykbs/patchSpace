@@ -6,13 +6,13 @@ import time
 
 import pytest
 
-from pwproc import Backoff
-from pwmatch import (
+from modules.pipewire.pwproc import Backoff
+from modules.pipewire.pwmatch import (
     INTERNAL_MEDIA_CLASS,
     SOURCE_MEDIA_CLASSES,
     resolve_channel_pairs,
 )
-from pwnodes import (
+from central.pwnodes import (
     AppClassifierNode,
     Edge,
     ReplayBufferNode,
@@ -84,7 +84,7 @@ def test_app_name_classifier_matches_the_application_name():
 
 
 def test_the_app_scope_is_parsed_from_a_cgroup_line():
-    from pwmatch import app_scope_key
+    from modules.pipewire.pwmatch import app_scope_key
 
     # The live Vesktop case: its audio subprocess sits in the app's scope.
     assert app_scope_key(
@@ -106,8 +106,8 @@ def test_the_app_scope_is_parsed_from_a_cgroup_line():
 
 
 def test_app_key_prefers_the_scope_then_the_process():
-    import pwmatch
-    from pwmatch import app_key
+    from modules.pipewire import pwmatch
+    from modules.pipewire.pwmatch import app_key
 
     props = {
         "application.name": "Chromium input",
@@ -130,14 +130,14 @@ def test_app_key_prefers_the_scope_then_the_process():
 
 
 def test_app_key_filter_matches_on_the_resolved_application():
-    from pwmatch import matches_source_filter
+    from modules.pipewire.pwmatch import matches_source_filter
 
     # A stream whose process is inside vesktop's scope, reporting only its
     # audio subprocess's name.
     props = {"application.name": "Chromium input",
              "application.process.binary": "electron",
              "application.process.id": 3808060}
-    import pwmatch
+    from modules.pipewire import pwmatch
     original = pwmatch._pid_app_scope
     pwmatch._pid_app_scope = lambda pid: "vesktop" if pid == 3808060 else ""
     try:
@@ -732,7 +732,7 @@ def test_unconfirmable_link_backs_off_instead_of_retrying_forever(monkeypatch):
     (a Bluetooth sink rejecting the source's format) must not be re-issued
     on every pass forever.  It backs off, then retries once the backoff
     elapses."""
-    monkeypatch.setattr("pwnodes.LINK_CONFIRM_TIMEOUT_S", 0.0)
+    monkeypatch.setattr("central.pwnodes.LINK_CONFIRM_TIMEOUT_S", 0.0)
     g = AsyncFakeGraph()
     g.add_source(10, "app1")
     g.add_sink(20, "sink1")
@@ -772,7 +772,7 @@ def test_unconfirmable_link_backs_off_instead_of_retrying_forever(monkeypatch):
 def test_removing_edge_forgets_link_backoff(monkeypatch):
     """Dropping the edge clears the pair's backoff so a deliberate re-add
     retries immediately rather than waiting out the old backoff."""
-    monkeypatch.setattr("pwnodes.LINK_CONFIRM_TIMEOUT_S", 0.0)
+    monkeypatch.setattr("central.pwnodes.LINK_CONFIRM_TIMEOUT_S", 0.0)
     g = AsyncFakeGraph()
     g.add_source(10, "app1")
     g.add_sink(20, "sink1")
@@ -1559,7 +1559,7 @@ def test_rename_preserves_internal_link_bookkeeping():
     not drop them.  Dropping them makes the next sync() disconnect the
     whole effect interior and re-make it, which stalls timing-sensitive
     modules like RNNoise (the 'noise cancel kills audio' wedge)."""
-    from pwnodes import _DesiredLinks
+    from central.pwnodes import _DesiredLinks
 
     g = FakeGraph()
     space = make_space(g)

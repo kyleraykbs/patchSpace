@@ -1,8 +1,8 @@
 """Legacy config migration: the old regex/media-class/description filter
 leaves become bundle pipeline nodes, in memory, idempotently."""
 
-import migrations
-from session_repair import repair
+from central import migrations
+from central.session_repair import repair
 
 
 def _config(nodes, edges, groups=None):
@@ -120,7 +120,7 @@ def test_repair_is_clean_after_migration():
 def test_a_node_labelled_clip_previous_catches_up_with_the_rename():
     """The type was renamed to Replay Buffer; a node saved before that keeps the
     old name on its body, because the label is stored with the node."""
-    from migrations import migrate
+    from central.migrations import migrate
 
     config = {
         "schema_version": 2,

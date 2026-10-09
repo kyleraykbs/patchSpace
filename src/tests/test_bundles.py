@@ -6,8 +6,8 @@ PipeWire is touched (the Bundle Output terminal's dummy is faked)."""
 
 import pytest
 
-from pwmatch import INTERNAL_MEDIA_CLASS
-from pwnodes import (
+from modules.pipewire.pwmatch import INTERNAL_MEDIA_CLASS
+from central.pwnodes import (
     PatchSpace,
     InputNode,
     OutputNode,
@@ -213,7 +213,7 @@ def test_app_classifier_takes_every_stream_the_app_created(monkeypatch):
     """Vesktop's audio comes from an Electron audio subprocess ("Chromium
     input") plus, say, a voice-engine stream; one Application value has to
     match both, where the Subprocess classifier would need each name."""
-    import pwmatch
+    from modules.pipewire import pwmatch
 
     monkeypatch.setattr(
         pwmatch, "_pid_app_scope",
@@ -576,7 +576,7 @@ def test_bundle_output_without_dummy_has_no_links():
 
 
 def test_daemon_registers_and_serializes_bundle_types():
-    from main import PatchSpaceDaemon
+    from central.main import PatchSpaceDaemon
 
     d = PatchSpaceDaemon()
     leaf_types = [
@@ -655,7 +655,7 @@ def test_node_specs_ports_compatible_matches_daemon_rules():
 
 
 def test_daemon_serializes_merge_bundle_inputs():
-    from main import PatchSpaceDaemon
+    from central.main import PatchSpaceDaemon
 
     d = PatchSpaceDaemon()
     d.handle_command({"command": "add_node", "node_type": "app_input",
@@ -669,7 +669,7 @@ def test_daemon_serializes_merge_bundle_inputs():
 
 
 def test_daemon_serializes_filter_inputs():
-    from main import PatchSpaceDaemon
+    from central.main import PatchSpaceDaemon
 
     d = PatchSpaceDaemon()
     d.handle_command({"command": "add_node", "node_type": "all_apps",
@@ -688,7 +688,7 @@ def test_daemon_switch_and_title_classifier_survive_set_node_property():
     """Both controls the GUI sends (the Filter node's Include/Exclude switch,
     the title classifier's box) go out as set_node_property, reach the daemon
     and are exported."""
-    from main import PatchSpaceDaemon
+    from central.main import PatchSpaceDaemon
 
     d = PatchSpaceDaemon()
     d.handle_command({"command": "add_node", "node_type": "filter",
@@ -715,7 +715,7 @@ def test_daemon_get_titles_lists_live_stream_titles():
     """The Title classifier's dropdown is built from these: the live streams'
     media.name, deduped and sorted - a device's media.name is left out, since
     it is a description rather than a title."""
-    from main import PatchSpaceDaemon
+    from central.main import PatchSpaceDaemon
 
     g = FakeGraph()
     g.add_source(10, "one", media_name="YouTube - a video")
@@ -730,7 +730,7 @@ def test_daemon_get_titles_lists_live_stream_titles():
 
 
 def test_daemon_application_classifier_round_trips_its_name():
-    from main import PatchSpaceDaemon
+    from central.main import PatchSpaceDaemon
 
     d = PatchSpaceDaemon()
     d.handle_command({"command": "add_node", "node_type": "app_name_classifier",
@@ -746,8 +746,8 @@ def test_daemon_application_classifier_round_trips_its_name():
 def test_daemon_get_apps_lists_live_applications(monkeypatch):
     """The Application picker's list: app keys of the live streams, with
     Patch Space's own plumbing left out."""
-    import pwmatch
-    from main import PatchSpaceDaemon
+    from modules.pipewire import pwmatch
+    from central.main import PatchSpaceDaemon
 
     g = FakeGraph()
     g.add_source(10, "one", app="Chromium input", binary="electron", pid=11)
@@ -772,7 +772,7 @@ def test_daemon_get_apps_lists_live_applications(monkeypatch):
 
 
 def test_daemon_application_classifier_round_trips_its_key():
-    from main import PatchSpaceDaemon
+    from central.main import PatchSpaceDaemon
 
     d = PatchSpaceDaemon()
     d.handle_command({"command": "add_node", "node_type": "app_classifier",
@@ -786,7 +786,7 @@ def test_daemon_application_classifier_round_trips_its_key():
 
 
 def test_daemon_create_node_builds_bundle_output_without_starting_it():
-    from main import PatchSpaceDaemon
+    from central.main import PatchSpaceDaemon
 
     d = PatchSpaceDaemon()
     node = d._create_node("bundle_output", "bo", {})
@@ -795,7 +795,7 @@ def test_daemon_create_node_builds_bundle_output_without_starting_it():
 
 
 def test_daemon_load_migrates_legacy_source_leaf():
-    from main import PatchSpaceDaemon
+    from central.main import PatchSpaceDaemon
 
     d = PatchSpaceDaemon()
     config = {
@@ -1010,7 +1010,7 @@ def test_all_inputs_and_all_outputs_leave_them_out_too():
 
     # Sinks resolve through the other matcher (a bundle of *destinations*, not
     # members), so check it where it lives.
-    import pwmatch
+    from modules.pipewire import pwmatch
     live = g.nodes()
     keepalive = {"mediaClassRegex": "^Audio/Sink$", "externalOnly": True}
     ours = dict(live[21]["info"]["props"])

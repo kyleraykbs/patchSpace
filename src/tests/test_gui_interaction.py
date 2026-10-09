@@ -526,7 +526,7 @@ def test_a_replay_buffer_keeps_the_window_the_daemon_reports():
 def test_the_old_clip_previous_type_key_still_loads():
     """It was renamed to Replay Buffer, so a session saved under the old key has
     to keep working."""
-    import main
+    import central.main
 
     assert "replay_buffer" in main.NODE_TYPE_REGISTRY
     assert main.NODE_TYPE_REGISTRY.get("clip_previous") is \

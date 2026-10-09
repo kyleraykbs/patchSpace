@@ -7,7 +7,7 @@ buffer holds must not block in write()."""
 import sys
 import time
 
-from pwproc import OwnedPwProcess
+from modules.pipewire.pwproc import OwnedPwProcess
 
 
 def test_chatty_helper_does_not_block_on_a_full_pipe(tmp_path):

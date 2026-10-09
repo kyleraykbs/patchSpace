@@ -14,8 +14,8 @@ GStreamer is touched.
 
 import pytest
 
-import pwnodes
-from main import PatchSpaceDaemon
+from central import pwnodes
+from central.main import PatchSpaceDaemon
 from gui import node_specs
 from tests.test_pwnodes import FakeGraph
 

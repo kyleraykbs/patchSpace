@@ -33,7 +33,7 @@ let
   defaultClient = self.packages.${system}.patchspace;
   repairTool = self.packages.${system}.patchspace-repair;
 
-  # Node type keys the daemon knows (main.py's NODE_TYPE_REGISTRY).  An enum
+  # Node type keys the daemon knows (central/main.py's NODE_TYPE_REGISTRY).  An enum
   # here turns a typo into an evaluation error; the flake's checks assert
   # this list still matches the packaged daemon, so it can't silently drift.
   nodeTypes = [

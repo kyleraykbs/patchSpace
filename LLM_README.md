@@ -18,7 +18,7 @@ codebase deliberately documents *why* and *what failed before*, not just *what*.
   ~6s**; the GTK canvas tests skip without a display). Tests are headless and do not
   touch real PipeWire.
 - **Run it:** `nix run` (GUI) or `nix run .#daemon` (headless daemon) from the repo root;
-  or, in `nix develop`, `cd src && python main.py` and `cd src/gui && python patchspace_gui.py`.
+  or, in `nix develop`, `cd src && python -m central.main` and `cd src/gui && python patchspace_gui.py`.
 - **The GUI starts/owns the daemon.** On launch it adopts a daemon that is already
   running, otherwise it starts a background one; it only shuts that daemon down on window
   close if *it* started it. The hamburger menu has Start/Stop/Restart Daemon. See §3.
@@ -37,17 +37,17 @@ codebase deliberately documents *why* and *what failed before*, not just *what*.
 ├── flake.lock
 ├── LLM_README.md
 └── src/                   # the whole implementation (former src-rewrite/)
-    ├── main.py            # daemon: socket API, session load, node factory, wiring
-    ├── pwnodes.py         # node graph model: PatchSpace, all Node classes, effect sandwich
-    ├── panels.py          # panel containers: namespacing, LCA edges, tree IO, migration
-    ├── pwgraph.py         # live PipeWire graph model (pw-dump driven)
-    ├── pwproc.py          # OwnedPwNode / OwnedPwProcess (pw-cli/pw-dump subprocesses)
-    ├── pwmatch.py         # matching helpers for external nodes
-    ├── migrations.py      # versioned node/config migrations (legacy -> current)
-    ├── session_repair.py  # validate/repair a session config (CLI + daemon)
-    ├── patchspace_cli.py    # synchronous one-shot socket client (CLI tools)
-    ├── apply_config.py    # CLI: apply an exported config
-    ├── export_config.py   # CLI: export current config
+    ├── central/           # the PipeWire-agnostic daemon core (run as `python -m central.main`)
+    │   ├── main.py            # daemon: socket API, session load, node factory, wiring
+    │   ├── pwnodes.py         # node graph model: PatchSpace, all Node classes, effect sandwich
+    │   ├── panels.py          # panel containers: namespacing, LCA edges, tree IO, migration
+    │   ├── migrations.py      # versioned node/config migrations (legacy -> current)
+    │   ├── session_repair.py  # validate/repair a session config (CLI + daemon)
+    │   ├── patchspace_cli.py  # synchronous one-shot socket client (CLI tools)
+    │   ├── apply_config.py    # CLI: apply an exported config
+    │   └── export_config.py   # CLI: export current config
+    ├── modules/               # built-in modules (PLAN.md moves the pipewire internals in here)
+    │   └── pipewire/          # pw substrate: pwgraph (live graph), pwproc (owned objects), pwmatch
     ├── tests/             # pytest suite (headless)
     └── gui/               # GTK4 client (flat imports; no __init__.py — namespace pkg)
         ├── patchspace_gui.py        # GUI entrypoint (Gtk.Application)
@@ -65,8 +65,13 @@ codebase deliberately documents *why* and *what failed before*, not just *what*.
         └── constants.py           # shared timing/zoom/size constants
 ```
 
-Note: there is **no `.gitignore` and `__pycache__/*.pyc` files are tracked**. Ignore the
-`.pyc` churn in `git status`; stage only source files.
+Source paths are packages under `src/`: the daemon core imports as `central.*`, the
+PipeWire substrate as `modules.pipewire.*`.  Everything resolves with `src/` as the
+import root (the dev shell's cwd or `PYTHONPATH`), which is why the packaged wrappers run
+`python -m central.main` and `python -m central.session_repair`.
+
+`.gitignore` excludes `__pycache__/`, `*.pyc` and `.pytest_cache/`; bytecode is no longer
+tracked (it used to be — `git status` was noisy with `.pyc` churn).
 
 ---
 
@@ -94,7 +99,7 @@ nix build .#patchspace .#patchspace-daemon
 nix develop            # provides python, gtk4, adwaita, pipewire, LADSPA_PATH, LV2_PATH
 
 # daemon
-cd src && python main.py
+cd src && python -m central.main
 
 # GUI (must run from the gui/ dir; imports are flat)
 cd src/gui && python patchspace_gui.py

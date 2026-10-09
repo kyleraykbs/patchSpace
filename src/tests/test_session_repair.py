@@ -1,6 +1,6 @@
 """Tests for session_repair: validating and fixing a saved session JSON."""
 
-from session_repair import (
+from central.session_repair import (
     ERROR,
     WARNING,
     repair,
@@ -36,7 +36,7 @@ def test_main_strict_check_rejects_a_config_that_needs_repairs(tmp_path):
     load a graph different from the one it declared."""
     import json
 
-    import session_repair
+    from central import session_repair
 
     broken = _config(
         nodes={

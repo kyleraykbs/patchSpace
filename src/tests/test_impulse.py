@@ -11,10 +11,10 @@ import os
 
 import pytest
 
-import pwnodes
-from main import PatchSpaceDaemon
+from central import pwnodes
+from central.main import PatchSpaceDaemon
 from gui import node_specs
-from session_repair import ERROR, repair, validate
+from central.session_repair import ERROR, repair, validate
 
 
 class FakeCli:

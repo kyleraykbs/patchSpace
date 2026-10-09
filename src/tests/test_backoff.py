@@ -2,7 +2,7 @@
 
 import pytest
 
-from pwproc import Backoff
+from modules.pipewire.pwproc import Backoff
 
 
 class Clock:

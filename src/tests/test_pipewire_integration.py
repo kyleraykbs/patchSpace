@@ -34,9 +34,9 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gui"))
 
-import pwgraph  # noqa: E402
-import pwmatch  # noqa: E402
-import pwnodes  # noqa: E402
+from modules.pipewire import pwgraph  # noqa: E402
+from modules.pipewire import pwmatch  # noqa: E402
+from central import pwnodes  # noqa: E402
 
 pytestmark = [
     pytest.mark.skipif(

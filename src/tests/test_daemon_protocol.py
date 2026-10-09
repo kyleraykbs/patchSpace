@@ -14,10 +14,10 @@ import time
 
 import pytest
 
-from main import PatchSpaceDaemon
-from pwnodes import BackedNode, Node
-import main as main_mod
-from pwgraph import PipewireGraph
+from central.main import PatchSpaceDaemon
+from central.pwnodes import BackedNode, Node
+import central.main as main_mod
+from modules.pipewire.pwgraph import PipewireGraph
 
 
 @pytest.fixture
@@ -713,7 +713,7 @@ def test_downstream_edges_walks_signal_order_through_switches():
 
 
 def test_light_noise_cancel_shares_echo_backing_but_hides_probe():
-    from pwnodes import EchoCancelNode, LightNoiseCancelNode
+    from central.pwnodes import EchoCancelNode, LightNoiseCancelNode
     from gui import node_specs
 
     assert main_mod.NODE_TYPE_REGISTRY["light_noise_cancel"] is LightNoiseCancelNode
@@ -879,7 +879,7 @@ def test_load_session_only_reaps_backings_of_new_nodes(monkeypatch):
 
 
 def test_speaker_mic_lines_share_builtin_volume_and_lock():
-    from pwnodes import (
+    from central.pwnodes import (
         PatchSpaceDeviceNode,
         VirtualMicNode,
         VirtualSpeakerNode,
@@ -957,8 +957,8 @@ def test_speaker_mic_lines_share_builtin_volume_and_lock():
 
 
 def test_device_volume_lock_gates_constant_override(monkeypatch):
-    import pwnodes
-    from pwnodes import DeviceOutputNode
+    from central import pwnodes
+    from central.pwnodes import DeviceOutputNode
 
     calls = []
     monkeypatch.setattr(pwnodes, "_run_wpctl", lambda *a, **k: calls.append(a) or True)
@@ -985,7 +985,7 @@ def test_device_volume_lock_gates_constant_override(monkeypatch):
 
 
 def test_normalize_registry_spec_and_control_clamp():
-    from pwnodes import NormalizeNode
+    from central.pwnodes import NormalizeNode
     from gui import node_specs as ns
 
     assert main_mod.NODE_TYPE_REGISTRY["normalize"] is NormalizeNode
@@ -1051,7 +1051,7 @@ def test_normalize_registry_spec_and_control_clamp():
 
 
 def test_boolean_nodes_registry_specs_and_output_control():
-    from pwnodes import (
+    from central.pwnodes import (
         BooleanSourceNode,
         BooleanSplitterNode,
         BooleanInvertNode,
@@ -1220,7 +1220,7 @@ def test_bool_panel_input_default_state_is_settable_and_drives():
 
 
 def test_warp_nodes_registry_specs_and_name_roundtrip():
-    from pwnodes import (
+    from central.pwnodes import (
         WarpInNode,
         WarpOutNode,
         BooleanWarpInNode,
@@ -1291,7 +1291,7 @@ def test_warp_nodes_registry_specs_and_name_roundtrip():
 
 def test_get_logs_serves_recent_output():
     import logging
-    from main import _LogRingHandler
+    from central.main import _LogRingHandler
 
     main_mod._log_buffer.clear()
     root = logging.getLogger()
@@ -1312,7 +1312,7 @@ def test_get_logs_serves_recent_output():
 
 
 def test_reverb_spec_and_control_clamp():
-    from pwnodes import ReverbNode
+    from central.pwnodes import ReverbNode
     from gui import node_specs as ns
 
     spec = ns.spec_for("reverb")
@@ -1364,7 +1364,7 @@ def test_reverb_spec_and_control_clamp():
 
 def test_install_log_ring_is_idempotent():
     import logging
-    from main import _LogRingHandler
+    from central.main import _LogRingHandler
 
     root = logging.getLogger()
     for h in list(root.handlers):
@@ -1590,7 +1590,7 @@ def test_patchspace_socket_env_moves_every_end(monkeypatch, tmp_path):
     src = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     code = (
         "import sys; sys.path[:0] = [{src!r}, {gui!r}];"
-        "import main, patchspace_cli; from gui import constants;"
+        "import central.main as main, central.patchspace_cli as patchspace_cli; from gui import constants;"
         "print(main.SOCKET_PATH, patchspace_cli.SOCKET_PATH, constants.SOCKET_PATH)"
     ).format(src=src, gui=os.path.join(src, "gui"))
     env = dict(os.environ, PATCHSPACE_SOCKET=sock)
@@ -1663,7 +1663,7 @@ def test_daemon_serves_the_configured_socket(monkeypatch, tmp_path):
     """The daemon binds whatever SOCKET_PATH says (the module global the
     --socket flag writes), and the one-shot CLI client reaches it there -
     the pair the NixOS/home-manager module will drive."""
-    from patchspace_cli import PatchSpaceClient
+    from central.patchspace_cli import PatchSpaceClient
 
     path = str(tmp_path / "service.sock")
     monkeypatch.setattr(main_mod, "SOCKET_PATH", path)
@@ -1698,7 +1698,7 @@ def test_ensure_device_profiles_applies_a2dp_when_off(monkeypatch):
     """A configured Bluetooth sink whose profile is 'off' exports no live
     node; the daemon should pick and apply an A2DP profile (and pin it so
     the normal tick keeps re-asserting it)."""
-    from pwnodes import DeviceOutputNode
+    from central.pwnodes import DeviceOutputNode
 
     d = fresh_daemon()
     node = DeviceOutputNode("tozo", device_name="bluez_output.XX.1")
@@ -1729,7 +1729,7 @@ def test_ensure_device_profiles_applies_a2dp_when_off(monkeypatch):
 def test_ensure_device_profiles_reasserts_pinned_profile_when_off(monkeypatch):
     """A profile the user (or auto-pick) pinned must be re-applied if the
     device flips back to 'off' without its id changing."""
-    from pwnodes import DeviceOutputNode
+    from central.pwnodes import DeviceOutputNode
 
     d = fresh_daemon()
     node = DeviceOutputNode(
@@ -1761,7 +1761,7 @@ def test_ensure_device_profiles_replaces_a_pinned_off_profile(monkeypatch):
     pin and pick a listening profile instead of re-asserting "off" on
     every tick.  (The node here has no stored description - a legacy
     save - so the index must be resolved through the device.)"""
-    from pwnodes import DeviceOutputNode
+    from central.pwnodes import DeviceOutputNode
 
     d = fresh_daemon()
     node = DeviceOutputNode(
@@ -1796,7 +1796,7 @@ def test_ensure_device_profiles_replaces_a_pinned_off_profile(monkeypatch):
 def test_device_profiles_never_offer_off(monkeypatch):
     """The profile picker must not offer the Bluetooth "off" profile:
     choosing it silences the device for good (see profile_is_off)."""
-    from pwnodes import DeviceOutputNode
+    from central.pwnodes import DeviceOutputNode
 
     d = fresh_daemon()
     node = DeviceOutputNode("bowie", device_name="bluez_output.XX.1")
@@ -1820,7 +1820,7 @@ def test_device_profiles_never_offer_off(monkeypatch):
 
 
 def test_setting_the_off_profile_is_rejected(monkeypatch):
-    from pwnodes import DeviceOutputNode
+    from central.pwnodes import DeviceOutputNode
 
     d = fresh_daemon()
     node = DeviceOutputNode("bowie", device_name="bluez_output.XX.1")
@@ -1845,8 +1845,8 @@ def test_setting_the_off_profile_is_rejected(monkeypatch):
 
 
 def test_a_stored_off_profile_is_not_re_asserted(monkeypatch):
-    import pwnodes as pwnodes_mod
-    from pwnodes import DeviceOutputNode
+    from central import pwnodes as pwnodes_mod
+    from central.pwnodes import DeviceOutputNode
 
     node = DeviceOutputNode(
         "bowie", device_name="bluez_output.XX.1",
@@ -1865,7 +1865,7 @@ def test_a_stored_off_profile_is_not_re_asserted(monkeypatch):
 def test_ensure_device_profiles_warns_once_when_unroutable(monkeypatch, caplog):
     import logging
 
-    from pwnodes import DeviceOutputNode
+    from central.pwnodes import DeviceOutputNode
 
     d = fresh_daemon()
     node = DeviceOutputNode("tozo", device_name="bluez_output.XX.1")
@@ -1896,7 +1896,7 @@ def test_ensure_device_profiles_warns_once_when_unroutable(monkeypatch, caplog):
 def test_ensure_device_profiles_clears_warning_when_routable(monkeypatch, caplog):
     import logging
 
-    from pwnodes import DeviceOutputNode
+    from central.pwnodes import DeviceOutputNode
 
     d = fresh_daemon()
     node = DeviceOutputNode("tozo", device_name="bluez_output.XX.1")
@@ -1932,7 +1932,7 @@ def test_a_recorder_reports_its_takes_revision(tmp_path, monkeypatch):
     """The GUI re-asks for a waveform when source_rev moves, so a recording has
     to move it: a take always writes the same path, and one short enough to
     start and finish between two polls shows no `recording` flip at all."""
-    import pwnodes
+    from central import pwnodes
     from tests.test_impulse import FakeCli, FakeProc
 
     monkeypatch.setattr(pwnodes, "OwnedPwNode", FakeCli)
@@ -1985,7 +1985,7 @@ def test_waveforms_are_decoded_without_holding_the_daemon_lock(monkeypatch):
     import threading
     import time
 
-    import pwnodes
+    from central import pwnodes
     from tests.test_impulse import FakeCli, FakeProc
 
     monkeypatch.setattr(pwnodes, "OwnedPwNode", FakeCli)

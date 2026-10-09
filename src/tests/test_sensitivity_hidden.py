@@ -8,8 +8,8 @@ real PipeWire server is touched."""
 
 import pytest
 
-import pwnodes
-from main import PatchSpaceDaemon
+from central import pwnodes
+from central.main import PatchSpaceDaemon
 
 
 class FakeCli:
@@ -455,7 +455,7 @@ def test_creating_panel_moves_hidden_children_live(tmp_path):
     # it with the node rather than dropping it (dropping forces the next
     # sync to tear the interior down and re-make it, which can stall the
     # module).
-    from pwnodes import _DesiredLinks
+    from central.pwnodes import _DesiredLinks
 
     d.space._edge_links["__internal__:sens:0"] = _DesiredLinks(pairs=set())
 

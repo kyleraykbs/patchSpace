@@ -4,8 +4,8 @@ tree loader, and migration from the legacy session/declarative shapes."""
 import json
 import os
 
-import panels
-from panels import (
+from central import panels
+from central.panels import (
     MODE_RO,
     MODE_RW,
     ROOT_ID,

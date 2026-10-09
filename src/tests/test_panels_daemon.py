@@ -4,8 +4,8 @@ listing, and migration.  Leaf node types only, so no PipeWire starts."""
 import json
 import os
 
-import panels
-from main import PatchSpaceDaemon
+from central import panels
+from central.main import PatchSpaceDaemon
 
 
 def _daemon(tmp_path):

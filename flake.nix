@@ -122,7 +122,8 @@
                   "${pkgs.gst_all_1.gstreamer.out}/lib/gstreamer-1.0"
                 ]
               }''${GST_PLUGIN_SYSTEM_PATH_1_0:+:$GST_PLUGIN_SYSTEM_PATH_1_0}"
-              exec ${python}/bin/python3 ${source}/main.py "$@"
+              export PYTHONPATH="${source}''${PYTHONPATH:+:$PYTHONPATH}"
+              exec ${python}/bin/python3 -m central.main "$@"
             '';
           };
 
@@ -135,7 +136,8 @@
             name = "patchspace-repair";
             runtimeInputs = [ python ];
             text = ''
-              exec ${python}/bin/python3 ${source}/session_repair.py "$@"
+              export PYTHONPATH="${source}''${PYTHONPATH:+:$PYTHONPATH}"
+              exec ${python}/bin/python3 -m central.session_repair "$@"
             '';
           };
 

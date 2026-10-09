@@ -62,8 +62,8 @@ def test_the_daemon_reports_the_deployment_opacity(monkeypatch):
     only reaches a session at login, so a launcher-started window would miss
     it), and the daemon reports it with the graph: that is how the client
     learns a preference it was not launched with."""
-    from main import PatchSpaceDaemon
-    import main as main_mod
+    from central.main import PatchSpaceDaemon
+    import central.main as main_mod
 
     monkeypatch.setattr(main_mod, "CANVAS_OPACITY", 0.85)
     payload = PatchSpaceDaemon()._cmd_get_nodes({})
@@ -72,7 +72,7 @@ def test_the_daemon_reports_the_deployment_opacity(monkeypatch):
 
 def test_an_unusable_daemon_opacity_is_no_preference(monkeypatch):
     import importlib
-    import main as main_mod
+    import central.main as main_mod
 
     monkeypatch.setenv("PATCHSPACE_CANVAS_OPACITY", "nonsense")
     reloaded = importlib.reload(main_mod)
