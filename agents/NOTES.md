@@ -866,3 +866,25 @@ a filter-chain module's bare `Input`/`Output` - is still skipped by
   widget vocabulary is still closed (it draws what it knows and ignores the
   rest), so a primitives node's slider is not yet draggable in the canvas; the
   value *is* settable through `node_control` and shown via `values`.
+
+## 2026-10-09 — phase 6: choosing the modules
+
+* `central/module_config.py` is the one source of truth for the enabled set:
+  `~/.config/patchspace/modules.json` (or `$PATCHSPACE_MODULES_CONFIG`, or
+  `--modules-config PATH`).  A module not mentioned keeps its default (the
+  daemon's own built-ins are on).  A **store path** is treated as
+  deployment-managed: readable, and `set_enabled` refuses (the CLI says so).
+* `attach_modules()` is now the single config-driven path: the in-process
+  provider attaches or detaches, and the process specs are rebuilt from the
+  enabled set.  Commands `modules` (report) and `set_module` (write + apply
+  live).  Disabling takes a module's nodes offline without touching the graph.
+* `central/modules_cli.py` → package `patchspace-modules` (`list`/`enable`/
+  `disable`); with no daemon it prints what the file says and exits 1.
+* nix: `services.patchspace.modules` writes a store JSON and adds
+  `--modules-config`; the read-only `modulesConfig` value is exposed.  Verified
+  by eval: `{ primitives.enable = false; }` →
+  `{"modules":{"primitives":{"enable":false}}}` on the unit's ExecStart.
+* **Git-backed flake trap, again:** a new file must be `git add`ed before any
+  `nix build`, or the store copy simply does not contain it (the packaged CLI
+  failed with "No module named central.modules_cli" until `modules_cli.py` was
+  tracked).

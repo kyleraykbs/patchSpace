@@ -41,6 +41,7 @@ from modules.pipewire import pwgraph
 from modules.pipewire import pwmatch
 from central import graph as graph_mod
 from central import module_api as api
+from central import module_config
 from central import module_supervisor as module_sup
 from central import protocol as protocol_mod
 from central import registry as registry_mod
@@ -548,6 +549,7 @@ class PatchSpaceDaemon:
         self,
         panel_dirs: Optional[List[tuple]] = None,
         root_panel_path: Optional[str] = None,
+        modules_config_path: Optional[str] = None,
     ):
         self.graph = PipewireGraph(pw_cli_command=("pw-cli",))
         #: The listening socket (bound by `_bind_socket`, served by
@@ -573,14 +575,11 @@ class PatchSpaceDaemon:
         #: is the gray node a missing module leaves behind.
         self._mirrored: set = set()
         #: Module *processes* the daemon runs (see module_supervisor); the
-        #: in-process PipeWire provider is separate.  The primitives module
-        #: ships with the daemon and is on by default; phase 6 turns this
-        #: into a config file with enable/disable.
-        self.module_specs: List[module_sup.ModuleSpec] = [
-            module_sup.ModuleSpec(
-                "primitives", [sys.executable, "-m", "modules.primitives.main"]
-            ),
-        ]
+        #: in-process PipeWire provider is separate.  The enabled set comes
+        #: from the module config file (see central/module_config.py); the
+        #: specs are rebuilt from it by `attach_modules`.
+        self.module_config = module_config.ModuleConfig(modules_config_path)
+        self.module_specs: List[module_sup.ModuleSpec] = []
         self._module_log_dir = os.path.join(
             os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"),
             "patchspace", "modules",
@@ -4501,6 +4500,37 @@ class PatchSpaceDaemon:
             stopped = node.stop()
         return {"status": "ok", "stopped": stopped}
 
+    def _cmd_modules(self, cmd: dict) -> dict:
+        """Which built-in modules exist, whether they are enabled, and
+        whether they are running."""
+        return {"status": "ok", **self.modules_report()}
+
+    def _cmd_set_module(self, cmd: dict) -> dict:
+        """Enable or disable one module, live.
+
+        The config file is the source of truth: this writes it (unless a
+        deployment manages it, in which case the caller is told so) and then
+        brings the running set in line — the in-process provider attaches or
+        detaches, the module processes are rebuilt.
+        """
+        name = str(cmd.get("name") or "")
+        if not name:
+            return {"status": "error", "message": "name required"}
+        enable = bool(cmd.get("enable", True))
+        if name not in module_config.BUILTINS and name not in self.module_config.states():
+            return {"status": "error", "message": f"Unknown module: {name}"}
+        if self.module_config.managed:
+            return {
+                "status": "error",
+                "message": (f"{name} is managed by the deployment "
+                            f"({self.module_config.path}); change it there"),
+            }
+        if not self.module_config.set_enabled(name, enable):
+            return {"status": "error",
+                    "message": f"could not write {self.module_config.path}"}
+        self.attach_modules()
+        return {"status": "ok", **self.modules_report()}
+
     def _cmd_impulse(self, cmd: dict) -> dict:
         """Fire one impulse out of a Button node (see PatchSpace.pulse).
 
@@ -5792,25 +5822,43 @@ class PatchSpaceDaemon:
         return {}
 
     def attach_modules(self, enabled: Optional[List[str]] = None) -> dict:
-        """Attach the built-in modules.
+        """Bring the running modules in line with the module config.
 
-        The in-process PipeWire provider (phase 1/2) and the module
-        *processes* the daemon runs (phase 3's supervisor) both land here;
-        phase 6 makes the set configurable, and phase 5 adds the primitives
-        module's spec.
+        The in-process provider (the PipeWire one, until phase 3 moves it
+        out) attaches or detaches; the module *processes* are rebuilt from
+        the enabled set.  One path, used at start and whenever the config
+        changes.
         """
-        if self._pw_module is None:
-            self._pw_module = pw_module.PipewireModule(
-                self._protocol,
-                type_map=NODE_TYPE_REGISTRY,
-                inventory=self.module_inventory,
-                migrate_config=migrations.migrate,
-            )
-        summary = self._pw_module.attach()
-        # Module *processes* need the daemon to be serving: they attach over
-        # the socket.  (A test that constructs a daemon and attaches modules
-        # without starting it therefore spawns nothing.)
-        if self._module_supervisor is None and self._server is not None:
+        summary: dict = {}
+        if self.module_config.enabled("pipewire"):
+            if self._pw_module is None:
+                self._pw_module = pw_module.PipewireModule(
+                    self._protocol,
+                    type_map=NODE_TYPE_REGISTRY,
+                    inventory=self.module_inventory,
+                    migrate_config=migrations.migrate,
+                )
+            # `attach` is restart-safe (a fresh connection, the same module
+            # id), so re-running this re-attaches a provider that was
+            # detached and leaves a running one attached.
+            summary = self._pw_module.attach()
+        elif self._pw_module is not None:
+            self._pw_module.detach()
+            self._pw_module = None
+
+        # Module processes: stop what is running and start the enabled set
+        # (a module restart is cheap and its nodes rebind by id).
+        if self._module_supervisor is not None:
+            self._module_supervisor.stop_all()
+            self._module_supervisor = None
+        self.module_specs = [
+            module_sup.ModuleSpec(name, [sys.executable] + list(spec["argv"]))
+            for name, spec in module_config.BUILTINS.items()
+            if spec["kind"] == "process" and self.module_config.enabled(name)
+        ]
+        # They attach over the socket, so only a serving daemon runs them
+        # (a test that builds a daemon without starting it spawns nothing).
+        if self._server is not None and self.module_specs:
             self._module_supervisor = module_sup.ModuleSupervisor(
                 self.module_specs,
                 socket_path=SOCKET_PATH,
@@ -5827,6 +5875,35 @@ class PatchSpaceDaemon:
             self._module_supervisor = None
         if self._pw_module is not None:
             self._pw_module.detach()
+
+    def modules_report(self) -> dict:
+        """What the daemon runs and what the config says, for the CLI."""
+        processes = {
+            entry["module_id"]: entry for entry in self.module_process_status()
+        }
+        rows = []
+        for name in self.module_config.names():
+            spec = module_config.BUILTINS.get(name, {})
+            kind = spec.get("kind", "unknown")
+            if kind == "inproc":
+                running = self._pw_module is not None
+                pid = None
+            else:
+                entry = processes.get(name)
+                running = bool(entry and entry["alive"])
+                pid = entry["pid"] if entry else None
+            rows.append({
+                "name": name,
+                "kind": kind,
+                "enabled": self.module_config.enabled(name),
+                "running": running,
+                "pid": pid,
+            })
+        return {
+            "config_path": self.module_config.path,
+            "managed": self.module_config.managed,
+            "modules": rows,
+        }
 
     def module_process_status(self) -> List[dict]:
         """The daemon's module processes (pid, alive, restarts) — the
@@ -5960,6 +6037,10 @@ class PatchSpaceDaemon:
                 response = self._cmd_reset(cmd)
             elif command == "rebuild":
                 response = self._cmd_rebuild(cmd)
+            elif command == "modules":
+                response = self._cmd_modules(cmd)
+            elif command == "set_module":
+                response = self._cmd_set_module(cmd)
             elif command == "shutdown":
                 response = self._cmd_shutdown(cmd)
             elif command in ("validate_session", "repair_session"):
@@ -6110,6 +6191,13 @@ def main():
         default=DEFAULT_ROOT_PANEL,
         help="Path of the root panel file (session autosave).",
     )
+    parser.add_argument(
+        "--modules-config",
+        default=None,
+        metavar="PATH",
+        help="Which built-in modules are enabled (default: "
+        "$PATCHSPACE_MODULES_CONFIG, else ~/.config/patchspace/modules.json).",
+    )
     args = parser.parse_args()
 
     # The server and the single-instance guard read SOCKET_PATH straight off
@@ -6129,6 +6217,7 @@ def main():
     daemon = PatchSpaceDaemon(
         panel_dirs=panel_dirs,
         root_panel_path=args.root_panel,
+        modules_config_path=args.modules_config,
     )
     try:
         daemon.start()

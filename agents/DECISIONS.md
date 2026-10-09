@@ -193,3 +193,13 @@
   which is every node a new module provides.  Without it a module's nodes could
   be drawn (phase 2) but never created, wired or shown.
 - Reversible: yes.
+
+## [2026-10-09] One module-enable file, and a store copy is authoritative
+- Decision: `modules.json` is the single source of truth (`--modules-config`,
+  else `$PATCHSPACE_MODULES_CONFIG`, else `~/.config/patchspace/modules.json`);
+  a store path means deployment-managed and the daemon's CLI refuses to edit it.
+  Unlisted modules keep their own default.
+- Why: two writable sources of truth for one switch is how "why is it off?" bugs
+  are born; a deployment that declares the set should not be silently
+  overridden by a CLI, and it should be told so rather than failing quietly.
+- Reversible: yes.

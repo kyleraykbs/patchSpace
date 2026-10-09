@@ -352,6 +352,16 @@ let
     "--root-panel" (toString rootPanel)
   ];
 
+  # Which built-in modules run.  A store file (like the panels) so the daemon
+  # can be pointed at it declaratively; the daemon's CLI then reports the set
+  # as deployment-managed rather than editing it.
+  modulesConfig = pkgs.writeText "patchspace-modules.json" (builtins.toJSON {
+    modules = lib.mapAttrs (_name: entry: { enable = entry.enable; }) cfg.modules;
+  });
+  modulesConfigArgs = lib.optionals (cfg.modules != { }) [
+    "--modules-config" (toString modulesConfig)
+  ];
+
   # `type` may be omitted on an override (it comes from the import), so the
   # merged result is what has to have one for every node.  Reported as a
   # build-time assertion naming the offending panel and ids, rather than
@@ -387,7 +397,7 @@ let
     ];
     execStart = concatStringsSep " " ([
       "${cfg.package}/bin/patchspace-daemon"
-    ] ++ socketArgs ++ panelDirArgs ++ rootPanelArgs ++ cfg.extraArgs);
+    ] ++ socketArgs ++ panelDirArgs ++ rootPanelArgs ++ modulesConfigArgs ++ cfg.extraArgs);
     restarts = { Restart = "on-failure"; RestartSec = 2; };
     wantedBy = [ "default.target" ];
     # The GUI's canvas opacity travels with the *daemon*: the daemon reads
@@ -583,6 +593,35 @@ in
       '';
     };
 
+    modules = mkOption {
+      type = types.attrsOf (types.submodule {
+        options.enable = mkOption {
+          type = types.bool;
+          default = true;
+          description = "Run this built-in module.";
+        };
+      });
+      default = { };
+      example = { primitives.enable = false; };
+      description = ''
+        Which built-in modules the daemon runs.  Anything not listed keeps its
+        own default (the modules the daemon ships are on).  The set is written
+        as a store file and handed to the daemon with `--modules-config`, so
+        the daemon's CLI reports it as deployment-managed and refuses to edit
+        it (change it here instead).
+      '';
+    };
+
+    modulesConfig = mkOption {
+      type = types.path;
+      readOnly = true;
+      internal = true;
+      description = ''
+        The generated module-enable file handed to the daemon.  Set by this
+        module; exposed so a deployment can inspect it.
+      '';
+    };
+
     effectiveConfig = mkOption {
       type = types.attrsOf types.anything;
       readOnly = true;
@@ -600,6 +639,7 @@ in
   config = mkIf (cfg.enable && !hmOwns) (mkMerge [
     {
       services.patchspace.panelsDir = panelsDir;
+      services.patchspace.modulesConfig = modulesConfig;
       services.patchspace.effectiveConfig =
         lib.mapAttrs (_: patchspaceLib.panelConfig) panels;
     }

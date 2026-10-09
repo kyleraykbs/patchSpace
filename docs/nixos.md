@@ -53,8 +53,14 @@ panel would appear on your canvas).
   exits on purpose).  The PipeWire provider still runs *inside* the daemon (it is the next one
   to move out; see `agents/PLAN.md` phase 3), which is why nothing about the PipeWire side of
   the unit changes here.
-  Disabling a module (and with it its nodes) is the next configuration step — until it lands,
-  the built-in set is what the daemon ships with.
+* **Choosing the modules**: `services.patchspace.modules` decides which built-ins run —
+  `{ primitives.enable = false; }` disables one, and anything not mentioned keeps its own
+  default (the daemon's own modules are on).  The set is written as a store file and handed to
+  the daemon with `--modules-config`, so the daemon's CLI
+  (`patchspace-modules`, in `environment.systemPackages` via the client package) reports it as
+  deployment-managed and refuses to edit it — change it here instead.  Without this option the
+  daemon uses `~/.config/patchspace/modules.json`, which the CLI *does* edit (and which then
+  applies live: disabling a module takes its nodes offline without touching the graph).
 
 ## Declaring a graph
 
@@ -132,6 +138,7 @@ Nix-declared nodes arrange themselves).
 | `edges` | list | `[]` | `{ from, to, from_port?, to_port? }`. |
 | `groups` | list | `[]` | Groups of the `main` panel. |
 | `panels` | attrs | `{}` | Declarative panels, keyed by stem (the file name the daemon sees). |
+| `modules` | attrs | `{}` | Which built-in modules the daemon runs (`{ primitives.enable = false; }`). Unlisted modules keep their own default. Written as a store file handed to the daemon with `--modules-config`. |
 | `extraArgs` | `[str]` | `[]` | Extra daemon arguments (see `patchspace-daemon --help`). |
 | `validate` | bool | `true` | Run every generated panel through `session_repair` at build time. |
 | `panelsDir` | path | *internal* | The generated read-only panel directory (the build that validates). |

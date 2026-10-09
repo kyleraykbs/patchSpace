@@ -141,6 +141,17 @@
             '';
           };
 
+          # The module CLI: which built-in modules are enabled, and turning
+          # them on or off live (the daemon owns the config file).
+          patchspace-modules = pkgs.writeShellApplication {
+            name = "patchspace-modules";
+            runtimeInputs = [ python ];
+            text = ''
+              export PYTHONPATH="${source}''${PYTHONPATH:+:$PYTHONPATH}"
+              exec ${python}/bin/python3 -m central.modules_cli "$@"
+            '';
+          };
+
           # The GTK4 client.  wrapGAppsHook propagates the GTK/Adwaita
           # typelib + GSettings-schema + XDG data dirs the build inputs'
           # setup hooks collect, so the packaged GUI finds Gtk/Adw without
@@ -199,7 +210,7 @@
         {
           packages = {
             default = patchspace;
-            inherit patchspace patchspace-daemon patchspace-repair;
+            inherit patchspace patchspace-daemon patchspace-repair patchspace-modules;
           };
 
           apps = {
