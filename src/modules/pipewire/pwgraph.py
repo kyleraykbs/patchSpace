@@ -581,6 +581,17 @@ class PipewireGraph:
                     f"another Patch Space daemon owns the {prog} helper pid "
                     f"{pid}; refusing to reap another instance's helpers"
                 )
+            if self._parent_is_alive(pid):
+                # Somebody else's *live* helper that happens to carry a
+                # matching name (a pw-cat the user started, another tool's
+                # loopback): not abandoned, not ours to touch.  Only helpers
+                # whose parent is gone - or is a manager (init / the systemd
+                # user manager), i.e. reparented when their daemon crashed -
+                # are ours to reap.
+                logger.info(
+                    "Leaving %s helper pid %s alone: its parent is alive", prog, pid
+                )
+                continue
             try:
                 os.kill(pid, signal.SIGTERM)
                 reaped += 1
@@ -726,6 +737,33 @@ class PipewireGraph:
         after_comm = raw.rfind(b")")
         fields = raw[after_comm + 1 :].split()
         return int(fields[1])
+
+    #: What an *abandoned* helper's parent looks like: init, or the systemd
+    #: user manager it gets reparented to when the daemon that spawned it
+    #: dies.  Anything else with a live parent is somebody's running helper.
+    _MANAGER_COMMS = ("init", "systemd")
+
+    def _parent_is_alive(self, pid: int) -> bool:
+        """Whether ``pid``'s parent is a live process that is *not* a manager.
+
+        Used to narrow the orphan sweep to helpers nobody owns any more: a
+        helper whose parent is alive belongs to somebody (another tool, the
+        user's own pw-cat) and must be left alone.  Only init / the systemd
+        user manager - what a crashed daemon's helpers get reparented to -
+        count as "gone".
+        """
+        try:
+            parent = self._read_ppid(pid)
+        except (OSError, ValueError, IndexError):
+            return False
+        if parent in (0, 1) or parent == self._caller_pid:
+            return False
+        try:
+            with open(f"/proc/{parent}/comm", "r", encoding="utf-8") as fh:
+                comm = fh.read().strip()
+        except OSError:
+            return False  # the parent is gone
+        return comm not in self._MANAGER_COMMS
 
     # ------------------------------------------------------------------
     # lifecycle

@@ -14,7 +14,8 @@ greeted, its role decides what it may do:
 
 Handling is synchronous and returns the reply messages for the caller to
 write back (usually one, but ``type_declare`` fans out one ``migrate`` per
-persisted instance its types own).
+persisted instance its types own, then one terminal ``declared``/``error``
+— so a client reads until it sees something that is not a ``migrate``).
 """
 
 from __future__ import annotations
@@ -112,6 +113,13 @@ class ProtocolHandler:
             aliases=msg.get("aliases"),
         )
         replies: List[Dict[str, Any]] = []
+        # The migration fan-out comes first, then one terminal reply: a
+        # client reads until it sees something that is not a `migrate`.
+        for item in migrations:
+            replies.append(api.migrate(
+                item["instance_id"], item["type_id"], item["config"],
+                item["from_schema"], item["to_schema"],
+            ))
         for error in errors:
             replies.append(api.error(error, ref="type_declare"))
         if not errors:
@@ -120,13 +128,6 @@ class ProtocolHandler:
                 "module_id": conn.module_id,
                 "types": sorted(self.registry.module(conn.module_id).types),
             })
-        # One migrate per persisted instance of a declared type: the module
-        # upgrades the config instead of losing the user's node.
-        for item in migrations:
-            replies.append(api.migrate(
-                item["instance_id"], item["type_id"], item["config"],
-                item["from_schema"], item["to_schema"],
-            ))
         return replies
 
     def _node_announce(self, msg: Dict[str, Any], conn: Connection) -> Reply:

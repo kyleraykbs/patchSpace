@@ -8,7 +8,12 @@ import os
 
 import pytest
 
-from modules.pipewire.pwgraph import LinkError, PipewireGraph, _name_is_backing_of
+from modules.pipewire.pwgraph import (
+    AnotherDaemonRunning,
+    LinkError,
+    PipewireGraph,
+    _name_is_backing_of,
+)
 
 
 def fake_run(rc, stdout="", stderr=""):
@@ -313,3 +318,72 @@ def test_the_reaper_still_reaps_genuine_orphans(monkeypatch):
 
     assert g.reap_stale_for_names(["nc_a"]) >= 1
     assert killed == [4242]
+
+
+# ----------------------------------------------------------------------
+# the orphan-helper sweep: only helpers nobody alive owns
+# ----------------------------------------------------------------------
+
+class _SweepRig:
+    """A PipewireGraph whose /proc reads are stubbed, so the sweep's
+    decision table can be asserted without touching real processes."""
+
+    def __init__(self, monkeypatch, entries):
+        # entries: {pid: (ppid, argv, parent_is_daemon, parent_comm)}
+        self.killed = []
+        self.entries = entries
+        g = PipewireGraph(pw_cli_command=("pw-cli",))
+        g._caller_pid = os.getpid()
+        monkeypatch.setattr(type(g), "_iter_pids", staticmethod(
+            lambda: sorted(entries)))
+        monkeypatch.setattr(g, "_read_ppid", lambda pid: entries[pid][0])
+        monkeypatch.setattr(g, "_read_cmdline", lambda pid: list(entries[pid][1]))
+        monkeypatch.setattr(g, "_parent_is_another_daemon",
+                            lambda pid: entries[pid][2])
+        monkeypatch.setattr(
+            g, "_parent_is_alive",
+            lambda pid: entries[pid][3] not in (None, "init", "systemd"),
+        )
+        monkeypatch.setattr(os, "kill",
+                            lambda pid, sig: self.killed.append(pid))
+        self.graph = g
+
+    def sweep(self, markers):
+        return self.graph._terminate_orphan_helpers(set(markers))
+
+
+def test_the_sweep_reaps_only_helpers_nobody_alive_owns(monkeypatch):
+    rig = _SweepRig(monkeypatch, {
+        # orphaned to init: ours to reap
+        101: (1, ["pw-cat", "--playback", "x.wav", "--target", "vol_1"], False, "init"),
+        # reparented to the systemd user manager: also abandoned
+        102: (4242, ["pw-loopback", "--name", "vol_1_fx"], False, "systemd"),
+        # somebody's live helper with a matching name: leave it alone
+        103: (555, ["pw-cat", "--target", "vol_1"], False, "bash"),
+        # another daemon's live helper: refuse, loudly (unchanged guard)
+        # ... covered in its own test below.
+        # a live helper we spawned: skipped before anything else
+        104: (os.getpid(), ["pw-cat", "--target", "vol_1"], False, None),
+        # a different program, or no marker: not a candidate
+        105: (1, ["ffmpeg", "-i", "vol_1"], False, "init"),
+        106: (1, ["pw-cat", "--target", "other"], False, "init"),
+    })
+    assert rig.sweep(["vol_1"]) == 2
+    assert rig.killed == [101, 102]
+
+
+def test_the_sweep_still_refuses_another_daemons_helper(monkeypatch):
+    rig = _SweepRig(monkeypatch, {
+        201: (777, ["pw-cat", "--target", "vol_1"], True, "bash"),
+    })
+    with pytest.raises(AnotherDaemonRunning):
+        rig.sweep(["vol_1"])
+    assert rig.killed == []
+
+
+def test_the_sweep_ignores_helpers_without_a_marker(monkeypatch):
+    rig = _SweepRig(monkeypatch, {
+        301: (1, ["pw-cat", "--target", "unrelated"], False, "init"),
+    })
+    assert rig.sweep(["vol_1"]) == 0
+    assert rig.killed == []

@@ -74,7 +74,9 @@ def test_declare_fans_out_one_migrate_per_persisted_instance():
 
     replies = daemon.handle_command(api.type_declare([CAMERA_IN]), conn)
     assert isinstance(replies, list)
-    assert replies[0]["type"] == "declared"
+    # The fan-out comes first, one terminal reply last: a client reads until
+    # it sees something that is not a migrate.
+    assert replies[-1]["type"] == "declared"
     migrates = [r for r in replies if r["type"] == "migrate"]
     assert [m["instance_id"] for m in migrates] == ["cam_1"]
     assert migrates[0]["from_schema"] == 1
