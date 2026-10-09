@@ -192,6 +192,36 @@ def value_set(instance_id: str, port: str, value: Any) -> Dict[str, Any]:
     return {"type": "value_set", "instance_id": instance_id, "port": port, "value": value}
 
 
+def node_spawn(nodes: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Daemon -> module: run these instances.
+
+    The daemon owns identity and placement; a module owns running the node.
+    When the user creates a node of a type a *module* provides (rather than
+    one the daemon models itself), this is how it is asked to run it.  Each
+    node is announce-shaped (``instance_id``, ``type_id``, ``space``,
+    ``config``) so a module can treat it exactly like one it announced
+    itself."""
+    return {"type": "node_spawn", "nodes": list(nodes)}
+
+
+def node_stop(instance_ids: List[str]) -> Dict[str, Any]:
+    """Daemon -> module: stop running these (the placement stays, so the
+    node is still there — offline — if the module comes back)."""
+    return {"type": "node_stop", "instance_ids": list(instance_ids)}
+
+
+def node_values(values: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    """Module -> daemon: the current output values of its instances
+    (``{instance_id: {port: value}}``).
+
+    Not state: a display reads them to show what a node is computing right
+    now (the primitives module's display nodes).  The daemon keeps the last
+    report so a display polling the graph sees them.
+    """
+    return {"type": "node_values",
+            "values": {k: dict(v) for k, v in values.items()}}
+
+
 def node_control(instance_id: str, key: str, value: Any) -> Dict[str, Any]:
     """A *display* setting one control of one node.
 

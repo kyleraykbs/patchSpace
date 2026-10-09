@@ -50,6 +50,8 @@ class ModuleHost:
         on_edge: Optional[Callable[[Dict[str, Any]], None]] = None,
         on_status: Optional[Callable[[Dict[str, Any]], None]] = None,
         on_value: Optional[Callable[[Dict[str, Any]], None]] = None,
+        on_spawn: Optional[Callable[[Dict[str, Any]], None]] = None,
+        on_stop: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> None:
         if socket_path is None:
             from central.main import SOCKET_PATH  # late: only for a real run
@@ -67,6 +69,8 @@ class ModuleHost:
         self.on_edge = on_edge
         self.on_status = on_status
         self.on_value = on_value
+        self.on_spawn = on_spawn
+        self.on_stop = on_stop
         #: What the daemon said when it accepted us.
         self.module_id = ""
         self.daemon_version = ""
@@ -132,6 +136,10 @@ class ModuleHost:
 
     def report_health(self, health: Mapping[str, str]) -> None:
         self._call(api.node_health(dict(health)))
+
+    def report_values(self, values: Mapping[str, Mapping[str, Any]]) -> None:
+        """Tell the daemon what the module's nodes currently compute."""
+        self._call(api.node_values({k: dict(v) for k, v in values.items()}))
 
     # -- the daemon's side -----------------------------------------------
 
@@ -203,6 +211,12 @@ class ModuleHost:
         elif kind == "value_set":
             if self.on_value is not None:
                 self.on_value(message)
+        elif kind == "node_spawn":
+            if self.on_spawn is not None:
+                self.on_spawn(message)
+        elif kind == "node_stop":
+            if self.on_stop is not None:
+                self.on_stop(message)
         elif kind == "error":
             logger.error("module %s: daemon error: %s", self.name,
                          message.get("message"))

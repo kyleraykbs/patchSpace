@@ -182,3 +182,14 @@
   module owns becomes wireable/controllable *before* the PipeWire model moves,
   which is what unblocks the primitives module.
 - Reversible: yes.
+
+## [2026-10-09] The daemon owns identity, the module owns running the node
+- Decision: `node_spawn`/`node_stop` (daemon -> module) let the daemon create an
+  instance of a *module-provided* type and ask the module to run it;
+  `node_values` (module -> daemon) reports what the nodes currently compute so a
+  display can show it.  `add_node`/`remove_node` fall through to that path when
+  the type is not one the daemon models.
+- Why: the plan's split, made concrete for a node the daemon has no class for —
+  which is every node a new module provides.  Without it a module's nodes could
+  be drawn (phase 2) but never created, wired or shown.
+- Reversible: yes.

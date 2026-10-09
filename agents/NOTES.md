@@ -844,3 +844,25 @@ a filter-chain module's bare `Input`/`Output` - is still skipped by
   controlled** — the GUI's legacy commands target the daemon's model, which has
   no object for a node a module owns.  With this path, a module's nodes are
   usable, so primitives can land on top of it.
+
+## 2026-10-09 — the primitives module, and what a module-owned node needed
+
+* A module-owned node (one the daemon does not model) needed three things to be
+  usable, all added here: **`node_spawn`** (daemon -> module: run this instance;
+  the daemon creates the identity/placement, the module runs it),
+  **`node_values`** (module -> daemon: what the nodes currently compute, so a
+  display can show it) and the daemon's `add_node`/`remove_node` falling through
+  to `ProtocolHandler.spawn_instance`/`stop_instance` when the type is declared by
+  a module rather than in `NODE_TYPE_REGISTRY`.
+* `_serialize_nodes` now also serves *online* module-owned instances (it used to
+  append only non-online ones), with `values` when the module reported any.
+* `attach_modules` starts the supervisor **only when the socket is bound**
+  (`self._server is not None`): module processes attach over the socket, and a
+  test that builds a daemon without starting it must not spawn anything.
+* `modules/primitives/` is the first out-of-process module: `types.py` (8 node
+  types), `engine.py` (a bounded fixpoint over its own edges — a user-drawn cycle
+  settles instead of hanging), `main.py` (a `ModuleHost` + the daemon's requests).
+  Its controls are `number`/`slider`/`toggle`/`choice` widgets — the display's
+  widget vocabulary is still closed (it draws what it knows and ignores the
+  rest), so a primitives node's slider is not yet draggable in the canvas; the
+  value *is* settable through `node_control` and shown via `values`.

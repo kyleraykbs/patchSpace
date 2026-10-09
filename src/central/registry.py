@@ -69,9 +69,13 @@ class InstanceRecord:
     status: str = api.STATUS_UNBACKED
     reason: str = ""
     health: str = api.HEALTH_UNKNOWN
+    #: The module's last reported output values (``{port: value}``) — what
+    #: a display shows for a node that computes something.  Empty for a
+    #: node whose module reports none.
+    values: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        out = {
             "instance_id": self.instance_id,
             "type_id": self.type_id,
             "space": self.space,
@@ -82,6 +86,9 @@ class InstanceRecord:
             "reason": self.reason,
             "health": self.health,
         }
+        if self.values:
+            out["values"] = dict(self.values)
+        return out
 
 
 @dataclass
@@ -382,6 +389,14 @@ class Registry:
                 instance = self._instances.get(instance_id)
                 if instance is not None and instance.declared_by == module_id:
                     instance.health = value
+
+    def set_values(self, module_id: str, values: Dict[str, Dict[str, Any]]) -> None:
+        """Record a module's reported output values (see `node_values`)."""
+        with self._lock:
+            for instance_id, ports in values.items():
+                instance = self._instances.get(instance_id)
+                if instance is not None and instance.declared_by == module_id:
+                    instance.values = {str(k): v for k, v in dict(ports).items()}
 
     def set_config(self, module_id: str, instance_id: str,
                    config: Optional[Dict[str, Any]]) -> bool:

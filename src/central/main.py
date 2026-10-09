@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import re
 import shutil
 import socket
@@ -572,10 +573,14 @@ class PatchSpaceDaemon:
         #: is the gray node a missing module leaves behind.
         self._mirrored: set = set()
         #: Module *processes* the daemon runs (see module_supervisor); the
-        #: in-process PipeWire provider is separate.  The specs come from
-        #: the deployment config (phase 6); empty means "no external
-        #: built-ins yet".
-        self.module_specs: List[module_sup.ModuleSpec] = []
+        #: in-process PipeWire provider is separate.  The primitives module
+        #: ships with the daemon and is on by default; phase 6 turns this
+        #: into a config file with enable/disable.
+        self.module_specs: List[module_sup.ModuleSpec] = [
+            module_sup.ModuleSpec(
+                "primitives", [sys.executable, "-m", "modules.primitives.main"]
+            ),
+        ]
         self._module_log_dir = os.path.join(
             os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"),
             "patchspace", "modules",
@@ -4086,6 +4091,15 @@ class PatchSpaceDaemon:
             return {"status": "error", "message": "node_type and node_id required"}
         cls = NODE_TYPE_REGISTRY.get(node_type)
         if cls is None:
+            # Not a type the daemon models itself: a *module* may provide it
+            # (a primitives node, say).  The daemon owns the identity and the
+            # placement; the module is asked to run it.
+            if self.registry.type_decl(node_type) is not None:
+                return self._protocol.spawn_instance(
+                    node_id, node_type,
+                    space=str(cmd.get("space") or "main"),
+                    config=config,
+                )
             return {"status": "error", "message": f"Unknown node type: {node_type}"}
 
         careful_node = None
@@ -4152,6 +4166,16 @@ class PatchSpaceDaemon:
                 node_id not in self.space.nodes
                 or node_id not in self.space.public_nodes
             ):
+                # Not a node the daemon models itself: a *module* may be
+                # running it (a primitives node, say).  Ask it to stop and
+                # drop what the graph remembered.
+                if self.registry.instance(node_id) is not None:
+                    self._protocol.stop_instance(node_id)
+                    self.registry.forget_instance(node_id)
+                    self.topology.forget(node_id)
+                    self._mirrored.discard(node_id)
+                    self._dirty = True
+                    return {"status": "ok"}
                 return {"status": "error", "message": f"Node {node_id} not found"}
             if isinstance(self.space.nodes.get(node_id), SensitivityGateNode):
                 # Drop the hidden gain-staging children this gate owns -
@@ -4171,6 +4195,7 @@ class PatchSpaceDaemon:
         # registry instance and its placement.  (A placement *nothing was
         # running* is otherwise kept on purpose - that is the gray node a
         # missing module leaves behind - so removal has to be explicit.)
+        self._protocol.stop_instance(node_id)
         self.registry.forget_instance(node_id)
         self.topology.forget(node_id)
         return {"status": "ok"}
@@ -5599,7 +5624,7 @@ class PatchSpaceDaemon:
         # are drawn — inert, with the registry's reason — instead of being
         # invisible, which is the whole point of keeping them.
         for instance in self.registry.instances():
-            if instance.instance_id in result or instance.status == api.STATUS_ONLINE:
+            if instance.instance_id in result:
                 continue
             placement = self.topology.placement(instance.instance_id)
             entry: Dict[str, Any] = {
@@ -5607,8 +5632,14 @@ class PatchSpaceDaemon:
                 "type": instance.type_id,
                 "status": instance.status,
                 "status_reason": instance.reason,
-                "ready": False,
+                # A module-owned node is a real, running node; only a node
+                # nothing runs is drawn inert.
+                "ready": instance.status == api.STATUS_ONLINE,
             }
+            if instance.values:
+                # What it currently computes (the primitives module's
+                # display nodes read this).
+                entry["values"] = dict(instance.values)
             if placement is not None:
                 entry["x"] = placement.x
                 entry["y"] = placement.y
@@ -5776,7 +5807,10 @@ class PatchSpaceDaemon:
                 migrate_config=migrations.migrate,
             )
         summary = self._pw_module.attach()
-        if self._module_supervisor is None:
+        # Module *processes* need the daemon to be serving: they attach over
+        # the socket.  (A test that constructs a daemon and attaches modules
+        # without starting it therefore spawns nothing.)
+        if self._module_supervisor is None and self._server is not None:
             self._module_supervisor = module_sup.ModuleSupervisor(
                 self.module_specs,
                 socket_path=SOCKET_PATH,

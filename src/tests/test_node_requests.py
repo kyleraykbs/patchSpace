@@ -201,7 +201,9 @@ def test_a_control_and_an_edge_reach_a_module_in_another_process(external):
     assert _wait_for(
         lambda: b"CONTROL value 0.75" in open(log_path, "rb").read()
     ), open(log_path, "rb").read()
-    assert b"EDGE add src_1->sink_1" in open(log_path, "rb").read()
+    assert _wait_for(
+        lambda: b"EDGE add src_1->sink_1" in open(log_path, "rb").read()
+    ), open(log_path, "rb").read()
 
 
 SRC_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

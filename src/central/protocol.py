@@ -113,6 +113,7 @@ class ProtocolHandler:
             "snapshot_request": self._snapshot_request,
             "node_control": self._node_control,
             "node_edge": self._node_edge,
+            "node_values": self._node_values,
         }.get(kind)
         if handler is None:
             return api.error(f"unknown message type {kind!r}")
@@ -247,6 +248,62 @@ class ProtocolHandler:
             types,
             instances,
         )
+
+    def _node_values(self, msg: Dict[str, Any], conn: Connection) -> Reply:
+        """A module reporting what its nodes currently compute."""
+        problem = self._needs_module(conn)
+        if problem is not None:
+            return problem
+        values = msg.get("values") or {}
+        if not isinstance(values, dict):
+            return api.error("node_values needs a mapping")
+        self.registry.set_values(conn.module_id, values)
+        return {"type": "ok", "ref": "node_values"}
+
+    # -- the daemon asking a module to run something ----------------------
+
+    def spawn_instance(self, instance_id: str, type_id: str, space: str = "main",
+                       config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Create an instance of a *module-provided* type and ask the module
+        to run it.
+
+        Used when the user adds a node the daemon does not model itself
+        (a primitives node, say): the daemon owns the identity and the
+        placement, the module owns running it.  Returns a status dict for the
+        caller (`_cmd_add_node`).
+        """
+        instance = self.registry.instance(instance_id)
+        if instance is not None and instance.declared_by:
+            return {"status": "error", "message": f"Node {instance_id} already exists"}
+        decl = self.registry.type_decl(type_id)
+        if decl is None:
+            return {"status": "error", "message": f"Unknown node type {type_id}"}
+        owner = decl.module_id
+        target = self._module_conns.get(owner)
+        if target is None:
+            return {"status": "error",
+                    "message": f"{owner} is not attached, so {type_id} cannot run"}
+        self.registry.place(instance_id, type_id, space=space, config=config or {})
+        node = {
+            "instance_id": instance_id,
+            "type_id": type_id,
+            "space": space,
+            "config": dict(config or {}),
+        }
+        if not target.send(api.node_spawn([node])):
+            return {"status": "error", "message": f"could not reach {owner}"}
+        return {"status": "ok", "node_id": instance_id, "module_id": owner}
+
+    def stop_instance(self, instance_id: str) -> bool:
+        """Ask whichever module runs this instance to stop (the placement
+        stays: the node is still there, offline)."""
+        instance = self.registry.instance(instance_id)
+        if instance is None or not instance.declared_by:
+            return False
+        target = self._module_conns.get(instance.declared_by)
+        if target is None:
+            return False
+        return target.send(api.node_stop([instance_id]))
 
     def _node_control(self, msg: Dict[str, Any], conn: Connection) -> Reply:
         """A display setting one control of one node: routed to whichever
