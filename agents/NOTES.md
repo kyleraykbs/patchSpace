@@ -18,8 +18,9 @@ cd src && nix develop ../ -c python -m pytest -q             # ~270 tests, ~7s, 
   (a) a `git rm --cached` (untracking bytecode) is silently undone by the next pathspec
   commit that covers the path, and (b) a bare `git commit --amend` sweeps in everything
   else staged.  Land a deletion by committing the index with nothing else staged.
-* The tree frequently carries the user's own uncommitted work in `main.py`, `pwnodes.py`,
-  `gui/*` — check `git diff` before committing so you don't sweep it into your commit.
+* The tree frequently carries the user's own uncommitted work (`config/systems/*` in mycelion;
+  `gui/*`, `.opencode/`, `org.patchspace.xcf` here) — check `git diff` before committing so
+  you don't sweep it in.
 
 ## Verifying behaviour the suite can't reach
 
