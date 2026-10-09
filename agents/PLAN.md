@@ -128,33 +128,40 @@ outputs, boolean logic".
   from the generic client: it is pw-specific debug UI. A module-shipped display
   extension is the eventual home; not in this cut.
 
-## 8. Phases (each ends green: tests pass, daemon+GUI run)
+## 8. Phases
 
-0. Rename `patch`→`patchSpace` on disk; mycelion `path:` input update; restructure
-   into `central/` + `modules/pipewire/` as pure file moves; housekeeping:
-   `.gitignore` + untrack `*.pyc` [D].
-1. Central core: hello/roles, registry, generic node/edge model, status. PW
-   internals run behind an in-process module-API adapter so the daemon still
-   boots and the GUI still works.
-2. Port the GUI to the new protocol (still in-repo; `node_specs.py` out).
-3. Extract the pipewire module to a subprocess; daemon spawns it. Scope the
-   orphan-helper sweep to the module's own children only (landmine: the global
-   sweep killed live helpers once).
-4. Spaces: blueprint/instance split, `space_input`/`space_output`, face-port
-   generation, diff persistence + rebase.
-5. Primitives module + `number` kind + value relay.
-6. Toggling: config file, CLI, offline + `requires`-closure propagation.
-7. Split `patchSpaceGui` out as its own repo/flake (pure move — protocol already
-   stable); mycelion gets the second input; GUI package + desktop entry move.
-8. Docs (`docs/nixos.md`, `homeManager.md`, LLM_README, STRUCTURE) + final live
-   smoke: daemon + pipewire module + GUI up, create a blueprint, instance it
-   twice, diverge a slider, reboot-restore, disable pipewire → nodes offline,
-   re-enable → recovered.
+Status (2026-10-09).  Each completed phase ended green: the daemon suite
+(`src/tests/`) has run headless at every step, plus a per-phase proof (an
+offscreen canvas render, a real-socket module attach, a spawned module process,
+a packaged CLI).
 
-Verification: daemon suite (`src/tests/`, headless) stays green at every phase;
-new protocol tests per phase (announce/migrate/offline/diff-rebase); GUI via the
-offscreen cairo render recipe; live smoke only at the end, against Kyle's session
-with his say-so (never a second daemon against live pipewire).
+| # | Phase | Status |
+|---|---|---|
+| 0 | rename `patch`→`patchSpace`, restructure into `central/` + `modules/pipewire/`, `.gitignore`/untrack pyc | **done** |
+| 1 | central core: hello/roles, registry, generic node/edge model, status; PW behind an in-process module-API adapter | **done** |
+| 2 | GUI port: `node_specs.py` deleted, specs from `type_declare`; gray/inert nodes drawn from the registry's status | **done** |
+| 5 | primitives module (8 types, local engine), `number` kind, `node_values` | **done** (out of order: it validates the boundary) |
+| 6 | toggling: one `modules.json`, `patchspace-modules` CLI, `services.patchspace.modules`, offline + `requires` closure | **done** |
+| 8a | docs (`nixos.md`, `homeManager.md`, LLM_README, STRUCTURE) | **done** |
+| 3 | **the extraction proper**: move the model (`pwnodes.PatchSpace` + node classes) and the pw substrate into the module process; the daemon keeps identity/placement/status and drives it over the API | **open — the big one.**  Its groundwork is all in: `modules/host.py`, `ModuleSupervisor`, `node_control`/`node_edge` routing, `node_spawn`/`node_values`, the scoped orphan sweep |
+| 4 | spaces merged with panels: blueprint/instance split, `space_input`/`space_output` face ports, per-instance diff persistence + rebase | **open** (`topology` already holds spaces/placements/edges; `panel_in`/`panel_out` types exist) |
+| 7 | split `patchSpaceGui` into its own repo/flake; mycelion's second input | **open** — touches the nix module's public interface (`defaultClient` currently comes from *this* flake), so it wants a deploy pass, not a rushed one |
+| 8b | final live smoke (needs Kyle at the machine) | **open** |
+
+Two known gaps left deliberately, each with its own step:
+
+* The display's **control vocabulary is closed**: the canvas draws the widgets it
+  knows (`volume`/`slider`/`toggle`/`field`/`picker`/`indicator`) and ignores the
+  rest, so a module-declared control is not yet draggable.  The value *is*
+  settable through `node_control` and displayed from `node_values`.
+* The canvas still gets the **graph** from the legacy `get_nodes` poll (enriched
+  with the registry's status), not from `snapshot_reply`.  Moving it belongs with
+  phase 3, when the legacy protocol retires.
+
+Verification: daemon suite headless at every phase; new protocol tests per phase
+(announce/migrate/offline/values/spawn); GUI via the offscreen cairo render
+recipe; live smoke only at the end, against Kyle's session with his say-so (never
+a second daemon against live pipewire).
 
 ## Known landmines (from agents/NOTES.md)
 
