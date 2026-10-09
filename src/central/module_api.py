@@ -65,8 +65,11 @@ HEALTH_DEAD = "dead"
 HEALTH_UNKNOWN = ""
 
 #: Port kinds the daemon itself knows.  A module may only declare ports
-#: whose kind is in here (phase 6 adds registration for extra kinds).
-PORT_KINDS = ("audio", "bundle", "boolean", "filter", "impulse", "sound", "camera")
+#: whose kind is in here.  `number` is the primitives module's kind (a
+#: numeric value: a constant, a slider, a maths result); like every other
+#: non-audio kind it pairs only with itself.
+PORT_KINDS = ("audio", "bundle", "boolean", "filter", "impulse", "sound",
+              "camera", "number")
 
 DIR_IN = "in"
 DIR_OUT = "out"

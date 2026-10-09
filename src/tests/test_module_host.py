@@ -54,21 +54,28 @@ class DaemonSide:
         conn = Connection(socket=sock)
         self.connections.append(conn)
         buffer = b""
-        while self._running:
-            try:
-                chunk = sock.recv(65536)
-            except OSError:
-                break
-            if not chunk:
-                break
-            buffer += chunk
-            while b"\n" in buffer:
-                line, buffer = buffer.split(b"\n", 1)
-                if not line.strip():
-                    continue
-                reply = self.handler.handle(json.loads(line.decode("utf-8")), conn)
-                for message in reply if isinstance(reply, list) else [reply]:
-                    sock.sendall((json.dumps(message) + "\n").encode("utf-8"))
+        try:
+            while self._running:
+                try:
+                    chunk = sock.recv(65536)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                buffer += chunk
+                while b"\n" in buffer:
+                    line, buffer = buffer.split(b"\n", 1)
+                    if not line.strip():
+                        continue
+                    reply = self.handler.handle(json.loads(line.decode("utf-8")), conn)
+                    for message in reply if isinstance(reply, list) else [reply]:
+                        sock.sendall((json.dumps(message) + "\n").encode("utf-8"))
+        finally:
+            # Same as the daemon's own client loop: a module socket dying
+            # takes its nodes offline (the placements stay, so a reconnect
+            # binds them again).
+            if conn.module_id:
+                self.registry.detach(conn.module_id)
 
     def push(self, message: dict) -> None:
         """Send a daemon -> module message to the last module that attached."""

@@ -40,6 +40,7 @@ from modules.pipewire import pwgraph
 from modules.pipewire import pwmatch
 from central import graph as graph_mod
 from central import module_api as api
+from central import module_supervisor as module_sup
 from central import protocol as protocol_mod
 from central import registry as registry_mod
 from central import pwnodes
@@ -570,6 +571,16 @@ class PatchSpaceDaemon:
         #: placement *not* in here came from persistence and is kept — that
         #: is the gray node a missing module leaves behind.
         self._mirrored: set = set()
+        #: Module *processes* the daemon runs (see module_supervisor); the
+        #: in-process PipeWire provider is separate.  The specs come from
+        #: the deployment config (phase 6); empty means "no external
+        #: built-ins yet".
+        self.module_specs: List[module_sup.ModuleSpec] = []
+        self._module_log_dir = os.path.join(
+            os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"),
+            "patchspace", "modules",
+        )
+        self._module_supervisor: Optional[module_sup.ModuleSupervisor] = None
 
         self._running = False
         self._clients: set[socket.socket] = set()
@@ -861,6 +872,13 @@ class PatchSpaceDaemon:
 
     def stop(self) -> None:
         self._running = False
+        # Module processes are started in their own session so they survive
+        # a daemon crash - which means the daemon must stop them explicitly
+        # when it goes down on purpose.
+        try:
+            self.detach_modules()
+        except Exception:
+            logger.exception("stopping the built-in modules failed")
         # Make sure a start-up that aborted part-way can't leave the
         # loading flag stuck on for any lingering get_nodes poll.
         with self._loading_lock:
@@ -1303,6 +1321,11 @@ class PatchSpaceDaemon:
             self._assert_defaults()
             self._enforce_volume_locks()
             self._ensure_device_profiles()
+            if self._module_supervisor is not None:
+                # A module process that died is brought back (with backoff);
+                # its nodes are already offline in the registry because its
+                # socket dropped.
+                self._module_supervisor.poll()
         except Exception:
             logger.exception("supervision tick failed")
         # Never autosave while a declarative reload is mid-flight: it
@@ -5738,8 +5761,13 @@ class PatchSpaceDaemon:
         return {}
 
     def attach_modules(self, enabled: Optional[List[str]] = None) -> dict:
-        """Attach the built-in modules (phase 6 makes the set configurable;
-        today it is the PipeWire provider alone)."""
+        """Attach the built-in modules.
+
+        The in-process PipeWire provider (phase 1/2) and the module
+        *processes* the daemon runs (phase 3's supervisor) both land here;
+        phase 6 makes the set configurable, and phase 5 adds the primitives
+        module's spec.
+        """
         if self._pw_module is None:
             self._pw_module = pw_module.PipewireModule(
                 self._protocol,
@@ -5747,13 +5775,31 @@ class PatchSpaceDaemon:
                 inventory=self.module_inventory,
                 migrate_config=migrations.migrate,
             )
-        return self._pw_module.attach()
+        summary = self._pw_module.attach()
+        if self._module_supervisor is None:
+            self._module_supervisor = module_sup.ModuleSupervisor(
+                self.module_specs,
+                socket_path=SOCKET_PATH,
+                log_dir=self._module_log_dir,
+            )
+            self._module_supervisor.start_all()
+        return summary
 
     def detach_modules(self) -> None:
         """Disable every module: their nodes go offline, the placements
         and the graph stay."""
+        if self._module_supervisor is not None:
+            self._module_supervisor.stop_all()
+            self._module_supervisor = None
         if self._pw_module is not None:
             self._pw_module.detach()
+
+    def module_process_status(self) -> List[dict]:
+        """The daemon's module processes (pid, alive, restarts) — the
+        process half of the module story; `module_status` is the registry."""
+        if self._module_supervisor is None:
+            return []
+        return self._module_supervisor.status()
 
     def module_status(self) -> dict:
         """The registry view (modules, declared types, instances and their

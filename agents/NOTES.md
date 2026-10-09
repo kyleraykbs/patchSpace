@@ -800,3 +800,28 @@ a filter-chain module's bare `Input`/`Output` - is still skipped by
 * `main.py` needed `from central import module_api as api` for the status
   constants — a missing import there turns every command into a silent error
   reply (`_serialize_nodes` raising is caught by the dispatcher).
+
+## 2026-10-09 — phase 3 groundwork: modules as processes
+
+* `modules/host.py` is the module-side client (`ModuleHost`): connect, hello,
+  declare, announce, answer the migration fan-out, dispatch `control_set` /
+  `edge_apply` / `status_change` / `value_set`, reconnect with backoff.  The
+  in-process PipeWire provider speaks the same protocol through
+  `ProtocolHandler`, so this is the transport half of the extraction.
+* **The declaration fan-out needs a terminator.**  `type_declare` answers with
+  the `migrate` messages first and one terminal `declared`/`error` last; a client
+  reads until it sees something that is not a `migrate`.  Without that, the host
+  blocked on `recv` waiting to find out the fan-out was over (the test suite
+  hung for the full timeout).
+* `ModuleHost.pump(timeout=0)` must `select()` before `recv()` — a zero-timeout
+  "poll" that blocks is not a poll.
+* `central/module_supervisor.py` runs module processes: start on attach, restart
+  with backoff (give up after 5 fast failures — a failed `Popen` counts, so
+  `proc is None` has to go through the same path as an exit), stop with the
+  daemon.  Children use `start_new_session=True` so a daemon *crash* leaves them
+  (the sweep/restart story), which means `stop()` must kill them explicitly.
+* The test rig `tests/test_module_host.DaemonSide` is the real handler on a real
+  socket; it must detach a module when its socket drops, exactly like the
+  daemon's client loop, or a restarted module gets a fresh id (`childmod#2`) and
+  its types are refused as already-declared.
+* `number` is now a declared port kind (the primitives module's wire).

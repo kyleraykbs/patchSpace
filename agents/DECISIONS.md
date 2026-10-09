@@ -144,3 +144,30 @@
   reading an empty catalog.  Cost a debugging round; the trap is in NOTES.md.
 - Reversible: yes (adding `gui/__init__.py` would make the two names one
   module, but that changes how the GUI is launched).
+
+## [2026-10-09] Modules are processes; the daemon supervises, the module declares
+- Decision: `central/module_supervisor.py` runs a built-in module as a child
+  process (start on attach, restart with backoff, give up after 5 fast failures,
+  stop with the daemon; children are in their own session so a daemon crash
+  leaves them, which is why `stop` kills them explicitly).  `modules/host.py` is
+  the module-side client every module process uses.
+- Why: a module that can take the graph daemon down with it is not a module
+  (the PipeWire stack has wedged on this box).  The daemon owns the process, the
+  module owns what it provides — the registry never decides that for it.
+- Reversible: yes (the in-process provider path stays for built-ins until each
+  one moves out).
+
+## [2026-10-09] A module's declaration ends with its terminal reply
+- Decision: `type_declare` answers with the migration fan-out first and one
+  terminal `declared`/`error` last, so a client reads until it sees something
+  that is not a `migrate`.
+- Why: without a terminator a client cannot know the fan-out is over without
+  timing out on the socket (which is exactly how the first host hung).
+- Reversible: yes.
+
+## [2026-10-09] `number` is a declared port kind
+- Decision: `module_api.PORT_KINDS` gains `number`; like every other non-audio
+  kind it pairs only with itself (`graph.kinds_compatible`).
+- Why: the primitives module needs a numeric wire; declaring the kind centrally
+  is what keeps a display from having to guess.
+- Reversible: yes.

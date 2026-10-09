@@ -58,6 +58,8 @@ extracted, but it now goes through the module API:
 | Wire | `central/protocol.py` | Daemon side of the API: `hello` + role gating, `type_declare` → one `migrate` per persisted instance → `migrate_result` → `node_announce`, `registry_query`, and module drop-off (a dead socket offlines its nodes). |
 | Provider | `modules/pipewire/declarations.py` | The node type catalog, generated from `gui/node_specs.py` + `NODE_TYPE_REGISTRY` while both exist (an agreement test keeps them in step; phase 2 makes this the source). |
 | Provider | `modules/pipewire/module.py` | The in-process module: greets through the same handler a socket client would use, answers migrations, announces the inventory the daemon hands it, and answers `control_set`/`edge_apply`. |
+| Runtime | `central/module_supervisor.py` | Runs built-in modules as **child processes**: start on attach, restart with backoff (and give up on one that keeps dying), stop with the daemon.  Specs come from the deployment config (phase 6). |
+| Runtime | `modules/host.py` | The client a module *process* runs: connect, greet, declare, announce, answer migrations, dispatch the daemon's pushes, reconnect.  The same protocol the in-process provider speaks — which is what makes moving a provider out of the daemon a transport change. |
 
 The daemon's `handle_command` routes on the message shape: `"type"` is the
 module API, `"command"` is the legacy GUI protocol — both work, which is how
