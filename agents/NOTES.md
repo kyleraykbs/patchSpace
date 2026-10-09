@@ -779,3 +779,24 @@ a filter-chain module's bare `Input`/`Output` - is still skipped by
 * `central/session_repair.py` no longer imports the GUI: it builds a small
   port/label table from the same catalog data and asks `central/graph.py` for
   the compatibility rule (the one authority).
+
+## 2026-10-09 — phase 2 tail: the gray nodes are real
+
+* `get_nodes` now carries the registry's `status` (+ `status_reason`) per node,
+  and appends synthetic entries for placements nothing is running (a node kept
+  for a module that is not loaded): id, type, remembered position, status.  So
+  the canvas can draw a node that has no model object behind it.
+* The canvas draws those inert: dim dashed outline, the body washed out with a
+  60% `node_bg` overlay, and a one-line badge ("◌ no module" / "◌ offline" /
+  "◌ needs input").  Keep the badge *short* — a long one wraps and the header
+  height/drawing disagreement shows up as a clipped line.  The registry's full
+  reason rides in the node's hover tooltip.
+* Which placements are "kept" vs "gone": `sync_registry` remembers the instance
+  ids it mirrored from live model nodes (`self._mirrored`).  An id in there that
+  is no longer live was deleted/renamed/reset/rebuilt → forget it; a placement
+  that was never mirrored came from persistence → keep it (that is the gray
+  node).  The sync hook runs after `add_node`/`remove_node`/`rename_node`/
+  `reset`/`rebuild`.
+* `main.py` needed `from central import module_api as api` for the status
+  constants — a missing import there turns every command into a silent error
+  reply (`_serialize_nodes` raising is caught by the dispatcher).

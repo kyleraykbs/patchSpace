@@ -177,3 +177,31 @@ def test_the_snapshot_reports_a_gray_node_as_unbacked():
     assert ghost["status"] == api.STATUS_UNBACKED
     placement = next(p for p in snapshot["placements"] if p["instance_id"] == "ghost_1")
     assert (placement["x"], placement["y"]) == (40.0, 10.0)
+
+
+def test_get_nodes_marks_nodes_the_registry_is_not_running():
+    """What the canvas greys out: the registry's lifecycle status travels
+    with every node, and a placement nothing runs is drawn too."""
+    daemon = fresh_daemon()
+    daemon.attach_modules()
+    add_node(daemon, "gate", "g1")
+    nodes = daemon.handle_command({"command": "get_nodes"})["nodes"]
+    assert nodes["g1"]["status"] == api.STATUS_ONLINE
+
+    # A placement nothing runs (a module that is not loaded): drawn, inert,
+    # with the registry's own reason and its remembered position.
+    daemon.registry.place("ghost_1", "nobody_makes_this")
+    daemon.topology.place("ghost_1", x=12.0, y=34.0)
+    nodes = daemon.handle_command({"command": "get_nodes"})["nodes"]
+    ghost = nodes["ghost_1"]
+    assert ghost["status"] == api.STATUS_UNBACKED
+    assert "no module" in ghost["status_reason"]
+    assert (ghost["x"], ghost["y"]) == (12.0, 34.0)
+    assert ghost["ready"] is False
+
+    # Detaching the module offlines the nodes it was running: they stay on
+    # the canvas, washed out, and say why.
+    daemon.detach_modules()
+    nodes = daemon.handle_command({"command": "get_nodes"})["nodes"]
+    assert nodes["g1"]["status"] == api.STATUS_OFFLINE_MODULE
+    assert "pipewire" in nodes["g1"]["status_reason"]

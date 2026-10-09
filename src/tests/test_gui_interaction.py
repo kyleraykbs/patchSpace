@@ -748,3 +748,51 @@ def test_the_canvas_repaints_on_a_floor_even_when_nothing_changes():
     for _ in range(10):
         w._anim_tick()
     assert drawn == [], "the floor repainted on every tick"
+
+
+def test_an_inert_node_shows_the_registry_reason():
+    """A node nothing is running (a placement for a module that is not
+    loaded) carries the registry's reason in its header instead of looking
+    like a live one."""
+    w, _client = _widget()
+    w.update_from_daemon({
+        "nodes": {
+            "ghost_1": {
+                "id": "ghost_1", "type": "nobody_makes_this", "x": 10, "y": 10,
+                "status": "unbacked",
+                "status_reason": "no module provides this node type",
+                "ready": False,
+            },
+            "g1": {
+                "id": "g1", "type": "gate", "x": 10, "y": 200,
+                "status": "offline_module", "status_reason": "pipewire is not attached",
+                "ready": False,
+            },
+        },
+        "edges": {}, "panels": [], "groups": [],
+    })
+
+    ghost_blocks = w._header_blocks("ghost_1", w.nodes["ghost_1"])
+    assert any("no module" in text for text, _s, _c in ghost_blocks)
+    # A bare placement is dim; a node whose module is known is a warning.
+    assert any(
+        colour == "subtext" for text, _s, colour in ghost_blocks
+        if "no module" in text
+    )
+    gate_blocks = w._header_blocks("g1", w.nodes["g1"])
+    assert any("offline" in text for text, _s, _c in gate_blocks)
+    assert any(
+        colour == "warning" for text, _s, colour in gate_blocks
+        if "offline" in text
+    )
+    # The registry's own reason is carried for the hover tooltip.
+    assert w.nodes["g1"]["status_reason"] == "pipewire is not attached"
+
+    # A live node carries no such badge.
+    w.update_from_daemon({
+        "nodes": {"vol_1": {"id": "vol_1", "type": "volume", "x": 10, "y": 10,
+                            "status": "online", "ready": True, "health": "ok"}},
+        "edges": {}, "panels": [], "groups": [],
+    })
+    texts = [t for t, _s, _c in w._header_blocks("vol_1", w.nodes["vol_1"])]
+    assert not any("not running" in t or "no module" in t for t in texts)

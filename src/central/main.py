@@ -39,6 +39,7 @@ from typing import Any, Dict, Optional
 from modules.pipewire import pwgraph
 from modules.pipewire import pwmatch
 from central import graph as graph_mod
+from central import module_api as api
 from central import protocol as protocol_mod
 from central import registry as registry_mod
 from central import pwnodes
@@ -564,6 +565,11 @@ class PatchSpaceDaemon:
         #: The built-in module host, attached by `attach_modules` (None
         #: until then; a test can drive the registry without a module).
         self._pw_module: Optional[pw_module.PipewireModule] = None
+        #: Instance ids mirrored from live model nodes.  What is in here and
+        #: no longer live is gone (deleted, renamed, reset, rebuilt); a
+        #: placement *not* in here came from persistence and is kept — that
+        #: is the gray node a missing module leaves behind.
+        self._mirrored: set = set()
 
         self._running = False
         self._clients: set[socket.socket] = set()
@@ -4138,7 +4144,13 @@ class PatchSpaceDaemon:
             self.space.sync()
             self._dirty = True
             self._wake_ticker()
-            return {"status": "ok"}
+        # Deleting a node deletes what the graph remembered about it: its
+        # registry instance and its placement.  (A placement *nothing was
+        # running* is otherwise kept on purpose - that is the gray node a
+        # missing module leaves behind - so removal has to be explicit.)
+        self.registry.forget_instance(node_id)
+        self.topology.forget(node_id)
+        return {"status": "ok"}
 
     def _cmd_rename_node(self, cmd: dict) -> dict:
         old_id, new_id = cmd.get("old_node_id"), cmd.get("new_node_id")
@@ -5442,6 +5454,15 @@ class PatchSpaceDaemon:
                 continue
             node_type = CLASS_TO_TYPE.get(type(node), "unknown")
             data: Dict[str, Any] = {"id": node.id, "type": node_type}
+            # The registry's view of this node: online, or offline because
+            # the module that provides its type is not attached (or a node
+            # it needs is).  The canvas draws an offline node washed out
+            # instead of pretending it works.
+            instance = self.registry.instance(node_id)
+            if instance is not None:
+                data["status"] = instance.status
+                if instance.reason:
+                    data["status_reason"] = instance.reason
             for attr in _SERIAL_ATTRS:
                 if hasattr(node, attr):
                     data[attr] = getattr(node, attr)
@@ -5550,6 +5571,26 @@ class PatchSpaceDaemon:
                 # feed publishes on (a VirtualCamN loopback).
                 data["selection_label"] = node.output_device
             result[node_id] = data
+        # Nodes the graph remembers but nothing is running: a placement
+        # kept for a module that is not loaded (or was never written).  They
+        # are drawn — inert, with the registry's reason — instead of being
+        # invisible, which is the whole point of keeping them.
+        for instance in self.registry.instances():
+            if instance.instance_id in result or instance.status == api.STATUS_ONLINE:
+                continue
+            placement = self.topology.placement(instance.instance_id)
+            entry: Dict[str, Any] = {
+                "id": instance.instance_id,
+                "type": instance.type_id,
+                "status": instance.status,
+                "status_reason": instance.reason,
+                "ready": False,
+            }
+            if placement is not None:
+                entry["x"] = placement.x
+                entry["y"] = placement.y
+                entry["anchored"] = placement.anchored
+            result[instance.instance_id] = entry
         return result
 
     def _serialize_edges(self) -> dict:
@@ -5682,13 +5723,16 @@ class PatchSpaceDaemon:
                     space=self.topology.placement(node_id).space,
                     config=self._export_node_params(node_id, node)["params"],
                 )
-        for instance in list(self.registry.instances()):
-            # Only forget what the module was actually running and has now
-            # dropped: an unannounced placement is the gray node the user
-            # keeps, and deleting one is an explicit action (phase 4/6).
-            if instance.declared_by and instance.instance_id not in live:
-                self.registry.forget_instance(instance.instance_id)
-                self.topology.forget(instance.instance_id)
+                self._mirrored.add(node_id)
+        # A node this daemon was mirroring and is no longer there (deleted,
+        # renamed, reset, rebuilt) takes its placement with it.  A placement
+        # that was never mirrored came from persistence: kept on purpose.
+        for instance_id in list(self._mirrored):
+            if instance_id in live:
+                continue
+            self._mirrored.discard(instance_id)
+            self.registry.forget_instance(instance_id)
+            self.topology.forget(instance_id)
         if self._pw_module is not None:
             return self._pw_module.announce()
         return {}
@@ -5847,7 +5891,7 @@ class PatchSpaceDaemon:
         except Exception as exc:
             logger.exception("Command %s failed", command)
             return {"status": "error", "message": str(exc)}
-        if command in ("add_node", "remove_node"):
+        if command in ("add_node", "remove_node", "rename_node", "reset", "rebuild"):
             # Keep the module view honest for the nodes the user just
             # changed (the load path syncs on its own at the end).
             try:

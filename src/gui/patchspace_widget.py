@@ -1633,6 +1633,12 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     # _node_health. Only backed nodes carry it; anything
                     # else is treated as healthy.
                     "health": ndata.get("health", "ok"),
+                    # The registry's lifecycle status ("online" /
+                    # "offline_module" / "offline_dep" / "unbacked") and the
+                    # reason behind it.  Empty for a node the registry does
+                    # not know; the canvas then treats it as online.
+                    "status": ndata.get("status", ""),
+                    "status_reason": ndata.get("status_reason", ""),
                     "device_volume": ndata.get("device_volume", 1.0),
                     "profile_index": ndata.get("profile_index"),
                     "codec_label": ndata.get("profile_description", ""),
@@ -2341,7 +2347,22 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             blocks.append((str(nid), 9, "subtext"))
         else:
             blocks.append((str(nid), 12, "text"))
-        if node.get("health") == "dead":
+        status = node.get("status", "")
+        if status in ("unbacked", "offline_module", "offline_dep"):
+            # The registry says nothing is running this node.  A short badge
+            # (the full reason is in the node's hover tooltip, which has the
+            # room for it): dim for a bare placement, warning for a node
+            # whose module is known but not attached.
+            short = {
+                "unbacked": "no module",
+                "offline_module": "offline",
+                "offline_dep": "needs input",
+            }[status]
+            blocks.append((
+                f"\u25cc {short}", 9,
+                "subtext" if status == "unbacked" else "warning",
+            ))
+        elif node.get("health") == "dead":
             # The node exists but its module died or its interior never
             # connected, so no audio can pass - flag it distinctly from
             # a node that's merely still coming up. See main.py's
@@ -5151,7 +5172,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             return False
         label = type_label(node["type"], nid)
         desc = description_for(node["type"])
-        tooltip.set_text(f"{label}\n{desc}" if desc else label)
+        tip = f"{label}\n{desc}" if desc else label
+        reason = node.get("status_reason", "")
+        if reason:
+            # Why this node is not running (the badge only has room for a
+            # short form) - see the registry's status model.
+            tip = f"{tip}\n\n\u25cc {reason}"
+        tooltip.set_text(tip)
         return True
 
     # ---------- drawing ----------
@@ -5744,6 +5771,13 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         )
         is_conn_target = self.hover_target_node == nid
         is_offline = not node.get("ready", True)
+        # The registry's lifecycle status: a node nothing is running
+        # (a placement for a module that is not loaded, or one whose module
+        # is detached).  Distinct from is_offline, which is a *backed* node
+        # still coming up - this one is not running at all, so it is drawn
+        # washed out with the registry's own reason for it.
+        status = node.get("status", "")
+        is_inert = status in ("unbacked", "offline_module", "offline_dep")
         # Module died or its interior never connected - see main.py's
         # _node_health. Distinct from is_offline (still coming up):
         # drawn with the theme's error color, solid, and a "dead"
@@ -5775,6 +5809,10 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         cr.fill_preserve()
         if is_conn_source or is_conn_target:
             cr.set_source_rgb(*pal["select"])
+        elif is_inert:
+            # Remembered, not running: a flat, dim outline (the body is
+            # washed out after it is drawn, below).
+            cr.set_source_rgb(*pal["subtext"])
         elif is_dead:
             cr.set_source_rgb(*pal["error"])
         elif is_offline or is_wiring:
@@ -5782,7 +5820,9 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         else:
             cr.set_source_rgb(*border_color)
         cr.set_line_width(2)
-        if (is_offline or is_wiring) and not is_dead and not (
+        if is_inert and not (is_conn_source or is_conn_target):
+            cr.set_dash([5.0, 4.0])
+        elif (is_offline or is_wiring) and not is_dead and not (
             is_conn_source or is_conn_target
         ):
             # Dashed rather than solid - a glance at the canvas should
@@ -5977,6 +6017,18 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                         8,
                         pal["subtext"],
                     )
+
+        if is_inert:
+            # Wash the whole body out: the node is remembered, not running,
+            # so its controls and sockets must not read as live.  Drawn last
+            # so it covers everything inside the outline (which stays
+            # visible through the alpha).
+            cr.save()
+            draw_rounded_rect(cr, x, y, node_w, node_h, 8)
+            cr.set_source_rgba(pal["node_bg"][0], pal["node_bg"][1],
+                               pal["node_bg"][2], 0.6)
+            cr.fill()
+            cr.restore()
 
     def _header_line_layout(self, nid, node, i):
         """(left_inset, max_width) for header line `i`, shared by
