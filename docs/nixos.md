@@ -43,6 +43,18 @@ panel would appear on your canvas).
 * **Session environment**: `canvasOpacity` is exported as `PATCHSPACE_CANVAS_OPACITY` for the
   GUI, and put on the daemon unit as well, so a window started by a launcher (whose
   environment predates the rebuild) still gets it.
+* **Modules**: the daemon runs the built-in modules and serves what they declare.  A module is
+  a separate program that attaches to the daemon's socket, declares its node types and
+  announces the nodes it runs; the GUI draws whatever it declares, so a module needs no GUI
+  work of its own.  Today the daemon runs the **primitives** module (numbers, boolean logic,
+  a display) as a child process; its log is `~/.cache/patchspace/modules/primitives.log`.
+  Those children live in the unit's cgroup, so `systemctl --user stop patchspace` reaps them
+  even though they are started in their own session (and the daemon stops them itself when it
+  exits on purpose).  The PipeWire provider still runs *inside* the daemon (it is the next one
+  to move out; see `agents/PLAN.md` phase 3), which is why nothing about the PipeWire side of
+  the unit changes here.
+  Disabling a module (and with it its nodes) is the next configuration step — until it lands,
+  the built-in set is what the daemon ships with.
 
 ## Declaring a graph
 

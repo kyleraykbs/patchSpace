@@ -115,3 +115,5 @@ one of the two defines the unit.
 * The same operational notes as [nixos.md](./nixos.md#operational-notes) apply: one daemon per
   session, socket in `$XDG_RUNTIME_DIR`, never run it as root, and re-lock `path:` inputs after
   every edit to the patch tree.
+* Modules are the daemon's, not the scope's: whichever scope owns the unit owns the daemon that
+  runs them (see "What the module does" in [nixos.md](./nixos.md)).
