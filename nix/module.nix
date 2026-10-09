@@ -30,7 +30,11 @@ let
 
   system = pkgs.stdenv.hostPlatform.system;
   defaultDaemon = self.packages.${system}.patchspace-daemon;
-  defaultClient = self.packages.${system}.patchspace;
+  # The client is its own repo/flake (see agents/PLAN.md phase 7), so this
+  # module does not supply one: a configuration that installs it says where it
+  # comes from (`clientPackage`).  Until that split lands, this flake's own GUI
+  # package is the obvious value to pass.
+  defaultClient = null;
   repairTool = self.packages.${system}.patchspace-repair;
 
   # Node type keys the daemon knows (central/main.py's NODE_TYPE_REGISTRY).  An enum
@@ -438,14 +442,28 @@ in
         the `.desktop` entry and icon travelling in its package.  Installing
         it here means `services.patchspace.enable = true` is the whole
         configuration; set this to false if you install the client yourself.
+
+        The client is its own flake, so a configuration that installs it says
+        where it comes from:
+
+        ```nix
+        services.patchspace.clientPackage =
+          inputs.patchSpaceGui.packages.${pkgs.system}.patchspace;
+        ```
       '';
     };
 
     clientPackage = mkOption {
-      type = types.package;
+      type = types.nullOr types.package;
       default = defaultClient;
-      defaultText = literalExpression "the patchspace GUI from this flake";
-      description = "The GUI installed when `installClient` is set.";
+      defaultText = literalExpression "null";
+      description = ''
+        The GUI installed when `installClient` is set.  `null` (the default)
+        means this module cannot know it — the client is its own flake, so a
+        configuration that wants it installed points this at that flake's
+        `patchspace` package.  `installClient` on with this left null is an
+        evaluation error, not a silent no-op.
+      '';
     };
 
     socket = mkOption {
@@ -653,12 +671,12 @@ in
       home.sessionVariables = mkIf (canvasOpacity != null) {
         PATCHSPACE_CANVAS_OPACITY = toString canvasOpacity;
       };
-      home.packages = mkIf cfg.installClient [ cfg.clientPackage ];
+      home.packages = mkIf (cfg.installClient && cfg.clientPackage != null) [ cfg.clientPackage ];
     } else {
       environment.sessionVariables = mkIf (canvasOpacity != null) {
         PATCHSPACE_CANVAS_OPACITY = toString canvasOpacity;
       };
-      environment.systemPackages = mkIf cfg.installClient [ cfg.clientPackage ];
+      environment.systemPackages = mkIf (cfg.installClient && cfg.clientPackage != null) [ cfg.clientPackage ];
     })
 
     {
@@ -704,6 +722,19 @@ in
           message = ''
             services.patchspace declares node(s) with no type, and no import
             provides one: ${typelessNodes}
+          '';
+        }
+        {
+          assertion = !(cfg.installClient && cfg.clientPackage == null);
+          message = ''
+            services.patchspace.installClient is on but clientPackage is null.
+            The GUI is its own flake, so say where it comes from:
+
+              services.patchspace.clientPackage =
+                inputs.patchSpaceGui.packages.''${pkgs.system}.patchspace;
+
+            (or this flake's own `packages.patchspace` until the split lands),
+            or set installClient = false to install the client yourself.
           '';
         }
       ];

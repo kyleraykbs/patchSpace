@@ -283,7 +283,7 @@
                   module = import ./nix/module.nix;
                   patchspace = cfg: cfg.services.patchspace;
 
-                  nixosScope = hmUsers: pkgs.lib.evalModules {
+                  nixosScope = extra: hmUsers: pkgs.lib.evalModules {
                     specialArgs = { inherit pkgs; lib = pkgs.lib; };
                     modules = [
                       (module { inherit self; homeManager = false; })
@@ -322,15 +322,25 @@
                         };
                         config.home-manager.users = hmUsers;
                       }
-                    ];
+                    ] ++ extra;
                   };
 
                   # The NixOS scope alone: it owns the unit.
-                  alone = nixosScope { };
+                  alone = nixosScope [ ] { };
+
+                  # The same scope with a client package named: the "the client
+                  # is its own flake" assertion must then be satisfied.
+                  withClient = nixosScope [
+                    { config.services.patchspace.clientPackage = pkgs.hello; }
+                  ] { };
+
+                  # Assertions only fire when something forces them; this is
+                  # the forcing (a real host reads config.assertions).
+                  clientErrors = cfg: pkgs.lib.filter (a: !a.assertion) cfg.config.assertions;
 
                   # A home-manager user that enables patchspace: the user scope
                   # now owns it, and the NixOS scope must define no unit at all.
-                  claimed = nixosScope {
+                  claimed = nixosScope [ ] {
                     kyle.services.patchspace.enable = true;
                   };
 
@@ -391,6 +401,13 @@
                      else "a NixOS-only configuration did not define the daemon")
                     (if solo.nodes.from_nixos.type == "gate" then null
                      else "a NixOS-only configuration did not generate its panel")
+                    # The client is its own flake: installing it without saying
+                    # where it comes from is an evaluation error, and naming it
+                    # satisfies that.
+                    (if pkgs.lib.length (clientErrors alone) == 1 then null
+                     else "installClient with no clientPackage should be an evaluation error")
+                    (if pkgs.lib.length (clientErrors withClient) == 0 then null
+                     else "naming the client package should satisfy the assertion")
                   ];
                 in
                 if problems == [ ]
