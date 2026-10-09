@@ -11,8 +11,13 @@ nix develop -c python -m py_compile src/<changed files>      # syntax gate
 cd src && nix develop ../ -c python -m pytest -q             # ~270 tests, ~7s, headless
 ```
 
-* `git status` is always noisy: **`.pyc` files are tracked** (no `.gitignore`) and pytest
-  dirties them.  Stage explicit source paths only, never `git add -A`.
+* `.gitignore` (added 2026-10-09) excludes `__pycache__/`, `*.pyc`, `.pytest_cache/` —
+  bytecode is **no longer tracked**.  The tree still frequently carries the user's own
+  uncommitted work (`gui/*`, `.opencode/`, `org.patchspace.xcf`): check `git status` first.
+* **`git commit -- <path>` writes the WORKTREE state of those paths, not the index.**  So
+  (a) a `git rm --cached` (untracking bytecode) is silently undone by the next pathspec
+  commit that covers the path, and (b) a bare `git commit --amend` sweeps in everything
+  else staged.  Land a deletion by committing the index with nothing else staged.
 * The tree frequently carries the user's own uncommitted work in `main.py`, `pwnodes.py`,
   `gui/*` — check `git diff` before committing so you don't sweep it into your commit.
 
@@ -732,3 +737,19 @@ every `pw-link` exited 0 and `pw-link -l` lists all of them).  Detection is by
 `audio.channel == "MONO"` only (`pwmatch.MONO_CHANNEL`): a single port with *no* channel -
 a filter-chain module's bare `Input`/`Output` - is still skipped by
 `port_groups_for_node`, unchanged.
+
+## 2026-10-09 — three-layer plan, phase 0 (repo surgery)
+
+* Plan of record: `agents/PLAN.md` (approved).  `patch` -> **patchSpace** on disk; the GUI
+  becomes `~/projects/patchSpaceGui` in phase 7.
+* Tree now: `src/central/*` (daemon core) + `src/modules/pipewire/*` (pw substrate) +
+  `src/gui/*`.  Everything imports with `src/` as the import root: `central.main`,
+  `modules.pipewire.pwgraph`.  Entry points are `python -m central.main` and
+  `python -m central.session_repair` (flake wrappers set `PYTHONPATH=${source}`); the GUI's
+  dev-spawn runs `[sys.executable, "-m", "central.main"]` with `cwd=<checkout>/src`.
+* `PipewireGraph._is_daemon_process` matches BOTH dev entry shapes (`main.py` from an old
+  daemon, `central.main` from a new one) - the orphan-helper guard depends on it.
+* 90 bytecode files untracked; `git ls-files | grep -c pyc` is 0.
+* Suite: 357 passed, 28 skipped headless (the 9 GUI files still segfault without a display).
+* mycelion's `patchspace` input is the **github** url (its `path:` line is commented out),
+  so this split only reaches a host after a push + `nix flake update patchspace` there.

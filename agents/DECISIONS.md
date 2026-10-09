@@ -47,3 +47,19 @@
   (no ports, no links - also probed).
 - Reversible: yes (argv shape only).
 
+
+## [2026-10-09] Packages under src/: central/ + modules/pipewire/
+- Decision: daemon core in `src/central/`, PipeWire substrate in `src/modules/pipewire/`;
+  imports resolve with `src/` as the import root (`central.*`, `modules.pipewire.*`), and the
+  packaged entry points are `python -m central.main` / `python -m central.session_repair`
+  (wrappers export `PYTHONPATH=${source}`).
+- Why: agents/PLAN.md's three-layer split needs the seam visible before the module-API work
+  starts; `-m` execution keeps the working directory out of the contract.
+- Reversible: yes (a move plus an import rewrite).
+
+## [2026-10-09] Bytecode untracked
+- Decision: `.gitignore` excludes `__pycache__/`, `*.pyc`, `.pytest_cache/`; 90 tracked
+  bytecode files were removed from the index.
+- Why: pyc churn polluted every `git status`, and LLM_README's "stage only source files"
+  warning was a workaround for it.
+- Reversible: yes.
