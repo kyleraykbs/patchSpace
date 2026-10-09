@@ -128,6 +128,8 @@ from central.pwnodes import (
 
 from central import session_repair
 from central import panels
+from central import migrations
+from modules.pipewire import module as pw_module
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
@@ -559,6 +561,9 @@ class PatchSpaceDaemon:
         self.registry = registry_mod.Registry()
         self.topology = graph_mod.Graph()
         self._protocol = protocol_mod.ProtocolHandler(self.registry)
+        #: The built-in module host, attached by `attach_modules` (None
+        #: until then; a test can drive the registry without a module).
+        self._pw_module: Optional[pw_module.PipewireModule] = None
 
         self._running = False
         self._clients: set[socket.socket] = set()
@@ -817,6 +822,14 @@ class PatchSpaceDaemon:
         # doesn't fire a reload on top of the startup load (which refreshes
         # this snapshot again when it finishes).
         self._panel_mtimes = panels.snapshot(self._panel_dir_paths())
+
+        # Attach the built-in modules before the session load, so the
+        # load's registry sync can announce the nodes it creates (a module
+        # attached later would only see the next sync).
+        try:
+            self.attach_modules()
+        except Exception:
+            logger.exception("attaching the built-in modules failed")
 
         # Load the saved session on a background thread.  Bringing up a
         # session's backed effect nodes is slow (up to
@@ -3656,6 +3669,15 @@ class PatchSpaceDaemon:
                 self.space.supervise()
 
         self._dirty = True
+        # Mirror what just landed into the registry and let the module
+        # re-announce: this is the step that turns a loaded session into
+        # online nodes (and a node whose module is missing into the gray
+        # one).  Cheap, idempotent, and only about identity/status — the
+        # nodes themselves are untouched.
+        try:
+            self.sync_registry()
+        except Exception:
+            logger.exception("registry sync after session load failed")
         logger.info(
             "Session load complete: %d node(s) created, %d updated, %d edge(s) "
             "wired (%d node failure(s), %d not-ready, %d edge failure(s), "
@@ -5594,6 +5616,107 @@ class PatchSpaceDaemon:
                 return
 
     # ------------------------------------------------------------------
+    # the module layer (agents/PLAN.md phase 1)
+    # ------------------------------------------------------------------
+
+    def module_inventory(self) -> List[dict]:
+        """Announce-shaped records for the public nodes right now.
+
+        The module is handed this rather than reaching into the daemon, so
+        phase 3 can move it to its own process: the inventory then comes
+        from the module's own graph instead.
+        """
+        with self._lock:
+            nodes = [
+                self.space.nodes[nid]
+                for nid in self.space.public_nodes
+                if nid in self.space.nodes
+            ]
+        records: List[dict] = []
+        for node in nodes:
+            type_key = CLASS_TO_TYPE.get(type(node), "")
+            if type_key not in NODE_TYPE_REGISTRY:
+                continue
+            placement = self.topology.placement(str(node.id))
+            records.append({
+                "instance_id": str(node.id),
+                "type_id": type_key,
+                "space": placement.space if placement else "main",
+                "config": self._export_node_params(str(node.id), node)["params"],
+                # Phase 4 gives nodes real dependencies (a sandwich's
+                # interior, a space's face ports); nothing declares one yet.
+                "requires": [],
+            })
+        return records
+
+    def sync_registry(self) -> dict:
+        """Mirror the live nodes into the registry, then let the attached
+        module announce.
+
+        Every public node becomes a placement (id, type, space, config) so
+        it survives in the graph even with no module behind it; the module's
+        announce then binds the ones it runs.  Nodes that vanished are
+        dropped from the placements.
+        """
+        with self._lock:
+            live = {str(nid) for nid in self.space.public_nodes}
+            for node_id in live:
+                node = self.space.nodes.get(node_id)
+                if node is None:
+                    continue
+                type_key = CLASS_TO_TYPE.get(type(node), "")
+                if type_key not in NODE_TYPE_REGISTRY:
+                    continue
+                placement = self.topology.placement(node_id)
+                if placement is None:
+                    self.topology.place(
+                        node_id,
+                        space="main",
+                        x=float(getattr(node, "x", 0.0) or 0.0),
+                        y=float(getattr(node, "y", 0.0) or 0.0),
+                        anchored=bool(getattr(node, "anchored", False)),
+                    )
+                self.registry.place(
+                    node_id,
+                    type_key,
+                    space=self.topology.placement(node_id).space,
+                    config=self._export_node_params(node_id, node)["params"],
+                )
+        for instance in list(self.registry.instances()):
+            # Only forget what the module was actually running and has now
+            # dropped: an unannounced placement is the gray node the user
+            # keeps, and deleting one is an explicit action (phase 4/6).
+            if instance.declared_by and instance.instance_id not in live:
+                self.registry.forget_instance(instance.instance_id)
+                self.topology.forget(instance.instance_id)
+        if self._pw_module is not None:
+            return self._pw_module.announce()
+        return {}
+
+    def attach_modules(self, enabled: Optional[List[str]] = None) -> dict:
+        """Attach the built-in modules (phase 6 makes the set configurable;
+        today it is the PipeWire provider alone)."""
+        if self._pw_module is None:
+            self._pw_module = pw_module.PipewireModule(
+                self._protocol,
+                type_map=NODE_TYPE_REGISTRY,
+                inventory=self.module_inventory,
+                migrate_config=migrations.migrate,
+            )
+        return self._pw_module.attach()
+
+    def detach_modules(self) -> None:
+        """Disable every module: their nodes go offline, the placements
+        and the graph stay."""
+        if self._pw_module is not None:
+            self._pw_module.detach()
+
+    def module_status(self) -> dict:
+        """The registry view (modules, declared types, instances and their
+        status) — what a display or an app would be served."""
+        return self.registry.snapshot()
+
+    # ------------------------------------------------------------------
     # command dispatch
     # ------------------------------------------------------------------
 
@@ -5724,6 +5847,13 @@ class PatchSpaceDaemon:
         except Exception as exc:
             logger.exception("Command %s failed", command)
             return {"status": "error", "message": str(exc)}
+        if command in ("add_node", "remove_node"):
+            # Keep the module view honest for the nodes the user just
+            # changed (the load path syncs on its own at the end).
+            try:
+                self.sync_registry()
+            except Exception:
+                logger.exception("registry sync after %s failed", command)
         return response
 
     # ------------------------------------------------------------------

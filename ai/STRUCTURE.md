@@ -45,8 +45,29 @@ entry points are `python -m central.main` / `python -m central.session_repair`.
 | Daemon | `central/main.py` | Socket protocol, node factory (`NODE_TYPE_REGISTRY`/`_create_node`), property handling, session load, watchdogs, built-in devices. |
 | Config | `central/migrations.py`, `central/session_repair.py`, `central/apply_config.py`, `central/export_config.py`, `central/patchspace_cli.py` | Versioned node migrations; validate/repair a session; CLI import/export. |
 
+## The module layer (agents/PLAN.md phase 1)
+
+The PipeWire-agnostic core is in place; the PipeWire machinery is not yet
+extracted, but it now goes through the module API:
+
+| Piece | File | Job |
+|---|---|---|
+| Vocabulary | `central/module_api.py` | Roles (`module`/`display`/`app`), message shapes, validation. JSON-stable: phase 3 puts it on a socket unchanged. |
+| Catalogue | `central/registry.py` | Attached modules, declared types, instances; the status model (`online`/`offline_module`/`offline_dep`/`unbacked`), the `requires` closure, migration handoff, capability queries, `port_kind`/`port_multi` for the graph rules. |
+| Structure | `central/graph.py` | Spaces, placements, edges, and the **single connection authority** (`kinds_compatible` + the one-driver rule). Edge ids equal `PatchSpace._edge_id`, so persisted sessions survive. |
+| Wire | `central/protocol.py` | Daemon side of the API: `hello` + role gating, `type_declare` → one `migrate` per persisted instance → `migrate_result` → `node_announce`, `registry_query`, and module drop-off (a dead socket offlines its nodes). |
+| Provider | `modules/pipewire/declarations.py` | The node type catalog, generated from `gui/node_specs.py` + `NODE_TYPE_REGISTRY` while both exist (an agreement test keeps them in step; phase 2 makes this the source). |
+| Provider | `modules/pipewire/module.py` | The in-process module: greets through the same handler a socket client would use, answers migrations, announces the inventory the daemon hands it, and answers `control_set`/`edge_apply`. |
+
+The daemon's `handle_command` routes on the message shape: `"type"` is the
+module API, `"command"` is the legacy GUI protocol — both work, which is how
+the GUI keeps running while the core lands. `sync_registry()` mirrors the
+live nodes into the registry (a placement each), and the module's announce
+binds the ones it runs; a placement nothing provides stays `unbacked` — the
+gray node — and is never swept by a sync.
+
 Note: `central/session_repair.py` still imports `gui.node_specs` for type/port
-knowledge — one of the three mirrors the plan collapses into the daemon registry
+knowledge — one of the three mirrors the plan collapses into the registry
 (phase 2).
 
 ## The one big idea

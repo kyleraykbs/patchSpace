@@ -63,3 +63,52 @@
 - Why: pyc churn polluted every `git status`, and LLM_README's "stage only source files"
   warning was a workaround for it.
 - Reversible: yes.
+
+## [2026-10-09] The module API is one dict vocabulary, and the legacy protocol stays
+- Decision: messages are plain JSON-able dicts built in `central/module_api.py`;
+  a message with a `"type"` key is module API, `{"command": ...}` is the legacy
+  GUI protocol, and both are served by `handle_command`.  Roles
+  (`module`/`display`/`app`) are set by `hello` per connection.
+- Why: one vocabulary is what phase 3 sends over a socket unchanged; keeping
+  the legacy shape serving means the GUI never has to be ported in the same
+  commit as the core.
+- Reversible: yes (the legacy branch is one `if`).
+
+## [2026-10-09] Status is the daemon's, health is the module's
+- Decision: `online` / `offline_module` / `offline_dep` / `unbacked` are computed
+  by `central/registry.py` from module connectivity and the `requires` closure;
+  a module only reports health (`ok`/`starting`/`dead`) about instances it runs.
+- Why: the gray-node semantics (module missing vs module disabled vs dependency
+  down) are graph-level facts; letting a module decide its own liveness would
+  put the same judgement in every module.
+- Reversible: yes.
+
+## [2026-10-09] Structure in graph.py, identity in registry.py, one connection authority
+- Decision: the registry owns instances (id, type, config, status); `central/graph.py`
+  owns spaces, placements and edges, and holds the only copy of the connection rules
+  (`kinds_compatible` + the single-driver rule; port kinds resolved via
+  `Registry.port_kind`).  The rule is stricter than the legacy one: only declared
+  kinds pair, except audio/bundle which interoperate.
+- Why: the legacy rule let an unknown kind pair with anything, which a numeric
+  primitive cannot live with; and the three-mirror problem (model, `node_specs`,
+  `session_repair`) ends when there is one authority.
+- Reversible: yes.
+
+## [2026-10-09] The PipeWire catalog is generated while both sources exist
+- Decision: `modules/pipewire/declarations.py` builds the type catalog from
+  `gui/node_specs.py` (ports, labels, category, colour) + `NODE_TYPE_REGISTRY`,
+  and `tests/test_pipewire_declarations.py` asserts the two agree for every type.
+  Phase 2 moves the data into the module and deletes the import.
+- Why: no copy to drift; a new node type without a declaration fails the suite
+  instead of producing a node a display cannot draw.  Specific port families
+  (boolean/impulse/…) win over the generic `inputs`/`outputs` list, because a
+  gate lists "ctrl" in both.
+- Reversible: yes.
+
+## [2026-10-09] The in-process module talks through the protocol handler
+- Decision: `modules/pipewire/module.py` holds no daemon reference; the daemon
+  hands it an inventory callable and it sends real module-API messages through
+  `ProtocolHandler.handle`, exactly as a socket client would.
+- Why: phase 3 becomes a transport swap, not a rewrite.  The module process then
+  owns its own graph and the callable disappears.
+- Reversible: yes.

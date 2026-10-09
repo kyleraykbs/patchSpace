@@ -384,6 +384,18 @@ class Registry:
                 instance.config = dict(config)
             return True
 
+    def forget_instance(self, instance_id: str) -> bool:
+        """Drop an instance entirely (its node was deleted, not merely
+        offline).  A placement alone is not forgotten by accident: the
+        daemon calls this only for instances a module was running."""
+        with self._lock:
+            instance = self._instances.pop(instance_id, None)
+            if instance is not None and instance.declared_by:
+                record = self._modules.get(instance.declared_by)
+                if record is not None:
+                    record.instances.discard(instance_id)
+            return instance is not None
+
     def instance(self, instance_id: str) -> Optional[InstanceRecord]:
         with self._lock:
             return self._instances.get(instance_id)
