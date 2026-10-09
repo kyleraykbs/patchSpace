@@ -80,7 +80,12 @@ class PipewireModule:
         if reply.get("type") != "hello_ok":
             raise RuntimeError(f"pipewire module refused: {reply}")
         catalog = declarations.declarations(self.type_map)
-        replies = self._call(api.type_declare(catalog))
+        replies = self._call(api.type_declare(
+            catalog,
+            menu=declarations.menu(),
+            vocabulary=declarations.vocabulary(),
+            aliases=declarations.legacy_aliases(),
+        ))
         migrated = 0
         for message in replies if isinstance(replies, list) else [replies]:
             if message.get("type") == "migrate":

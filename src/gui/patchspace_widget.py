@@ -16,8 +16,8 @@ different event handlers with no guarantee they stayed in sync.
 
 Node-type-specific behavior (what sockets a type has, what inline
 control/field it draws, its display label) all comes from
-node_specs.NODE_TYPE_SPECS instead of being duplicated across
-if/elif chains here.
+node_catalog (what the daemon's modules declare) instead of being
+duplicated across if/elif chains here.
 """
 
 from __future__ import annotations
@@ -84,7 +84,7 @@ from wire_router import (
     simplify as wire_simplify,
 )
 from view_mixin import GraphViewMixin
-from node_specs import (
+from node_catalog import (
     ADD_NODE_MENU_ITEMS,
     ADD_NODE_CATEGORIES,
     FIELD_LABELS,
@@ -955,7 +955,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
 
     # ---------- Sensitivity Gate slider ----------
     # The Sensitivity Gate's own live LADSPA threshold isn't reliable on
-    # every build (see node_specs.py's sensitivity_gate spec comment), so
+    # every build (see node_catalog.py's sensitivity_gate spec comment), so
     # the slider does NOT touch the gate's threshold directly. Instead the
     # daemon invisibly brackets every Sensitivity node with two hidden
     # VolumeProcessNodes - a pre-boost and a reciprocal post-cut (see
@@ -1815,7 +1815,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
                     if value is not None:
                         node["wet_dry"] = value
                 # Sensitivity Gate's `level` is now a Settings-dialog-
-                # only static value (see node_specs.py) - no longer
+                # only static value (see node_catalog.py) - no longer
                 # touched by dragging the node's inline slider (that
                 # slider drives _apply_sensitivity_slider instead), so
                 # there's no "pending" value of our own to guard
@@ -4620,7 +4620,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         lands on - 0 for every single-input node type (and the
         common case even for a multi-input one), only different when
         the edge's to_port names a later socket (e.g. EchoCancelNode's
-        "probe", index 1 - see node_specs.NODE_TYPE_SPECS["echo_cancel"]
+        "probe", index 1 - see node_catalog.NODE_TYPE_SPECS["echo_cancel"]
         and Edge.to_port in patchSpace.py). Falls back to 0 for a
         to_port that isn't (or isn't yet) one of the target's declared
         inputs, so a stale/renamed port never crashes rendering."""
@@ -4723,7 +4723,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         "sensitivity". It sends the value to the daemon (which drives the
         hidden pre/post Volume nodes it owns) rather than to this node's
         own threshold - see _apply_sensitivity_slider and
-        node_specs.py's sensitivity_gate spec comment for why."""
+        node_catalog.py's sensitivity_gate spec comment for why."""
         for nid, node in self._hit_nodes(x, y):
             if spec_for(node["type"]).control != "sensitivity":
                 continue
@@ -4762,7 +4762,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         """Which extra bottom rows this specific device/app node
         currently needs - depends on live connection state, not just
         node type, so this is computed fresh rather than looked up
-        from node_specs. Used identically by drawing and hit-testing
+        from node_catalog. Used identically by drawing and hit-testing
         below, so a row can never be drawn without also being
         clickable."""
         ntype = node["type"]
@@ -5757,7 +5757,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         is_wiring = (not is_offline) and (nid in self.nodes_pending_wiring)
         # Stable, category-assigned theme color - same type always gets
         # the same border, and it comes from the GTK theme rather than a
-        # per-process hash (see node_specs.color_name_for_node_type).
+        # per-process hash (see node_catalog.color_name_for_node_type).
         border_color = theme_color(
             self, color_name_for_node_type(node["type"]), pal["node_border"]
         )
@@ -7571,7 +7571,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
             # selection (see _show_choice_popover) instead of an Entry
             # the user could type an invalid raw class string into.
             # Which choices make sense depends on direction (source vs
-            # target - see node_specs.media_class_choices_for).
+            # target - see node_catalog.media_class_choices_for).
             def on_pick(value):
                 self._send_property(node_id, field, value)
                 self.schedule_refresh()
@@ -9687,7 +9687,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         popover.popdown()
         self.show_settings_dialog(node_id)
 
-    # ---------- settings dialog (data-driven from node_specs) ----------
+    # ---------- settings dialog (data-driven from node_catalog) ----------
 
     @staticmethod
     def _labeled_row(label_text, widget):
@@ -9821,7 +9821,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # Field entry (for text fields), or a dropdown of human-
         # readable names for media_class (a fixed set of raw
         # PipeWire media.class strings, direction-dependent - see
-        # node_specs.media_class_choices_for). _on_settings_response
+        # node_catalog.media_class_choices_for). _on_settings_response
         # tells the two apart via spec.field rather than isinstance(),
         # since that's the same thing it already checks to decide
         # which property to send.
@@ -9936,7 +9936,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         if is_mute_node(old_id) and not is_mute_node(new_id):
             # A mute switch is told apart from a plain volume slider
             # purely by its "mute_" id prefix (see
-            # node_specs.is_mute_node) - losing the prefix would
+            # node_catalog.is_mute_node) - losing the prefix would
             # silently turn it back into a slider.
             return "Mute switch IDs must start with \u201cmute_\u201d."
         return None
@@ -11835,7 +11835,7 @@ class PatchSpaceGraphWidget(Gtk.DrawingArea, GraphViewMixin):
         # "Mute Switch" is a real "volume" node under the hood (so it
         # actually attenuates audio via the backing volume processor),
         # just presented with a checkbox instead of a slider - told
-        # apart purely by its id prefix (see node_specs.is_mute_node),
+        # apart purely by its id prefix (see node_catalog.is_mute_node),
         # no backend changes needed.
         is_mute = node_type == "mute"
         real_type = "volume" if is_mute else node_type

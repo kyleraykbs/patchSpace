@@ -37,6 +37,7 @@ from socket_client import PatchSpaceClient
 from daemon_control import DaemonManager
 from pipewire_widget import PipeWireGraphWidget
 from patchspace_widget import PatchSpaceGraphWidget
+import node_catalog
 
 logger = logging.getLogger(__name__)
 
@@ -311,6 +312,9 @@ class MainWindow(Gtk.ApplicationWindow):
 
         self._daemon_connected = self.client.is_connected()
         self._disconnected_badge.set_visible(not self._daemon_connected)
+        #: Whether this connection has asked for the node-type catalog yet
+        #: (reset on every connect; see _request_catalog).
+        self._catalog_requested = False
 
         # Update the badge the instant the client's connection flips
         # (the client redials on its own), with the periodic poll below
@@ -1037,10 +1041,28 @@ class MainWindow(Gtk.ApplicationWindow):
             self._disconnected_badge.set_visible(not connected)
         if connected:
             # Fresh connection (or a reconnected daemon): pull a snapshot
-            # now instead of waiting for the next poll.
+            # now instead of waiting for the next poll, and ask for the
+            # node-type catalog (what this GUI draws from — see
+            # node_catalog).  Re-asked per connection because a reconnect
+            # may be a different daemon with different modules.
+            self._catalog_requested = False
+            self._request_catalog()
             self.pw_widget.refresh()
             self.ps_widget.refresh()
         return False
+
+    def _request_catalog(self):
+        """Greet as a display and ask for the catalog, once per connection.
+
+        The daemon serves the module API on the same socket as the legacy
+        `command` protocol; a message with a `type` key is the module API,
+        so this needs no second connection."""
+        if self._catalog_requested or not self.client.is_connected():
+            return
+        self._catalog_requested = True
+        self.client.send({"type": "hello", "proto": 1, "role": "display",
+                          "name": "patchspaceGui", "version": ""})
+        self.client.send({"type": "catalog_request"})
 
     def _set_canvas_translucency(self, on):
         """The canvas is see-through only when the alpha says so; the class is
@@ -1344,6 +1366,15 @@ class MainWindow(Gtk.ApplicationWindow):
             try:
                 if "graph" in resp:
                     self.pw_widget.update_graph(resp["graph"])
+                elif resp.get("type") == "catalog_reply":
+                    # What every module provides: the canvas draws from it
+                    # (see node_catalog), so an unknown module's nodes
+                    # render with their declared ports and controls.
+                    node_catalog.install(resp.get("types") or [],
+                                         resp.get("menu") or [],
+                                         resp.get("vocabulary") or {},
+                                         resp.get("aliases") or {})
+                    self.ps_widget.queue_draw()
                 elif "devices" in resp:
                     self.ps_widget.on_hardware_devices(resp["devices"])
                 elif "peaks" in resp:

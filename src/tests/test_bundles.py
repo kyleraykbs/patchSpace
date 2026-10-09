@@ -610,25 +610,25 @@ def test_daemon_registers_and_serializes_bundle_types():
     assert c1["invert"] is True
 
 
-def test_node_specs_declare_bundle_and_filter_ports():
-    from gui import node_specs
+def test_node_catalog_declares_bundle_and_filter_ports():
+    import node_catalog
 
-    assert node_specs.port_kind("all_inputs", "out", "out") == "bundle"
-    assert node_specs.port_kind("all_outputs", "out", "out") == "bundle"
-    assert node_specs.port_kind("filter", "bundle", "in") == "bundle"
-    assert node_specs.port_kind("filter", "out", "out") == "bundle"
-    assert node_specs.port_kind("filter", "filter1", "in") == "filter"
-    assert node_specs.port_kind("filter", "filter9", "in") == "filter"
-    assert node_specs.port_kind("regex_classifier", "out", "out") == "filter"
-    assert node_specs.port_kind("bundle_to_audio", "in", "in") == "bundle"
-    assert node_specs.port_kind("bundle", "in1", "in") == "bundle"
+    assert node_catalog.port_kind("all_inputs", "out", "out") == "bundle"
+    assert node_catalog.port_kind("all_outputs", "out", "out") == "bundle"
+    assert node_catalog.port_kind("filter", "bundle", "in") == "bundle"
+    assert node_catalog.port_kind("filter", "out", "out") == "bundle"
+    assert node_catalog.port_kind("filter", "filter1", "in") == "filter"
+    assert node_catalog.port_kind("filter", "filter9", "in") == "filter"
+    assert node_catalog.port_kind("regex_classifier", "out", "out") == "filter"
+    assert node_catalog.port_kind("bundle_to_audio", "in", "in") == "bundle"
+    assert node_catalog.port_kind("bundle", "in1", "in") == "bundle"
     # Dynamic merge inputs (in2, ...) are bundles too.
-    assert node_specs.port_kind("bundle", "in7", "in") == "bundle"
-    assert node_specs.port_kind("bundle", "out", "out") == "bundle"
-    assert node_specs.port_kind("bundle_split", "in", "in") == "bundle"
+    assert node_catalog.port_kind("bundle", "in7", "in") == "bundle"
+    assert node_catalog.port_kind("bundle", "out", "out") == "bundle"
+    assert node_catalog.port_kind("bundle_split", "in", "in") == "bundle"
     # A Split Bundle's member outputs are ordinary audio.
-    assert node_specs.port_kind("bundle_split", "alpha", "out") == "audio"
-    assert node_specs.port_kind("bundle_output", "bundle", "in") == "bundle"
+    assert node_catalog.port_kind("bundle_split", "alpha", "out") == "audio"
+    assert node_catalog.port_kind("bundle_output", "bundle", "in") == "bundle"
     # Every new type has a spec and a menu description.
     for node_type in (
         "all_inputs", "all_outputs", "all_apps", "filter", "bundle",
@@ -636,22 +636,22 @@ def test_node_specs_declare_bundle_and_filter_ports():
         "media_class_classifier", "description_classifier",
         "external_only_classifier",
     ):
-        assert node_type in node_specs.NODE_TYPE_SPECS
-        assert node_type in node_specs.NODE_DESCRIPTIONS
+        assert node_type in node_catalog.NODE_TYPE_SPECS
+        assert node_catalog.description_for(node_type), node_type
 
 
-def test_node_specs_ports_compatible_matches_daemon_rules():
-    from gui import node_specs
+def test_node_catalog_ports_compatible_matches_daemon_rules():
+    import node_catalog
 
     # Bundle <-> audio either way.
-    assert node_specs.ports_compatible("all_inputs", "out", "app_output", "in")
-    assert node_specs.ports_compatible("app_input", "out", "filter", "in")
+    assert node_catalog.ports_compatible("all_inputs", "out", "app_output", "in")
+    assert node_catalog.ports_compatible("app_input", "out", "filter", "in")
     # Filter only with filter.
-    assert node_specs.ports_compatible("regex_classifier", "out", "filter", "filter")
-    assert not node_specs.ports_compatible("regex_classifier", "out", "app_output", "in")
+    assert node_catalog.ports_compatible("regex_classifier", "out", "filter", "filter")
+    assert not node_catalog.ports_compatible("regex_classifier", "out", "app_output", "in")
     # Boolean only with boolean.
-    assert node_specs.ports_compatible("boolean_switch", "out", "gate", "ctrl")
-    assert not node_specs.ports_compatible("all_inputs", "out", "gate", "ctrl")
+    assert node_catalog.ports_compatible("boolean_switch", "out", "gate", "ctrl")
+    assert not node_catalog.ports_compatible("all_inputs", "out", "gate", "ctrl")
 
 
 def test_daemon_serializes_merge_bundle_inputs():

@@ -9,6 +9,7 @@ touch a live session; `start()` is never called.
 
 from central import module_api as api
 from central.main import NODE_TYPE_REGISTRY, PatchSpaceDaemon
+from central.protocol import Connection
 from modules.pipewire import declarations
 
 
@@ -124,3 +125,55 @@ def test_detaching_the_module_offlines_its_nodes_and_keeps_the_graph():
     daemon.attach_modules()
     daemon.sync_registry()
     assert daemon.registry.instance("g1").status == api.STATUS_ONLINE
+
+
+def test_a_display_gets_the_catalog_and_the_graph_snapshot():
+    """What phase 2's GUI consumes: the type catalog once, then the graph
+    (identity, status, position, edges) whenever it asks."""
+    daemon = fresh_daemon()
+    daemon.attach_modules()
+    add_node(daemon, "gate", "g1")
+    add_node(daemon, "regex_input", "in1", pattern=".*")
+    daemon.topology.connect(
+        "in1", "g1", "audio", "out",
+        kind_of=daemon.registry.port_kind,
+        multi_of=daemon.registry.port_multi,
+    )
+
+    display = Connection()
+    assert daemon.handle_command(api.catalog_request(), display)["type"] == "error"
+    daemon.handle_command(api.hello(api.ROLE_DISPLAY, "patchspaceGui"), display)
+
+    catalog = daemon.handle_command(api.catalog_request(), display)
+    assert catalog["type"] == "catalog_reply"
+    assert len(catalog["types"]) == len(declarations.canonical_types(NODE_TYPE_REGISTRY))
+    gate = next(t for t in catalog["types"] if t["type_id"] == "gate")
+    assert any(p["name"] == "ctrl" and p["kind"] == "boolean" for p in gate["ports"])
+
+    snapshot = daemon.handle_command(api.snapshot_request(), display)
+    assert snapshot["type"] == "snapshot_reply"
+    by_id = {i["instance_id"]: i for i in snapshot["instances"]}
+    assert set(by_id) == {"g1", "in1"}
+    assert by_id["g1"]["status"] == api.STATUS_ONLINE
+    assert by_id["g1"]["type_id"] == "gate"
+    placements = {p["instance_id"]: p for p in snapshot["placements"]}
+    assert set(placements) == {"g1", "in1"}
+    assert placements["g1"]["space"] == "main"
+    assert [e["id"] for e in snapshot["edges"]] == ["in1->g1:audio"]
+    assert [s["space_id"] for s in snapshot["spaces"]] == ["main"]
+
+
+def test_the_snapshot_reports_a_gray_node_as_unbacked():
+    daemon = fresh_daemon()
+    daemon.attach_modules()
+    daemon.registry.place("ghost_1", "nobody_makes_this")
+    daemon.topology.place("ghost_1", x=40.0, y=10.0)
+
+    display = Connection()
+    daemon.handle_command(api.hello(api.ROLE_DISPLAY, "patchspaceGui"), display)
+    snapshot = daemon.handle_command(api.snapshot_request(), display)
+
+    ghost = next(i for i in snapshot["instances"] if i["instance_id"] == "ghost_1")
+    assert ghost["status"] == api.STATUS_UNBACKED
+    placement = next(p for p in snapshot["placements"] if p["instance_id"] == "ghost_1")
+    assert (placement["x"], placement["y"]) == (40.0, 10.0)

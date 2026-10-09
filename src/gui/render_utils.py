@@ -44,7 +44,7 @@ _FALLBACK_BOOLEAN_PORT = (0.55, 0.55, 0.58)
 _FALLBACK_BUNDLE_PORT = (0.55, 0.80, 0.95)
 _FALLBACK_FILTER_PORT = (0.78, 0.62, 0.95)
 _FALLBACK_SOUND_PORT = (0.95, 0.68, 0.35)
-#: A *camera* wire carries live video (see node_specs' camera ports).
+#: A *camera* wire carries live video (see node_catalog' camera ports).
 #: Magenta: the one hue nothing else claims (orange=sound, blue/cyan=
 #: impulse, yellow=bundle, purple=filter), so a video wire can never be
 #: mistaken for another kind.
@@ -174,7 +174,7 @@ def theme_palette(widget) -> dict:
         # gets its own slot: orange, well clear of bundle/filter/audio/boolean.
         "sound_port": _lookup(widget, "orange_3", _FALLBACK_SOUND_PORT),
         # A camera feed is live video - its own kind end to end (see the
-        # camera ports in node_specs).  Pink: distinct from every other
+        # camera ports in node_catalog).  Pink: distinct from every other
         # wire kind, so video never reads as audio or control.
         "camera_port": _lookup(widget, "pink_3", _FALLBACK_CAMERA_PORT),
         # An impulse is a momentary event, not a stream: the theme's own

@@ -282,9 +282,9 @@ def test_a_sound_dump_shows_its_two_fields_on_its_body():
     """Kyle: "Name and folder for sound dump should appear on the node itself
     as two textboxes... and just add the directory selector".  The body owns
     both rows, and the folder row carries the button."""
-    from gui import node_specs
+    import node_catalog
 
-    assert node_specs.spec_for("sound_dump").control == "dump"
+    assert node_catalog.spec_for("sound_dump").control == "dump"
 
     w, client = _widget()
     w.update_from_daemon({
@@ -398,9 +398,9 @@ def test_a_replay_buffer_shows_its_window_on_its_body():
     seconds, it should have a number box with the number of seconds it holds,
     there should be a clip button that when pressed locks in the last 60 seconds
     into its output sound"."""
-    from gui import node_specs
+    import node_catalog
 
-    assert node_specs.spec_for("replay_buffer").control == "replay_buffer"
+    assert node_catalog.spec_for("replay_buffer").control == "replay_buffer"
 
     w, client = _widget()
     w.update_from_daemon({"nodes": {"c1": _clip_node()},
@@ -469,13 +469,13 @@ def test_a_split_bundle_names_its_line_with_a_single_member():
 
     assert w.nodes["s1"]["outputs"] == ["m0"]
     assert w.nodes["s1"]["output_labels"] == {"m0": "Firefox"}, "the name to show"
-    from gui import node_specs
+    import node_catalog
 
-    assert node_specs.spec_for("bundle_split").label_lone_output
+    assert node_catalog.spec_for("bundle_split").label_lone_output
 
     # And it is the *drawn* rule, not just the data: with one socket the label
     # is still wanted.
-    spec = node_specs.spec_for("bundle_split")
+    spec = node_catalog.spec_for("bundle_split")
     assert spec.socket_labels and (len(w.nodes["s1"]["outputs"]) > 1
                                    or spec.label_lone_output)
 
@@ -526,7 +526,7 @@ def test_a_replay_buffer_keeps_the_window_the_daemon_reports():
 def test_the_old_clip_previous_type_key_still_loads():
     """It was renamed to Replay Buffer, so a session saved under the old key has
     to keep working."""
-    import central.main
+    import central.main as main
 
     assert "replay_buffer" in main.NODE_TYPE_REGISTRY
     assert main.NODE_TYPE_REGISTRY.get("clip_previous") is \

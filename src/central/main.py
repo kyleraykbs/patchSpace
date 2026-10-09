@@ -560,7 +560,7 @@ class PatchSpaceDaemon:
         # module extraction moves that under modules/pipewire).
         self.registry = registry_mod.Registry()
         self.topology = graph_mod.Graph()
-        self._protocol = protocol_mod.ProtocolHandler(self.registry)
+        self._protocol = protocol_mod.ProtocolHandler(self.registry, self.topology)
         #: The built-in module host, attached by `attach_modules` (None
         #: until then; a test can drive the registry without a module).
         self._pw_module: Optional[pw_module.PipewireModule] = None

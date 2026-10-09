@@ -1,7 +1,7 @@
 """The PipeWire module's type catalog must describe every node type the
 daemon can construct, and describe it validly.
 
-Phase 2 moved the data out of `gui/node_specs.py` into
+Phase 2 moved the data out of `gui/node_catalog.py` into
 `modules/pipewire/catalog.json`: this is the guard that keeps the module's
 declarations (the only thing a display draws from) in step with the node
 classes the daemon can build.

@@ -31,16 +31,32 @@ DYNAMIC_KINDS = frozenset({"bundle", "filter"})
 
 
 @lru_cache(maxsize=1)
-def _catalog_by_type() -> Dict[str, Dict[str, Any]]:
+def _payload() -> Dict[str, Any]:
     with open(CATALOG_PATH, "r", encoding="utf-8") as handle:
-        payload = json.load(handle)
-    return {entry["type_id"]: entry for entry in payload.get("types", [])}
+        return json.load(handle)
+
+
+@lru_cache(maxsize=1)
+def _catalog_by_type() -> Dict[str, Dict[str, Any]]:
+    return {entry["type_id"]: entry for entry in _payload().get("types", [])}
 
 
 def catalog() -> List[Dict[str, Any]]:
     """Every declared type, sorted by type_id (a fresh list each call)."""
     return [dict(entry) for entry in sorted(_catalog_by_type().values(),
                                             key=lambda t: t["type_id"])]
+
+
+def menu() -> List[Dict[str, Any]]:
+    """The add-node menu: categories in order, each with the types a user
+    may create from it.  Module data, relayed to a display unchanged."""
+    return [dict(group) for group in _payload().get("menu", [])]
+
+
+def vocabulary() -> Dict[str, Any]:
+    """Presentation vocabulary the module owns: field labels and the
+    media.class choice tables."""
+    return dict(_payload().get("vocabulary", {}))
 
 
 def type_decl(type_id: str) -> Dict[str, Any]:
@@ -79,3 +95,9 @@ def declarations(type_map: Mapping[str, type]) -> List[Dict[str, Any]]:
         logger.error("no type declaration for %s", ", ".join(missing))
     wanted = set(canonical_types(type_map))
     return [entry for entry in catalog() if entry["type_id"] in wanted]
+
+
+def legacy_aliases() -> Dict[str, str]:
+    """Pre-rename type keys this module still answers to (a panel or
+    session written under one loads and renders as its canonical type)."""
+    return dict(_payload().get("legacy_aliases", {}))

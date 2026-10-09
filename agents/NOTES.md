@@ -754,3 +754,28 @@ a filter-chain module's bare `Input`/`Output` - is still skipped by
 * Suite: 357 passed, 28 skipped headless (the 9 GUI files still segfault without a display).
 * mycelion's `patchspace` input is the **github** url (its `path:` line is commented out),
   so this split only reaches a host after a push + `nix flake update patchspace` there.
+
+## 2026-10-09 — phase 2 (GUI draws from the daemon's catalog)
+
+* The node-type data moved out of the GUI: `modules/pipewire/catalog.json` is
+  the module's catalog (types, ports, controls, display, the add-node menu, the
+  media-class vocabulary, the legacy aliases).  `gui/node_catalog.py` installs
+  what the daemon serves (`catalog_request` -> `catalog_reply`) and answers
+  every lookup the canvas makes; `gui/node_specs.py` is gone.
+* **Namespace-package trap:** `gui/` has no `__init__.py`, so `gui.node_catalog`
+  and a flat `import node_catalog` are *two module objects* for the same file.
+  The widget imports its neighbours flat, so anything that installs the catalog
+  must use the flat import or the widget reads an empty catalog (the header
+  shows "Unknown" and every port is "audio").  `tests/conftest.py` puts
+  `src/gui` on `sys.path` at collection time and installs the catalog in an
+  autouse fixture (process-global state: one test clearing it must not poison
+  the next).
+* Offscreen canvas proof (recipe unchanged): install the catalog, build the
+  widget with a stub client, `update_from_daemon`, pump the main loop ~1 s
+  (first frame is alpha 0), render `on_draw` into a cairo surface.  It draws
+  type labels, per-type icons, socket labels ("audio"/"ctrl"), the gate's
+  on/off fallback, a filter's dynamic sockets and camera wires - all from the
+  wire payload.
+* `central/session_repair.py` no longer imports the GUI: it builds a small
+  port/label table from the same catalog data and asks `central/graph.py` for
+  the compatibility rule (the one authority).

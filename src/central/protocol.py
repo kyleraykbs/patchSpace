@@ -48,8 +48,12 @@ class Connection:
 class ProtocolHandler:
     """Turns module-API messages into registry changes and replies."""
 
-    def __init__(self, registry: Registry) -> None:
+    def __init__(self, registry: Registry, topology: Optional[Any] = None) -> None:
         self.registry = registry
+        #: The generic structure (spaces/placements/edges).  Optional so a
+        #: registry-only test harness needs no graph; a display's snapshot
+        #: is empty without it.
+        self.topology = topology
 
     # -- entry point -----------------------------------------------------
 
@@ -63,6 +67,8 @@ class ProtocolHandler:
             "node_health": self._node_health,
             "migrate_result": self._migrate_result,
             "registry_query": self._registry_query,
+            "catalog_request": self._catalog_request,
+            "snapshot_request": self._snapshot_request,
         }.get(kind)
         if handler is None:
             return api.error(f"unknown message type {kind!r}")
@@ -101,7 +107,9 @@ class ProtocolHandler:
         if problem is not None:
             return problem
         errors, migrations = self.registry.declare_types(
-            conn.module_id, msg.get("types") or []
+            conn.module_id, msg.get("types") or [],
+            menu=msg.get("menu"), vocabulary=msg.get("vocabulary"),
+            aliases=msg.get("aliases"),
         )
         replies: List[Dict[str, Any]] = []
         for error in errors:
@@ -194,3 +202,33 @@ class ProtocolHandler:
             types,
             instances,
         )
+
+    def _catalog_request(self, msg: Dict[str, Any], conn: Connection) -> Reply:
+        """The whole type catalog (plus the modules' menu and vocabulary):
+        what a display needs once to be able to draw any node, including one
+        whose module is not attached."""
+        if not conn.greeted:
+            return api.error("send hello first")
+        catalog = self.registry.catalog()
+        return api.catalog_reply(catalog["types"], catalog["menu"],
+                                 catalog["vocabulary"], catalog["aliases"])
+
+    def _snapshot_request(self, msg: Dict[str, Any], conn: Connection) -> Reply:
+        """The graph as a display sees it: instances with their status,
+        where each sits, and the edges between them."""
+        if not conn.greeted:
+            return api.error("send hello first")
+        instances = [i.to_dict() for i in self.registry.instances()]
+        placements: List[Dict[str, Any]] = []
+        edges: List[Dict[str, Any]] = []
+        spaces: List[Dict[str, Any]] = []
+        if self.topology is not None:
+            for instance in instances:
+                placement = self.topology.placement(instance["instance_id"])
+                if placement is not None:
+                    entry = placement.to_dict()
+                    entry["instance_id"] = instance["instance_id"]
+                    placements.append(entry)
+            edges = [e.to_dict() for e in self.topology.edges.values()]
+            spaces = [s.to_dict() for s in self.topology.spaces.values()]
+        return api.snapshot_reply(instances, placements, edges, spaces)

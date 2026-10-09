@@ -503,7 +503,7 @@ def test_every_node_type_has_a_description_and_setting_tooltips():
     """Every node spec carries hover-ready text: a one-line description
     (shown on the add-node panel and a long hover on the canvas) and a
     tooltip for every Settings row (falling back to the label)."""
-    from gui import node_specs as ns
+    import node_catalog as ns
 
     missing_desc = [t for t, spec in ns.NODE_TYPE_SPECS.items() if not spec.description]
     assert missing_desc == []
@@ -714,7 +714,7 @@ def test_downstream_edges_walks_signal_order_through_switches():
 
 def test_light_noise_cancel_shares_echo_backing_but_hides_probe():
     from central.pwnodes import EchoCancelNode, LightNoiseCancelNode
-    from gui import node_specs
+    import node_catalog
 
     assert main_mod.NODE_TYPE_REGISTRY["light_noise_cancel"] is LightNoiseCancelNode
     # Same backing/machinery as echo cancel, so the careful-node
@@ -722,19 +722,19 @@ def test_light_noise_cancel_shares_echo_backing_but_hides_probe():
     assert issubclass(LightNoiseCancelNode, EchoCancelNode)
     assert isinstance(LightNoiseCancelNode("x", "x"), EchoCancelNode)
 
-    spec = node_specs.spec_for("light_noise_cancel")
+    spec = node_catalog.spec_for("light_noise_cancel")
     assert spec.label == "Light Noise Cancel"
     assert spec.inputs == ["mic"]  # probe deliberately not exposed
 
     # The existing denoiser is now presented as AI Noise Cancel.
-    assert node_specs.spec_for("noise_cancel").label == "AI Noise Cancel"
+    assert node_catalog.spec_for("noise_cancel").label == "AI Noise Cancel"
     assert (
-        node_specs.normalize_node_type("LightNoiseCancelNode") == "light_noise_cancel"
+        node_catalog.normalize_node_type("LightNoiseCancelNode") == "light_noise_cancel"
     )
     assert (
         "Light Noise Cancel",
         "light_noise_cancel",
-    ) in node_specs.ADD_NODE_MENU_ITEMS
+    ) in node_catalog.ADD_NODE_MENU_ITEMS
 
 
 def test_add_node_stages_and_waits_on_finicky_nodes(monkeypatch):
@@ -986,7 +986,7 @@ def test_device_volume_lock_gates_constant_override(monkeypatch):
 
 def test_normalize_registry_spec_and_control_clamp():
     from central.pwnodes import NormalizeNode
-    from gui import node_specs as ns
+    import node_catalog as ns
 
     assert main_mod.NODE_TYPE_REGISTRY["normalize"] is NormalizeNode
     assert NormalizeNode in main_mod._CAREFUL_NODE_TYPES
@@ -1059,7 +1059,7 @@ def test_boolean_nodes_registry_specs_and_output_control():
         BooleanOrNode,
         BooleanXorNode,
     )
-    from gui import node_specs as ns
+    import node_catalog as ns
 
     assert main_mod.NODE_TYPE_REGISTRY["boolean_switch"] is BooleanSourceNode
     assert main_mod.NODE_TYPE_REGISTRY["boolean_splitter"] is BooleanSplitterNode
@@ -1226,7 +1226,7 @@ def test_warp_nodes_registry_specs_and_name_roundtrip():
         BooleanWarpInNode,
         BooleanWarpOutNode,
     )
-    from gui import node_specs as ns
+    import node_catalog as ns
 
     assert main_mod.NODE_TYPE_REGISTRY["warp_in"] is WarpInNode
     assert main_mod.NODE_TYPE_REGISTRY["warp_out"] is WarpOutNode
@@ -1313,7 +1313,7 @@ def test_get_logs_serves_recent_output():
 
 def test_reverb_spec_and_control_clamp():
     from central.pwnodes import ReverbNode
-    from gui import node_specs as ns
+    import node_catalog as ns
 
     spec = ns.spec_for("reverb")
     assert spec.control == "wetdry"

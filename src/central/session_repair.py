@@ -29,7 +29,7 @@ Two entry points:
     cleanups (dropping orphan nodes, collapsing duplicate built-in lines)
     are opt-in.
 
-The port/type knowledge comes from ``gui.node_specs`` (pure data, no
+The port/type knowledge comes from ``gui.node_catalog`` (pure data, no
 GTK), so the daemon can import this without pulling in the GUI.
 """
 
@@ -38,13 +38,92 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
+from central import graph
 from central import migrations
-from gui.node_specs import (
-    NODE_TYPE_SPECS,
-    normalize_node_type,
-    port_kind,
-    ports_compatible,
-)
+from modules.pipewire import declarations as _catalog_data
+
+
+class _TypeSpec:
+    """The little bit of a node type an offline validator needs: its ports
+    and its label.
+
+    Built from the built-in module's catalog data (`catalog.json`), so
+    validating a session needs no daemon and no GUI.  The *rule* it feeds
+    (what may connect to what) lives in `central/graph.py` — the one
+    authority — not here.
+    """
+
+    __slots__ = ("label", "inputs", "outputs", "_kinds", "_dynamic")
+
+    def __init__(self, entry: dict) -> None:
+        self.label = (entry.get("display") or {}).get("name", "")
+        extra = entry.get("spec") or {}
+        self.inputs = list(extra.get("inputs") or [])
+        self.outputs = list(extra.get("outputs") or [])
+        self._kinds: Dict[Tuple[str, str], str] = {}
+        #: Port families the runtime grows on demand (filter1, in2, ...):
+        #: any name sharing the prefix carries that kind.
+        self._dynamic: Dict[Tuple[str, str], str] = {}
+        for port in entry.get("ports") or []:
+            name = str(port.get("name") or "")
+            kind = str(port.get("kind") or "audio")
+            direction = str(port.get("direction") or "in")
+            self._kinds[(name, direction)] = kind
+            if port.get("dynamic"):
+                prefix = name.rstrip("0123456789")
+                if prefix:
+                    self._dynamic[(prefix, direction)] = kind
+
+    def kind(self, port: str, direction: str) -> str:
+        kind = self._kinds.get((port, direction))
+        if kind:
+            return kind
+        return self._dynamic.get((port.rstrip("0123456789"), direction), "audio")
+
+
+def _load_catalog() -> Dict[str, _TypeSpec]:
+    specs = {entry["type_id"]: _TypeSpec(entry)
+             for entry in _catalog_data.catalog()}
+    for legacy, canonical in _catalog_data.legacy_aliases().items():
+        if canonical in specs:
+            specs[legacy] = specs[canonical]
+    return specs
+
+
+NODE_TYPE_SPECS: Dict[str, _TypeSpec] = _load_catalog()
+
+_CLASS_NAME_TO_TYPE = {
+    entry["class_name"]: entry["type_id"]
+    for entry in _catalog_data.catalog()
+    if entry.get("class_name")
+}
+
+
+def normalize_node_type(raw_type: str) -> str:
+    """A backend class name to its canonical type key; a no-op for a key or
+    a genuinely unknown type."""
+    return _CLASS_NAME_TO_TYPE.get(raw_type, raw_type)
+
+
+def port_kind(node_type: str, port: str, direction: str) -> str:
+    """What one port of `node_type` carries."""
+    spec = NODE_TYPE_SPECS.get(node_type)
+    if spec is None:
+        return "audio"
+    if direction == "in" and port == "in" and port not in spec.inputs:
+        # Legacy name: a node's first input used to be called "in".
+        port = spec.inputs[0] if spec.inputs else "in"
+    return spec.kind(port, direction)
+
+
+def ports_compatible(from_type: str, from_port: str, to_type: str,
+                     to_port: str) -> bool:
+    """Whether two ports may be connected — the daemon's rule, from the one
+    place that holds it (`central/graph.kinds_compatible`)."""
+    return graph.kinds_compatible(
+        port_kind(from_type, from_port, "out"),
+        port_kind(to_type, to_port, "in"),
+    )
 
 # Switch ports were renamed a/b -> on/off; the engine tolerates the old
 # names (see pwnodes.ABSwitchNode._LEGACY_PORTS) but a config should be

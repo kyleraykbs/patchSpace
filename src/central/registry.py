@@ -93,6 +93,13 @@ class ModuleRecord:
     connected: bool = True
     types: Dict[str, TypeDecl] = field(default_factory=dict)
     instances: Set[str] = field(default_factory=set)
+    #: Presentation data the module owns and a display consumes verbatim:
+    #: the add-node menu and the vocabulary tables (field labels, choice
+    #: lists).  The daemon relays them; it does not interpret them.
+    menu: List[Dict[str, Any]] = field(default_factory=list)
+    vocabulary: Dict[str, Any] = field(default_factory=dict)
+    #: Pre-rename type keys this module still answers to.
+    aliases: Dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -179,7 +186,11 @@ class Registry:
     # -- types -----------------------------------------------------------
 
     def declare_types(self, module_id: str,
-                      decls: Iterable[Dict[str, Any]]) -> Tuple[List[str], List[Dict[str, Any]]]:
+                      decls: Iterable[Dict[str, Any]],
+                      menu: Optional[List[Dict[str, Any]]] = None,
+                      vocabulary: Optional[Dict[str, Any]] = None,
+                      aliases: Optional[Dict[str, str]] = None
+                      ) -> Tuple[List[str], List[Dict[str, Any]]]:
         """Register a module's type catalog.
 
         Returns ``(errors, migrations)`` where ``migrations`` are the
@@ -194,6 +205,12 @@ class Registry:
             record = self._modules.setdefault(
                 module_id, ModuleRecord(module_id=module_id, name=module_id)
             )
+            if menu is not None:
+                record.menu = list(menu)
+            if vocabulary is not None:
+                record.vocabulary = dict(vocabulary)
+            if aliases is not None:
+                record.aliases = dict(aliases)
             for decl in decls:
                 ok, message = api.validate_type_decl(decl)
                 if not ok:
@@ -534,6 +551,28 @@ class Registry:
                 if capability in decl.capabilities:
                     hits.append(decl.to_dict())
             return {"capability": capability, "available": bool(hits), "types": hits}
+
+    def catalog(self) -> Dict[str, Any]:
+        """What a display needs to draw any node: every attached module's
+        declared types, plus the presentation data it owns (menu order,
+        vocabulary tables)."""
+        with self._lock:
+            modules = [m for m in self._modules.values() if m.connected]
+            menu: List[Dict[str, Any]] = []
+            vocabulary: Dict[str, Any] = {}
+            aliases: Dict[str, str] = {}
+            for module in modules:
+                menu.extend(module.menu)
+                for key, value in module.vocabulary.items():
+                    vocabulary.setdefault(key, value)
+                for key, value in module.aliases.items():
+                    aliases.setdefault(key, value)
+            return {
+                "types": [t.to_dict() for t in self.declared_types()],
+                "menu": menu,
+                "vocabulary": vocabulary,
+                "aliases": aliases,
+            }
 
     def snapshot(self) -> Dict[str, Any]:
         with self._lock:

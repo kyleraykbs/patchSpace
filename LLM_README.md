@@ -53,7 +53,7 @@ codebase deliberately documents *why* and *what failed before*, not just *what*.
         ├── patchspace_gui.py        # GUI entrypoint (Gtk.Application)
         ├── main_window.py         # MainWindow, LogConsole, toolbar, hamburger, loading overlay
         ├── patchspace_widget.py   # the editable node canvas (big file)
-        ├── node_specs.py          # NodeSpec table: ports, inline control, Settings rows
+        ├── node_catalog.py        # what the daemon's modules declare (installed from catalog_reply)
         ├── daemon_control.py      # start/adopt/stop the background daemon
         ├── view_mixin.py          # pan/zoom/undo shared by both graph widgets
         ├── pipewire_widget.py     # raw PipeWire graph view
@@ -1039,9 +1039,11 @@ of graph refreshes can't consume/miss its replies. The PatchSpace canvas polls
 
 ### Imports / running
 - Daemon modules (`src/`) use absolute imports and are run from `src/`.
-- GUI modules use **flat imports** (`from constants import ...`, `from node_specs import ...`)
+- GUI modules use **flat imports** (`from constants import ...`, `import node_catalog`)
   and must be run from `src/gui/` or with that dir on `sys.path`. There is no
-  `gui/__init__.py`; tests reach it via `from gui import node_specs` (namespace package).
+  `gui/__init__.py`, so `gui.node_catalog` and a flat `import node_catalog` are **two
+  module objects for the same file** — the widget imports flat, so anything installing the
+  catalog (tests, tooling) must import it flat too or the widget reads an empty one.
 - So: a change to a GUI module can't be exercised by the daemon test suite unless it's
   pure logic.
 
@@ -1087,7 +1089,7 @@ A new tunable/serialized attribute usually touches all of these:
    - pass it through in `_create_node()`;
    - handle it in the big `set_node_property` handler (clamp + validate), and call
      `self._coalesce_reload(node)` if it's a load-time control.
-3. `gui/node_specs.py` — add a row to the node type's `NodeSpec.settings`
+3. `modules/pipewire/catalog.json` — add a row to the type's `spec.settings`
    (`bool` / `number` / `choice` / `text`).
 4. `tests/` — add a regression test (round-trip serialization + set behavior + bounds).
 5. Run `python -m pytest -q`.
@@ -1096,10 +1098,12 @@ A new tunable/serialized attribute usually touches all of these:
 - Define the class in `pwnodes.py`.
 - Register it in `NODE_TYPE_REGISTRY` in `main.py` **and** keep `CLASS_TO_TYPE` (derived)
   in sync; add a `_create_node()` branch if it takes constructor args.
-- Add a `NodeSpec` in `gui/node_specs.py` (ports, `control=`, settings, `socket_labels=`)
-  and menu/category/icon entries. `gui/node_specs.py` is the single source of truth for
-  node UI. Pure control-plane nodes are `boolean_inputs`/`boolean_outputs` and carry no
-  backing.
+- Describe it in `modules/pipewire/catalog.json` (ports, `controls`, `display`, the
+  `spec` block with `inputs`/`outputs`/`settings`/`socket_labels`, and the add-node menu).
+  That file is the single source of truth for node UI now; the daemon serves it to any
+  display (`catalog_request` → `catalog_reply`) and `tests/test_pipewire_declarations.py`
+  fails if a registered type has no declaration. Pure control-plane nodes declare
+  `boolean_inputs`/`boolean_outputs` and carry no backing.
 - Effects with async multi-stream modules (`EchoCancelNode`, `NoiseCancelNode`,
   `SensitivityGateNode`, `NormalizeNode`, `ReverbNode`) must be in `_CAREFUL_NODE_TYPES`
   so session load gives them a dedicated per-input bring-up pass.
@@ -1363,9 +1367,10 @@ supervision pass then recreates whatever vanished with the old PipeWire.
 
 ## 6. GUI specifics
 
-- **`node_specs.py` is the UI source of truth.** `NodeSpec(label, inputs, outputs,
-  control=..., field=..., settings=[...], boolean_inputs/outputs=..., impulse_inputs/
-  outputs=..., toggle=..., indicator=..., socket_labels=...)`.
+- **`modules/pipewire/catalog.json` is the UI source of truth** (served to the display as
+  `catalog_reply`, installed by `gui/node_catalog.py`).  Each entry carries ports, controls,
+  the `spec` block (ordered `inputs`/`outputs`, `settings`, `socket_labels`, `toggle`,
+  `field_choices`, tooltips) and `display` (name, description, category, colour, icon).
   - **Every node gets at least one sink of its own; where it has none, it gets a dummy
     sink.**  A private internal null sink (media class `pwmatch.INTERNAL_MEDIA_CLASS`, so it
     never shows up as a device in apps) whose *monitor* is the node's output.  That is what

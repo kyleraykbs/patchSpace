@@ -1,14 +1,283 @@
 {
  "generated_from": "gui/node_specs.py + central.NODE_TYPE_REGISTRY (phase 2 move)",
+ "legacy_aliases": {
+  "clip_previous": "replay_buffer",
+  "patchbay_device": "patchspace_device",
+  "patchbay_mic_device": "patchspace_mic_device"
+ },
+ "menu": [
+  {
+   "category": "Bundles",
+   "items": [
+    {
+     "label": "All Inputs",
+     "type_id": "all_inputs"
+    },
+    {
+     "label": "All Outputs",
+     "type_id": "all_outputs"
+    },
+    {
+     "label": "All Apps",
+     "type_id": "all_apps"
+    },
+    {
+     "label": "Bundle",
+     "type_id": "bundle"
+    },
+    {
+     "label": "Split Bundle",
+     "type_id": "bundle_split"
+    },
+    {
+     "label": "Filter",
+     "type_id": "filter"
+    },
+    {
+     "label": "Regex Classifier",
+     "type_id": "regex_classifier"
+    },
+    {
+     "label": "Media Class Classifier",
+     "type_id": "media_class_classifier"
+    },
+    {
+     "label": "Description Classifier",
+     "type_id": "description_classifier"
+    },
+    {
+     "label": "Title Classifier",
+     "type_id": "title_classifier"
+    },
+    {
+     "label": "Application Classifier",
+     "type_id": "app_classifier"
+    },
+    {
+     "label": "Subprocess Classifier",
+     "type_id": "app_name_classifier"
+    },
+    {
+     "label": "External Only",
+     "type_id": "external_only_classifier"
+    },
+    {
+     "label": "Bundle -> Audio",
+     "type_id": "bundle_to_audio"
+    },
+    {
+     "label": "Bundle Output",
+     "type_id": "bundle_output"
+    }
+   ]
+  },
+  {
+   "category": "Processing",
+   "items": [
+    {
+     "label": "Splitter",
+     "type_id": "splitter"
+    },
+    {
+     "label": "Gate (bool)",
+     "type_id": "gate"
+    },
+    {
+     "label": "Switcher (On/Off out)",
+     "type_id": "switcher"
+    },
+    {
+     "label": "Inverse Switcher (On/Off in)",
+     "type_id": "inverse_switcher"
+    },
+    {
+     "label": "Exclude Filter (regex)",
+     "type_id": "exclude_filter"
+    },
+    {
+     "label": "Volume (slider)",
+     "type_id": "volume"
+    }
+   ]
+  },
+  {
+   "category": "Boolean",
+   "items": [
+    {
+     "label": "On/Off",
+     "type_id": "boolean_switch"
+    },
+    {
+     "label": "Invert",
+     "type_id": "boolean_invert"
+    },
+    {
+     "label": "AND",
+     "type_id": "boolean_and"
+    },
+    {
+     "label": "OR",
+     "type_id": "boolean_or"
+    },
+    {
+     "label": "XOR",
+     "type_id": "boolean_xor"
+    },
+    {
+     "label": "Bool Splitter",
+     "type_id": "boolean_splitter"
+    }
+   ]
+  },
+  {
+   "category": "Impulse",
+   "items": [
+    {
+     "label": "Button",
+     "type_id": "button"
+    },
+    {
+     "label": "Sound",
+     "type_id": "sound"
+    },
+    {
+     "label": "Sound Player",
+     "type_id": "sound_player"
+    },
+    {
+     "label": "Sound Dump",
+     "type_id": "sound_dump"
+    },
+    {
+     "label": "Recorder",
+     "type_id": "recorder"
+    },
+    {
+     "label": "Clip",
+     "type_id": "clip"
+    },
+    {
+     "label": "Replay Buffer",
+     "type_id": "replay_buffer"
+    }
+   ]
+  },
+  {
+   "category": "Warp",
+   "items": [
+    {
+     "label": "Warp In",
+     "type_id": "warp_in"
+    },
+    {
+     "label": "Warp Out",
+     "type_id": "warp_out"
+    },
+    {
+     "label": "Bool Warp In",
+     "type_id": "bool_warp_in"
+    },
+    {
+     "label": "Bool Warp Out",
+     "type_id": "bool_warp_out"
+    }
+   ]
+  },
+  {
+   "category": "Effects",
+   "items": [
+    {
+     "label": "Echo Cancel",
+     "type_id": "echo_cancel"
+    },
+    {
+     "label": "AI Noise Cancel",
+     "type_id": "noise_cancel"
+    },
+    {
+     "label": "Light Noise Cancel",
+     "type_id": "light_noise_cancel"
+    },
+    {
+     "label": "Sensitivity Gate",
+     "type_id": "sensitivity_gate"
+    },
+    {
+     "label": "Reverb",
+     "type_id": "reverb"
+    },
+    {
+     "label": "Normalize",
+     "type_id": "normalize"
+    }
+   ]
+  },
+  {
+   "category": "Hardware & Apps",
+   "items": [
+    {
+     "label": "Hardware Input",
+     "type_id": "device_input"
+    },
+    {
+     "label": "Hardware Output",
+     "type_id": "device_output"
+    },
+    {
+     "label": "Camera In",
+     "type_id": "camera_input"
+    },
+    {
+     "label": "App Playback",
+     "type_id": "app_input"
+    },
+    {
+     "label": "App Mic",
+     "type_id": "app_output"
+    },
+    {
+     "label": "Speaker Line",
+     "type_id": "patchspace_device"
+    },
+    {
+     "label": "Mic Line",
+     "type_id": "patchspace_mic_device"
+    }
+   ]
+  },
+  {
+   "category": "Virtual Devices",
+   "items": [
+    {
+     "label": "Virtual Speaker",
+     "type_id": "virtual_speaker"
+    },
+    {
+     "label": "Virtual Mic",
+     "type_id": "virtual_mic"
+    },
+    {
+     "label": "Virtual Cam",
+     "type_id": "virtual_camera"
+    },
+    {
+     "label": "V4L2 Virtual Cam",
+     "type_id": "v4l2_virtual_camera"
+    }
+   ]
+  }
+ ],
  "module": "pipewire",
  "types": [
   {
    "capabilities": [],
+   "class_name": "AllAppsNode",
    "controls": [],
    "display": {
     "category": "Bundles",
     "color": "accent_color",
     "description": "A bundle of just the app playback streams.",
+    "icon": "application-x-executable-symbolic",
     "name": "All Apps"
    },
    "ports": [
@@ -21,15 +290,29 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "all_apps"
   },
   {
    "capabilities": [],
+   "class_name": "AllInputsNode",
    "controls": [],
    "display": {
     "category": "Bundles",
     "color": "accent_color",
     "description": "A bundle of every source: hardware inputs and app playback streams.  Feed it through Filters to pick some of them.",
+    "icon": "applications-multimedia-symbolic",
     "name": "All Inputs"
    },
    "ports": [
@@ -42,15 +325,29 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "all_inputs"
   },
   {
    "capabilities": [],
+   "class_name": "AllOutputsNode",
    "controls": [],
    "display": {
     "category": "Bundles",
     "color": "accent_color",
     "description": "A bundle of every destination (hardware outputs and app recording streams) to route audio into.",
+    "icon": "audio-speakers-symbolic",
     "name": "All Outputs"
    },
    "ports": [
@@ -63,10 +360,23 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "all_outputs"
   },
   {
    "capabilities": [],
+   "class_name": "AppClassifierNode",
    "controls": [
     {
      "key": "app_key",
@@ -82,6 +392,7 @@
     "category": "Bundles",
     "color": "accent_color",
     "description": "A filter that matches every stream an *application* created - by the app scope behind the stream's process, so the app you know (\"vesktop\", \"discord\") matches all of its subprocesses at once.",
+    "icon": "focus-windows-symbolic",
     "name": "Application"
    },
    "ports": [
@@ -94,15 +405,35 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": true,
+    "inputs": [],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [
+     [
+      "invert",
+      "Invert (exclude matches)",
+      "bool"
+     ]
+    ],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "app_classifier"
   },
   {
    "capabilities": [],
+   "class_name": "AppInputNode",
    "controls": [],
    "display": {
     "category": "Hardware & Apps",
     "color": "error_color",
     "description": "An application's audio output (playback stream).",
+    "icon": "application-x-executable-symbolic",
     "name": "App Playback"
    },
    "ports": [
@@ -114,10 +445,23 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "app_input"
   },
   {
    "capabilities": [],
+   "class_name": "AppNameClassifierNode",
    "controls": [
     {
      "key": "app_name",
@@ -133,6 +477,7 @@
     "category": "Bundles",
     "color": "accent_color",
     "description": "A filter that matches the *subprocess* behind a stream - PipeWire's application.name, which for an app that delegates its audio is the subprocess (an Electron app reports \"Chromium input\").",
+    "icon": "application-x-executable-symbolic",
     "name": "Subprocess"
    },
    "ports": [
@@ -145,15 +490,35 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": true,
+    "inputs": [],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [
+     [
+      "invert",
+      "Invert (exclude matches)",
+      "bool"
+     ]
+    ],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "app_name_classifier"
   },
   {
    "capabilities": [],
+   "class_name": "AppOutputNode",
    "controls": [],
    "display": {
     "category": "Hardware & Apps",
     "color": "error_color",
     "description": "An application's recording input.",
+    "icon": "application-x-executable-symbolic",
     "name": "App Mic"
    },
    "ports": [
@@ -165,10 +530,23 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "audio"
+    ],
+    "label_lone_output": false,
+    "outputs": [],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "app_output"
   },
   {
    "capabilities": [],
+   "class_name": "BoolPanelInNode",
    "controls": [
     {
      "key": "description",
@@ -183,6 +561,7 @@
     "category": "",
     "color": "accent_color",
     "description": "A panel boolean input port (control signal from outside to inside).",
+    "icon": "list-add-symbolic",
     "name": "Bool Panel In"
    },
    "ports": [
@@ -199,10 +578,36 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "boolean"
+    ],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [
+     [
+      "description",
+      "Description:",
+      "text"
+     ],
+     [
+      "default_state",
+      "Default state (when unconnected):",
+      "bool"
+     ]
+    ],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "bool_panel_in"
   },
   {
    "capabilities": [],
+   "class_name": "BoolPanelOutNode",
    "controls": [
     {
      "key": "description",
@@ -213,6 +618,7 @@
     "category": "",
     "color": "accent_color",
     "description": "A panel boolean output port (control signal from inside to outside).",
+    "icon": "list-add-symbolic",
     "name": "Bool Panel Out"
    },
    "ports": [
@@ -229,10 +635,31 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "boolean"
+    ],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [
+     [
+      "description",
+      "Description:",
+      "text"
+     ]
+    ],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "bool_panel_out"
   },
   {
    "capabilities": [],
+   "class_name": "BooleanWarpInNode",
    "controls": [
     {
      "key": "warp_name",
@@ -244,6 +671,7 @@
     "category": "Warp",
     "color": "accent_color",
     "description": "Publishes a boolean control signal under a name.",
+    "icon": "insert-link-symbolic",
     "name": "Bool Warp In"
    },
    "ports": [
@@ -255,10 +683,23 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "boolean"
+    ],
+    "label_lone_output": false,
+    "outputs": [],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "bool_warp_in"
   },
   {
    "capabilities": [],
+   "class_name": "BooleanWarpOutNode",
    "controls": [
     {
      "key": "warp_name",
@@ -270,6 +711,7 @@
     "category": "Warp",
     "color": "accent_color",
     "description": "Reads the boolean control signal published under a name.",
+    "icon": "insert-link-symbolic",
     "name": "Bool Warp Out"
    },
    "ports": [
@@ -281,15 +723,29 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "bool_warp_out"
   },
   {
    "capabilities": [],
+   "class_name": "BooleanAndNode",
    "controls": [],
    "display": {
     "category": "Boolean",
     "color": "dim_label_color",
     "description": "True only when every wired input is true.",
+    "icon": "checkbox-checked-symbolic",
     "name": "AND"
    },
    "ports": [
@@ -311,15 +767,32 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "a",
+     "b"
+    ],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": false,
+    "toggle": null
+   },
    "type_id": "boolean_and"
   },
   {
    "capabilities": [],
+   "class_name": "BooleanInvertNode",
    "controls": [],
    "display": {
     "category": "Boolean",
     "color": "dim_label_color",
     "description": "Inverts a boolean signal (NOT).",
+    "icon": "action-unavailable-symbolic",
     "name": "Invert"
    },
    "ports": [
@@ -336,15 +809,31 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "boolean"
+    ],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "boolean_invert"
   },
   {
    "capabilities": [],
+   "class_name": "BooleanOrNode",
    "controls": [],
    "display": {
     "category": "Boolean",
     "color": "dim_label_color",
     "description": "True when any wired input is true.",
+    "icon": "list-add-symbolic",
     "name": "OR"
    },
    "ports": [
@@ -366,15 +855,32 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "a",
+     "b"
+    ],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": false,
+    "toggle": null
+   },
    "type_id": "boolean_or"
   },
   {
    "capabilities": [],
+   "class_name": "BooleanSplitterNode",
    "controls": [],
    "display": {
     "category": "Boolean",
     "color": "dim_label_color",
     "description": "Fans one boolean signal out to two destinations.",
+    "icon": "network-transmit-receive-symbolic",
     "name": "Bool Splitter"
    },
    "ports": [
@@ -398,10 +904,26 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "boolean"
+    ],
+    "label_lone_output": false,
+    "outputs": [
+     "out1",
+     "out2"
+    ],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "boolean_splitter"
   },
   {
    "capabilities": [],
+   "class_name": "BooleanSourceNode",
    "controls": [
     {
      "key": "boolean",
@@ -412,6 +934,7 @@
     "category": "Boolean",
     "color": "dim_label_color",
     "description": "A manual On/Off control signal. Wire it into gates and switches to drive them.",
+    "icon": "object-select-symbolic",
     "name": "On/Off"
    },
    "ports": [
@@ -423,15 +946,29 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "boolean_switch"
   },
   {
    "capabilities": [],
+   "class_name": "BooleanXorNode",
    "controls": [],
    "display": {
     "category": "Boolean",
     "color": "dim_label_color",
     "description": "True when exactly one wired input is true (odd parity).",
+    "icon": "checkbox-mixed-symbolic",
     "name": "XOR"
    },
    "ports": [
@@ -453,15 +990,32 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "a",
+     "b"
+    ],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": false,
+    "toggle": null
+   },
    "type_id": "boolean_xor"
   },
   {
    "capabilities": [],
+   "class_name": "BundleMergeNode",
    "controls": [],
    "display": {
     "category": "Bundles",
     "color": "accent_color",
     "description": "Collects several lines or bundles into one bundle; it grows another input each time you plug one in.",
+    "icon": "insert-link-symbolic",
     "name": "Merge Bundle"
    },
    "ports": [
@@ -480,15 +1034,31 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "in1"
+    ],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "bundle"
   },
   {
    "capabilities": [],
+   "class_name": "BundleOutputNode",
    "controls": [],
    "display": {
     "category": "Bundles",
     "color": "accent_color",
     "description": "Delivers the audio wired into it to every destination in a sink bundle.",
+    "icon": "audio-card-symbolic",
     "name": "Bundle Output"
    },
    "ports": [
@@ -506,15 +1076,30 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "audio",
+     "bundle"
+    ],
+    "label_lone_output": false,
+    "outputs": [],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "bundle_output"
   },
   {
    "capabilities": [],
+   "class_name": "BundleSplitNode",
    "controls": [],
    "display": {
     "category": "Bundles",
     "color": "accent_color",
     "description": "Takes a bundle apart: one output line per member, so each stream can be routed or processed on its own.",
+    "icon": "view-list-symbolic",
     "name": "Split Bundle"
    },
    "ports": [
@@ -527,15 +1112,29 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "bundle"
+    ],
+    "label_lone_output": true,
+    "outputs": [],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "bundle_split"
   },
   {
    "capabilities": [],
+   "class_name": "BundleToAudioNode",
    "controls": [],
    "display": {
     "category": "Bundles",
     "color": "accent_color",
     "description": "Converts a source bundle back into one ordinary audio stream (all its members).",
+    "icon": "media-playback-start-symbolic",
     "name": "Bundle -> Audio"
    },
    "ports": [
@@ -553,10 +1152,25 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "bundle"
+    ],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "bundle_to_audio"
   },
   {
    "capabilities": [],
+   "class_name": "ButtonNode",
    "controls": [
     {
      "key": "impulse",
@@ -567,6 +1181,7 @@
     "category": "Impulse",
     "color": "success_color",
     "description": "A momentary button: press it to fire an impulse down its wire. It holds no state - the pulse is the whole signal.",
+    "icon": "media-playback-start-symbolic",
     "name": "Button"
    },
    "ports": [
@@ -578,15 +1193,29 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "button"
   },
   {
    "capabilities": [],
+   "class_name": "CameraInputNode",
    "controls": [],
    "display": {
     "category": "Hardware & Apps",
     "color": "error_color",
     "description": "A camera feed: one selected video source (webcam, capture card, virtual camera, ...) carried on a camera wire.",
+    "icon": "camera-photo-symbolic",
     "name": "Camera In"
    },
    "ports": [
@@ -598,10 +1227,23 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "camera_input"
   },
   {
    "capabilities": [],
+   "class_name": "ClipNode",
    "controls": [
     {
      "key": "clip",
@@ -612,6 +1254,7 @@
     "category": "Impulse",
     "color": "success_color",
     "description": "A range of a sound: sound in, sound out.  The node is a timeline of the file - waveform, a yellow selection you drag the sides of, and the selection's start/end times - and what it passes on is that part of the sound.",
+    "icon": "edit-select-all-symbolic",
     "name": "Clip"
    },
    "ports": [
@@ -628,10 +1271,25 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "sound"
+    ],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "clip"
   },
   {
    "capabilities": [],
+   "class_name": "DescriptionClassifierNode",
    "controls": [
     {
      "key": "description",
@@ -647,6 +1305,7 @@
     "category": "Bundles",
     "color": "accent_color",
     "description": "A filter that matches by a text match on the description.",
+    "icon": "text-x-generic-symbolic",
     "name": "Description"
    },
    "ports": [
@@ -659,10 +1318,29 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [
+     [
+      "invert",
+      "Invert (exclude matches)",
+      "bool"
+     ]
+    ],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "description_classifier"
   },
   {
    "capabilities": [],
+   "class_name": "DescriptionInputNode",
    "controls": [
     {
      "key": "description",
@@ -674,6 +1352,7 @@
     "category": "",
     "color": "accent_color",
     "description": "Audio sources selected by a text match on their description.",
+    "icon": "text-x-generic-symbolic",
     "name": "Description In"
    },
    "ports": [
@@ -685,10 +1364,23 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "description_input"
   },
   {
    "capabilities": [],
+   "class_name": "DescriptionOutputNode",
    "controls": [
     {
      "key": "description",
@@ -700,6 +1392,7 @@
     "category": "",
     "color": "accent_color",
     "description": "A destination selected by a text match on its description.",
+    "icon": "text-x-generic-symbolic",
     "name": "Description Out"
    },
    "ports": [
@@ -711,15 +1404,29 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "audio"
+    ],
+    "label_lone_output": false,
+    "outputs": [],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "description_output"
   },
   {
    "capabilities": [],
+   "class_name": "DeviceInputNode",
    "controls": [],
    "display": {
     "category": "Hardware & Apps",
     "color": "error_color",
     "description": "A hardware capture device (microphone, interface input, ...).",
+    "icon": "audio-input-microphone-symbolic",
     "name": "Hardware Input"
    },
    "ports": [
@@ -731,15 +1438,29 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "device_input"
   },
   {
    "capabilities": [],
+   "class_name": "DeviceOutputNode",
    "controls": [],
    "display": {
     "category": "Hardware & Apps",
     "color": "error_color",
     "description": "A hardware playback device (speakers, headphones, ...).",
+    "icon": "audio-speakers-symbolic",
     "name": "Hardware Output"
    },
    "ports": [
@@ -751,10 +1472,23 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "audio"
+    ],
+    "label_lone_output": false,
+    "outputs": [],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "device_output"
   },
   {
    "capabilities": [],
+   "class_name": "EchoCancelNode",
    "controls": [
     {
      "key": "library_name",
@@ -773,6 +1507,7 @@
     "category": "Effects",
     "color": "warning_color",
     "description": "Removes speaker echo from a microphone using a probe/reference feed (WebRTC acoustic echo cancellation).",
+    "icon": "audio-input-microphone-symbolic",
     "name": "Echo Cancel"
    },
    "ports": [
@@ -794,10 +1529,46 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "mic",
+     "probe"
+    ],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {
+     "aec_args": "Extra options passed to the AEC library, e.g. 'analog_gain_control=0 digital_gain_control=1'.",
+     "library_name": "The AEC implementation to load. 'aec/libspa-aec-webrtc' is the WebRTC echo canceller.",
+     "monitor_mode": "Automatically use the default sink as the echo reference instead of the probe input."
+    },
+    "settings": [
+     [
+      "library_name",
+      "AEC library:",
+      "text"
+     ],
+     [
+      "aec_args",
+      "AEC args:",
+      "text"
+     ],
+     [
+      "monitor_mode",
+      "Monitor mode (auto-cancel default sink)",
+      "bool"
+     ]
+    ],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "echo_cancel"
   },
   {
    "capabilities": [],
+   "class_name": "ExcludeFilterNode",
    "controls": [
     {
      "key": "pattern",
@@ -809,6 +1580,7 @@
     "category": "Processing",
     "color": "success_color",
     "description": "Passes audio through while excluding sources that match a regular expression from the mix.",
+    "icon": "action-unavailable-symbolic",
     "name": "Exclude (Regex)"
    },
    "ports": [
@@ -825,10 +1597,25 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "audio"
+    ],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "exclude_filter"
   },
   {
    "capabilities": [],
+   "class_name": "ExternalOnlyClassifierNode",
    "controls": [
     {
      "key": "invert",
@@ -839,6 +1626,7 @@
     "category": "Bundles",
     "color": "accent_color",
     "description": "A filter that keeps only real apps and hardware, stripping Patch Space's own plumbing.",
+    "icon": "system-users-symbolic",
     "name": "External Only"
    },
    "ports": [
@@ -851,10 +1639,29 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [
+     [
+      "invert",
+      "Invert (exclude matches)",
+      "bool"
+     ]
+    ],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "external_only_classifier"
   },
   {
    "capabilities": [],
+   "class_name": "FilterNode",
    "controls": [
     {
      "key": "filter_mode",
@@ -865,6 +1672,7 @@
     "category": "Bundles",
     "color": "accent_color",
     "description": "Narrows a bundle to the members the classifiers plugged into its filter input(s) match (AND).  Its Include/Exclude switch keeps everything except those members when set to Exclude.",
+    "icon": "edit-find-symbolic",
     "name": "Filter"
    },
    "ports": [
@@ -889,10 +1697,26 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "bundle",
+     "filter1"
+    ],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "filter"
   },
   {
    "capabilities": [],
+   "class_name": "GateNode",
    "controls": [
     {
      "key": "fallback_onoff",
@@ -903,6 +1727,7 @@
     "category": "Processing",
     "color": "success_color",
     "description": "Passes or blocks audio, driven by a boolean control signal (or its own on/off button when nothing is wired to ctrl).",
+    "icon": "view-reveal-symbolic",
     "name": "Gate"
    },
    "ports": [
@@ -924,10 +1749,26 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "audio",
+     "ctrl"
+    ],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "gate"
   },
   {
    "capabilities": [],
+   "class_name": "InverseSwitcherNode",
    "controls": [
     {
      "key": "fallback_onoff",
@@ -938,6 +1779,7 @@
     "category": "Processing",
     "color": "success_color",
     "description": "Takes two inputs (On/Off) and routes the selected one to its output.",
+    "icon": "object-flip-horizontal-symbolic",
     "name": "Inv. Switcher"
    },
    "ports": [
@@ -964,10 +1806,27 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "on",
+     "off",
+     "ctrl"
+    ],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "inverse_switcher"
   },
   {
    "capabilities": [],
+   "class_name": "LightNoiseCancelNode",
    "controls": [
     {
      "key": "library_name",
@@ -986,6 +1845,7 @@
     "category": "Effects",
     "color": "warning_color",
     "description": "Mic-only denoiser using the same engine as Echo Cancel, with the probe input hidden.",
+    "icon": "microphone-sensitivity-low-symbolic",
     "name": "Light Noise Cancel"
    },
    "ports": [
@@ -1002,10 +1862,45 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "mic"
+    ],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {
+     "aec_args": "Extra options passed to the AEC library; use these to bias it toward noise suppression.",
+     "library_name": "The AEC implementation to load.",
+     "monitor_mode": "Automatically use the default sink as the reference instead of a probe feed."
+    },
+    "settings": [
+     [
+      "library_name",
+      "AEC library:",
+      "text"
+     ],
+     [
+      "aec_args",
+      "AEC args:",
+      "text"
+     ],
+     [
+      "monitor_mode",
+      "Monitor mode (auto-capture default sink)",
+      "bool"
+     ]
+    ],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "light_noise_cancel"
   },
   {
    "capabilities": [],
+   "class_name": "MediaClassClassifierNode",
    "controls": [
     {
      "key": "media_class",
@@ -1021,6 +1916,7 @@
     "category": "Bundles",
     "color": "accent_color",
     "description": "A filter that matches by PipeWire media class.",
+    "icon": "view-list-symbolic",
     "name": "Media Class"
    },
    "ports": [
@@ -1033,10 +1929,29 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [
+     [
+      "invert",
+      "Invert (exclude matches)",
+      "bool"
+     ]
+    ],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "media_class_classifier"
   },
   {
    "capabilities": [],
+   "class_name": "MediaClassInputNode",
    "controls": [
     {
      "key": "media_class",
@@ -1048,6 +1963,7 @@
     "category": "",
     "color": "accent_color",
     "description": "Audio sources selected by their PipeWire media class (hardware inputs, sink monitors, app playback).",
+    "icon": "view-list-symbolic",
     "name": "Media Class In"
    },
    "ports": [
@@ -1059,10 +1975,23 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "media_class_input"
   },
   {
    "capabilities": [],
+   "class_name": "MediaClassOutputNode",
    "controls": [
     {
      "key": "media_class",
@@ -1074,6 +2003,7 @@
     "category": "",
     "color": "accent_color",
     "description": "Destinations selected by their PipeWire media class (hardware outputs, app recording streams).",
+    "icon": "view-list-symbolic",
     "name": "Media Class Out"
    },
    "ports": [
@@ -1085,10 +2015,23 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "audio"
+    ],
+    "label_lone_output": false,
+    "outputs": [],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "media_class_output"
   },
   {
    "capabilities": [],
+   "class_name": "NoiseCancelNode",
    "controls": [
     {
      "key": "vad_threshold",
@@ -1107,6 +2050,7 @@
     "category": "Effects",
     "color": "warning_color",
     "description": "AI (RNNoise) denoiser for a microphone signal.",
+    "icon": "microphone-sensitivity-muted-symbolic",
     "name": "AI Noise Cancel"
    },
    "ports": [
@@ -1123,10 +2067,50 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "audio"
+    ],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {
+     "ladspa_label": "Override the RNNoise plugin label. Blank = auto (uses the stereo variant).",
+     "ladspa_plugin": "Override the librnnoise_ladspa.so path. Blank = find it automatically.",
+     "vad_threshold": "How confident RNNoise must be that a frame is speech before passing it through. Higher = more aggressive."
+    },
+    "settings": [
+     [
+      "vad_threshold",
+      "Sensitivity, RNNoise (0-100):",
+      "number",
+      {
+       "max": 100,
+       "min": 0,
+       "step": 1
+      }
+     ],
+     [
+      "ladspa_plugin",
+      "Override plugin path (blank = auto):",
+      "text"
+     ],
+     [
+      "ladspa_label",
+      "Override plugin label (blank = auto):",
+      "text"
+     ]
+    ],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "noise_cancel"
   },
   {
    "capabilities": [],
+   "class_name": "NormalizeNode",
    "controls": [
     {
      "key": "gain",
@@ -1181,6 +2165,7 @@
     "category": "Effects",
     "color": "warning_color",
     "description": "Loudness normalization with a lookahead limiter, so quiet speech can be lifted without blasting when it resumes.",
+    "icon": "audio-volume-high-symbolic",
     "name": "Normalize"
    },
    "ports": [
@@ -1197,10 +2182,138 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "audio"
+    ],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {
+     "attack_ms": "Compressor attack time.",
+     "boost_db": "Input gain applied before the limiter.",
+     "ceiling_db": "Maximum output level (the brickwall limit).",
+     "knee_db": "Softness of the compressor knee.",
+     "ladspa_dir": "Directory holding the swh LADSPA plugins. Blank = find them automatically.",
+     "leveling": "Enable the sc4 leveling compressor ahead of the limiter.",
+     "limiter_release_s": "Limiter release time in seconds.",
+     "max_boost_db": "Ceiling that caps the boost.",
+     "ratio": "Compressor ratio.",
+     "release_ms": "Compressor release time.",
+     "threshold_db": "Compressor threshold: below this the compressor does nothing."
+    },
+    "settings": [
+     [
+      "boost_db",
+      "Boost (dB):",
+      "number",
+      {
+       "max": 30,
+       "min": 0,
+       "step": 0.5
+      }
+     ],
+     [
+      "max_boost_db",
+      "Maximum boost cap (dB):",
+      "number",
+      {
+       "max": 30,
+       "min": 0,
+       "step": 0.5
+      }
+     ],
+     [
+      "ceiling_db",
+      "Output ceiling (dB):",
+      "number",
+      {
+       "max": 0,
+       "min": -20,
+       "step": 0.5
+      }
+     ],
+     [
+      "leveling",
+      "Leveling compressor (sc4)",
+      "bool"
+     ],
+     [
+      "threshold_db",
+      "Compressor threshold (dB):",
+      "number",
+      {
+       "max": 0,
+       "min": -60,
+       "step": 1
+      }
+     ],
+     [
+      "ratio",
+      "Compressor ratio (1:n):",
+      "number",
+      {
+       "max": 20,
+       "min": 1,
+       "step": 0.5
+      }
+     ],
+     [
+      "attack_ms",
+      "Compressor attack (ms):",
+      "number",
+      {
+       "max": 200,
+       "min": 0.1,
+       "step": 1
+      }
+     ],
+     [
+      "release_ms",
+      "Compressor release (ms):",
+      "number",
+      {
+       "max": 2000,
+       "min": 10,
+       "step": 10
+      }
+     ],
+     [
+      "knee_db",
+      "Compressor knee (dB):",
+      "number",
+      {
+       "max": 24,
+       "min": 0,
+       "step": 1
+      }
+     ],
+     [
+      "limiter_release_s",
+      "Limiter release (s):",
+      "number",
+      {
+       "max": 5,
+       "min": 0.01,
+       "step": 0.05
+      }
+     ],
+     [
+      "ladspa_dir",
+      "LADSPA dir override (blank = auto):",
+      "text"
+     ]
+    ],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "normalize"
   },
   {
    "capabilities": [],
+   "class_name": "PanelInNode",
    "controls": [
     {
      "key": "description",
@@ -1211,6 +2324,7 @@
     "category": "",
     "color": "accent_color",
     "description": "A panel input port: wire audio in from outside; inside the panel it acts as a source.",
+    "icon": "list-add-symbolic",
     "name": "Panel In"
    },
    "ports": [
@@ -1227,10 +2341,31 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "audio"
+    ],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [
+     [
+      "description",
+      "Description:",
+      "text"
+     ]
+    ],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "panel_in"
   },
   {
    "capabilities": [],
+   "class_name": "PanelOutNode",
    "controls": [
     {
      "key": "description",
@@ -1241,6 +2376,7 @@
     "category": "",
     "color": "accent_color",
     "description": "A panel output port: wire audio to it from inside the panel; outside it acts as a source.",
+    "icon": "list-add-symbolic",
     "name": "Panel Out"
    },
    "ports": [
@@ -1257,15 +2393,37 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "audio"
+    ],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [
+     [
+      "description",
+      "Description:",
+      "text"
+     ]
+    ],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "panel_out"
   },
   {
    "capabilities": [],
+   "class_name": "PatchSpaceDeviceNode",
    "controls": [],
    "display": {
     "category": "Hardware & Apps",
     "color": "error_color",
     "description": "A line to the built-in Patch Space speaker device.",
+    "icon": "audio-speakers-symbolic",
     "name": "Speaker Line"
    },
    "ports": [
@@ -1282,15 +2440,31 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "audio"
+    ],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "patchspace_device"
   },
   {
    "capabilities": [],
+   "class_name": "PatchSpaceMicDeviceNode",
    "controls": [],
    "display": {
     "category": "Hardware & Apps",
     "color": "error_color",
     "description": "A line to the built-in Patch Space microphone device.",
+    "icon": "audio-input-microphone-symbolic",
     "name": "Mic Line"
    },
    "ports": [
@@ -1307,10 +2481,25 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "audio"
+    ],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "patchspace_mic_device"
   },
   {
    "capabilities": [],
+   "class_name": "RecorderNode",
    "controls": [
     {
      "key": "recorder",
@@ -1325,6 +2514,7 @@
     "category": "Impulse",
     "color": "success_color",
     "description": "Records what is wired into it: an audio input, and a sound output pointing at the take.  Record starts a fresh take (overwriting the last), Stop finishes it, and the node shows the take's waveform and length.",
+    "icon": "media-record-symbolic",
     "name": "Recorder"
    },
    "ports": [
@@ -1341,10 +2531,25 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "audio"
+    ],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "recorder"
   },
   {
    "capabilities": [],
+   "class_name": "RegexClassifierNode",
    "controls": [
     {
      "key": "pattern",
@@ -1360,6 +2565,7 @@
     "category": "Bundles",
     "color": "accent_color",
     "description": "A filter that matches by regular expression on the node/app name.",
+    "icon": "edit-find-symbolic",
     "name": "Regex"
    },
    "ports": [
@@ -1372,10 +2578,29 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [
+     [
+      "invert",
+      "Invert (exclude matches)",
+      "bool"
+     ]
+    ],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "regex_classifier"
   },
   {
    "capabilities": [],
+   "class_name": "RegexInputNode",
    "controls": [
     {
      "key": "pattern",
@@ -1387,6 +2612,7 @@
     "category": "",
     "color": "accent_color",
     "description": "Audio sources whose node name matches a regular expression (e.g. every app playback stream).",
+    "icon": "edit-find-symbolic",
     "name": "Regex In"
    },
    "ports": [
@@ -1398,10 +2624,23 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "regex_input"
   },
   {
    "capabilities": [],
+   "class_name": "RegexOutputNode",
    "controls": [
     {
      "key": "pattern",
@@ -1413,6 +2652,7 @@
     "category": "",
     "color": "accent_color",
     "description": "A destination picked by matching a regular expression against node names.",
+    "icon": "edit-find-symbolic",
     "name": "Regex Out"
    },
    "ports": [
@@ -1424,10 +2664,23 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "audio"
+    ],
+    "label_lone_output": false,
+    "outputs": [],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "regex_output"
   },
   {
    "capabilities": [],
+   "class_name": "ReplayBufferNode",
    "controls": [
     {
      "key": "replay_buffer",
@@ -1442,6 +2695,7 @@
     "category": "Impulse",
     "color": "success_color",
     "description": "Keeps the last few seconds of what is wired into it: an audio input, and a sound output pointing at the clip.  It records continuously, so the clip is already there when you want it - press Clip and the last N seconds become a file, a retrospective take you make *after* the thing you wanted happened.",
+    "icon": "list-add-symbolic",
     "name": "Replay Buffer"
    },
    "ports": [
@@ -1458,10 +2712,36 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "audio"
+    ],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [
+     [
+      "window",
+      "Window (seconds):",
+      "number",
+      {
+       "max": 3600,
+       "min": 1,
+       "step": 1
+      }
+     ]
+    ],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "replay_buffer"
   },
   {
    "capabilities": [],
+   "class_name": "ReverbNode",
    "controls": [
     {
      "key": "wetdry",
@@ -1496,6 +2776,7 @@
     "category": "Effects",
     "color": "warning_color",
     "description": "Adds reverb; the inline slider sets the dry/wet mix.",
+    "icon": "media-playlist-repeat-symbolic",
     "name": "Reverb"
    },
    "ports": [
@@ -1512,10 +2793,88 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "audio"
+    ],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {
+     "decay_time": "How long the reverb tail lasts.",
+     "diffusion": "Density/smoothness of the reverb tail.",
+     "hf_damp": "Frequency above which the tail is damped.",
+     "plugin_uri": "Override the LV2 plugin URI. Blank = Calf Reverb.",
+     "predelay": "Delay before the reverb starts, in milliseconds.",
+     "room_size": "Apparent size of the simulated room."
+    },
+    "settings": [
+     [
+      "decay_time",
+      "Decay time (s):",
+      "number",
+      {
+       "max": 15,
+       "min": 0.4,
+       "step": 0.1
+      }
+     ],
+     [
+      "room_size",
+      "Room size (0-5):",
+      "number",
+      {
+       "max": 5,
+       "min": 0,
+       "step": 0.1
+      }
+     ],
+     [
+      "diffusion",
+      "Diffusion (0-1):",
+      "number",
+      {
+       "max": 1,
+       "min": 0,
+       "step": 0.05
+      }
+     ],
+     [
+      "hf_damp",
+      "High-freq damping (Hz):",
+      "number",
+      {
+       "max": 20000,
+       "min": 2000,
+       "step": 100
+      }
+     ],
+     [
+      "predelay",
+      "Pre-delay (ms):",
+      "number",
+      {
+       "max": 500,
+       "min": 0,
+       "step": 1
+      }
+     ],
+     [
+      "plugin_uri",
+      "LV2 plugin URI (blank = Calf Reverb):",
+      "text"
+     ]
+    ],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "reverb"
   },
   {
    "capabilities": [],
+   "class_name": "SensitivityGateNode",
    "controls": [
     {
      "key": "sensitivity",
@@ -1558,6 +2917,7 @@
     "category": "Effects",
     "color": "warning_color",
     "description": "A voice-activity gate that opens on speech and closes on silence.",
+    "icon": "microphone-sensitivity-high-symbolic",
     "name": "Sensitivity"
    },
    "ports": [
@@ -1574,10 +2934,110 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "audio"
+    ],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {
+     "attack_ms": "How quickly the gate opens when speech starts.",
+     "knee_db": "Softness of the transition around the threshold.",
+     "lv2_uri": "Override the LV2 gate plugin URI. Blank = Calf Gate.",
+     "makeup": "Gain added back after gating.",
+     "range_db": "Level the gate drops to when closed (-96 dB = silence).",
+     "ratio": "How hard the gate attenuates below the threshold.",
+     "release_ms": "How long before the gate closes after speech stops.",
+     "sensitivity": "0..1: how easily sound opens the gate (1 = most sensitive)."
+    },
+    "settings": [
+     [
+      "sensitivity",
+      "Sensitivity (0-1, 1 = most sensitive):",
+      "number",
+      {
+       "max": 1,
+       "min": 0,
+       "step": 0.01
+      }
+     ],
+     [
+      "ratio",
+      "Gate ratio (1-20):",
+      "number",
+      {
+       "max": 20,
+       "min": 1,
+       "step": 0.5
+      }
+     ],
+     [
+      "attack_ms",
+      "Attack (ms):",
+      "number",
+      {
+       "max": 200,
+       "min": 0,
+       "step": 1
+      }
+     ],
+     [
+      "release_ms",
+      "Release / decay (ms):",
+      "number",
+      {
+       "max": 2000,
+       "min": 0,
+       "step": 10
+      }
+     ],
+     [
+      "knee_db",
+      "Knee (dB):",
+      "number",
+      {
+       "max": 12,
+       "min": 0,
+       "step": 0.5
+      }
+     ],
+     [
+      "makeup",
+      "Makeup gain:",
+      "number",
+      {
+       "max": 10,
+       "min": 0,
+       "step": 0.1
+      }
+     ],
+     [
+      "range_db",
+      "Closed-gate level (dB, -96 = silence):",
+      "number",
+      {
+       "max": 0,
+       "min": -96,
+       "step": 1
+      }
+     ],
+     [
+      "lv2_uri",
+      "LV2 gate URI (blank = Calf Gate):",
+      "text"
+     ]
+    ],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "sensitivity_gate"
   },
   {
    "capabilities": [],
+   "class_name": "SoundNode",
    "controls": [
     {
      "key": "path",
@@ -1601,6 +3061,7 @@
     "category": "Impulse",
     "color": "success_color",
     "description": "A sound: an audio file of known length, on its own port kind.  It makes no noise itself - a Sound Player fires it, a Clip node returns part of it - so it has no inputs, just a sound output.",
+    "icon": "audio-x-generic-symbolic",
     "name": "Sound"
    },
    "ports": [
@@ -1612,10 +3073,29 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [
+     [
+      "path",
+      "Sound file:",
+      "text"
+     ]
+    ],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "sound"
   },
   {
    "capabilities": [],
+   "class_name": "SoundDumpNode",
    "controls": [
     {
      "key": "dump",
@@ -1634,6 +3114,7 @@
     "category": "Impulse",
     "color": "success_color",
     "description": "Writes the sound wired into it to a file whenever an impulse arrives: a sound input, an impulse input, and no outputs at all.  It saves to its folder and name as Opus, so what it writes is small and plays anywhere - the sink for a sound, where the Sound Player is the source.",
+    "icon": "document-save-symbolic",
     "name": "Sound Dump"
    },
    "ports": [
@@ -1650,17 +3131,38 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "sound",
+     "impulse"
+    ],
+    "label_lone_output": false,
+    "outputs": [],
+    "setting_tooltips": {},
+    "settings": [
+     [
+      "folder",
+      "Folder:",
+      "text"
+     ],
+     [
+      "name",
+      "Name:",
+      "text"
+     ]
+    ],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "sound_dump"
   },
   {
    "capabilities": [],
+   "class_name": "SoundPlayerNode",
    "controls": [
     {
      "key": "toggle",
-     "spec": [
-      "overlap",
-      "Stack"
-     ],
      "widget": "toggle"
     },
     {
@@ -1672,6 +3174,7 @@
     "category": "Impulse",
     "color": "success_color",
     "description": "Plays the sound wired into it whenever an impulse arrives: a sound input, an impulse input, an audio output.  The Stack switch picks whether a new impulse restarts it or stacks another take.",
+    "icon": "media-playback-start-symbolic",
     "name": "Sound Player"
    },
    "ports": [
@@ -1693,15 +3196,35 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "impulse",
+     "sound"
+    ],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": [
+     "overlap",
+     "Stack"
+    ]
+   },
    "type_id": "sound_player"
   },
   {
    "capabilities": [],
+   "class_name": "SplitterNode",
    "controls": [],
    "display": {
     "category": "Processing",
     "color": "success_color",
     "description": "Passes audio straight through; useful as a named junction that several edges can share.",
+    "icon": "network-transmit-receive-symbolic",
     "name": "Splitter"
    },
    "ports": [
@@ -1718,10 +3241,25 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "audio"
+    ],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "splitter"
   },
   {
    "capabilities": [],
+   "class_name": "SwitcherNode",
    "controls": [
     {
      "key": "fallback_onoff",
@@ -1732,6 +3270,7 @@
     "category": "Processing",
     "color": "success_color",
     "description": "Routes its input to the On or Off output, chosen by a boolean control signal.",
+    "icon": "object-flip-horizontal-symbolic",
     "name": "Switcher"
    },
    "ports": [
@@ -1758,10 +3297,27 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "audio",
+     "ctrl"
+    ],
+    "label_lone_output": false,
+    "outputs": [
+     "on",
+     "off"
+    ],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "switcher"
   },
   {
    "capabilities": [],
+   "class_name": "TitleClassifierNode",
    "controls": [
     {
      "key": "title",
@@ -1777,6 +3333,7 @@
     "category": "Bundles",
     "color": "accent_color",
     "description": "A filter that matches a stream's title - PipeWire's media.name, the label a mixer shows for a playing app (\"YouTube\", a track name).",
+    "icon": "insert-text-symbolic",
     "name": "Title"
    },
    "ports": [
@@ -1789,15 +3346,35 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": true,
+    "inputs": [],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [
+     [
+      "invert",
+      "Invert (exclude matches)",
+      "bool"
+     ]
+    ],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "title_classifier"
   },
   {
    "capabilities": [],
+   "class_name": "V4l2VirtualCameraNode",
    "controls": [],
    "display": {
     "category": "Virtual Devices",
     "color": "destructive_color",
     "description": "A virtual camera on a v4l2 device: republishes the camera feed wired into it on an output device (VirtualCamN), so other apps can pick it up as a camera.",
+    "icon": "camera-video-symbolic",
     "name": "V4L2 Virtual Cam"
    },
    "ports": [
@@ -1809,10 +3386,23 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "in"
+    ],
+    "label_lone_output": false,
+    "outputs": [],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "v4l2_virtual_camera"
   },
   {
    "capabilities": [],
+   "class_name": "VirtualCameraNode",
    "controls": [
     {
      "key": "device_label",
@@ -1824,6 +3414,7 @@
     "category": "Virtual Devices",
     "color": "destructive_color",
     "description": "A virtual camera in the PipeWire system: republishes the camera feed wired into it as a video source other PipeWire-aware apps can pick as a camera.",
+    "icon": "camera-video-symbolic",
     "name": "Virtual Cam"
    },
    "ports": [
@@ -1835,10 +3426,23 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "in"
+    ],
+    "label_lone_output": false,
+    "outputs": [],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "virtual_camera"
   },
   {
    "capabilities": [],
+   "class_name": "VirtualMicNode",
    "controls": [
     {
      "key": "device_label",
@@ -1850,6 +3454,7 @@
     "category": "Virtual Devices",
     "color": "destructive_color",
     "description": "A named virtual microphone other applications can record from.",
+    "icon": "audio-input-microphone-symbolic",
     "name": "Virtual Mic"
    },
    "ports": [
@@ -1866,10 +3471,25 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "audio"
+    ],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "virtual_mic"
   },
   {
    "capabilities": [],
+   "class_name": "VirtualSpeakerNode",
    "controls": [
     {
      "key": "device_label",
@@ -1881,6 +3501,7 @@
     "category": "Virtual Devices",
     "color": "destructive_color",
     "description": "A named virtual speaker other applications can play into.",
+    "icon": "audio-speakers-symbolic",
     "name": "Virtual Speaker"
    },
    "ports": [
@@ -1897,10 +3518,25 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "audio"
+    ],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "virtual_speaker"
   },
   {
    "capabilities": [],
+   "class_name": "VolumeProcessNode",
    "controls": [
     {
      "key": "volume",
@@ -1911,6 +3547,7 @@
     "category": "Processing",
     "color": "success_color",
     "description": "Adjusts the level of whatever passes through it.",
+    "icon": "audio-volume-high-symbolic",
     "name": "Volume"
    },
    "ports": [
@@ -1927,10 +3564,25 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "audio"
+    ],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "volume"
   },
   {
    "capabilities": [],
+   "class_name": "WarpInNode",
    "controls": [
     {
      "key": "warp_name",
@@ -1942,6 +3594,7 @@
     "category": "Warp",
     "color": "accent_color",
     "description": "Publishes whatever is plugged into it under a name, so a Warp Out elsewhere can pull it in.",
+    "icon": "insert-link-symbolic",
     "name": "Warp In"
    },
    "ports": [
@@ -1953,10 +3606,23 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [
+     "audio"
+    ],
+    "label_lone_output": false,
+    "outputs": [],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "warp_in"
   },
   {
    "capabilities": [],
+   "class_name": "WarpOutNode",
    "controls": [
     {
      "key": "warp_name",
@@ -1968,6 +3634,7 @@
     "category": "Warp",
     "color": "accent_color",
     "description": "Pulls in everything published under a name (mixes multiple publishers).",
+    "icon": "insert-link-symbolic",
     "name": "Warp Out"
    },
    "ports": [
@@ -1979,7 +3646,71 @@
    ],
    "requires": [],
    "schema": 1,
+   "spec": {
+    "field_choices": false,
+    "inputs": [],
+    "label_lone_output": false,
+    "outputs": [
+     "out"
+    ],
+    "setting_tooltips": {},
+    "settings": [],
+    "socket_labels": true,
+    "toggle": null
+   },
    "type_id": "warp_out"
   }
- ]
+ ],
+ "vocabulary": {
+  "field_labels": {
+   "description": "Description:",
+   "device_label": "Name:",
+   "media_class": "Media Class:",
+   "path": "Sound file:",
+   "pattern": "Pattern:",
+   "warp_name": "Warp name:"
+  },
+  "media_class_choices": [
+   [
+    "Hardware Output",
+    "Audio/Sink"
+   ],
+   [
+    "Hardware Input",
+    "Audio/Source"
+   ],
+   [
+    "App Playback",
+    "Stream/Output/Audio"
+   ],
+   [
+    "App Recording",
+    "Stream/Input/Audio"
+   ]
+  ],
+  "media_class_input_choices": [
+   [
+    "Hardware Input",
+    "Audio/Source"
+   ],
+   [
+    "Hardware Output (loopback)",
+    "Audio/Sink"
+   ],
+   [
+    "App Playback",
+    "Stream/Output/Audio"
+   ]
+  ],
+  "media_class_output_choices": [
+   [
+    "Hardware Output",
+    "Audio/Sink"
+   ],
+   [
+    "App Recording",
+    "Stream/Input/Audio"
+   ]
+  ]
+ }
 }

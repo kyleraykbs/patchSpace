@@ -91,7 +91,10 @@ def error(message: str, ref: str = "") -> Dict[str, Any]:
     return msg
 
 
-def type_declare(types: List[Dict[str, Any]]) -> Dict[str, Any]:
+def type_declare(types: List[Dict[str, Any]],
+                 menu: Optional[List[Dict[str, Any]]] = None,
+                 vocabulary: Optional[Dict[str, Any]] = None,
+                 aliases: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """A module's catalog.
 
     Each type::
@@ -106,8 +109,20 @@ def type_declare(types: List[Dict[str, Any]]) -> Dict[str, Any]:
                      "color": "#5b9bd5", "icon": "camera-video"},
          "capabilities": ["virtual-camera"],
          "requires": []}                       # type ids this one needs
+
+    ``menu`` is the module's add-node menu (categories in order, each with
+    the types a user may create) and ``vocabulary`` its presentation tables
+    (field labels, choice lists).  Both are relayed to a display unchanged —
+    the daemon does not interpret them.
     """
-    return {"type": "type_declare", "types": list(types)}
+    message: Dict[str, Any] = {"type": "type_declare", "types": list(types)}
+    if menu is not None:
+        message["menu"] = list(menu)
+    if vocabulary is not None:
+        message["vocabulary"] = dict(vocabulary)
+    if aliases is not None:
+        message["aliases"] = dict(aliases)
+    return message
 
 
 def node_announce(nodes: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -190,6 +205,45 @@ def registry_reply(modules: List[Dict[str, Any]], types: List[Dict[str, Any]],
         "modules": list(modules),
         "types": list(types),
         "instances": list(instances),
+    }
+
+
+def catalog_request() -> Dict[str, Any]:
+    """A display asking for the type catalog once, so it can draw nodes it
+    has never heard of."""
+    return {"type": "catalog_request"}
+
+
+def catalog_reply(types: List[Dict[str, Any]],
+                  menu: Optional[List[Dict[str, Any]]] = None,
+                  vocabulary: Optional[Dict[str, Any]] = None,
+                  aliases: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    return {
+        "type": "catalog_reply",
+        "types": list(types),
+        "menu": list(menu or []),
+        "vocabulary": dict(vocabulary or {}),
+        "aliases": dict(aliases or {}),
+    }
+
+
+def snapshot_request() -> Dict[str, Any]:
+    """A display asking for the graph: what exists, where, and in what
+    state.  The daemon answers with instances (identity + status),
+    placements (space/position) and edges."""
+    return {"type": "snapshot_request"}
+
+
+def snapshot_reply(instances: List[Dict[str, Any]], placements: List[Dict[str, Any]],
+                   edges: List[Dict[str, Any]], spaces: List[Dict[str, Any]],
+                   revision: int = 0) -> Dict[str, Any]:
+    return {
+        "type": "snapshot_reply",
+        "revision": revision,
+        "instances": list(instances),
+        "placements": list(placements),
+        "edges": list(edges),
+        "spaces": list(spaces),
     }
 
 

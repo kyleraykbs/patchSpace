@@ -111,13 +111,20 @@ three can't disagree about what may connect.
 side panels, console, daemon start/adopt) → `patchspace_widget.py` (the editable canvas:
 drawing, hit-testing, gestures, layout, panels, wires) with:
 
-* `node_specs.py` — the single source of truth for what a node type *is*: ports, kinds,
-  inline controls, settings rows, menu/category/color/icon/description.  (Dies in
-  PLAN.md phase 2: specs arrive from the daemon's module registry.)
+* `node_catalog.py` — what the daemon's modules declare: ports, kinds, controls,
+  labels, colours, icons, the add-node menu, the settings rows.  The client asks for
+  it once per connection (`hello` role=display → `catalog_request`) and installs the
+  reply; `node_specs.py` (the GUI's own copy) is gone.  An unknown type renders as a
+  generic in/out node, so a module the GUI has never heard of still draws.
 * `view_mixin.py` — pan/zoom/undo shared by both canvases; `wire_router.py` — A* orthogonal
   routing; `force_layout.py` — physics; `render_utils.py` — palette + cairo helpers;
   `socket_client.py` — async client thread; `daemon_control.py` — start/adopt/stop;
   `bool_state.py` — the one poll-vs-pending rule for boolean controls.
+
+`gui/` is a namespace package: its modules import each other **flat**, and
+`gui.node_catalog` is a *different module object* from a flat `import node_catalog`.
+Anything that installs the catalog (tests, tooling) must use the flat import or the
+widget reads an empty one.
 
 **There is no GUI test suite.**  The daemon suite (`src/tests/`) is headless and never
 touches real PipeWire; canvas/GUI behaviour is verified by hand (see `agents/NOTES.md` for

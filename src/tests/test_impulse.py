@@ -13,7 +13,7 @@ import pytest
 
 from central import pwnodes
 from central.main import PatchSpaceDaemon
-from gui import node_specs
+import node_catalog
 from central.session_repair import ERROR, repair, validate
 
 
@@ -316,12 +316,12 @@ def test_a_loaded_session_brings_an_impulse_chain_back(monkeypatch):
 
 
 def test_gui_mirrors_the_impulse_port_kind():
-    assert node_specs.port_kind("button", "out", "out") == "impulse"
-    assert node_specs.port_kind("sound_player", "impulse", "in") == "impulse"
-    assert node_specs.port_kind("sound_player", "out", "out") == "audio"
-    assert node_specs.ports_compatible("button", "out", "sound_player", "in")
-    assert not node_specs.ports_compatible("button", "out", "volume", "in")
-    assert not node_specs.ports_compatible("splitter", "out", "sound_player", "in")
+    assert node_catalog.port_kind("button", "out", "out") == "impulse"
+    assert node_catalog.port_kind("sound_player", "impulse", "in") == "impulse"
+    assert node_catalog.port_kind("sound_player", "out", "out") == "audio"
+    assert node_catalog.ports_compatible("button", "out", "sound_player", "in")
+    assert not node_catalog.ports_compatible("button", "out", "volume", "in")
+    assert not node_catalog.ports_compatible("splitter", "out", "sound_player", "in")
 
 
 def test_session_repair_accepts_an_impulse_wire():

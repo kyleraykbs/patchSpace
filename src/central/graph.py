@@ -12,7 +12,7 @@ Ownership split (agents/PLAN.md):
 Node records are looked up by id, never duplicated here.  The edge rules
 live in exactly one place (``kinds_compatible`` plus the single-driver
 rule in ``Graph.can_connect``) so that the old three-way mirror — the
-model, the GUI's ``node_specs`` and ``session_repair`` each re-checking
+model, the GUI's ``node_catalog`` and ``session_repair`` each re-checking
 compatibility — has one authority to defer to.
 """
 

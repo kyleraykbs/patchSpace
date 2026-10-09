@@ -54,7 +54,7 @@ def _widget(node):
     from gi.repository import Gtk
     if not Gtk.init_check():
         pytest.skip("no display available for GTK")
-    from gui.node_specs import spec_for
+    from gui.node_catalog import spec_for
     from gui.patchspace_widget import PatchSpaceGraphWidget
 
     client = _Client()
@@ -76,7 +76,7 @@ def test_the_node_is_its_sockets_and_the_switch():
     """No box on the face: the bundle in, the classifier inputs, the out, and
     the Include/Exclude button."""
     w, _ = _widget(_filter_node())
-    from gui.node_specs import spec_for
+    from gui.node_catalog import spec_for
 
     assert spec_for("filter").field is None
     assert w.nodes["f"]["inputs"] == ["in", "filter1", "filter2"]

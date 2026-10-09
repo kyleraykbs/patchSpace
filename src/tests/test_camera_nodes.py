@@ -16,7 +16,7 @@ import pytest
 
 from central import pwnodes
 from central.main import PatchSpaceDaemon
-from gui import node_specs
+import node_catalog
 from tests.test_pwnodes import FakeGraph
 
 
@@ -117,18 +117,18 @@ def test_a_virtual_camera_takes_exactly_one_feed():
 
 
 def test_gui_mirrors_the_camera_port_kind():
-    assert node_specs.port_kind("camera_input", "out", "out") == "camera"
-    assert node_specs.port_kind("virtual_camera", "in", "in") == "camera"
-    assert node_specs.port_kind("v4l2_virtual_camera", "in", "in") == "camera"
-    assert node_specs.ports_compatible(
+    assert node_catalog.port_kind("camera_input", "out", "out") == "camera"
+    assert node_catalog.port_kind("virtual_camera", "in", "in") == "camera"
+    assert node_catalog.port_kind("v4l2_virtual_camera", "in", "in") == "camera"
+    assert node_catalog.ports_compatible(
         "camera_input", "out", "virtual_camera", "in")
-    assert node_specs.ports_compatible(
+    assert node_catalog.ports_compatible(
         "camera_input", "out", "v4l2_virtual_camera", "in")
-    assert not node_specs.ports_compatible("camera_input", "out", "volume", "in")
-    assert not node_specs.ports_compatible("splitter", "out", "virtual_camera", "in")
+    assert not node_catalog.ports_compatible("camera_input", "out", "volume", "in")
+    assert not node_catalog.ports_compatible("splitter", "out", "virtual_camera", "in")
     # The labels Kyle named the two sinks.
-    assert node_specs.spec_for("virtual_camera").label == "Virtual Cam"
-    assert node_specs.spec_for("v4l2_virtual_camera").label == "V4L2 Virtual Cam"
+    assert node_catalog.spec_for("virtual_camera").label == "Virtual Cam"
+    assert node_catalog.spec_for("v4l2_virtual_camera").label == "V4L2 Virtual Cam"
 
 
 # ---------------------------------------------------------------------------

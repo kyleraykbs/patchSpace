@@ -59,17 +59,17 @@ def test_the_length_of_a_real_file_is_known(tmp_path):
 
 
 def test_sound_ports_pair_only_with_sound_ports():
-    from gui import node_specs
+    import node_catalog
 
-    assert node_specs.port_kind("sound", "out", "out") == "sound"
-    assert node_specs.spec_for("sound").sound_outputs == {"out"}
-    assert node_specs.spec_for("sound").inputs == []
+    assert node_catalog.port_kind("sound", "out", "out") == "sound"
+    assert node_catalog.spec_for("sound").sound_outputs == {"out"}
+    assert node_catalog.spec_for("sound").inputs == []
     # A sound output only ever meets a sound input: the player's.
-    player = node_specs.spec_for("sound_player")
+    player = node_catalog.spec_for("sound_player")
     assert player.sound_inputs == {"sound"}
-    assert node_specs.ports_compatible("sound", "out", "sound_player", "sound")
-    assert not node_specs.ports_compatible("sound", "out", "sound_player", "in")
-    assert not node_specs.ports_compatible("volume", "out", "sound_player", "sound")
+    assert node_catalog.ports_compatible("sound", "out", "sound_player", "sound")
+    assert not node_catalog.ports_compatible("sound", "out", "sound_player", "in")
+    assert not node_catalog.ports_compatible("volume", "out", "sound_player", "sound")
 
 
 def test_a_sound_edge_is_accepted_and_is_never_a_link():

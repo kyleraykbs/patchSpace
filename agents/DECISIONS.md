@@ -112,3 +112,35 @@
 - Why: phase 3 becomes a transport swap, not a rewrite.  The module process then
   owns its own graph and the callable disappears.
 - Reversible: yes.
+
+## [2026-10-09] The node catalog is module-owned data, relayed by the daemon
+- Decision: `modules/pipewire/catalog.json` holds the types (ports, controls,
+  display), the add-node menu, the vocabulary tables (field labels, media.class
+  choices) and the legacy aliases.  A module sends them in `type_declare`; the
+  registry stores them per module and `catalog_reply` serves the merged view;
+  the display installs it (`gui/node_catalog.py`).
+- Why: the GUI's private copy (`node_specs.py`) was the mirror the plan kills,
+  and a display in another process (phase 7, or a niri fork) cannot import it.
+  Keeping the menu/vocabulary on the wire means the display hardcodes no
+  PipeWire vocabulary either.
+- Reversible: yes (the payload is data; the module owns it).
+
+## [2026-10-09] One compatibility rule, in central/graph.py
+- Decision: `kinds_compatible` (+ the single-driver rule) is the only
+  implementation.  The GUI mirrors it for *live* drag feedback
+  (`node_catalog.ports_compatible`), `session_repair` calls it directly, and
+  the daemon enforces it on every edge.
+- Why: three copies disagreed by construction; a display must be able to
+  answer "may I offer this drop" locally, and an offline validator must run
+  without a daemon — both derive from the same declared port kinds.
+- Reversible: yes.
+
+## [2026-10-09] The GUI's flat-import convention is load-bearing
+- Decision: `gui/` stays a namespace package and its modules import each other
+  flat; anything that needs the GUI's modules (tests, tooling) must put
+  `src/gui` on `sys.path` and import flat too.
+- Why: `gui.node_catalog` and flat `node_catalog` are two module objects for
+  one file — installing the catalog through the wrong one leaves the widget
+  reading an empty catalog.  Cost a debugging round; the trap is in NOTES.md.
+- Reversible: yes (adding `gui/__init__.py` would make the two names one
+  module, but that changes how the GUI is launched).
