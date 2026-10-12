@@ -619,6 +619,14 @@ class PatchSpaceDaemon:
         self._panel_snapshots: Dict[str, panels.Panel] = {}
         # Panels currently in edit mode (parameter changes are persisted).
         self._edit_panels: set = set()
+        #: placement id -> its local changes (a partial panel config), so two
+        #: instances of one blueprint can differ.  Persisted in the root panel
+        #: (the session autosave) and replayed on load; see `_capture_diffs`.
+        self._placement_diffs: Dict[str, dict] = {}
+        #: Where they live: a sidecar beside the session autosave.
+        self._placement_diffs_path = os.path.join(
+            os.path.dirname(self.root_panel_path) or ".", "placement_diffs.json"
+        )
         self._panel_mtimes: Dict[str, float] = {}
         self._panel_poll_at = 0.0
         self._panel_reloading = False
@@ -1595,6 +1603,7 @@ class PatchSpaceDaemon:
                         ],
                     }
                 )
+        self._merge_placement_diffs(nodes)
         return {"nodes": nodes, "edges": edges, "groups": groups}
 
     def _install_panels(self, tree: Dict[str, panels.Panel]) -> None:
@@ -1607,6 +1616,42 @@ class PatchSpaceDaemon:
         }
         self._panel_snapshots = dict(tree)
         self._edit_panels &= set(tree)
+        # Per-placement diffs: a placement's local changes, so two instances of
+        # one blueprint can differ and both come back after a restart.  They
+        # are session state, not part of any panel's schema, so they live in a
+        # sidecar beside the root panel (the session autosave).  See
+        # `_capture_diffs`.
+        stored = {}
+        try:
+            with open(self._placement_diffs_path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            stored = payload.get("placements") or {}
+        except FileNotFoundError:
+            stored = {}
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("ignoring %s: %s", self._placement_diffs_path, exc)
+            stored = {}
+        self._placement_diffs = {
+            str(pid): dict(diff) for pid, diff in stored.items()
+            if isinstance(diff, dict) and pid in tree
+        }
+
+    def _merge_placement_diffs(self, nodes: Dict[str, dict]) -> None:
+        """Overlay every placement's local changes on the config it loads.
+
+        A diff is a partial panel config (node params, by local id); keys for
+        nodes the blueprint no longer has are dropped, which is the rebase
+        when the blueprint changes underneath."""
+        for pid, diff in self._placement_diffs.items():
+            for local, entry in (diff.get("nodes") or {}).items():
+                qid = panels.make_id(pid, local)
+                node = nodes.get(qid)
+                if node is None:
+                    continue
+                params = dict(entry.get("params") or {})
+                merged = dict(node.get("params") or {})
+                merged.update(params)
+                node["params"] = merged
 
     def _load_new_placement(self, root_id: str) -> None:
         """Bring up just one newly-added placement subtree, without tearing
@@ -1788,25 +1833,38 @@ class PatchSpaceDaemon:
         return out
 
     def _write_panels(self) -> None:
-        """Write the root panel and every writable read-write panel."""
+        """Write the root panel and every writable read-write panel.
+
+        Order matters: the panel *files* first (a committed change — edit
+        mode, or the canonical placement of a shared file), then the snapshots
+        those writes commit, then the per-placement diffs captured against
+        those snapshots, and finally the root (the session autosave), which
+        carries the diffs.  Capturing before the writes would record a
+        committed change as a local diff.
+        """
         tree = self._build_panels_from_space()
         canon = self._canonical_by_stem()
-        root = tree.get(panels.ROOT_ID)
-        if root is not None:
-            panels.write_file(self.root_panel_path, root)
+        groups = self._plan_placement_groups()
         written = set()
         for pid, panel in tree.items():
             if pid == panels.ROOT_ID:
                 continue
             if not panel.writable or panel.is_readonly or not panel.path:
                 continue
-            # Placements of the same file share it; write it once, from the
-            # placement that actually changed.
+            # One write per file, from the placement that *committed* a change
+            # (edit mode).  When several placements share a file and none of
+            # them committed, the file keeps its blueprint content: their local
+            # changes are their own diffs.  A lone placement writes as before.
             if panel.path in written:
                 continue
             written.add(panel.path)
-            write_panel = tree.get(canon.get(panel.stem or "", pid), panel)
-            panels.write_file(panel.path, write_panel)
+            canonical = canon.get(panel.stem or "")
+            if canonical:
+                panels.write_file(panel.path, tree.get(canonical, panel))
+                continue
+            if len(groups.get(panel.stem or "", [])) > 1:
+                continue
+            panels.write_file(panel.path, panel)
         # A panel in edit mode (or one whose change was just written as the
         # canonical placement) has committed; make that the frozen state.
         for pid in list(self._edit_panels):
@@ -1815,14 +1873,30 @@ class PatchSpaceDaemon:
         for pid in canon.values():
             if pid in tree:
                 self._panel_snapshots[pid] = tree[pid]
-        self._sync_placements(canon)
+        root = tree.get(panels.ROOT_ID)
+        if root is not None:
+            panels.write_file(self.root_panel_path, root)
+        # The per-placement diffs ride beside the session: local state, not
+        # part of any panel's schema.
+        self._capture_diffs()
+        try:
+            os.makedirs(os.path.dirname(self._placement_diffs_path), exist_ok=True)
+            with open(self._placement_diffs_path, "w", encoding="utf-8") as handle:
+                json.dump({"placements": self._placement_diffs}, handle,
+                          indent=2, sort_keys=True)
+                handle.write("\n")
+        except OSError as exc:
+            logger.warning("could not write %s: %s", self._placement_diffs_path, exc)
         self._panel_mtimes = panels.snapshot(self._panel_dir_paths())
 
     def _placement_differs(self, snap, live, include_params, positions=True):
-        """Whether ``live`` differs from committed ``snap`` in a way that
-        should sync to the file's other placements.  ``positions=False``
-        ignores node x/y, leaving only structural/parameter differences
-        (which are the ones that need a sibling rebuild)."""
+        """Whether ``live`` differs from committed ``snap``.
+
+        Used to pick which placement of a shared file *is* the changed one (a
+        change made in edit mode is committed to the blueprint, so it has to
+        be written from the placement that made it), and to record the others'
+        local changes as their own diffs.  ``positions=False`` ignores node
+        x/y, leaving only structural/parameter differences."""
         if set(snap.nodes) != set(live.nodes):
             return True
         if snap.children != live.children:
@@ -1871,9 +1945,13 @@ class PatchSpaceDaemon:
         return groups
 
     def _canonical_by_stem(self) -> Dict[str, str]:
-        """{stem: placement id} for stems with several placements, picking
-        the placement whose live state diverged from its snapshot (the one
-        that changed); empty when nothing needs syncing."""
+        """{stem: placement id} for stems with several placements, picking the
+        placement whose change is *committed* to the blueprint (one in edit
+        mode) — the file is written from that one.
+
+        A placement that changed outside edit mode is not a blueprint change:
+        it is that placement's own diff (see `_capture_diffs`), and it must
+        never be written back over the file."""
         groups = self._plan_placement_groups()
         if not any(len(v) > 1 for v in groups.values()):
             return {}
@@ -1885,89 +1963,62 @@ class PatchSpaceDaemon:
             if len(pids) < 2:
                 continue
             for pid in pids:
+                if pid not in self._edit_panels:
+                    continue
                 snap = self._panel_snapshots.get(pid)
                 live = live_all.get(pid)
                 if snap is not None and live is not None and self._placement_differs(
-                    snap, live, pid in self._edit_panels
+                    snap, live, True
                 ):
                     canon[stem] = pid
                     break
         return canon
 
-    def _sync_placements(self, canon: Optional[Dict[str, str]] = None) -> None:
-        """Fan a changed placement out to the file's other placements:
-        positions are copied live (cheap), structural/parameter changes
-        revert the siblings to the changed placement's config."""
-        if canon is None:
-            canon = self._canonical_by_stem()
-        if not canon:
-            return
-        groups = self._plan_placement_groups()
+    def _capture_diffs(self) -> None:
+        """Record each placement's local changes as its own diff.
+
+        A placement that differs from its committed file state (a parameter
+        the user turned, a node they moved) keeps that difference *here* and
+        nowhere else: the blueprint file is not touched and the file's other
+        placements are not affected — that is what lets two instances of one
+        panel diverge.  The diffs are written into the root panel (the session
+        autosave) by `_write_panels`, and replayed on load.
+        """
         live_all = self._build_panels_from_space(
             use_snapshots=False, freeze_params=False
         )
-        for stem, pid in canon.items():
-            source = live_all.get(pid)
-            if source is None:
+        for pid, panel in self.panels.items():
+            if pid == panels.ROOT_ID or not panel.stem:
                 continue
-            off_src = self._panel_origin(self.panels, pid)
-            for other in groups.get(stem, []):
-                if other == pid:
+            snap = self._panel_snapshots.get(pid)
+            live = live_all.get(pid)
+            if snap is None or live is None:
+                continue
+            entry: Dict[str, dict] = {"nodes": {}}
+            for local, cfg in live.nodes.items():
+                base = snap.nodes.get(local)
+                if base is None:
                     continue
-                # Cheap position sync.
-                off_other = self._panel_origin(self.panels, other)
-                for local, cfg in source.nodes.items():
-                    node = self.space.nodes.get(panels.make_id(other, local))
-                    params = cfg.get("params") or {}
-                    if node is None or params.get("x") is None:
-                        continue
-                    node.x = off_other[0] + float(params["x"])
-                    node.y = off_other[1] + float(params["y"])
-                snap = self._panel_snapshots.get(other)
-                other_panel = self.panels.get(other)
-                if snap is None or other_panel is None:
-                    continue
-                # Keep the sibling's snapshot in step for the copied
-                # positions, so it doesn't look "changed" next time.
-                for local, cfg in source.nodes.items():
-                    sc = snap.nodes.get(local)
-                    params = cfg.get("params") or {}
-                    if sc is None or params.get("x") is None:
-                        continue
-                    sp = sc.setdefault("params", {})
-                    sp["x"] = float(params["x"])
-                    sp["y"] = float(params["y"])
-                structural = self._placement_differs(
-                    snap, source, include_params=False, positions=False
-                )
-                params_differ = self._placement_differs(
-                    snap, source, include_params=True, positions=False
-                )
-                if not structural and not params_differ:
-                    continue
-                adapted = panels.Panel(
-                    id=other_panel.id, parent=other_panel.parent,
-                    label=other_panel.label, color=other_panel.color,
-                    mode=other_panel.mode, x=other_panel.x, y=other_panel.y,
-                    w=other_panel.w, h=other_panel.h,
-                    anchored=other_panel.anchored, path=other_panel.path,
-                    writable=other_panel.writable, stem=other_panel.stem,
-                    auto_load=other_panel.auto_load,
-                    config={
-                        "nodes": dict(source.config.get("nodes") or {}),
-                        "edges": list(source.config.get("edges") or []),
-                        "panels": list(source.child_entries),
-                        "groups": list(source.config.get("groups") or []),
-                    },
-                )
-                self._panel_snapshots[other] = adapted
-                if structural:
-                    # Membership/edges differ: rebuild the sibling subtree.
-                    self._revert_panel(other, {other: adapted})
-                else:
-                    # Parameters only: apply in place (no node reload).
-                    self._apply_panel_params(other, source)
-
+                params = cfg.get("params") or {}
+                committed = base.get("params") or {}
+                changed = {
+                    key: value for key, value in params.items()
+                    if key not in ("declarative", "backing_node_name")
+                    and committed.get(key) != value
+                }
+                # A node's position is part of the placement's own state too.
+                if changed:
+                    entry["nodes"][local] = {"params": changed}
+            if entry["nodes"]:
+                self._placement_diffs[pid] = entry
+            else:
+                # Nothing local any more: drop the diff rather than keep a
+                # stale one (a change reverted by hand, a blueprint that now
+                # matches).
+                self._placement_diffs.pop(pid, None)
+        for pid in list(self._placement_diffs):
+            if pid not in self.panels:
+                self._placement_diffs.pop(pid, None)
     def _cmd_list_panels(self, cmd: dict) -> dict:
         files = []
         for pid, panel in sorted(self.panels.items()):

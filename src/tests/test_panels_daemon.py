@@ -579,7 +579,10 @@ def test_list_panel_files_and_autoload_toggle(tmp_path):
     assert next(f for f in listing["files"] if f["stem"] == "kit")["auto_load"] is True
 
 
-def test_placements_sync_structure(tmp_path):
+def test_a_blueprint_change_reaches_its_instances_on_reload(tmp_path):
+    """A change to the *blueprint* (edit mode writes the file) is what other
+    placements follow - on reload, not by leaking live.  A local change in one
+    placement is that placement's own (see the divergence tests below)."""
     d, root, pdir = _daemon(tmp_path)
     d.panels = d._load_panels_tree()
     d.handle_command({"command": "add_node", "node_type": "regex_input",
@@ -588,14 +591,23 @@ def test_placements_sync_structure(tmp_path):
     other = d._cmd_place_panel({"stem": "kit"})["name"]
     assert "kit::a" in d.space.nodes and f"{other}::a" in d.space.nodes
 
-    # Add a node to one placement; the shared file syncs the other.
+    # A node added to the blueprint in edit mode is written to the file...
+    d._cmd_set_panel_edit_mode({"panel_id": "kit", "enabled": True})
     d.handle_command({"command": "add_node", "node_type": "regex_output",
                       "node_id": "kit::b", "config": {"pattern": ".*"}})
     d._write_panels()
-    assert f"{other}::b" in d.space.nodes
+    raw = json.load(open(os.path.join(pdir, "kit.json")))
+    assert "b" in raw["config"]["nodes"]
+
+    # ...and the other placement picks it up when the tree is reloaded.
+    d.panels = d._load_panels_tree()
+    assert "b" in d.panels[other].nodes
 
 
-def test_placements_sync_positions(tmp_path):
+def test_a_local_move_stays_in_its_placement(tmp_path):
+    """Two instances of one blueprint diverge: a node moved in one keeps the
+    blueprint's position in the other, and the move comes back after a reload
+    (it is that placement's diff)."""
     d, root, pdir = _daemon(tmp_path)
     d.panels = d._load_panels_tree()
     d.handle_command({"command": "add_node", "node_type": "regex_input",
@@ -603,16 +615,49 @@ def test_placements_sync_positions(tmp_path):
     d._cmd_create_panel({"name": "kit", "node_ids": ["a"]})
     other = d._cmd_place_panel({"stem": "kit"})["name"]
 
-    rel = d.space.nodes["kit::a"]
-    rel.x += 100
-    rel.y += 40
+    moved = d.space.nodes["kit::a"]
+    sibling = d.space.nodes[f"{other}::a"]
+    moved.x += 100
+    moved.y += 40
     d._write_panels()
-    o = d.space.nodes[f"{other}::a"]
-    # Same relative offset within each placement's own origin.
-    off_k = d._panel_origin(d.panels, "kit")
+
+    # The sibling is untouched (no fan-out, no rebuild)...
+    assert d.space.nodes[f"{other}::a"] is sibling
     off_o = d._panel_origin(d.panels, other)
-    assert abs((rel.x - off_k[0]) - (o.x - off_o[0])) < 1e-6
-    assert abs((rel.y - off_k[1]) - (o.y - off_o[1])) < 1e-6
+    assert abs((sibling.x - off_o[0]) - 10) < 1e-6
+    # ...the move is recorded as *this* placement's diff...
+    assert "kit" in d._placement_diffs
+    assert d._placement_diffs["kit"]["nodes"]["a"]["params"]["x"] == 110.0
+    # ...and the blueprint file is untouched.
+    raw = json.load(open(os.path.join(pdir, "kit.json")))
+    assert raw["config"]["nodes"]["a"]["params"]["x"] == 10
+
+    # The diff rode into the session file, and a reload replays it.
+    stored = json.load(open(os.path.join(os.path.dirname(root), "placement_diffs.json")))
+    assert stored["placements"]["kit"]["nodes"]["a"]["params"]["x"] == 110.0
+    d._install_panels(d._load_panels_tree())
+    config = d._flatten_panels(d.panels)
+    assert config["nodes"]["kit::a"]["params"]["x"] == 110.0
+    assert config["nodes"][f"{other}::a"]["params"]["x"] != 110.0
+
+
+def test_a_local_parameter_change_is_not_written_to_the_blueprint(tmp_path):
+    """The volume-slider case: turning a control in one instance keeps it in
+    that instance; the file and the other instance are unaffected."""
+    d, root, pdir = _daemon(tmp_path)
+    d.panels = d._load_panels_tree()
+    d.handle_command({"command": "add_node", "node_type": "regex_input",
+                      "node_id": "a", "config": {"pattern": "orig"}})
+    d._cmd_create_panel({"name": "kit", "node_ids": ["a"]})
+    other = d._cmd_place_panel({"stem": "kit"})["name"]
+
+    d.space.nodes["kit::a"].pattern = "local"
+    d._write_panels()
+
+    assert d.space.nodes[f"{other}::a"].pattern == "orig"
+    assert d._placement_diffs["kit"]["nodes"]["a"]["params"]["pattern"] == "local"
+    raw = json.load(open(os.path.join(pdir, "kit.json")))
+    assert raw["config"]["nodes"]["a"]["params"]["pattern"] == "orig"
 
 
 def test_remove_panel_placement_keeps_file(tmp_path):
@@ -648,23 +693,6 @@ def test_moving_a_placement_does_not_rebuild_siblings(tmp_path):
     assert d.space.nodes["kit::a"] is a_obj
     assert d.space.nodes[f"{other}::a"] is b_obj
     assert a_obj.x == 510
-
-
-def test_moving_a_node_syncs_positions_without_rebuild(tmp_path):
-    d, root, pdir = _daemon(tmp_path)
-    d.panels = d._load_panels_tree()
-    d.handle_command({"command": "add_node", "node_type": "regex_input",
-                      "node_id": "a", "config": {"pattern": ".*", "x": 10, "y": 20}})
-    d._cmd_create_panel({"name": "kit", "node_ids": ["a"]})
-    other = d._cmd_place_panel({"stem": "kit"})["name"]
-
-    b_obj = d.space.nodes[f"{other}::a"]
-    d.space.nodes["kit::a"].x += 100
-    d._write_panels()
-    assert d.space.nodes[f"{other}::a"] is b_obj  # no rebuild
-    off_k = d._panel_origin(d.panels, "kit")
-    off_o = d._panel_origin(d.panels, other)
-    assert abs((d.space.nodes["kit::a"].x - off_k[0]) - (b_obj.x - off_o[0])) < 1e-6
 
 
 def test_placements_keep_their_own_positions(tmp_path):
@@ -739,7 +767,9 @@ def test_panel_port_nodes_round_trip(tmp_path):
     assert tree["kit"].nodes["gate"]["params"]["port_name"] == "Gate"
 
 
-def test_edit_mode_params_sync_across_placements(tmp_path):
+def test_an_edit_mode_change_writes_the_blueprint(tmp_path):
+    """In edit mode the change *is* the blueprint: it lands in the file, and
+    the placement that made it keeps no diff of its own."""
     d, root, pdir = _daemon(tmp_path)
     d.panels = d._load_panels_tree()
     d.handle_command({"command": "add_node", "node_type": "regex_input",
@@ -751,14 +781,16 @@ def test_edit_mode_params_sync_across_placements(tmp_path):
     d._cmd_set_panel_edit_mode({"panel_id": other, "enabled": True})
     d.space.nodes[f"{other}::a"].pattern = "edited"
     d._write_panels()
-    # The edit is mirrored onto the sibling...
-    assert d.space.nodes["kit::a"].pattern == "edited"
-    # ...and repeated writes don't clobber it back.
-    d._write_panels()
-    assert d.space.nodes["kit::a"].pattern == "edited"
-    assert d.space.nodes[f"{other}::a"].pattern == "edited"
+
     raw = json.load(open(os.path.join(pdir, "kit.json")))
     assert raw["config"]["nodes"]["a"]["params"]["pattern"] == "edited"
+    # Committed, so the placement carries no diff for it.
+    assert "pattern" not in (
+        d._placement_diffs.get(other, {}).get("nodes", {}).get("a", {}).get("params", {})
+    )
+    # Repeated writes do not clobber it back.
+    d._write_panels()
+    assert json.load(open(os.path.join(pdir, "kit.json")))["config"]["nodes"]["a"]["params"]["pattern"] == "edited"
 
 
 def test_create_panel_nests_into_given_parent(tmp_path):
