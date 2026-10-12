@@ -1173,26 +1173,6 @@ def test_boolean_nodes_registry_specs_and_output_control():
         == "error"
     )
 
-
-def test_gui_holds_driven_bool_state_through_unresolved_poll():
-    """A driven gate/switcher must not flash its stored default when a
-    poll reports bool_state=None while the ctrl signal is still wired
-    (e.g. a bool-warp publisher briefly re-created by a panel sync)."""
-    from gui.bool_state import resolve_bool_state_from_poll
-
-    # Wired, previously resolved True: a None poll keeps True.
-    assert resolve_bool_state_from_poll(None, True, True) is True
-    assert resolve_bool_state_from_poll(None, True, False) is False
-    # A genuine value from the daemon always wins.
-    assert resolve_bool_state_from_poll(False, True, True) is False
-    assert resolve_bool_state_from_poll(True, True, False) is True
-    # Nothing wired: None clears the held value (no stick).
-    assert resolve_bool_state_from_poll(None, False, True) is None
-    # Wired but never resolved yet: stays None (draws the stored default).
-    assert resolve_bool_state_from_poll(None, True, None) is None
-
-
-def test_bool_panel_input_default_state_is_settable_and_drives():
     d = fresh_daemon()
     d.space.mark_graph_loaded()
     assert d.handle_command(
@@ -1593,17 +1573,20 @@ def test_patchspace_socket_env_moves_every_end(monkeypatch, tmp_path):
     since that is when the env is read."""
     sock = str(tmp_path / "custom" / "patchspace.sock")
     src = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # The daemon and its CLI both derive it from the environment; the
+    # *client's* copy of this rule is asserted in the client's repo (the
+    # display is its own repo now, so it cannot be imported from here).
     code = (
-        "import sys; sys.path[:0] = [{src!r}, {gui!r}];"
-        "import central.main as main, central.patchspace_cli as patchspace_cli; from gui import constants;"
-        "print(main.SOCKET_PATH, patchspace_cli.SOCKET_PATH, constants.SOCKET_PATH)"
-    ).format(src=src, gui=os.path.join(src, "gui"))
+        "import sys; sys.path[:0] = [{src!r}];"
+        "import central.main as main, central.patchspace_cli as patchspace_cli;"
+        "print(main.SOCKET_PATH, patchspace_cli.SOCKET_PATH)"
+    ).format(src=src)
     env = dict(os.environ, PATCHSPACE_SOCKET=sock)
     result = subprocess.run(
         [sys.executable, "-c", code], env=env, capture_output=True, text=True
     )
     assert result.returncode == 0, result.stderr
-    assert result.stdout.split() == [sock, sock, sock]
+    assert result.stdout.split() == [sock, sock]
 
     # …and without it, the default is a path the *user* owns, with the
     # historical /tmp name only for a session that has no runtime dir.
@@ -1615,14 +1598,14 @@ def test_patchspace_socket_env_moves_every_end(monkeypatch, tmp_path):
         [sys.executable, "-c", code], env=env, capture_output=True, text=True
     )
     assert result.returncode == 0, result.stderr
-    assert result.stdout.split() == [str(rundir / "patchspace.sock")] * 3
+    assert result.stdout.split() == [str(rundir / "patchspace.sock")] * 2
 
     env.pop("XDG_RUNTIME_DIR")
     result = subprocess.run(
         [sys.executable, "-c", code], env=env, capture_output=True, text=True
     )
     assert result.returncode == 0, result.stderr
-    assert result.stdout.split() == ["/tmp/patchspace.sock"] * 3
+    assert result.stdout.split() == ["/tmp/patchspace.sock"] * 2
 
 
 def test_pre_rename_paths_are_adopted_once(monkeypatch, tmp_path):

@@ -47,14 +47,8 @@
           python = pkgs.python3;
           source = ./src;
 
-          # The GUI needs PyGObject + PyCairo; the daemon is pure stdlib
-          # Python (it drives pw-cli/pw-dump/pw-link/pw-cat subprocesses).
-          guiPythonEnv = python.withPackages (
-            ps: with ps; [
-              pygobject3
-              pycairo
-            ]
-          );
+          # The daemon is pure stdlib Python (it drives pw-cli/pw-dump/pw-link/
+          # pw-cat subprocesses).  The GTK client is its own flake.
 
           # DSP plugins the daemon's pw-cli sessions load.  A filter-chain /
           # echo-cancel module is instantiated inside the pw-cli process the
@@ -152,75 +146,17 @@
             '';
           };
 
-          # The GTK4 client.  wrapGAppsHook propagates the GTK/Adwaita
-          # typelib + GSettings-schema + XDG data dirs the build inputs'
-          # setup hooks collect, so the packaged GUI finds Gtk/Adw without
-          # any manual GI_TYPELIB_PATH fiddling.
-          patchspace = pkgs.stdenvNoCC.mkDerivation {
-            pname = "patchspace";
-            version = "0.1.0";
-            src = source;
-            dontUnpack = true;
-            dontBuild = true;
-            dontConfigure = true;
-            nativeBuildInputs = [
-              pkgs.makeWrapper
-              pkgs.wrapGAppsHook4
-            ];
-            buildInputs = [
-              guiPythonEnv
-              pkgs.gtk4
-              pkgs.libadwaita
-              pkgs.gobject-introspection
-              pkgs.cairo
-              pkgs.pipewire
-              pkgs.wireplumber
-            ];
-            installPhase = ''
-              runHook preInstall
-              mkdir -p $out/bin $out/share/applications \
-                $out/share/icons/hicolor/512x512/apps
-              # PATCHSPACE_DAEMON tells the GUI exactly which daemon binary
-              # to spawn for its "start a background daemon" behaviour.
-              makeWrapper ${guiPythonEnv}/bin/python $out/bin/patchspace \
-                --add-flags "${source}/gui/patchspace_gui.py" \
-                --set PATCHSPACE_DAEMON "${patchspace-daemon}/bin/patchspace-daemon" \
-                --prefix LADSPA_PATH : "${ladspaPath}" \
-                --prefix LV2_PATH : "${lv2Path}"
-              # Desktop entry + its icon travel with the package, so a
-              # launcher (or `home.packages`) picks the app up without the
-              # consumer repeating `xdg.desktopEntries`/`xdg.dataFile`.
-              # Copied under the plain names: a store path's basename carries
-              # a hash prefix, and a desktop file is found by its name.
-              cp ${./packaging/org.patchspace.desktop} \
-                $out/share/applications/org.patchspace.desktop
-              # A PNG, so it goes in a size slot that hicolor's own
-              # index.theme lists (a `<N>x<N>` directory it does not list is
-              # never looked at).  512x512 is the largest standard one; the
-              # source image is bigger than that, which only ever means the
-              # icon gets downscaled, never upscaled.
-              cp ${./packaging/org.patchspace.png} \
-                $out/share/icons/hicolor/512x512/apps/org.patchspace.png
-              runHook postInstall
-            '';
-            meta.mainProgram = "patchspace";
-          };
-
         in
         {
           packages = {
-            default = patchspace;
-            inherit patchspace patchspace-daemon patchspace-repair patchspace-modules;
+            default = patchspace-daemon;
+            inherit patchspace-daemon patchspace-repair patchspace-modules;
           };
 
           apps = {
             default = {
               type = "app";
-              program = "${patchspace}/bin/patchspace";
-            };
-            patchspace = {
-              type = "app";
-              program = "${patchspace}/bin/patchspace";
+              program = "${patchspace-daemon}/bin/patchspace-daemon";
             };
             daemon = {
               type = "app";
@@ -420,17 +356,11 @@
               (python.withPackages (
                 ps: with ps; [
                   numpy
-                  pygobject3
-                  pycairo
                   pytest
                   ipython
                   black
                 ]
               ))
-              pkgs.gobject-introspection
-              pkgs.gtk4
-              pkgs.libadwaita
-              pkgs.cairo
               pkgs.pipewire
               pkgs.wireplumber
             ] ++ ladspaPluginPackages ++ lv2PluginPackages;
@@ -439,7 +369,8 @@
               export LADSPA_PATH="${ladspaPath}''${LADSPA_PATH:+:$LADSPA_PATH}"
               export LV2_PATH="${lv2Path}''${LV2_PATH:+:$LV2_PATH}"
               echo "Python dev shell ready ($(python --version))"
-              echo "GTK4, Adwaita, PipeWire, WirePlumber available"
+              echo "PipeWire, WirePlumber and the DSP plugins available"
+              echo "the GTK client is its own repo (patchSpaceGui)"
               echo "LADSPA_PATH=$LADSPA_PATH"
               echo "LV2_PATH=$LV2_PATH"
             '';
