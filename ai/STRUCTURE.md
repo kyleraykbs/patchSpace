@@ -19,7 +19,7 @@ gui/patchspace_gui.py  ──(unix socket, JSON lines, $XDG_RUNTIME_DIR/patchspa
 ```
 
 * **The daemon owns the graph.** `central/main.py` (`PatchSpaceDaemon`) is the only
-  writer: it keeps a model (`central/pwnodes.py`) and reconciles it onto live
+  writer: it keeps a model (`modules/pipewire/pwnodes.py`) and reconciles it onto live
   PipeWire objects.
 * **The GUI is a client.** It sends commands and polls `get_nodes` every 400 ms; it
   applies user actions optimistically and each poll is guarded so a stale echo can't
@@ -40,7 +40,7 @@ entry points are `python -m central.main` / `python -m central.session_repair`.
 | Substrate | `modules/pipewire/pwproc.py` | Owns real PipeWire objects: `OwnedPwNode` (a pw-cli session holding a created node), `OwnedPwProcess` (pw-cat/pw-loopback), `Backoff`, `Ticker`. |
 | Graph snapshot | `modules/pipewire/pwgraph.py` | `pw-dump -m` stream → live nodes/ports/links; connect/disconnect; node-created/removed callbacks. |
 | Matching | `modules/pipewire/pwmatch.py` | Filter dicts → live node ids; port groups → channel pairs (a lone `MONO` endpoint bridges every channel of its peer); which objects are Patch Space's own. |
-| Model | `central/pwnodes.py` | `Node` taxonomy + `PatchSpace` (the reconcile/supervise engine: `sync_locked` = structure, `supervise` = health).  PipeWire-bound classes are next in line to move into the module (PLAN.md phase 1/3). |
+| Model | `modules/pipewire/pwnodes.py` | `Node` taxonomy + `PatchSpace` (the reconcile/supervise engine: `sync_locked` = structure, `supervise` = health).  It lives on the module's side (it imports `modules.pipewire.*` and nothing from `central`), so the daemon reaches into it in-process — the transitional state before the report (EXTRACTION.md step 2). |
 | Containers | `central/panels.py` | Panel tree, namespaced ids, edge ownership (LCA), read-only snapshots, legacy migration. |
 | Daemon | `central/main.py` | Socket protocol, node factory (`NODE_TYPE_REGISTRY`/`_create_node`), property handling, session load, watchdogs, built-in devices. |
 | Config | `central/migrations.py`, `central/session_repair.py`, `central/apply_config.py`, `central/export_config.py`, `central/patchspace_cli.py` | Versioned node migrations; validate/repair a session; CLI import/export. |
@@ -49,7 +49,10 @@ entry points are `python -m central.main` / `python -m central.session_repair`.
 
 The PipeWire-agnostic core is in place and modules are real: the daemon runs
 built-in ones as child processes and serves what they declare.  The PipeWire
-machinery itself has not moved out yet (PLAN.md phase 3, "the extraction"):
+machinery has started moving out (PLAN.md phase 3, "the extraction"): the model
+(`modules/pipewire/pwnodes.py`) now lives on the module's side, so what remains
+is the *report* — the daemon reading node data through the API instead of walking
+the model — and then the process move.  See `agents/EXTRACTION.md`:
 
 | Piece | File | Job |
 |---|---|---|

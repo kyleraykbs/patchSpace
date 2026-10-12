@@ -45,10 +45,10 @@ from central import module_config
 from central import module_supervisor as module_sup
 from central import protocol as protocol_mod
 from central import registry as registry_mod
-from central import pwnodes
+from modules.pipewire import pwnodes
 from modules.pipewire.pwgraph import PipewireGraph
 from modules.pipewire.pwproc import Backoff, Ticker
-from central.pwnodes import (
+from modules.pipewire.pwnodes import (
     PatchSpace,
     Node,
     BackedNode,

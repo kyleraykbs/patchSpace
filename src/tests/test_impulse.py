@@ -11,7 +11,7 @@ import os
 
 import pytest
 
-from central import pwnodes
+from modules.pipewire import pwnodes
 from central.main import PatchSpaceDaemon
 from tests import catalog as node_catalog
 from central.session_repair import ERROR, repair, validate

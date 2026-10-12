@@ -15,7 +15,7 @@ import time
 import pytest
 
 from central.main import PatchSpaceDaemon
-from central.pwnodes import BackedNode, Node
+from modules.pipewire.pwnodes import BackedNode, Node
 import central.main as main_mod
 from modules.pipewire.pwgraph import PipewireGraph
 
@@ -714,7 +714,7 @@ def test_downstream_edges_walks_signal_order_through_switches():
 
 
 def test_light_noise_cancel_shares_echo_backing_but_hides_probe():
-    from central.pwnodes import EchoCancelNode, LightNoiseCancelNode
+    from modules.pipewire.pwnodes import EchoCancelNode, LightNoiseCancelNode
     from tests import catalog as node_catalog
 
     assert main_mod.NODE_TYPE_REGISTRY["light_noise_cancel"] is LightNoiseCancelNode
@@ -880,7 +880,7 @@ def test_load_session_only_reaps_backings_of_new_nodes(monkeypatch):
 
 
 def test_speaker_mic_lines_share_builtin_volume_and_lock():
-    from central.pwnodes import (
+    from modules.pipewire.pwnodes import (
         PatchSpaceDeviceNode,
         VirtualMicNode,
         VirtualSpeakerNode,
@@ -958,8 +958,8 @@ def test_speaker_mic_lines_share_builtin_volume_and_lock():
 
 
 def test_device_volume_lock_gates_constant_override(monkeypatch):
-    from central import pwnodes
-    from central.pwnodes import DeviceOutputNode
+    from modules.pipewire import pwnodes
+    from modules.pipewire.pwnodes import DeviceOutputNode
 
     calls = []
     monkeypatch.setattr(pwnodes, "_run_wpctl", lambda *a, **k: calls.append(a) or True)
@@ -986,7 +986,7 @@ def test_device_volume_lock_gates_constant_override(monkeypatch):
 
 
 def test_normalize_registry_spec_and_control_clamp():
-    from central.pwnodes import NormalizeNode
+    from modules.pipewire.pwnodes import NormalizeNode
     from tests import catalog as node_catalog
     ns = node_catalog
 
@@ -1053,7 +1053,7 @@ def test_normalize_registry_spec_and_control_clamp():
 
 
 def test_boolean_nodes_registry_specs_and_output_control():
-    from central.pwnodes import (
+    from modules.pipewire.pwnodes import (
         BooleanSourceNode,
         BooleanSplitterNode,
         BooleanInvertNode,
@@ -1203,7 +1203,7 @@ def test_boolean_nodes_registry_specs_and_output_control():
 
 
 def test_warp_nodes_registry_specs_and_name_roundtrip():
-    from central.pwnodes import (
+    from modules.pipewire.pwnodes import (
         WarpInNode,
         WarpOutNode,
         BooleanWarpInNode,
@@ -1296,7 +1296,7 @@ def test_get_logs_serves_recent_output():
 
 
 def test_reverb_spec_and_control_clamp():
-    from central.pwnodes import ReverbNode
+    from modules.pipewire.pwnodes import ReverbNode
     from tests import catalog as node_catalog
     ns = node_catalog
 
@@ -1686,7 +1686,7 @@ def test_ensure_device_profiles_applies_a2dp_when_off(monkeypatch):
     """A configured Bluetooth sink whose profile is 'off' exports no live
     node; the daemon should pick and apply an A2DP profile (and pin it so
     the normal tick keeps re-asserting it)."""
-    from central.pwnodes import DeviceOutputNode
+    from modules.pipewire.pwnodes import DeviceOutputNode
 
     d = fresh_daemon()
     node = DeviceOutputNode("tozo", device_name="bluez_output.XX.1")
@@ -1717,7 +1717,7 @@ def test_ensure_device_profiles_applies_a2dp_when_off(monkeypatch):
 def test_ensure_device_profiles_reasserts_pinned_profile_when_off(monkeypatch):
     """A profile the user (or auto-pick) pinned must be re-applied if the
     device flips back to 'off' without its id changing."""
-    from central.pwnodes import DeviceOutputNode
+    from modules.pipewire.pwnodes import DeviceOutputNode
 
     d = fresh_daemon()
     node = DeviceOutputNode(
@@ -1749,7 +1749,7 @@ def test_ensure_device_profiles_replaces_a_pinned_off_profile(monkeypatch):
     pin and pick a listening profile instead of re-asserting "off" on
     every tick.  (The node here has no stored description - a legacy
     save - so the index must be resolved through the device.)"""
-    from central.pwnodes import DeviceOutputNode
+    from modules.pipewire.pwnodes import DeviceOutputNode
 
     d = fresh_daemon()
     node = DeviceOutputNode(
@@ -1784,7 +1784,7 @@ def test_ensure_device_profiles_replaces_a_pinned_off_profile(monkeypatch):
 def test_device_profiles_never_offer_off(monkeypatch):
     """The profile picker must not offer the Bluetooth "off" profile:
     choosing it silences the device for good (see profile_is_off)."""
-    from central.pwnodes import DeviceOutputNode
+    from modules.pipewire.pwnodes import DeviceOutputNode
 
     d = fresh_daemon()
     node = DeviceOutputNode("bowie", device_name="bluez_output.XX.1")
@@ -1808,7 +1808,7 @@ def test_device_profiles_never_offer_off(monkeypatch):
 
 
 def test_setting_the_off_profile_is_rejected(monkeypatch):
-    from central.pwnodes import DeviceOutputNode
+    from modules.pipewire.pwnodes import DeviceOutputNode
 
     d = fresh_daemon()
     node = DeviceOutputNode("bowie", device_name="bluez_output.XX.1")
@@ -1833,8 +1833,8 @@ def test_setting_the_off_profile_is_rejected(monkeypatch):
 
 
 def test_a_stored_off_profile_is_not_re_asserted(monkeypatch):
-    from central import pwnodes as pwnodes_mod
-    from central.pwnodes import DeviceOutputNode
+    from modules.pipewire import pwnodes as pwnodes_mod
+    from modules.pipewire.pwnodes import DeviceOutputNode
 
     node = DeviceOutputNode(
         "bowie", device_name="bluez_output.XX.1",
@@ -1853,7 +1853,7 @@ def test_a_stored_off_profile_is_not_re_asserted(monkeypatch):
 def test_ensure_device_profiles_warns_once_when_unroutable(monkeypatch, caplog):
     import logging
 
-    from central.pwnodes import DeviceOutputNode
+    from modules.pipewire.pwnodes import DeviceOutputNode
 
     d = fresh_daemon()
     node = DeviceOutputNode("tozo", device_name="bluez_output.XX.1")
@@ -1884,7 +1884,7 @@ def test_ensure_device_profiles_warns_once_when_unroutable(monkeypatch, caplog):
 def test_ensure_device_profiles_clears_warning_when_routable(monkeypatch, caplog):
     import logging
 
-    from central.pwnodes import DeviceOutputNode
+    from modules.pipewire.pwnodes import DeviceOutputNode
 
     d = fresh_daemon()
     node = DeviceOutputNode("tozo", device_name="bluez_output.XX.1")
@@ -1920,7 +1920,7 @@ def test_a_recorder_reports_its_takes_revision(tmp_path, monkeypatch):
     """The GUI re-asks for a waveform when source_rev moves, so a recording has
     to move it: a take always writes the same path, and one short enough to
     start and finish between two polls shows no `recording` flip at all."""
-    from central import pwnodes
+    from modules.pipewire import pwnodes
     from tests.test_impulse import FakeCli, FakeProc
 
     monkeypatch.setattr(pwnodes, "OwnedPwNode", FakeCli)
@@ -1973,7 +1973,7 @@ def test_waveforms_are_decoded_without_holding_the_daemon_lock(monkeypatch):
     import threading
     import time
 
-    from central import pwnodes
+    from modules.pipewire import pwnodes
     from tests.test_impulse import FakeCli, FakeProc
 
     monkeypatch.setattr(pwnodes, "OwnedPwNode", FakeCli)

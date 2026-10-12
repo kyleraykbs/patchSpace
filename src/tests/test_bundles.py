@@ -7,7 +7,7 @@ PipeWire is touched (the Bundle Output terminal's dummy is faked)."""
 import pytest
 
 from modules.pipewire.pwmatch import INTERNAL_MEDIA_CLASS
-from central.pwnodes import (
+from modules.pipewire.pwnodes import (
     PatchSpace,
     InputNode,
     OutputNode,

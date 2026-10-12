@@ -12,7 +12,7 @@ from modules.pipewire.pwmatch import (
     SOURCE_MEDIA_CLASSES,
     resolve_channel_pairs,
 )
-from central.pwnodes import (
+from modules.pipewire.pwnodes import (
     AppClassifierNode,
     Edge,
     ReplayBufferNode,
@@ -732,7 +732,7 @@ def test_unconfirmable_link_backs_off_instead_of_retrying_forever(monkeypatch):
     (a Bluetooth sink rejecting the source's format) must not be re-issued
     on every pass forever.  It backs off, then retries once the backoff
     elapses."""
-    monkeypatch.setattr("central.pwnodes.LINK_CONFIRM_TIMEOUT_S", 0.0)
+    monkeypatch.setattr("modules.pipewire.pwnodes.LINK_CONFIRM_TIMEOUT_S", 0.0)
     g = AsyncFakeGraph()
     g.add_source(10, "app1")
     g.add_sink(20, "sink1")
@@ -772,7 +772,7 @@ def test_unconfirmable_link_backs_off_instead_of_retrying_forever(monkeypatch):
 def test_removing_edge_forgets_link_backoff(monkeypatch):
     """Dropping the edge clears the pair's backoff so a deliberate re-add
     retries immediately rather than waiting out the old backoff."""
-    monkeypatch.setattr("central.pwnodes.LINK_CONFIRM_TIMEOUT_S", 0.0)
+    monkeypatch.setattr("modules.pipewire.pwnodes.LINK_CONFIRM_TIMEOUT_S", 0.0)
     g = AsyncFakeGraph()
     g.add_source(10, "app1")
     g.add_sink(20, "sink1")
@@ -1559,7 +1559,7 @@ def test_rename_preserves_internal_link_bookkeeping():
     not drop them.  Dropping them makes the next sync() disconnect the
     whole effect interior and re-make it, which stalls timing-sensitive
     modules like RNNoise (the 'noise cancel kills audio' wedge)."""
-    from central.pwnodes import _DesiredLinks
+    from modules.pipewire.pwnodes import _DesiredLinks
 
     g = FakeGraph()
     space = make_space(g)

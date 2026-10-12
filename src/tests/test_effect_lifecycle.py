@@ -4,8 +4,8 @@ touches a live PipeWire server."""
 
 import pytest
 
-from central import pwnodes
-from central.pwnodes import (
+from modules.pipewire import pwnodes
+from modules.pipewire.pwnodes import (
     EchoCancelNode,
     NoiseCancelNode,
     NormalizeNode,
@@ -319,7 +319,7 @@ def test_normalize_leveling_off_omits_compressor():
 def test_reverb_builds_calf_lv2_graph_with_wetdry():
     """ReverbNode is LV2 (Calf Reverb) found by URI, with a real wet/dry
     crossfade - not the old /usr/lib/ladspa/caps.so + bogus "dry/wet"."""
-    from central.pwnodes import ReverbNode
+    from modules.pipewire.pwnodes import ReverbNode
 
     node = ReverbNode("n", "rev", wet_dry=0.25)
     args = node._module_command_args()
@@ -334,7 +334,7 @@ def test_reverb_builds_calf_lv2_graph_with_wetdry():
     assert '"room_size"' in args
 
     # clamps out-of-range constructor values
-    from central.pwnodes import ReverbNode as R
+    from modules.pipewire.pwnodes import ReverbNode as R
     n2 = R("n", "rev", decay_time=999, room_size=-3, wet_dry=5)
     assert n2.decay_time == R.DECAY_MAX_S
     assert n2.room_size == R.ROOM_MIN
@@ -342,7 +342,7 @@ def test_reverb_builds_calf_lv2_graph_with_wetdry():
 
 
 def test_reverb_plugin_uri_override():
-    from central.pwnodes import ReverbNode
+    from modules.pipewire.pwnodes import ReverbNode
 
     node = ReverbNode("n", "rev", plugin_uri="http://example.com/custom")
     assert 'plugin = "http://example.com/custom"' in node._module_command_args()

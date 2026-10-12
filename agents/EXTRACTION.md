@@ -7,8 +7,13 @@ rewrite, not a move — the daemon reads its model richly and synchronously all
 over, so "move `pwnodes` out" is only possible once the reading has been
 re-routed.
 
-Sizes today (for scale): `central/main.py` 6289 lines, `central/pwnodes.py`
-6061, `modules/pipewire/{pwgraph,pwproc,pwmatch}` 2043, `central/panels.py` 560.
+Sizes today (for scale): `central/main.py` 6289 lines,
+`modules/pipewire/pwnodes.py` 6061 (moved here in step 1),
+`modules/pipewire/{pwgraph,pwproc,pwmatch}` 2043, `central/panels.py` 560.
+
+**Status**: step 1 is done (2026-10-12) — the model lives in the module and the
+daemon reaches into it in-process.  Step 2 (the report) is the next one and the
+only load-bearing step; 3–5 follow.
 
 ## The target, precisely
 
@@ -64,60 +69,58 @@ blob) without ever holding a node object.
 
 ## The steps (each ends green; the daemon serves the GUI at every point)
 
-### 1. The module creates nodes (in-process)
-`_create_node` + `NODE_TYPE_REGISTRY` move behind a `node_spawn` handler in
-`modules/pipewire/module.py`, which the daemon calls through
-`ProtocolHandler.spawn_instance` — the path a primitives node already takes.
-`_cmd_add_node` stops calling `_create_node` for pw types.  The module still
-holds a reference to the daemon's `PatchSpace` (in-process), so this is a
-*routing* change.
-*Verify*: every `add_node` test still passes; a new test asserts the spawn went
-through the module.
-*Invariant*: the GUI's optimistic add is unchanged (the reply ordering is).
+### 1. The boundary is drawn (a pure move) — DONE 2026-10-12
+`pwnodes.py` moved to `modules/pipewire/`, its importers repointed
+(`central/main.py`, the suite: `from modules.pipewire.pwnodes import …`), nothing
+else changed — the daemon still reaches into the model in-process
+(`self.space.nodes`), so this was a *location* change that ended green.  It came
+first because every later step needs the model on the module's side: **a step
+cannot report what it does not hold.**  (The first draft of this file had the
+module creating and reporting its nodes *before* the move; neither is
+implementable, because the factory and the report both need the model.  The order
+below is the one that can actually be executed.)  It was cheap because the model
+imports only `modules.pipewire.*` — nothing from `central` — so the dependency
+runs one way.
+*Verified*: the daemon's suite (465 tests) and the private-instance smoke.
+*Invariant held*: no behaviour change; the client and the protocol untouched.
 
-### 2. The module reports its nodes
-Implement `node_report`: the module serializes each of its nodes the way
-`_serialize_nodes` does today (the `_SERIAL_ATTRS`/`_LAYOUT_ATTRS` walk, the
-per-class extras, `_node_is_ready`/`_node_health`).  The daemon's
-`_serialize_nodes` becomes: registry instances + the last report.  Same for
-`_export_node_params` (used by the panel builder and the session export).
+### 2. The daemon stops reaching through (the load-bearing step)
+Its *driving* calls go through the API: `_create_node` + `NODE_TYPE_REGISTRY` move
+behind `node_spawn` (called through `ProtocolHandler.spawn_instance`, the path a
+primitives node already takes), and `_load_session`, `_bring_node_up`,
+`_standardize_nodes`, `_ensure_sensitivity_internals`, `_apply_sensitivity`,
+`_coalesce_reload` and the command handlers behind `node_spawn`/`node_control`/
+`node_edge`.  Its *building* calls read data instead of the model: `node_report`
+carries the `_SERIAL_ATTRS`/`_LAYOUT_ATTRS` walk, the per-class extras and
+`_node_is_ready`/`_node_health`, and `_serialize_nodes`, `_export_node_params`,
+`_build_panels_from_space`, `_logical_edge` and the group handling become registry
+instances + the last report.
 *Verify*: a test asserts `get_nodes` is byte-identical before/after for a session
-with every node type (the strongest available check — capture the payload once,
-then compare).
-*Invariant*: `get_nodes`'s shape does not change; the client is untouched.
+with every node type (capture the payload once, then compare) — the strongest
+available check, and the reason this step is safe to attempt.
+*Invariant*: `get_nodes`'s shape does not change; the client is untouched.  The
+daemon stops walking `space.nodes` — that is the point of the step, and the
+replica problem (see Hazards) is why nothing may be left reading attributes.
 
-### 3. The model moves
-`pwnodes.py` moves to `modules/pipewire/`.  Everything in `main.py` that walks
-`self.space.nodes`/`.edges` to *build* something (`_build_panels_from_space`,
-`_serialize_*`, `_export_node_params`, `_logical_edge`, the group handling) now
-reads the registry + reports (step 2).  Everything that *drives* the model
-(`_load_session`, `_bring_node_up`, `_standardize_nodes`,
-`_ensure_sensitivity_internals`, `_apply_sensitivity`, `_coalesce_reload`, the
-command handlers) moves into the module, called by `node_spawn`/`node_control`/
-`node_edge`.
-*Verify*: the daemon's suite (which is mostly model tests) moves with it — the
-daemon keeps the protocol/registry/panel tests; the node tests go to the
-module's suite.
-*Invariant*: the panel files and the session autosave are written by the daemon
-from reports, and a round trip (write → load) is unchanged.
-
-### 4. The substrate moves
-`pwgraph`/`pwproc`/`pwmatch` follow `pwnodes` (the node classes own the pw
-objects, so they cannot be separated — that is why steps 3 and 4 are one move in
-practice, done file by file).  The daemon's `_tick` loses everything that touches
-the model (`space.supervise()`, `_assert_defaults`, `_enforce_volume_locks`,
+### 3. The substrate follows
+`pwgraph`/`pwproc`/`pwmatch` move with `pwnodes` (the node classes own the pw
+objects, so they cannot be separated — one move in practice, done file by file).
+The daemon's `_tick` loses everything that touches the model
+(`space.supervise()`, `_assert_defaults`, `_enforce_volume_locks`,
 `_ensure_device_profiles`) and the module runs its own tick.
 *Verify*: the private-instance smoke (`scripts/smoke.sh`) — it already exercises
 panel load, wiring, node creation, control, values, and module disable/enable.
+*Invariant*: the panel files and the session autosave are written by the daemon
+from reports, and a round trip (write → load) is unchanged.
 
-### 5. The module becomes a process
+### 4. The module becomes a process
 It already speaks the API through `ProtocolHandler`; running it under
 `ModuleHost` is a transport change (the supervisor and host are done and tested).
 The in-process path stays for tests.
 *Verify*: the smoke again, plus a kill-and-restart (the supervisor's test already
 covers the rebind).
 
-### 6. The legacy command surface retires
+### 5. The legacy command surface retires
 The GUI's `command` messages become module calls: `set_volume` → `node_control`,
 `add_edge` → `node_edge`, `add_node` → `node_spawn`, and the rest of the model
 handlers either move to the module or are deleted if the module owns them.  This

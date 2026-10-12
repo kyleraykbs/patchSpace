@@ -18,9 +18,9 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from central import pwnodes
+from modules.pipewire import pwnodes
 from tests.test_impulse import FakeCli, FakeProc
-from central.pwnodes import SoundNode, probe_duration  # noqa: E402
+from modules.pipewire.pwnodes import SoundNode, probe_duration  # noqa: E402
 
 
 def _write_wav(path, seconds=0.25, rate=8000):
@@ -77,7 +77,7 @@ def test_a_sound_edge_is_accepted_and_is_never_a_link():
     sound input, and that wire carries no audio (a real bug: the daemon's
     add_edge rejected the kind outright, so nothing could be plugged in)."""
     from tests.test_pwnodes import FakeGraph
-    from central.pwnodes import PatchSpace, SoundNode, SoundPlayerNode
+    from modules.pipewire.pwnodes import PatchSpace, SoundNode, SoundPlayerNode
 
     g = FakeGraph()
     space = PatchSpace(g)
@@ -105,7 +105,7 @@ def test_a_clip_narrows_the_sound_it_is_given():
     """A Clip is a range, so clips stack *intersecting* like the Filter
     node's filters do - and the range stays in the file's own time base."""
     from tests.test_pwnodes import FakeGraph
-    from central.pwnodes import ClipNode, PatchSpace, SoundNode
+    from modules.pipewire.pwnodes import ClipNode, PatchSpace, SoundNode
 
     g = FakeGraph()
     space = PatchSpace(g)
@@ -136,7 +136,7 @@ def test_a_clip_narrows_the_sound_it_is_given():
 def test_a_waveform_is_reduced_to_peaks(tmp_path):
     if not shutil.which("ffmpeg"):
         pytest.skip("ffmpeg not available")
-    from central.pwnodes import PEAK_BUCKETS, probe_peaks
+    from modules.pipewire.pwnodes import PEAK_BUCKETS, probe_peaks
 
     path = tmp_path / "blip.wav"
     _write_wav(path, seconds=0.4)
@@ -439,7 +439,7 @@ def test_every_node_type_exports_to_json(monkeypatch):
     name), not just the one that bit us."""
     import json
 
-    from central import pwnodes as pn
+    from modules.pipewire import pwnodes as pn
     from central.main import NODE_TYPE_REGISTRY, PatchSpaceDaemon
     from tests.test_pwnodes import FakeGraph
 

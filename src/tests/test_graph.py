@@ -4,7 +4,7 @@ bookkeeping, edge ids that match the legacy scheme, and persistence."""
 import pytest
 
 from central import graph as g
-from central.pwnodes import PatchSpace
+from modules.pipewire.pwnodes import PatchSpace
 
 
 def _kinds(mapping):
