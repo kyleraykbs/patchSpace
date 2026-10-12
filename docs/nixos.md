@@ -38,8 +38,20 @@ panel would appear on your canvas).
 * **Graph**: every declared panel is written as a `mode = "read-only"`, `auto_load = true`
   panel file in a store directory passed to the daemon **last and read-only**. The daemon never
   writes it back, and `Reset` in the GUI re-applies exactly what Nix said.
-* **Client**: `installClient` (default `true`) puts the GUI - window, `.desktop` entry and icon
-  - into `environment.systemPackages`. Set it to `false` if you install it yourself.
+* **Client**: the GUI is its own repo/flake (`patchSpaceGui`), so this module no longer
+  supplies one.  `installClient` (default `true`) installs `clientPackage` — which a
+  configuration must name — into `environment.systemPackages` (or `home.packages` in the
+  home-manager scope):
+
+  ```nix
+  services.patchspace.clientPackage =
+    inputs.patchSpaceGui.packages.${pkgs.system}.patchspace;
+  ```
+
+  Leaving `clientPackage` unset with `installClient` on is an evaluation error (the
+  `module-scopes` check asserts exactly that), and `installClient = false` means you
+  install the window yourself.  The window, its `.desktop` entry and its icon all travel
+  in that package.
 * **Session environment**: `canvasOpacity` is exported as `PATCHSPACE_CANVAS_OPACITY` for the
   GUI, and put on the daemon unit as well, so a window started by a launcher (whose
   environment predates the rebuild) still gets it.
@@ -128,7 +140,7 @@ Nix-declared nodes arrange themselves).
 | `enable` | bool | `false` | Run the daemon, generate the panels, install the client. |
 | `package` | package | daemon from this flake | The daemon binary the unit runs. |
 | `installClient` | bool | `true` | Put the GUI (and its desktop entry/icon) in this scope's profile. |
-| `clientPackage` | package | GUI from this flake | What `installClient` installs. |
+| `clientPackage` | package? | `null` | What `installClient` installs. The GUI is its own flake, so a configuration that installs it names it here (`inputs.patchSpaceGui.packages.<system>.patchspace`); `null` with `installClient` on is an evaluation error. |
 | `socket` | `str?` | `null` | Command-API socket. `null` = the daemon's default, `$XDG_RUNTIME_DIR/patchspace.sock`. |
 | `panelDirs` | `[str]?` | `null` | Daemon `PATH[:rw\|:ro]` entries, searched in order. `null` = the conventional `~/.local/share/patchspace/panels:rw` (where the GUI keeps hand-made panels), which is passed explicitly because handing the daemon any `--panel-dir` replaces its own default. `[]` = only the declarative panels. |
 | `rootPanel` | `str?` | `null` | The session autosave file. `null` keeps the daemon's own (`~/.cache/patchspace/last_session.json`). |

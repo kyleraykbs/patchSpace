@@ -45,19 +45,22 @@ entry points are `python -m central.main` / `python -m central.session_repair`.
 | Daemon | `central/main.py` | Socket protocol, node factory (`NODE_TYPE_REGISTRY`/`_create_node`), property handling, session load, watchdogs, built-in devices. |
 | Config | `central/migrations.py`, `central/session_repair.py`, `central/apply_config.py`, `central/export_config.py`, `central/patchspace_cli.py` | Versioned node migrations; validate/repair a session; CLI import/export. |
 
-## The module layer (agents/PLAN.md phase 1)
+## The module layer (agents/PLAN.md phases 1, 3, 5, 6)
 
-The PipeWire-agnostic core is in place; the PipeWire machinery is not yet
-extracted, but it now goes through the module API:
+The PipeWire-agnostic core is in place and modules are real: the daemon runs
+built-in ones as child processes and serves what they declare.  The PipeWire
+machinery itself has not moved out yet (PLAN.md phase 3, "the extraction"):
 
 | Piece | File | Job |
 |---|---|---|
-| Vocabulary | `central/module_api.py` | Roles (`module`/`display`/`app`), message shapes, validation. JSON-stable: phase 3 puts it on a socket unchanged. |
-| Catalogue | `central/registry.py` | Attached modules, declared types, instances; the status model (`online`/`offline_module`/`offline_dep`/`unbacked`), the `requires` closure, migration handoff, capability queries, `port_kind`/`port_multi` for the graph rules. |
+| Vocabulary | `central/module_api.py` | Roles (`module`/`display`/`app`), message shapes, validation. JSON-stable: it crosses the socket unchanged. |
+| Catalogue | `central/registry.py` | Attached modules, declared types, instances; the status model (`online`/`offline_module`/`offline_dep`/`unbacked`), the `requires` closure, migration handoff, capability queries, `port_kind`/`port_multi` for the graph rules, reported `values`. |
 | Structure | `central/graph.py` | Spaces, placements, edges, and the **single connection authority** (`kinds_compatible` + the one-driver rule). Edge ids equal `PatchSpace._edge_id`, so persisted sessions survive. |
-| Wire | `central/protocol.py` | Daemon side of the API: `hello` + role gating, `type_declare` → one `migrate` per persisted instance → `migrate_result` → `node_announce`, `registry_query`, and module drop-off (a dead socket offlines its nodes). |
-| Provider | `modules/pipewire/declarations.py` | The node type catalog, generated from `gui/node_specs.py` + `NODE_TYPE_REGISTRY` while both exist (an agreement test keeps them in step; phase 2 makes this the source). |
+| Wire | `central/protocol.py` | Daemon side of the API: `hello` + role gating, `type_declare` → migration fan-out → `node_announce`, `registry_query`, `catalog_request`/`snapshot_request`, `node_control`/`node_edge` (routed to the owning module), `node_values`, and module drop-off (a dead socket offlines its nodes). |
+| Config | `central/module_config.py` | Which built-ins are enabled (`--modules-config`, else `~/.config/patchspace/modules.json`; a store path is deployment-managed).  `central/modules_cli.py` is `patchspace-modules`. |
+| Provider | `modules/pipewire/declarations.py` + `catalog.json` | The node types this module declares: ports, controls, display, the add-node menu and the vocabulary.  Emitted once from the legacy tables during phase 2 and **the source from then on** — a test asserts it covers every type the daemon can construct. |
 | Provider | `modules/pipewire/module.py` | The in-process module: greets through the same handler a socket client would use, answers migrations, announces the inventory the daemon hands it, and answers `control_set`/`edge_apply`. |
+| Provider | `modules/primitives/` | The first *out-of-process* module: numbers and boolean logic (`types.py`), a bounded local fixpoint (`engine.py`), a `ModuleHost` program (`main.py`). |
 | Runtime | `central/module_supervisor.py` | Runs built-in modules as **child processes**: start on attach, restart with backoff (and give up on one that keeps dying), stop with the daemon.  Specs come from the deployment config (phase 6). |
 | Runtime | `modules/host.py` | The client a module *process* runs: connect, greet, declare, announce, answer migrations, dispatch the daemon's pushes, reconnect.  The same protocol the in-process provider speaks — which is what makes moving a provider out of the daemon a transport change. |
 
@@ -68,9 +71,9 @@ live nodes into the registry (a placement each), and the module's announce
 binds the ones it runs; a placement nothing provides stays `unbacked` — the
 gray node — and is never swept by a sync.
 
-Note: `central/session_repair.py` still imports `gui.node_specs` for type/port
-knowledge — one of the three mirrors the plan collapses into the registry
-(phase 2).
+`session_repair.py` builds its own port/label table from the same catalog data
+(`modules.pipewire.declarations`) and asks `central/graph.py` for the
+compatibility rule, so an offline validator needs neither a daemon nor the client.
 
 ## The one big idea
 
@@ -103,31 +106,23 @@ port pairs for it - see `pwnodes.VirtualCameraNode`.
 | `filter` | predicate | pulled: a Filter node ANDs its classifiers over a bundle |
 | `impulse` | event | **pushed**: `PatchSpace.pulse()` walks the edges on a button press |
 
-The GUI must mirror the pairing rules (`gui/node_specs.ports_compatible`,
-`ports_compatible`/`port_kind`) and `session_repair` re-checks the same function, so the
-three can't disagree about what may connect.
+The pairing rules live in exactly one place — `central/graph.py`'s
+`kinds_compatible` plus the single-driver rule.  `session_repair` calls it, the
+daemon enforces it on every edge, and the client derives the same answer from the
+declared port kinds (so it can refuse a drop locally).  There is no second copy.
 
-## GUI-side map
+## The client (its own repo)
 
-`patchspace_gui.py` (app) → `main_window.py` (notebook: raw PW tab + editor tab, toolbars,
-side panels, console, daemon start/adopt) → `patchspace_widget.py` (the editable canvas:
-drawing, hit-testing, gestures, layout, panels, wires) with:
+The GTK4 window lives in `~/projects/patchSpaceGui` (flake `patchSpaceGui`) and is
+not part of this tree.  What this repo owes it:
 
-* `node_catalog.py` — what the daemon's modules declare: ports, kinds, controls,
-  labels, colours, icons, the add-node menu, the settings rows.  The client asks for
-  it once per connection (`hello` role=display → `catalog_request`) and installs the
-  reply; `node_specs.py` (the GUI's own copy) is gone.  An unknown type renders as a
-  generic in/out node, so a module the GUI has never heard of still draws.
-* `view_mixin.py` — pan/zoom/undo shared by both canvases; `wire_router.py` — A* orthogonal
-  routing; `force_layout.py` — physics; `render_utils.py` — palette + cairo helpers;
-  `socket_client.py` — async client thread; `daemon_control.py` — start/adopt/stop;
-  `bool_state.py` — the one poll-vs-pending rule for boolean controls.
+* the **socket protocol** (`central/module_api.py`, `central/protocol.py`): a
+  display greets (`hello` role=display), asks for the catalog once
+  (`catalog_request`), polls the graph, and sends `node_control`/`node_edge`;
+* the **catalog** — what the modules declare (`type_declare` → `catalog_reply`),
+  which the client installs as its node specs.  A module the client has never
+  heard of still draws, and a node nothing runs is drawn inert;
+* the **daemon's own tests** (`src/tests/`, headless, no display): they assert
+  what the *modules declare* (`tests/catalog.py` is a small adapter over
+  `modules.pipewire.declarations`), never the client's parser.
 
-`gui/` is a namespace package: its modules import each other **flat**, and
-`gui.node_catalog` is a *different module object* from a flat `import node_catalog`.
-Anything that installs the catalog (tests, tooling) must use the flat import or the
-widget reads an empty one.
-
-**There is no GUI test suite.**  The daemon suite (`src/tests/`) is headless and never
-touches real PipeWire; canvas/GUI behaviour is verified by hand (see `agents/NOTES.md` for
-the offscreen-render and private-PipeWire recipes).

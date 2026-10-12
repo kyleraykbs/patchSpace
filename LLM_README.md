@@ -18,7 +18,7 @@ codebase deliberately documents *why* and *what failed before*, not just *what*.
   ~6s**; the GTK canvas tests skip without a display). Tests are headless and do not
   touch real PipeWire.
 - **Run it:** `nix run` (GUI) or `nix run .#daemon` (headless daemon) from the repo root;
-  or, in `nix develop`, `cd src && python -m central.main` and `cd src/gui && python patchspace_gui.py`.
+  or, in `nix develop`, `cd src && python -m central.main` (the GTK client is the separate `patchSpaceGui` repo).
 - **The GUI starts/owns the daemon.** On launch it adopts a daemon that is already
   running, otherwise it starts a background one; it only shuts that daemon down on window
   close if *it* started it. The hamburger menu has Start/Stop/Restart Daemon. See §3.
@@ -46,24 +46,21 @@ codebase deliberately documents *why* and *what failed before*, not just *what*.
     │   ├── patchspace_cli.py  # synchronous one-shot socket client (CLI tools)
     │   ├── apply_config.py    # CLI: apply an exported config
     │   └── export_config.py   # CLI: export current config
-    ├── modules/               # built-in modules (PLAN.md moves the pipewire internals in here)
-    │   └── pipewire/          # pw substrate: pwgraph (live graph), pwproc (owned objects), pwmatch
-    ├── tests/             # pytest suite (headless)
-    └── gui/               # GTK4 client (flat imports; no __init__.py — namespace pkg)
-        ├── patchspace_gui.py        # GUI entrypoint (Gtk.Application)
-        ├── main_window.py         # MainWindow, LogConsole, toolbar, hamburger, loading overlay
-        ├── patchspace_widget.py   # the editable node canvas (big file)
-        ├── node_catalog.py        # what the daemon's modules declare (installed from catalog_reply)
-        ├── daemon_control.py      # start/adopt/stop the background daemon
-        ├── view_mixin.py          # pan/zoom/undo shared by both graph widgets
-        ├── pipewire_widget.py     # raw PipeWire graph view
-        ├── socket_client.py       # async PatchSpaceClient (background thread)
-        ├── render_utils.py        # cairo drawing helpers, theme palette
-        ├── force_layout.py        # physics layout for nodes
-        ├── color_picker.py        # self-drawn HSV picker (no GSettings dependency)
-        ├── portal_file_dialog.py  # xdg portal file chooser
-        └── constants.py           # shared timing/zoom/size constants
+    ├── tests/             # pytest suite (headless, daemon-only)
+    └── modules/           # built-in modules (PLAN.md moves the pipewire internals in here)
+        ├── pipewire/      # pw substrate: pwgraph (live graph), pwproc (owned objects), pwmatch
+        │   └── catalog.json   # the node types this module declares (ports, controls, display)
+        ├── primitives/    # numbers and boolean logic, its own process (types/engine/main)
+        └── host.py        # the module-side client (what a module *process* runs)
 ```
+
+**The client is its own repo**: `~/projects/patchSpaceGui` (flake
+`patchSpaceGui`) — the GTK4 window, the canvas, the node catalog parser, the
+socket client.  It talks to this daemon over the socket and knows nothing about
+PipeWire; it draws whatever the modules declare.  Sections below that describe
+client internals (`bool_state`, `wire_router`, the canvas geometry) are kept
+because the daemon's behaviour is what they are *about* — the code lives in the
+client's repo.
 
 Source paths are packages under `src/`: the daemon core imports as `central.*`, the
 PipeWire substrate as `modules.pipewire.*`.  Everything resolves with `src/` as the
@@ -101,11 +98,8 @@ nix develop            # provides python, gtk4, adwaita, pipewire, LADSPA_PATH, 
 # daemon
 cd src && python -m central.main
 
-# GUI (must run from the gui/ dir; imports are flat)
-cd src/gui && python patchspace_gui.py
+# the GTK client is the separate patchSpaceGui repo (cd gui && python patchspace_gui.py)
 
-# tests
-cd src && python -m pytest -q
 ```
 
 The daemon listens on a Unix socket, `$XDG_RUNTIME_DIR/patchspace.sock` by default (the /tmp name
@@ -297,7 +291,7 @@ and bundle pair either way (a single stream is a bundle of one), so "route every
 bundle stands for into this sink" is just an edge. The canvas draws bundle/filter sockets
 as diamonds and their wires dotted (and as short dash-stroked rubber bands while
 dragging); `render_utils.theme_palette` gains `bundle_port`/`filter_port`/`impulse_port`
-colors. `gui/node_specs.ports_compatible` and `session_repair` mirror the daemon's rule
+colors.  `session_repair` and the client both derive from the declared port kinds;
 so the GUI/repair can never fabricate a connection the daemon rejects.
 
 * `AllInputsNode` / `AllAppsNode` (`InputNode`) produce a source bundle from

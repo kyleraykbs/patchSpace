@@ -13,11 +13,14 @@ service because it drives your PipeWire session.
 ```nix
 {
   inputs.patchspace.url = "github:kyleraykbs/patchSpace";
+  inputs.patchSpaceGui.url = "github:kyleraykbs/patchSpaceGui";   # the client
 
   # in your home-manager configuration:
   imports = [ inputs.patchspace.homeModules.patchspace ];
   services.patchspace = {
-    enable = true;                    # daemon unit, panels, and the client
+    enable = true;                    # daemon unit, panels
+    clientPackage =                  # ...and the window (installClient is on by default)
+      inputs.patchSpaceGui.packages.${pkgs.system}.patchspace;
     nodes.vol = { type = "volume"; params.initial_volume = 0.8; };
     nodes.out = { type = "patchspace_device"; params.label = "Speaker Line"; };
     edges = [ { from = "vol"; to = "out"; } ];
@@ -27,7 +30,8 @@ service because it drives your PipeWire session.
 
 The client is installed with `home.packages` (via `installClient`), the daemon as
 `systemd.user.services.patchspace`, and the generated panels are handed to it exactly as in the
-NixOS case.
+NixOS case.  `installClient` needs `clientPackage` (the GUI is its own flake — see the
+client bullet in [nixos.md](./nixos.md)); `installClient = false` if you install it yourself.
 
 ## Quick start, together with NixOS
 
