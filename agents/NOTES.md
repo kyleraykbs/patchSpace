@@ -919,3 +919,26 @@ Do those three first, then the move is mechanical.  Nothing was left half-split:
   `gui.node_catalog`.  The display's parser is the display's business; the
   daemon asserts what the module *declares*.  When the display moves out, these
   tests need no change.
+
+## 2026-10-12 — phase 4: placements keep their own diffs
+
+* A panel file is the **blueprint**, a placement is an **instance**, and each
+  instance now keeps its own diff: a control turned or a node moved in one
+  instance stays there.  The diff lives in a sidecar beside the session
+  autosave (`placement_diffs.json` — the panel-file payload is whitelisted by
+  `panels.build_payload`, and the diffs are session state, not part of any
+  panel's schema).  It is replayed on load by `_flatten_panels`, which is the
+  one place a placement's effective config is produced; a key whose node the
+  blueprint no longer has is dropped (the rebase).
+* The old behaviour was the opposite: `_sync_placements` *fanned a change out*
+  to the file's other placements, and `_canonical_by_stem` picked "the placement
+  that changed" to write the file from.  Both had to go: `_capture_diffs`
+  records the change instead, and a file is now written **only from a placement
+  that committed a change** (edit mode) — or, for a lone placement, as before.
+* Order inside `_write_panels` matters: panel files first, then the snapshot
+  refresh for what they committed, then the diffs captured against those
+  snapshots, then the session.  Capturing first recorded a committed change as a
+  local diff.
+* Four tests pinned the fan-out ("sync across placements") and were rewritten to
+  the new semantics: an instance diverges, the blueprint only changes in edit
+  mode, and the file is never written from a local change.
