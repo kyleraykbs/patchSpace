@@ -148,15 +148,16 @@ a packaged CLI).
 | 7 | split `patchSpaceGui` into its own repo/flake; mycelion's second input | **done.**  `~/projects/patchSpaceGui` (flake `patchSpaceGui`) holds the client: `gui/`, `packaging/`, its own tests (113 passing, including the canvas suite and the catalog parser) and its own flake (`packages.patchspace` + a `checks.tests` whose only cross-repo need is the daemon's source, for the catalog fixture).  The daemon's tree is GTK-free (its dev shell no longer carries GTK, its suite is 465 passing), `clientPackage` is an explicit option with an assertion the module-scopes check exercises, and mycelion carries the second input.  What made it more than a move: the client's tests use the same *flat* import graph the app does (a `gui.X` import is a second module object, which silently breaks the catalog install and a wire-router monkeypatch), one test asserted a cross-repo invariant (the socket path) and now does so on both sides, and two "canvas" tests were really daemon tests (they moved back) |
 | 8b | final live smoke (needs Kyle at the machine) | **open** |
 
-Two known gaps left deliberately, each with its own step:
+One known gap left deliberately, with its own step:
 
-* The display's **control vocabulary is closed**: the canvas draws the widgets it
-  knows (`volume`/`slider`/`toggle`/`field`/`picker`/`indicator`) and ignores the
-  rest, so a module-declared control is not yet draggable.  The value *is*
-  settable through `node_control` and displayed from `node_values`.
 * The canvas still gets the **graph** from the legacy `get_nodes` poll (enriched
   with the registry's status), not from `snapshot_reply`.  Moving it belongs with
   phase 3, when the legacy protocol retires.
+
+Closed since the first draft: the display's control vocabulary (a module now
+declares a control's widget — `slider`/`switch`/`choice`, with `choices` and a
+numeric `min`/`max` — and the client draws it with its own widgets while sending
+`node_control`), and the gray/inert node rendering.
 
 Verification: daemon suite headless at every phase; new protocol tests per phase
 (announce/migrate/offline/values/spawn); GUI via the offscreen cairo render

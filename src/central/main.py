@@ -5665,6 +5665,10 @@ class PatchSpaceDaemon:
                 # A module-owned node is a real, running node; only a node
                 # nothing runs is drawn inert.
                 "ready": instance.status == api.STATUS_ONLINE,
+                # A node a *module* runs (not one the daemon models): the
+                # client sends its controls as `node_control` and the daemon
+                # routes them to the owner.
+                "module_owned": True,
             }
             if instance.values:
                 # What it currently computes (the primitives module's
