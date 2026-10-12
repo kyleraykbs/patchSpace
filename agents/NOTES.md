@@ -942,3 +942,24 @@ Do those three first, then the move is mechanical.  Nothing was left half-split:
 * Four tests pinned the fan-out ("sync across placements") and were rewritten to
   the new semantics: an instance diverges, the blueprint only changes in edit
   mode, and the file is never written from a local change.
+
+## 2026-10-12 — the end-to-end smoke, and the sweep made instance-scoped
+
+* `scripts/smoke.sh` runs the whole thing against a **private** PipeWire +
+  WirePlumber (the recipe above): a declarative panel loads and wires, the module
+  set reports pipewire in-process + primitives as a live process, the daemon
+  creates a primitives node and a control reaches it, two placements of one panel
+  diverge (their diff lands in `placement_diffs.json`), and disabling pipewire
+  takes its nodes offline and re-enabling brings them back.  No trace of the
+  user's session.  Run it from `nix develop`.
+* It found a real defect: the **argv half of the orphan sweep was machine-wide**,
+  so a private instance refused to start while the user's daemon was running
+  ("another daemon owns the pw-loopback helper").  The pw-dump half is
+  instance-scoped; the argv half is not.  Fixed by intersecting it with the pids
+  the dump identified (`_terminate_orphan_helpers(markers, candidates)`), so the
+  sweep is instance-scoped end to end and the machine-wide hazard in this file's
+  header is gone.
+* Two smoke lessons: the daemon loads its session on a background thread and
+  spawns modules asynchronously, so every check must *poll* (a socket that
+  answers is not a graph that is up); and a display connection has to greet
+  (`hello` role=display) before the daemon will route a `node_control`.

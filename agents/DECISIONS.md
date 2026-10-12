@@ -203,3 +203,12 @@
   are born; a deployment that declares the set should not be silently
   overridden by a CLI, and it should be told so rather than failing quietly.
 - Reversible: yes.
+
+## [2026-10-12] The orphan sweep is instance-scoped end to end
+- Decision: the argv-based helper scan only considers pids the instance-scoped
+  pw-dump half identified as owning this instance's stale objects.
+- Why: the argv half was machine-wide, so a private instance (a smoke, a test, a
+  second checkout) refused to start while the user's daemon ran, because their
+  helpers' argv carried a matching backing name.  A helper attached to another
+  PipeWire instance is not ours to reap, whatever its argv says.
+- Reversible: yes (pass no candidates for the old machine-wide behaviour).

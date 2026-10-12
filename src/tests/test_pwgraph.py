@@ -95,12 +95,12 @@ def test_reap_stale_returns_count(monkeypatch):
     """reap_stale_for_names returns how much it cleaned up, and is a
     no-op when nothing is stale."""
     g = PipewireGraph()
-    g._terminate_orphan_helpers = lambda markers: 1
+    g._terminate_orphan_helpers = lambda markers, candidates=None: 1
     g._snapshot_stale = lambda *a, **k: ({}, set())
     assert g.reap_stale_for_names(["patchspace_x"]) == 1
     assert g.reap_stale_for_names([]) == 0
 
-    g._terminate_orphan_helpers = lambda markers: 0
+    g._terminate_orphan_helpers = lambda markers, candidates=None: 0
     g._snapshot_stale = lambda *a, **k: ({1: "patchspace_x"}, set())
     destroyed = []
     g._destroy_nodes = lambda nodes: destroyed.extend(nodes) or len(nodes)
@@ -292,7 +292,7 @@ def test_the_reaper_refuses_to_touch_a_live_daemons_graph(monkeypatch):
         g, "_destroy_nodes",
         lambda stale: touched.append(("destroy", dict(stale))) or 0,
     )
-    monkeypatch.setattr(g, "_terminate_orphan_helpers", lambda markers: 0)
+    monkeypatch.setattr(g, "_terminate_orphan_helpers", lambda markers, candidates=None: 0)
 
     with pytest.raises(AnotherDaemonRunning):
         g.reap_stale_for_names(["nc_a"])
@@ -313,7 +313,7 @@ def test_the_reaper_still_reaps_genuine_orphans(monkeypatch):
     killed = []
     monkeypatch.setattr(os, "kill", lambda pid, sig: killed.append(pid))
     monkeypatch.setattr(g, "_destroy_nodes", lambda stale: 1)
-    monkeypatch.setattr(g, "_terminate_orphan_helpers", lambda markers: 0)
+    monkeypatch.setattr(g, "_terminate_orphan_helpers", lambda markers, candidates=None: 0)
     monkeypatch.setattr(g, "_wait_markers_gone", lambda *a, **k: True)
 
     assert g.reap_stale_for_names(["nc_a"]) >= 1
@@ -349,7 +349,7 @@ class _SweepRig:
         self.graph = g
 
     def sweep(self, markers):
-        return self.graph._terminate_orphan_helpers(set(markers))
+        return self.graph._terminate_orphan_helpers(set(markers), None)
 
 
 def test_the_sweep_reaps_only_helpers_nobody_alive_owns(monkeypatch):

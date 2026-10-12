@@ -466,7 +466,7 @@ class PipewireGraph:
                 f"{live} still own graph objects); refusing to sweep or start a "
                 "second instance"
             )
-        swept = self._terminate_orphan_helpers(set(markers))
+        swept = self._terminate_orphan_helpers(set(markers), set(owner_pids))
         # Kill the actual owning process first, not just the node id.
         # Per pwproc.py's ownership model this is the one teardown path
         # the server always honors atomically and completely - a client
@@ -543,15 +543,26 @@ class PipewireGraph:
                 hits.append(name)
         return hits
 
-    def _terminate_orphan_helpers(self, markers: Set[str]) -> int:
+    def _terminate_orphan_helpers(self, markers: Set[str],
+                                  candidates: Optional[Set[int]] = None) -> int:
         """SIGTERM every pw-loopback / pw-cat helper whose command line
         references one of ``markers`` and which we did not spawn.  A
         crashed daemon's helpers get reparented to init and keep running
         forever; they own nothing once their nodes are destroyed, but
-        they linger and can race a later recreation."""
+        they linger and can race a later recreation.
+
+        ``candidates`` restricts the scan to pids the *instance-scoped*
+        pw-dump half identified as owning this instance's stale objects.
+        That is what keeps the argv scan from being machine-wide: a helper
+        whose argv happens to carry a matching name but which is attached to
+        another PipeWire instance (the user's live session, another
+        checkout's daemon) is not ours to touch.  Without it the sweep is
+        best-effort machine-wide, which is only ever right for a lone daemon.
+        """
         my_pid = os.getpid()
         reaped = 0
-        for pid in self._iter_pids():
+        for pid in (sorted(candidates) if candidates is not None
+                    else self._iter_pids()):
             if pid == my_pid:
                 continue
             try:
