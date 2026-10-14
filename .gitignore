@@ -3,3 +3,7 @@ __pycache__/
 .pytest_cache/
 result
 result-*
+# Editor/agent state (never source).
+.opencode/
+# The GIMP master for the icon; the app and its art live in patchSpaceGui now.
+*.xcf
