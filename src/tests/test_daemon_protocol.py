@@ -501,7 +501,7 @@ def test_shutdown_command_reports_ok_and_stops_the_daemon():
 
 def test_every_node_type_has_a_description_and_setting_tooltips():
     """Every node spec carries hover-ready text: a one-line description
-    (shown on the add-node panel and a long hover on the canvas) and a
+    (shown on the add-node space and a long hover on the canvas) and a
     tooltip for every Settings row (falling back to the label)."""
     from tests import catalog as node_catalog
     ns = node_catalog
@@ -1176,7 +1176,7 @@ def test_boolean_nodes_registry_specs_and_output_control():
     d = fresh_daemon()
     d.space.mark_graph_loaded()
     assert d.handle_command(
-        {"command": "add_node", "node_type": "bool_panel_in",
+        {"command": "add_node", "node_type": "bool_space_in",
          "node_id": "pin", "config": {}}
     )["status"] == "ok"
     assert d.handle_command(
@@ -1190,7 +1190,7 @@ def test_boolean_nodes_registry_specs_and_output_control():
     # Default off (None): the gate isn't driven.
     nodes = d.handle_command({"command": "get_nodes"})["nodes"]
     assert nodes["g"]["bool_driven"] is False
-    # Setting the panel input's default state drives it with nothing wired
+    # Setting the space input's default state drives it with nothing wired
     # from outside.
     assert d.handle_command(
         {"command": "set_node_property", "node_id": "pin",
@@ -1609,42 +1609,49 @@ def test_patchspace_socket_env_moves_every_end(monkeypatch, tmp_path):
 
 
 def test_pre_rename_paths_are_adopted_once(monkeypatch, tmp_path):
-    """The rename (PatchBay -> Patch Space) moved the panel directory and the
-    session cache.  A machine that has been running the old code must find its
-    graph where it always was: the old contents are copied in, idempotently,
-    and nothing that already exists at the new location is overwritten."""
+    """Both renames moved the space directory - PatchBay's `panels` one, and
+    this project's own `panels` spelling before S0.  A machine that has been
+    running either must find its graph where it always was: the old contents
+    are copied in, idempotently, and nothing that already exists at the new
+    location is overwritten."""
     import json
 
-    legacy_panels = tmp_path / "legacy" / "panels"
-    legacy_panels.mkdir(parents=True)
-    (legacy_panels / "kit.json").write_text('{"type": "panel", "config": {}}')
+    legacy_spaces = tmp_path / "legacy" / "panels"      # PatchBay's directory
+    legacy_spaces.mkdir(parents=True)
+    (legacy_spaces / "kit.json").write_text('{"type": "panel", "config": {}}')
+    old_spelling = tmp_path / "older" / "panels"        # pre-S0, same spelling
+    old_spelling.mkdir(parents=True)
+    (old_spelling / "other.json").write_text('{"type": "panel", "config": {}}')
     legacy_session = tmp_path / "legacy" / "last_session.json"
     legacy_session.write_text(json.dumps({"nodes": {}, "edges": [], "groups": []}))
 
-    new_panels = tmp_path / "new" / "panels"
+    new_spaces = tmp_path / "new" / "spaces"
     new_session = tmp_path / "new" / "last_session.json"
-    # A panel that exists under *both* names: the new one wins.
-    new_panels.mkdir(parents=True)
-    (new_panels / "kit.json").write_text('{"type": "panel", "config": {"keep": 1}}')
+    # A space that exists under *both* names: the new one wins.
+    new_spaces.mkdir(parents=True)
+    (new_spaces / "kit.json").write_text('{"type": "space", "config": {"keep": 1}}')
 
-    monkeypatch.setattr(main_mod, "LEGACY_PANEL_DIR", str(legacy_panels))
+    monkeypatch.setattr(main_mod, "LEGACY_SPACE_DIR", str(legacy_spaces))
+    monkeypatch.setattr(main_mod, "LEGACY_OLD_SPELLING_SPACE_DIR",
+                        str(old_spelling))
     monkeypatch.setattr(main_mod, "LEGACY_SESSION_CACHE", str(legacy_session))
     monkeypatch.setattr(main_mod, "SESSION_CACHE_PATH", str(new_session))
 
     d = fresh_daemon()
-    d.panel_dirs = [(str(new_panels), True)]
-    d.root_panel_path = str(new_session)
+    d.space_dirs = [(str(new_spaces), True)]
+    d.root_space_path = str(new_session)
     d._migrate_legacy_paths()
 
-    assert (new_panels / "other.json").exists() is False          # nothing invented
-    assert json.loads((new_panels / "kit.json").read_text())["config"] == {"keep": 1}
+    # Exactly the two legacy files (one per rename), nothing invented.
+    assert sorted(os.listdir(new_spaces)) == ["kit.json", "other.json"]
+    assert json.loads((new_spaces / "kit.json").read_text())["config"] == {"keep": 1}
     assert json.loads(new_session.read_text())["nodes"] == {}
     assert legacy_session.exists()          # copied, not moved
 
     # Second run is a no-op (both destinations exist now).
-    before = (new_panels / "kit.json").read_text()
+    before = (new_spaces / "kit.json").read_text()
     d._migrate_legacy_paths()
-    assert (new_panels / "kit.json").read_text() == before
+    assert (new_spaces / "kit.json").read_text() == before
 
 
 def test_daemon_serves_the_configured_socket(monkeypatch, tmp_path):
@@ -1946,14 +1953,14 @@ def test_a_recorder_reports_its_takes_revision(tmp_path, monkeypatch):
     assert d.handle_command({"command": "get_nodes"})["nodes"]["rec"]["source_rev"] != first
 
 
-def test_a_failing_autosave_does_not_starve_the_panel_poll(monkeypatch):
+def test_a_failing_autosave_does_not_starve_the_space_poll(monkeypatch):
     """The tick's two post-steps each have their own guard.  They shared one
-    try, so a failing session export kept the panel poll from ever running -
-    and the panel poll is what notices a panel file changing on disk."""
+    try, so a failing session export kept the space poll from ever running -
+    and the space poll is what notices a space file changing on disk."""
     d = fresh_daemon()
     d._running = True               # _tick returns immediately otherwise
     polls = []
-    monkeypatch.setattr(d, "_poll_panels", lambda: polls.append(True))
+    monkeypatch.setattr(d, "_poll_spaces", lambda: polls.append(True))
 
     def boom():
         raise RuntimeError("the export is broken")
@@ -2015,7 +2022,7 @@ def test_the_autosave_waits_for_a_quiet_moment(monkeypatch):
     d._running = True
     exports = []
     monkeypatch.setattr(d, "_auto_export_session", lambda: exports.append(True))
-    monkeypatch.setattr(d, "_poll_panels", lambda: None)
+    monkeypatch.setattr(d, "_poll_spaces", lambda: None)
 
     clock = [1000.0]
     monkeypatch.setattr(main_mod.time, "monotonic", lambda: clock[0])

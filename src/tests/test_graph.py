@@ -93,16 +93,16 @@ def test_single_driver_inputs_take_one_edge_but_multi_opt_out_takes_many():
         ("btn1", "out", "out"): "impulse",
         ("btn2", "out", "out"): "impulse",
         ("play", "in", "in"): "impulse",
-        ("panel", "in", "in"): "impulse",
+        ("space", "in", "in"): "impulse",
     })
-    multi = _multi({("panel", "in"): True})
+    multi = _multi({("space", "in"): True})
 
     graph.connect("btn1", "play", "in", "out", kinds, multi)
     ok, message = graph.can_connect("btn2", "play", "in", "out", kinds, multi)
     assert not ok and "already driven" in message
 
-    graph.connect("btn1", "panel", "in", "out", kinds, multi)
-    ok, _ = graph.can_connect("btn2", "panel", "in", "out", kinds, multi)
+    graph.connect("btn1", "space", "in", "out", kinds, multi)
+    ok, _ = graph.can_connect("btn2", "space", "in", "out", kinds, multi)
     assert ok, "a multi input accepts a second driver"
 
 
@@ -170,7 +170,7 @@ def test_persistence_round_trip():
     graph = g.Graph()
     graph.add_space("game", label="Game")
     graph.place("a", space="main", x=1.5, y=2.5, anchored=True)
-    graph.place("b", space="game", x=3.0, y=4.0, panel="p1")
+    graph.place("b", space="game", x=3.0, y=4.0, space_id="p1")
     kinds = _kinds({("a", "out", "out"): "audio", ("b", "in", "in"): "audio"})
     graph.connect("a", "b", "in", "out", kinds)
 

@@ -2,7 +2,7 @@
 
 The home-manager module exposes **exactly the same options** as the NixOS one
 ([nixos.md](./nixos.md) documents them) and **layers on top of it**: the user scope wins per
-node, per edge, per panel and per scalar, so a graph - or a single override - can be written in
+node, per edge, per space and per scalar, so a graph - or a single override - can be written in
 either place.
 
 ## Quick start, standalone (no NixOS)
@@ -18,7 +18,7 @@ service because it drives your PipeWire session.
   # in your home-manager configuration:
   imports = [ inputs.patchspace.homeModules.patchspace ];
   services.patchspace = {
-    enable = true;                    # daemon unit, panels
+    enable = true;                    # daemon unit, spaces
     clientPackage =                  # ...and the window (installClient is on by default)
       inputs.patchSpaceGui.packages.${pkgs.system}.patchspace;
     nodes.vol = { type = "volume"; params.initial_volume = 0.8; };
@@ -29,7 +29,7 @@ service because it drives your PipeWire session.
 ```
 
 The client is installed with `home.packages` (via `installClient`), the daemon as
-`systemd.user.services.patchspace`, and the generated panels are handed to it exactly as in the
+`systemd.user.services.patchspace`, and the generated spaces are handed to it exactly as in the
 NixOS case.  `installClient` needs `clientPackage` (the GUI is its own flake — see the
 client bullet in [nixos.md](./nixos.md)); `installClient = false` if you install it yourself.
 
@@ -43,7 +43,7 @@ in your home configuration:
 services.patchspace = {
   enable = true;
   nodes.mic = { type = "patchspace_mic_device"; params.label = "Mic"; };
-  panels.kit = { label = "Kitchen"; placement.w = 520; };
+  spaces.kit = { label = "Kitchen"; placement.w = 520; };
 };
 
 # home-manager side: layers on top of the above
@@ -51,10 +51,10 @@ services.patchspace = {
   enable = true;
   # override a field the system scope set (the rest of the node survives)
   nodes.mic.params.label = "My Mic";
-  # add nodes, edges and whole panels of your own
+  # add nodes, edges and whole spaces of your own
   nodes.post = { type = "normalize"; params = { }; };
   edges = [ { from = "mic"; to = "post"; } ];
-  panels.kit.nodes.snare = { type = "button"; params.label = "Snare"; };
+  spaces.kit.nodes.snare = { type = "button"; params.label = "Snare"; };
   canvasOpacity = 0.75;               # beats the system scope's value
 };
 ```
@@ -70,9 +70,9 @@ overrides" arrangement above.
 | Setting | Composition |
 |---|---|
 | `nodes`, `edges`, `groups` | Merged per id / per edge identity; the user scope wins the fields it sets, everything else survives. |
-| `panels`, `panels.<name>.*` | Merged per stem, then per field; `children` and `imports` accumulate, `placement` merges per key. |
+| `spaces`, `spaces.<name>.*` | Merged per stem, then per field; `children` and `imports` accumulate, `placement` merges per key. |
 | `imports` | Appended after the NixOS scope's, so they layer under the same Nix-side nodes. |
-| `socket`, `panelDirs`, `rootPanel`, `canvasOpacity` | User scope wins when it sets one (`null` means "unset", so the lower scope's value stays). |
+| `socket`, `spaceDirs`, `rootSpace`, `canvasOpacity` | User scope wins when it sets one (`null` means "unset", so the lower scope's value stays). The pre-rename spellings (`panelDirs`, `rootPanel`) alias onto these and compose the same way. |
 | `extraArgs` | Concatenated (system first). |
 | `enable` | The scope that enables it owns the daemon; the other defines nothing. |
 | `installClient`, `clientPackage`, `package`, `validate` | Taken from the **owning** scope: the one with `enable = true`. The client lands in that scope's profile (`home.packages` or `environment.systemPackages`). |
@@ -83,16 +83,16 @@ Two consequences worth knowing:
   design - that is what makes "user overrides the system defaults" work. If you want the
   system-wide daemon (every user gets it, no per-user merge), enable it only in the NixOS
   scope.
-* The NixOS scope's `rootPanel`/`panelDirs` still apply unless the user scope sets its own -
-  the session autosave and the hand-made panel directory are shared state, not per-scope ones.
+* The NixOS scope's `rootSpace`/`spaceDirs` still apply unless the user scope sets its own -
+  the session autosave and the hand-made space directory are shared state, not per-scope ones.
 
 ## Inspecting and validating
 
 Both scopes generate the same artifacts, and the *owning* scope's are the ones in play:
 
 ```console
-$ nix build .#nixosConfigurations.<host>.config.services.patchspace.panelsDir   # system scope
-$ nix build .#homeConfigurations.<user>.config.services.patchspace.panelsDir    # user scope
+$ nix build .#nixosConfigurations.<host>.config.services.patchspace.spacesDir   # system scope
+$ nix build .#homeConfigurations.<user>.config.services.patchspace.spacesDir    # user scope
 ```
 
 `services.patchspace.effectiveConfig` gives the same content as an attrset - including the

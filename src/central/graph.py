@@ -28,7 +28,7 @@ LINKABLE_KINDS = frozenset({"audio", "bundle"})
 
 #: Kinds whose *input* takes exactly one driver (a level signal, an event,
 #: a file reference, a video feed — not a mixable bus).  A port may opt out
-#: with ``multi: true`` in its type declaration (panel boolean ports do).
+#: with ``multi: true`` in its type declaration (space boolean ports do).
 SINGLE_DRIVER_KINDS = frozenset({"boolean", "impulse", "sound", "camera"})
 
 
@@ -84,13 +84,13 @@ class Edge:
 
 @dataclass
 class Space:
-    """A routing region.  Phase 4 merges spaces with panels (a blueprint
+    """A routing region.  Phase 4 merges spaces with spaces (a blueprint
     plus per-instance diffs); today it is the grouping the placement and
     edge ownership hang off, with ``main`` as the default."""
 
     space_id: str
     label: str = ""
-    parent: str = ""            # nested spaces (panel-in-panel) once phase 4 lands
+    parent: str = ""            # nested spaces (space-in-space) once phase 4 lands
     readonly: bool = False
     anchored: bool = False
 
@@ -106,13 +106,21 @@ class Space:
 
 @dataclass
 class Placement:
-    """Where an instance sits — structure, not identity."""
+    """Where an instance sits — structure, not identity.
+
+    Two space-ish ids live here and they are **not** the same thing yet:
+    ``space`` is this topology's routing region (`graph.Space.space_id`,
+    default ``main``), while ``space_id`` is the *container* the node sits in
+    (`spaces.py`'s tree, a ``Parent::Child`` path, ``""`` for the root - the
+    same id the command protocol calls ``space_id``).  S1 merges the two
+    models; until then both are carried, as before, under their own names.
+    """
 
     space: str = "main"
     x: float = 0.0
     y: float = 0.0
     anchored: bool = False
-    panel: str = ""
+    space_id: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -120,7 +128,7 @@ class Placement:
             "x": self.x,
             "y": self.y,
             "anchored": self.anchored,
-            "panel": self.panel,
+            "space_id": self.space_id,
         }
 
 
@@ -169,7 +177,7 @@ class Graph:
     # -- placements ------------------------------------------------------
 
     def place(self, instance_id: str, space: str = "main", x: float = 0.0,
-              y: float = 0.0, anchored: bool = False, panel: str = "") -> Placement:
+              y: float = 0.0, anchored: bool = False, space_id: str = "") -> Placement:
         with self._lock:
             if space not in self.spaces:
                 self.add_space(space)
@@ -178,7 +186,7 @@ class Graph:
             placement.x = x
             placement.y = y
             placement.anchored = anchored
-            placement.panel = panel
+            placement.space_id = space_id
             self.placements[instance_id] = placement
             return placement
 
@@ -296,7 +304,11 @@ class Graph:
                     x=float(placement.get("x", 0.0)),
                     y=float(placement.get("y", 0.0)),
                     anchored=bool(placement.get("anchored", False)),
-                    panel=placement.get("panel", ""),
+                    # A snapshot dict written before S0 spells this `panel`
+                    # (read, never written - the one-release window).
+                    space_id=placement.get(
+                        "space_id", placement.get("panel", "")
+                    ),
                 )
             self.edges = {}
             for eid, edge in (data.get("edges") or {}).items():

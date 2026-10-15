@@ -40,7 +40,7 @@ codebase deliberately documents *why* and *what failed before*, not just *what*.
     ├── central/           # the PipeWire-agnostic daemon core (run as `python -m central.main`)
     │   ├── main.py            # daemon: socket API, session load, node factory, wiring
     │   ├── pwnodes.py         # node graph model: PatchSpace, all Node classes, effect sandwich
-    │   ├── panels.py          # panel containers: namespacing, LCA edges, tree IO, migration
+    │   ├── spaces.py          # space containers: namespacing, LCA edges, tree IO, migration
     │   ├── migrations.py      # versioned node/config migrations (legacy -> current)
     │   ├── session_repair.py  # validate/repair a session config (CLI + daemon)
     │   ├── patchspace_cli.py  # synchronous one-shot socket client (CLI tools)
@@ -134,14 +134,14 @@ evaluated by hand before it goes in, against the same stubs the `module-scopes` 
 `flake.modules.nixos.patchspace` and `flake.modules.homeManager.patchspace` are the same
 `nix/module.nix` with `homeManager = true/false`, exposing the same options.  A home-manager
 configuration reads the NixOS one through `osConfig` and merges over it - per node, per edge,
-per panel, per scalar - so a graph (or a single override) can live in either place and the user
+per space, per scalar - so a graph (or a single override) can live in either place and the user
 scope wins.  Whichever scope is *enabled* owns the daemon unit, and they never both define it:
 home-manager enabled ⇒ it owns (a user service belongs to the user, with that user's own
 merged config), NixOS enabled ⇒ it owns unless some home-manager user claims it.  `enable =
-true` is the whole configuration: the daemon, the generated panels, the client with its
+true` is the whole configuration: the daemon, the generated spaces, the client with its
 desktop entry and icon (`installClient`, on by default, respects the scope it lands in -
 `environment.systemPackages` or `home.packages`), and the session environment.  The merged
-per-panel config is exposed as `services.patchspace.effectiveConfig`, which is what the
+per-space config is exposed as `services.patchspace.effectiveConfig`, which is what the
 flake's `module-scopes` check asserts on (NixOS scope evaluated first, then home-manager with
 that as `osConfig` - exactly the order a real host goes through).
 
@@ -149,7 +149,7 @@ that as `osConfig` - exactly the order a real host goes through).
 `nix/module.nix` (exported as `flake.modules.nixos.patchspace`,
 `flake.modules.homeManager.patchspace` and the `nixosModules`/`homeModules` aliases; the
 merge helpers alone are `flake.lib.patchspace`) runs the daemon as a **user** service and
-generates the graph as **read-only panel files**:
+generates the graph as **read-only space files**:
 
 ```nix
 services.patchspace = {
@@ -158,41 +158,41 @@ services.patchspace = {
   nodes.boom = { type = "sound_effect"; params = { path = "~/sounds/boom.wav"; }; };
   nodes.kick = { type = "button"; params = { label = "Kick"; }; };
   edges = [ { from = "kick"; to = "boom"; } ];
-  panels.kit = { placement.w = 720; nodes.snare = { type = "button"; }; };
+  spaces.kit = { placement.w = 720; nodes.snare = { type = "button"; }; };
 };
 ```
 
-* **Layering.** Each panel's `imports` (flat exports, or panel files the GUI wrote) are
-  merged *under* the panel's own `nodes`/`edges`/`groups`: `recursiveUpdate` per node, so a
+* **Layering.** Each space's `imports` (flat exports, or space files the GUI wrote) are
+  merged *under* the space's own `nodes`/`edges`/`groups`: `recursiveUpdate` per node, so a
   Nix entry overrides the fields it names and keeps the rest - including the node's `type`,
   which is why an override of an imported node doesn't have to restate it
   (`node.type` has no default and is only required for a node nothing imports; the module
   asserts that after merging). Edges are keyed by the daemon's own edge identity
-  (`from->to[:to_port][@from_port]`), so an edge named twice is one edge. Panel vs panel
+  (`from->to[:to_port][@from_port]`), so an edge named twice is one edge. Space vs space
   is dir-order precedence: the generated store dir is passed `:ro` and *last*.
-* **It does not take over your panel dirs.** Giving the daemon any `--panel-dir` at all
+* **It does not take over your space dirs.** Giving the daemon any `--space-dir` at all
   *replaces* its built-in default, so the module passes the conventional
-  (`~/.local/share/patchspace/panels`, read-write - where the GUI keeps the panels you make
+  (`~/.local/share/patchspace/spaces`, read-write - where the GUI keeps the spaces you make
   by hand) explicitly, then appends the generated declarative dir **last and read-only**:
-  both are searched, and a panel defined in Nix wins over a file with the same stem anywhere
-  else. Add more with `services.patchspace.panelDirs` (the daemon's own `PATH[:rw|:ro]`
-  form). `rootPanel = null` (the default) leaves the session autosave where the daemon has
+  both are searched, and a space defined in Nix wins over a file with the same stem anywhere
+  else. Add more with `services.patchspace.spaceDirs` (the daemon's own `PATH[:rw|:ro]`
+  form). `rootSpace = null` (the default) leaves the session autosave where the daemon has
   always put it (`~/.cache/patchspace/last_session.json`), so an existing session keeps
   loading; set it to keep that state elsewhere.
 * **Generated files** carry `mode = "read-only"` and `auto_load`, so the daemon never writes
   them back, `Reset` in the GUI re-applies exactly what Nix said, and an unreferenced
-  panel is placed at the root on start-up by itself.
+  space is placed at the root on start-up by itself.
 * **Layout.** Nodes keep whatever `x`/`y` the JSON has; nodes with no coordinates are placed
   by the layout. Only nodes the *user* placed are node-anchored, so Nix/imported nodes
-  settle by physics inside their panel (which is why `anchored` panels pin the box, not the
+  settle by physics inside their space (which is why `anchored` spaces pin the box, not the
   contents - see §3 "Physics").
 * **Two gates, both at build time.** `services.patchspace.nodes.*.type` is an enum of
-  `NODE_TYPE_REGISTRY`, so a typo fails evaluation; and every generated panel is run
+  `NODE_TYPE_REGISTRY`, so a typo fails evaluation; and every generated space is run
   through `session_repair --check --strict` (the new strict mode: fail on the *input*
   needing any repair, not only on the repaired config failing). That catches bad ports,
   kind mismatches (an impulse wire into an audio input), duplicate edges, missing endpoints
-  and unknown types - `packages.patchspace-repair` is the CLI that does it. A failing panel
-  fails the build of the panel dir the daemon loads.
+  and unknown types - `packages.patchspace-repair` is the CLI that does it. A failing space
+  fails the build of the space dir the daemon loads.
 * **Rebuilds restart the daemon**: the generated dir is a new store path, which changes the
   unit's `ExecStart`. `services.patchspace.socket` defaults to `null` (the built-in
   `$XDG_RUNTIME_DIR/patchspace.sock`); set it and the GUI/CLI need `PATCHSPACE_SOCKET` in the
@@ -236,7 +236,7 @@ boolean warps. `_resolve_boolean*` evaluates them; AND/OR/XOR ignore unwired inp
 wired input passes through; XOR is odd parity, i.e. exactly one of two) and emit nothing
 when fully unwired. A driven gate/switcher's on/off indicator renders read-only
 white from the daemon's `bool_driven`/`bool_state`. If a poll reports `bool_state=None`
-while the ctrl signal is still wired (a bool-warp publisher briefly re-created by a panel
+while the ctrl signal is still wired (a bool-warp publisher briefly re-created by a space
 sync), the GUI holds the last resolved value rather than flashing back to the node's
 stored default (`gui/bool_state.py:resolve_bool_state_from_poll`); it clears once ctrl is
 genuinely disconnected.
@@ -254,7 +254,7 @@ draws the socket as a filled dot with a short-dashed wire (`IMPULSE_DASH`). The 
 Effect is a `_SingleSinkNode` whose dummy sink is the node's *socket* (its audio out is
 the dummy's monitor); each impulse spawns a short-lived
 `pw-cat --playback <path> --target <dummy>`. Its `path` may start with `~` - stored as
-written (so it stays portable across sessions, panels and machines) and expanded by
+written (so it stays portable across sessions, spaces and machines) and expanded by
 `os.path.expanduser` in `_start_player`, because nothing in pw-cat's argv is a shell. The
 node's folder button (`spec.picker`) opens the desktop portal's file chooser (the same
 `open_file` helper Import uses - against the desktop that *is* the file manager's open
@@ -365,13 +365,13 @@ so the GUI/repair can never fabricate a connection the daemon rejects.
 **Node migrations (`migrations.py`).** Old node shapes are brought forward by a
 versioned registry: `config["schema_version"]` selects which `Migration.apply(config)`
 functions run, each returning its list of fixes. The loader calls it only on *full*
-loads from disk (startup, `reload_panels`, explicit `load_session`/import) — not on
+loads from disk (startup, `reload_spaces`, explicit `load_session`/import) — not on
 incremental single-placement reloads, which must match the sibling placements already in
 the graph (see `main._load_session`'s `migrate` flag). `session_repair.repair` runs the
 same pass (so the repair CLI with `--write` persists it). The first migration rewrites
 the six legacy Regex/Media Class/Description input/output leaves as bundle pipelines
 (`All Inputs`/`All Outputs` → matching classifier → `Filter`, plus a `Bundle Output`
-terminal on the sink side), keeping panel-qualified ids in their panel while sharing one
+terminal on the sink side), keeping space-qualified ids in their space while sharing one
 root-level preset per side. Legacy type keys stay in `NODE_TYPE_REGISTRY`/specs as
 aliases so an unmigrated file still loads.
 
@@ -379,86 +379,86 @@ aliases so an unmigrated file still loads.
 `get_nodes`/`export` emit, read via `getattr(node, attr)`. `_LAYOUT_ATTRS` (x/y/anchored)
 is separate so unpositioned nodes don't emit nulls.
 
-**Panels (`panels.py`) — the file-backed container model (supersedes declarative files).**
-A *panel* is a nestable box that owns nodes and child panels; the whole graph has one
-`root` panel and every non-root panel is one `*.json` file, referenced by its file stem.
-Panel ids are the `::`-joined path of stems from the root (`kit`, `kit::eq`); a
-node/group id is `<panel-id>::<local>` (bare `<local>` at the root). Local ids may not
-contain `::`; split with `rsplit("::", 1)`. A root-level node and a root-level panel may
+**Spaces (`spaces.py`) — the file-backed container model (supersedes declarative files).**
+A *space* is a nestable box that owns nodes and child spaces; the whole graph has one
+`root` space and every non-root space is one `*.json` file, referenced by its file stem.
+Space ids are the `::`-joined path of stems from the root (`kit`, `kit::eq`); a
+node/group id is `<space-id>::<local>` (bare `<local>` at the root). Local ids may not
+contain `::`; split with `rsplit("::", 1)`. A root-level node and a root-level space may
 not share a name.
 
 *Placement* is parent-relative and lives in the **child** file (`placement: {x,y,w,h,
-anchored}`), so a panel is self-describing. Node runtime coordinates stay **absolute**
-in `PatchSpace`/the GUI and are authoritative: the GUI moves a panel's nodes itself and
-persists their absolute positions (`set_node_layout`) alongside the panel's placement
-(`set_panel_layout`); the daemon only stores the panel metadata and never derives node
+anchored}`), so a space is self-describing. Node runtime coordinates stay **absolute**
+in `PatchSpace`/the GUI and are authoritative: the GUI moves a space's nodes itself and
+persists their absolute positions (`set_node_layout`) alongside the space's placement
+(`set_space_layout`); the daemon only stores the space metadata and never derives node
 positions from it (doing both moved nodes twice and made the boxes fight their contents).
-`_flatten_panels` adds a panel's folded absolute origin when loading and
-`_build_panels_from_space` subtracts it when writing, so only the serialization is
-panel-relative. Child panels are never shifted when a parent moves - they derive their
+`_flatten_spaces` adds a space's folded absolute origin when loading and
+`_build_spaces_from_space` subtracts it when writing, so only the serialization is
+space-relative. Child spaces are never shifted when a parent moves - they derive their
 absolute position by folding ancestors.
 
-*Edges are owned by the least common ancestor* of the two endpoints' panels
-(`panels.edge_owner`): same-panel edges live in that panel's file, cross-panel edges in
-the deepest common panel, and edges between different top-level panels in the root file.
+*Edges are owned by the least common ancestor* of the two endpoints' spaces
+(`spaces.edge_owner`): same-space edges live in that space's file, cross-space edges in
+the deepest common space, and edges between different top-level spaces in the root file.
 An edge is never stored twice; reparenting a node re-homes its incident edges
 automatically because ownership is derived from ids.
 
-*Load dirs* are a list (`--panel-dir PATH[:rw|:ro]`, repeatable, later shadows earlier;
-`PATCHSPACE_PANEL_DIR` for the default). The **root panel** is the session autosave
-(`--root-panel`, default `~/.cache/patchspace/last_session.json`) — a legacy
+*Load dirs* are a list (`--space-dir PATH[:rw|:ro]`, repeatable, later shadows earlier;
+`PATCHSPACE_SPACE_DIR` for the default). The **root space** is the session autosave
+(`--root-space`, default `~/.cache/patchspace/last_session.json`) — a legacy
 `{nodes,edges,groups}` cache and old declarative files are migrated in place on load
-(`_load_panels_tree`).
+(`_load_spaces_tree`).
 
-*Read-only panels* (`mode: "read-only"`) keep a frozen snapshot
-(`self._readonly_snapshots`); the GUI controls stay live but `reset_panel` / reload /
+*Read-only spaces* (`mode: "read-only"`) keep a frozen snapshot
+(`self._readonly_snapshots`); the GUI controls stay live but `reset_space` / reload /
 restart re-apply the file's membership, positions, edges and params. `read-write` (the
-default) reads and writes. The GUI draws a panel as a tinted-grid box (grid shares the
+default) reads and writes. The GUI draws a space as a tinted-grid box (grid shares the
 world grid's origin/spacing so it overlays it). Its title floats just above the box like a
-group's title (panel color, zoom-scaled font clamped so it stops growing past a point)
+group's title (space color, zoom-scaled font clamped so it stops growing past a point)
 and is drawn **bold** to read as a heading (`draw_text_unbounded(..., bold=True)`; the
 header geometry measures it bold too).
-Panel boxes and headers share one **paint order**, bottom to top (`_panel_paint_order`):
-ancestors first so a nested panel sits on top of its parent, and among same-depth panels
-the most recently added/placed draws last. Hit tests (`find_panel_at` and the per-button
-`find_panel_*_at`) walk the reverse (`_panel_order_top_first`), so a click always lands on
-the panel the user sees on top rather than the first-inserted one.
-A left-drag on the title *or any empty panel background* moves the panel; on the right of
+Space boxes and headers share one **paint order**, bottom to top (`_space_paint_order`):
+ancestors first so a nested space sits on top of its parent, and among same-depth spaces
+the most recently added/placed draws last. Hit tests (`find_space_at` and the per-button
+`find_space_*_at`) walk the reverse (`_space_order_top_first`), so a click always lands on
+the space the user sees on top rather than the first-inserted one.
+A left-drag on the title *or any empty space background* moves the space; on the right of
 the title row are rounded-square buttons in the same outline style as the group +/-
 buttons: the physics-stop (pin/pause) toggle, then a delete (trash) button on writable
-panels (a Reset button on read-only ones), and the **hamburger menu** at the very edge.
-The hamburger opens `Settings\u2026` (writable; rename/recolor via `edit_panel`),
-`Duplicate\u2026` (asks for a name, then `clone_panel` copies the panel's *current* nodes into
+spaces (a Reset button on read-only ones), and the **hamburger menu** at the very edge.
+The hamburger opens `Settings\u2026` (writable; rename/recolor via `edit_space`),
+`Duplicate\u2026` (asks for a name, then `clone_space` copies the space's *current* nodes into
 a new file and reloads so the copy is live), and `Copy as JSON` / `Save to File\u2026`
-(which ask the daemon for the panel's current state via `export_panel`, so they work on
-read-only panels too). Delete asks whether to also delete the panel's nodes or keep them
-(moved up into the parent panel; `delete_panel` with `keep_nodes`). The box **tightly
-auto-fits its contents** in every direction (like a group) with `PANEL_PADDING`: member
-nodes, child panels (their boxes, their floating title rows, and their straddling IO
-ports), and the outlines **and title blocks** of groups owned by the panel
+(which ask the daemon for the space's current state via `export_space`, so they work on
+read-only spaces too). Delete asks whether to also delete the space's nodes or keep them
+(moved up into the parent space; `delete_space` with `keep_nodes`). The box **tightly
+auto-fits its contents** in every direction (like a group) with `SPACE_PADDING`: member
+nodes, child spaces (their boxes, their floating title rows, and their straddling IO
+ports), and the outlines **and title blocks** of groups owned by the space
 (all members inside it), so group titles/edges are never clipped. It has a **square
-minimum size** (`PANEL_MIN_SIDE`, centred on the content); there is no manual resize
-handle. Each node living in a non-root panel also gets a tiny panel-colored chip at its
+minimum size** (`SPACE_MIN_SIDE`, centred on the content); there is no manual resize
+handle. Each node living in a non-root space also gets a tiny space-colored chip at its
 bottom-left corner (root-level nodes get none), drawn in `on_draw` from
-`_panel_of_node`/the panel's color. A **nested panel** gets the same chip in its *parent*
-panel's color (top-level panels get none). While
-a node is being dragged, its panel is held at the size it had when the drag began
-(`_panel_drag_baseline`) and may only **grow** toward the node, capped at
-`PANEL_DRAG_GROW` past the baseline - so picking a node up never shrinks the box, nudging
+`_space_of_node`/the space's color. A **nested space** gets the same chip in its *parent*
+space's color (top-level spaces get none). While
+a node is being dragged, its space is held at the size it had when the drag began
+(`_space_drag_baseline`) and may only **grow** toward the node, capped at
+`SPACE_DRAG_GROW` past the baseline - so picking a node up never shrinks the box, nudging
 the edge makes room, and dragging well past the cap takes the node out.
 
 *Wire routing.* Edges are drawn in `on_draw`, which first runs `_route_all_wires` (before
-the panel boxes, since panels grow around their wires). Wires are **always orthogonal**
+the space boxes, since spaces grow around their wires). Wires are **always orthogonal**
 (there is no bezier/sigmoid fallback): `_wire_points` returns a square path, and only the
 final rare last resort - when A* can't find a route - is a plain L. Routing is an A* over
 a coarse grid of the endpoints' bounding box (`gui/wire_router.py`), with a turn penalty
 (`TURN_COST`) and a milder "moving away from the goal" penalty (`BACKTRACK_COST`, so a
 detour prefers going around beside an obstacle over diving past it and hooking back),
-avoiding every visible node rect **and every panel box**, each inflated by `PAD`;
+avoiding every visible node rect **and every space box**, each inflated by `PAD`;
 `draw_square_path` rounds the bends at draw time. Obstacle sets are asymmetric on purpose:
 - The **endpoint nodes are obstacles too** (so a wire can't loop back through its own
   node) with a `clear_rects` corridor punched out at each socket. Other wires **and every
-  other node/panel** are passed as `keep_blocked` (applied *after* the holes), so a socket
+  other node/space** are passed as `keep_blocked` (applied *after* the holes), so a socket
   corridor only ever punches through the *endpoint* nodes - it can't cut through a node
   that happens to sit next to the socket. (`route`'s corridor loop also only discards a
   cell whose centre is actually inside the corridor; rounding the corners to grid indices
@@ -484,7 +484,7 @@ avoiding every visible node rect **and every panel box**, each inflated by `PAD`
   straight out of its socket. (Extending the cramped end *past* its clamp was tried and
   pushed the stub into the crowding node, so sharing only ever shortens the freer end.) It
   is also capped by the nearest other
-  node/panel along that direction
+  node/space along that direction
   (`_stub_len`), because a fixed-length stub could end inside a neighbour - then the
   router couldn't reach that endpoint and the fallback drew straight through the node.
   `_stub_len` skips the endpoint being stubbed but **not** the other endpoint: the stub
@@ -543,8 +543,8 @@ avoiding every visible node rect **and every panel box**, each inflated by `PAD`
   gave a near-zero y pitch and the search margin - `ceil(MARGIN/pitch) * pitch` - collapsed
   from `MARGIN` world units to a handful of pixels, so the grid couldn't route around a
   node and `route` returned `None` (again falling through to a straight line through it).
-- A panel holding either endpoint is skipped (a wire must leave/enter its own panel);
-  routing always uses the content-only `_panel_rect_base`, so growing a panel to enclose
+- A space holding either endpoint is skipped (a wire must leave/enter its own space);
+  routing always uses the content-only `_space_rect_base`, so growing a space to enclose
   its wires can't feed back into the next frame's route.
 - Edges are routed **in order**, and each finished wire is laid down as a thin keep-out
   strip (`polyline_rects`, `SPACING`) so later wires keep visible clearance from it. Two
@@ -554,18 +554,18 @@ avoiding every visible node rect **and every panel box**, each inflated by `PAD`
   as a close pair rather than one thick line sitting exactly on top of itself.
   If clearing the wire strips would force an absurdly long route
   (`_route`'s `len > 1.5 * manhattan + WIRE_CELL` test), `_wire_points` falls back to the
-  node/panel-clear route: a wire may end up closer to another wire, but it won't
+  node/space-clear route: a wire may end up closer to another wire, but it won't
   dive past the target and hook back to satisfy spacing. Likewise a cached route is
   re-checked against the other wires' strips (`_wire_spacing_rects` -> `_route_still_valid`'s
   `spacing_rects`), throttled per edge (`_route_spacing_evicted`, 0.5s) so a close pair
   can't re-route every frame, and only against wires that actually *changed* last frame
   (`_route_changed`) rather than every wire every frame.
 - **Routing is incremental, not per-frame.** `_route_all_wires` starts with a cheap
-  `_wire_routing_signature` (revealed node boxes, edge set, panel boxes, groups, reveal/
+  `_wire_routing_signature` (revealed node boxes, edge set, space boxes, groups, reveal/
   detach/drag state); if it matches the last frame the function returns immediately and
   keeps the previous routes, bounds and caches. When it does run, a cached route is only
   re-checked against obstacles that *moved* this frame (`_wire_last_boxes`/
-  `_wire_last_panels` -> `_route_still_valid`'s `moved_nodes`/`moved_panels`), so a node
+  `_wire_last_spaces` -> `_route_still_valid`'s `moved_nodes`/`moved_spaces`), so a node
   drag only re-routes the wires near it. Known-unroutable edges (`_route_fallback`, the
   `_stubbed_fallback` Z) are reused and, on a small drag, shifted with their
   endpoints (`<= WIRE_CELL`) instead of spending full A* searches that will fail again.
@@ -576,14 +576,14 @@ avoiding every visible node rect **and every panel box**, each inflated by `PAD`
   `route()` itself keeps a flat int blocked-set and flat `best`/`came` arrays with the
   heuristic inlined. This took a 60-node/90-edge graph from ~1.4s *every frame* to
   ~0.0ms idle, ~18ms/frame drawing, and ~10-20ms of routing during a node drag.
-- A panel's floating **title row** (`_panel_header_rects["header"]`) is a *soft* obstacle:
-  `_route_all_wires` collects the titles of the panels not holding an endpoint and passes
+- A space's floating **title row** (`_space_header_rects["header"]`) is a *soft* obstacle:
+  `_route_all_wires` collects the titles of the spaces not holding an endpoint and passes
   them to `_wire_points`, which first routes with them in the obstacle/keep-blocked set and,
-  only if that fails, re-routes dropping the titles. So a wire goes around a panel's title
+  only if that fails, re-routes dropping the titles. So a wire goes around a space's title
   when it can and crosses it only when there is no other route.
 - A routed wire is **cached and reused** (`_route_cache`/`_route_still_valid`) while it
   still starts/ends on the sockets, stays square, clears the *static* obstacles (nodes and
-  panels), and keeps its distance from the other wires (`spacing_rects`). Re-checking wire
+  spaces), and keeps its distance from the other wires (`spacing_rects`). Re-checking wire
   spacing on the cached path is what stops a stale wire from being overlapped by a
   neighbour that moved onto it after it was routed; the per-edge throttle keeps a close
   pair from alternating detours forever (the observed "cycles between 3 states").
@@ -599,11 +599,11 @@ bend is a cubic with both controls at the vertex, and the radius is only shorten
 segment is too short to fit it (the router keeps stubs/bends at least `2*radius` long via
 `MIN_STUB`, so that clamp rarely applies and the curves don't visibly fluctuate). Cairo
 has no arc-to, which is why the corner is a Bezier.
-`_wire_bounds` records where each panel's *owned* wires (LCA owner) run, and `_panel_rect`
+`_wire_bounds` records where each space's *owned* wires (LCA owner) run, and `_space_rect`
 grows the content box to enclose them. Only that drawn box grows: **physics and port
-layout use `_panel_rect_base`** (content-only), because if panel motion or port positions
-reacted to the wire-expanded rect the loop *panel moves -> nodes move -> new wire bounds
--> bigger panel -> panel moves* would never settle. IO bars/plus/port hit-tests also use
+layout use `_space_rect_base`** (content-only), because if space motion or port positions
+reacted to the wire-expanded rect the loop *space moves -> nodes move -> new wire bounds
+-> bigger space -> space moves* would never settle. IO bars/plus/port hit-tests also use
 the base rect so ports stay on the content edge. Wire waypoints then snap to the canvas
 half-grid (`WIRE_GRID_STEP = 20`, i.e. half of `draw_grid_background`'s 40px) as best they
 can: `_snap_to_grid` rounds each non-socket segment's perpendicular coordinate and rebuilds
@@ -627,10 +627,10 @@ is pure geometry (no GTK) and unit-tested in `tests/test_wire_router.py`.
 
 *Slots.* A stored color may be a hex **or a theme slot** written `@blue` … `@teal`
 (`PatchSpaceGraphWidget.COLOR_SLOTS`), resolved by `resolve_color` *every time it is drawn* - so
-a panel or group colored `@blue` follows the desktop palette (stylix recolors those slots)
+a space or group colored `@blue` follows the desktop palette (stylix recolors those slots)
 instead of freezing one hex, and survives a theme change.  The pickers' presets are those slots
 (`_group_colors` returns `(value, rgb)` pairs: the swatch shows today's color, the button
-stores the slot), the module's `panels.<name>.color` defaults to `@blue`, and the pre-slot
+stores the slot), the module's `spaces.<name>.color` defaults to `@blue`, and the pre-slot
 `#3584e4` reads as `@blue`.  Empty/default resolves to the default slot; an unknown slot falls
 back to a per-name palette color.  The side view's color dot resolves the same way, so it
 shows what the canvas draws.
@@ -643,7 +643,7 @@ on the zoom-scaled Cairo context).  Icons are drawn at exactly the size asked fo
 (`ICON_RASTER_PX = 96`) - not one per zoom.  GTK returns a differently-sized pixbuf for
 different requests (13px for a 20px request, 58px for 64px) and the icon's own padding is
 a different fraction of it each time, so rasterising per zoom made the drawn glyph change
-size as you zoomed: the panel buttons' pencil was about half its button at one zoom and
+size as you zoomed: the space buttons' pencil was about half its button at one zoom and
 two-thirds at another.  One generous raster, scaled to the target (`icon_placement`),
 gives the same size at every zoom and a cache of one entry per icon.
 
@@ -666,9 +666,9 @@ the sliders share the theme's blue (`accent` = `blue_3`, Adwaita's #3584e4 - the
 the whole numbered palette onto its base16 hues, so there the blues *are* the accent - the
 color audio links already use, which is also why an impulse wire reads as audio under
 stylix), a slider's groove is the card
-lifted like an entry field, its handle is the theme's text color, and a **panel with no color
-of its own** (`#3584e4`, the default the daemon stores) is drawn in a color derived per panel
-from the palette via `theme_class_color` - so default panels follow the desktop while panels
+lifted like an entry field, its handle is the theme's text color, and a **space with no color
+of its own** (`#3584e4`, the default the daemon stores) is drawn in a color derived per space
+from the palette via `theme_class_color` - so default spaces follow the desktop while spaces
 someone colored keep exactly what they set. Nothing here is a literal; the fallbacks in
 `render_utils` are the old literals, for a theme that defines no named colors.
 
@@ -692,10 +692,10 @@ card; the `view_bg`/`view_fg` fallbacks are the old literals.
 overrides - paints both canvases' background at that alpha; when
 < 1 only the *grid* becomes see-through - the window surface and immediate canvas
 containers go transparent while `.opaque-chrome` (headerbar, tab bar, toolbars, side
-panels, console, with a **literal** palette color, not libadwaita's `@window_bg_color`
+spaces, console, with a **literal** palette color, not libadwaita's `@window_bg_color`
 which isn't defined here) keeps everything else filled and the CSD shadow/rounded corners
-are removed. Panels and their IO strips draw their `node_bg` backing at the **same
-`CANVAS_BG_ALPHA`** before the color tint, so a panel is exactly as see-through as the
+are removed. Spaces and their IO strips draw their `node_bg` backing at the **same
+`CANVAS_BG_ALPHA`** before the color tint, so a space is exactly as see-through as the
 grid behind it (just tinted); nodes are fully opaque.
 
 Where that value comes from, in order: the flag, `$PATCHSPACE_CANVAS_OPACITY`, then whatever
@@ -708,7 +708,7 @@ the running GUI's `/proc/<pid>/environ` had no such variable), while the unit is
 the activation that changed it.  The flag and the environment variable are the *user's* choice
 and beat the deployment's (`constants.CANVAS_BG_ALPHA_EXPLICIT`). The toolbar is wrapped in a
 full-width opaque strip and the notebook padding/border is zeroed so the padding around
-the grid isn't left transparent. The two side panels use `.side-panel-fill`, painted with
+the grid isn't left transparent. The two side spaces use `.side-space-fill`, painted with
 the theme's `headerbar_bg_color` (the brighter "titlebar/active tab" color Firefox uses),
 falling back to a lightened window bg.
 See-through needs the compositor not to fill a border background behind the window; on
@@ -775,7 +775,7 @@ stashes the deterministic edge id in `_pending_edge_draw`; the poll that echoes 
 stamps its birth in `_edge_born` (both `update_from_daemon` and `_anim_tick` promote, so
 the very first drawn frame animates). The draw path uses `_draw_growing_wire`, which
 splits the route by arc length (`_grow_split`) into an opaque body and a short tail
-resampled into per-step alpha strokes. Only GUI-initiated edges animate - a session/panel
+resampled into per-step alpha strokes. Only GUI-initiated edges animate - a session/space
 load doesn't draw every wire in.
 
 *Connection retract.* Removing a connection runs the same animation **in reverse**: the
@@ -787,172 +787,172 @@ nodes and skipped in the normal edge loop while it runs. A poll that still repor
 optimistically-removed edge does not cancel the retract (only a genuine re-add does), so
 poll lag can't make the wire flicker back.
 
-*Edit mode.* A panel's parameter values (volumes, switches, effect knobs) are **not**
+*Edit mode.* A space's parameter values (volumes, switches, effect knobs) are **not**
 written back to its file by default - the daemon serves the committed file values from
-`_panel_snapshots` (only layout stays live), so runtime tweaks are ephemeral until you
-commit them. The pencil button in the title row sends `set_panel_edit_mode`; enabling it
-first refreshes the panel to its file's values in place
-(`_refresh_panel_params_from_file` re-applies params to the existing live nodes - no
-node teardown/rebuild), then edits persist (`_write_panels` refreshes the snapshot for
-panels in `_edit_panels`). The panel is darkened and stamped with a large "EDIT MODE"
-water-mark while on. Read-only panels can't enter edit mode.
+`_space_snapshots` (only layout stays live), so runtime tweaks are ephemeral until you
+commit them. The pencil button in the title row sends `set_space_edit_mode`; enabling it
+first refreshes the space to its file's values in place
+(`_refresh_space_params_from_file` re-applies params to the existing live nodes - no
+node teardown/rebuild), then edits persist (`_write_spaces` refreshes the snapshot for
+spaces in `_edit_spaces`). The space is darkened and stamped with a large "EDIT MODE"
+water-mark while on. Read-only spaces can't enter edit mode.
 
-*Files vs placements.* A panel *file* (its `stem`) is the backend; a *placement* is one
+*Files vs placements.* A space *file* (its `stem`) is the backend; a *placement* is one
 loaded instance with its own `id` (its path) and file (`path`), so the same file can be
 loaded in several places. A child reference is a stem string, or `{name, stem}` when the
-placement name differs from the file stem (`panels.child_name/child_stem/child_ref`).
+placement name differs from the file stem (`spaces.child_name/child_stem/child_ref`).
 Each placement's geometry is stored in its **parent's** child reference
-(`child_ref(name, stem, placement)`, `child_placement`), not in the shared panel file —
+(`child_ref(name, stem, placement)`, `child_placement`), not in the shared space file —
 so several placements of one file each keep their own position. Placements keep
 independent live settings (their own nodes), but structure, positions and (in edit mode)
-parameters sync: `_canonical_by_stem` finds the placement that changed, `_write_panels`
+parameters sync: `_canonical_by_stem` finds the placement that changed, `_write_spaces`
 writes the file from it, and `_sync_placements` copies positions to the others (cheap) and
 syncs structural/parameter changes: a structural difference reverts the sibling
 subtree, while a parameter-only difference is applied in place
-(`_apply_panel_params`, no node reload) with the sibling's snapshot updated - so editing
-one placement updates the others and repeated writes can't clobber the file back. `place_panel` adds a placement of a file (root by default); the
+(`_apply_space_params`, no node reload) with the sibling's snapshot updated - so editing
+one placement updates the others and repeated writes can't clobber the file back. `place_space` adds a placement of a file (root by default); the
 side view's **Place** button puts one in the middle of the viewport at the top level, and
-rows are **draggable onto the canvas** (dropped over a panel it nests there, else root).
+rows are **draggable onto the canvas** (dropped over a space it nests there, else root).
 
 *Auto-load.* `auto_load` (default **false**, top-level in the file, a checkbox in the
-right side view) controls whether a standalone panel placement is spawned at the root on
-start-up; a nested sub-panel is always loaded as a dependency of its parent regardless of
-its own flag. `list_panel_files`/`set_panel_file_autoload`/`delete_panel_file` drive the
-side view; `list_panels`/`get_nodes` report per-placement `stem`/`auto_load`.
+right side view) controls whether a standalone space placement is spawned at the root on
+start-up; a nested sub-space is always loaded as a dependency of its parent regardless of
+its own flag. `list_space_files`/`set_space_file_autoload`/`delete_space_file` drive the
+side view; `list_spaces`/`get_nodes` report per-placement `stem`/`auto_load`.
 
-*Panel ports (IO).* A panel can expose inputs/outputs as lightweight **pass-through proxy
-nodes** placed at its edges: `panel_in`/`panel_out` (audio, `TransparentNode` subclasses)
-and `bool_panel_in`/`bool_panel_out` (boolean; `_resolve_boolean` relays them). Each panel
+*Space ports (IO).* A space can expose inputs/outputs as lightweight **pass-through proxy
+nodes** placed at its edges: `space_in`/`space_out` (audio, `TransparentNode` subclasses)
+and `bool_space_in`/`bool_space_out` (boolean; `_resolve_boolean` relays them). Each space
 draws a thin bar straddling its left (inputs) and right (outputs) edges with a `+` at the
-foot (`_panel_io_rects`); the `+` opens a name/type dialog and drops a port node near that
-edge (`_prompt_add_port`/`_add_panel_port`), showing **only its label** (no type/id) and
+foot (`_space_io_rects`); the `+` opens a name/type dialog and drops a port node near that
+edge (`_prompt_add_port`/`_add_space_port`), showing **only its label** (no type/id) and
 sized to the label (capped at `NODE_WIDTH`). Port nodes are centered on the edge (the bar
 runs through the middle of each), locked `anchored` and always pinned in the physics - no
 unanchor control, no three-dots badge (right-click for the menu). Ports can be dragged
 **vertically only** to reorder the stack (clamped to the box); the settings dialog has a
-`description` row, and a `bool_panel_in` also has a **Default state** checkbox (reachable
+`description` row, and a `bool_space_in` also has a **Default state** checkbox (reachable
 via right-click → Settings; ports show no gear badge) - the value it emits when nothing is
-wired into its external input (`BoolPanelInNode.default_state`; `None` = emit nothing, so
+wired into its external input (`BoolSpaceInNode.default_state`; `None` = emit nothing, so
 downstream keeps its own default). The bar extends
-`PANEL_IO_BAR_PAD` past the top/bottom port. `_layout_panel_ports` re-centers the stack
-after every poll so ports follow the box as it grows/moves, and the panel reserves
-`NODE_WIDTH/2 + PANEL_IO_MARGIN` inside each port edge (and enough height for the stack) so
-ports never overlap nodes. Wire the port from outside the panel on its outer side and to
+`SPACE_IO_BAR_PAD` past the top/bottom port. `_layout_space_ports` re-centers the stack
+after every poll so ports follow the box as it grows/moves, and the space reserves
+`NODE_WIDTH/2 + SPACE_IO_MARGIN` inside each port edge (and enough height for the stack) so
+ports never overlap nodes. Wire the port from outside the space on its outer side and to
 internal nodes on its inner side - ordinary edges, so LCA edge-ownership already places
-them in the right file. Unlike ordinary single-input transparent nodes, a panel port is a
-**bus**: `PanelInNode`/`PanelOutNode` set `MIX_INPUTS` and override
+them in the right file. Unlike ordinary single-input transparent nodes, a space port is a
+**bus**: `SpaceInNode`/`SpaceOutNode` set `MIX_INPUTS` and override
 `allows_multiple_inputs()`, so several edges may land on the same audio port and their
-sources are all resolved/summed (`PatchSpace._resolve_sources`). Boolean panel ports set
+sources are all resolved/summed (`PatchSpace._resolve_sources`). Boolean space ports set
 `ALLOW_MULTIPLE_BOOLEAN`, letting several edges target one boolean port; resolution still
 takes the first wired source (`_resolve_boolean_input`).
 
-*Panels side view.* A docked, scrollable list of panel files lives on the right (the endchild of an outer `Gtk.Paned`), toggled by a button directly under the top-right
-hamburger (`main_window._panels_toggle` / `_build_panels_view`). A column-header row labels
-the controls; each row shows the panel's color dot, a word-wrapping (WORD_CHAR) label,
-two dim count lines (nodes above panels, from `list_panel_files`'s `node_count`/`children`),
+*Spaces side view.* A docked, scrollable list of space files lives on the right (the endchild of an outer `Gtk.Paned`), toggled by a button directly under the top-right
+hamburger (`main_window._spaces_toggle` / `_build_spaces_view`). A column-header row labels
+the controls; each row shows the space's color dot, a word-wrapping (WORD_CHAR) label,
+two dim count lines (nodes above spaces, from `list_space_files`'s `node_count`/`children`),
 then an **Auto**-load checkbox, an **Add** (place) button and a **Del** button. Files may
-live in sub-folders (`panels.list_files` is recursive; `list_panel_files` reports each
+live in sub-folders (`spaces.list_files` is recursive; `list_space_files` reports each
 file's `folder`); the view groups rows under dim folder headers when any exist, and
-`delete_panel_file` prunes folders it empties. Del confirms, then sends `delete_panel_file`
+`delete_space_file` prunes folders it empties. Del confirms, then sends `delete_space_file`
 (which removes the file and every placement's subtree). The list re-reads on every toggle
-and on a `PANELS_VIEW_REFRESH_MS` timer while visible, and `process_responses` refreshes it
-the moment a panel-file action (delete / auto-load / create / clone) completes;
-`_update_panels_view` skips rebuilding when the listing signature is unchanged, so the
+and on a `SPACES_VIEW_REFRESH_MS` timer while visible, and `process_responses` refreshes it
+the moment a space-file action (delete / auto-load / create / clone) completes;
+`_update_spaces_view` skips rebuilding when the listing signature is unchanged, so the
 periodic refresh can't destroy the button under the pointer mid-click. The old standalone
-"Panels… dialog" (and its Select/Group/Delete surface) has been removed.
+"Spaces… dialog" (and its Select/Group/Delete surface) has been removed.
 
 *Physics* is hierarchical (`_hierarchical_step`, `on_layout_tick`): node physics runs
-inside each panel in that panel's local frame (internal edges only). Node physics and the
-auto-fit both use a panel's **direct** nodes (`_panel_direct_nodes`), not its subtree -
+inside each space in that space's local frame (internal edges only). Node physics and the
+auto-fit both use a space's **direct** nodes (`_space_direct_nodes`), not its subtree -
 using the subtree double-integrated descendants (two force steps in two origin frames,
 which drifted them and grew the parent box without bound) and double-counted them in the
-box. **All** physics (node layout *and* panel-vs-panel) is **on by default**
+box. **All** physics (node layout *and* space-vs-space) is **on by default**
 (`physics_active = True`); pause it from the hamburger menu ("Physics") or the floating
-pause/resume button under the panels toggle at the top-right (the two stay in sync via
-`_set_physics`). New panels are pinned/paused regardless (see below), so a freshly created
-panel doesn't get shoved by the layout. When on, per parent,
-the direct child panels repel each other in the parent's local frame (siblings only -
-running every panel through one flat pass made a child fight its own parent). Panels use
-a dedicated `panel_force_layout` with *size-aware* springs: an edge's rest length grows by
-each box's half-extent projected onto the edge, so connected panels settle edge-to-edge
+pause/resume button under the spaces toggle at the top-right (the two stay in sync via
+`_set_physics`). New spaces are pinned/paused regardless (see below), so a freshly created
+space doesn't get shoved by the layout. When on, per parent,
+the direct child spaces repel each other in the parent's local frame (siblings only -
+running every space through one flat pass made a child fight its own parent). Spaces use
+a dedicated `space_force_layout` with *size-aware* springs: an edge's rest length grows by
+each box's half-extent projected onto the edge, so connected spaces settle edge-to-edge
 around their bounding boxes. There is **no** global centre pull (it beat `1/d^2` repulsion
-past ~600px, so distant panels crept toward each other) and repulsion is **short-range**
-(cutoff ~ one box), so nearby panels visibly push apart but don't drift together or fling
+past ~600px, so distant spaces crept toward each other) and repulsion is **short-range**
+(cutoff ~ one box), so nearby spaces visibly push apart but don't drift together or fling
 apart without bound; the rectangle-aware `_resolve_overlaps` pass handles the rest. The
 layout re-arms whenever the
-node/edge/panel set changes, so it also runs right after a panel is created or loaded
-(not only after a node is dragged). Nodes never exert forces across a panel boundary
-(cross-panel edges only spring the two panels together). Panel placement is *locally*
-authoritative while physics/drag moves it (`_pending_panels`): a poll carries the last
-flushed placement, so accepting it would snap the panel - and, since moving a panel moves
+node/edge/space set changes, so it also runs right after a space is created or loaded
+(not only after a node is dragged). Nodes never exert forces across a space boundary
+(cross-space edges only spring the two spaces together). Space placement is *locally*
+authoritative while physics/drag moves it (`_pending_spaces`): a poll carries the last
+flushed placement, so accepting it would snap the space - and, since moving a space moves
 its nodes, drag every node back - each refresh. It is handed back to the daemon when the
-daemon echoes exactly what was sent. Newly created, cloned and placed panels start **pinned** (`anchored=True`) so the re-armed
-layout can't shove a fresh panel around; `_panel_is_paused` (self or any ancestor anchored)
-holds that panel's **box** still, and the panel header's physics-stop toggle unpins it
+daemon echoes exactly what was sent. Newly created, cloned and placed spaces start **pinned** (`anchored=True`) so the re-armed
+layout can't shove a fresh space around; `_space_is_paused` (self or any ancestor anchored)
+holds that space's **box** still, and the space header's physics-stop toggle unpins it
 (which now re-arms `layout_awake`, so un-pinning acts immediately instead of waiting for
 some unrelated structural change to wake the layout).
 
-Crucially, pinning a panel holds the box, **not its contents**: node physics still runs in
-a pinned panel's local frame, so nodes that arrive unanchored - anything loaded from a
-file, an export, or a Nix-generated panel; only nodes the *user* placed are node-anchored -
-settle themselves inside their panel while the box stays put. Because the box auto-fits its
-members, that settling would otherwise grow the box without bound: `_panel_growth_limits`
-gives the panel's physics a *room* - its declared placement plus `PANEL_PHYSICS_GROW`
-per side - and `_wall_nodes_into_panels` holds **unanchored** members inside it (the room is
+Crucially, pinning a space holds the box, **not its contents**: node physics still runs in
+a pinned space's local frame, so nodes that arrive unanchored - anything loaded from a
+file, an export, or a Nix-generated space; only nodes the *user* placed are node-anchored -
+settle themselves inside their space while the box stays put. Because the box auto-fits its
+members, that settling would otherwise grow the box without bound: `_space_growth_limits`
+gives the space's physics a *room* - its declared placement plus `SPACE_PHYSICS_GROW`
+per side - and `_wall_nodes_into_spaces` holds **unanchored** members inside it (the room is
 centred on the fitted box the user is looking at - walling against the fitted box itself
-would forbid the contents from spreading at all), **minus the boxes of neighbouring panels**
-(`_panel_blockers`, ancestors excluded since they contain the panel): a member stops
-`2*PANEL_PADDING` short of a neighbour, so the two fitted boxes can never cross even when neither
-panel may be moved by the panel pass.  The pull is a fraction of the overshoot per
-step (`PANEL_WALL_PULL`) with a clamp to the padded bound as a backstop, and it is applied
+would forbid the contents from spreading at all), **minus the boxes of neighbouring spaces**
+(`_space_blockers`, ancestors excluded since they contain the space): a member stops
+`2*SPACE_PADDING` short of a neighbour, so the two fitted boxes can never cross even when neither
+space may be moved by the space pass.  The pull is a fraction of the overshoot per
+step (`SPACE_WALL_PULL`) with a clamp to the padded bound as a backstop, and it is applied
 against the box snapshot taken *before* that step's node physics, so the box can't chase its own
 tail.  The room is sized from the declared placement rather than from the current box because
 the box's origin legitimately follows its content - an origin-relative size ratchets outward a
-`PANEL_PHYSICS_GROW` per step. Both passes are skipped while a drag is in flight (the drag path
-owns growth then, via `_panel_drag_baseline`/`PANEL_DRAG_GROW`).
+`SPACE_PHYSICS_GROW` per step. Both passes are skipped while a drag is in flight (the drag path
+owns growth then, via `_space_drag_baseline`/`SPACE_DRAG_GROW`).
 
 **That room is not a cap on the drawn box** (it used to be, and that was a bug): the widget
-never rewrites a panel's `w`/`h`, so the placement is usually just the size the panel was
-*created* with (420x260 for the root, 320x320 for a daemon-made panel).  Clipping the fit to it
-made a panel under-fit its own contents - most visibly a panel with no IO ports, since a ported
-panel's box is pushed out by its port stack anyway, and worst on a parent whose child panels had
-been dragged apart (children can't be walled back in the way a member can).  `_panel_rect_base`
-therefore always encloses the contents: member nodes, child panels (whose boxes are already in
-**canvas** coordinates - nodes carry absolute x/y and `_draw_panel_boxes` draws every rect raw,
-unlike `panel.x`/`panel.y`, which are parent-relative and only folded back by `_panel_absolute`
-for the empty-panel fallback), groups and their titles.  Whatever the box cannot fit, it grows
+never rewrites a space's `w`/`h`, so the placement is usually just the size the space was
+*created* with (420x260 for the root, 320x320 for a daemon-made space).  Clipping the fit to it
+made a space under-fit its own contents - most visibly a space with no IO ports, since a ported
+space's box is pushed out by its port stack anyway, and worst on a parent whose child spaces had
+been dragged apart (children can't be walled back in the way a member can).  `_space_rect_base`
+therefore always encloses the contents: member nodes, child spaces (whose boxes are already in
+**canvas** coordinates - nodes carry absolute x/y and `_draw_space_boxes` draws every rect raw,
+unlike `space.x`/`space.y`, which are parent-relative and only folded back by `_space_absolute`
+for the empty-space fallback), groups and their titles.  Whatever the box cannot fit, it grows
 for; only the unbounded part - the physics cloud - is bounded, by the wall.
 
 *Reparenting:* dragging a node across a boundary sends `move_nodes`; the daemon
 re-qualifies its id, re-homes its edges (ownership is derived from ids) and re-points
-group membership, so a selected set moved into a panel keeps its groups. Dragging a
-*panel* onto another panel sends `move_panel`: the panel keeps its absolute placement,
-is re-keyed under the target's path (`fx` -> `kit::fx`), and every descendant panel/node
+group membership, so a selected set moved into a space keeps its groups. Dragging a
+*space* onto another space sends `move_space`: the space keeps its absolute placement,
+is re-keyed under the target's path (`fx` -> `kit::fx`), and every descendant space/node
 id is re-qualified (edges rebuilt, groups re-pointed), to arbitrary depth; cycles are
-refused. Refused (GUI snaps back) when the source or target panel is read-only. While a node is being dragged
-it is excluded from its panel's auto-grown bounds, so the source panel doesn't stretch
+refused. Refused (GUI snaps back) when the source or target space is read-only. While a node is being dragged
+it is excluded from its space's auto-grown bounds, so the source space doesn't stretch
 under the cursor and steal the drop. After the rename the GUI immediately re-sends the
 moved nodes' positions under their *new* ids (`_reparent_after_drag`), because the
 debounced layout save still holds the old ids and would be ignored - otherwise the nodes
-bounce back to where they were picked up. The drop target is resolved from each panel's
-**drag-start box** (`_panel_drag_baseline`, via `_panel_drop_target`) while the drag state
+bounce back to where they were picked up. The drop target is resolved from each space's
+**drag-start box** (`_space_drag_baseline`, via `_space_drop_target`) while the drag state
 is still active - *not* the box as it grows toward the dragged node. Using the grown box
-would let the source panel follow the node out and swallow the drop (hard to drag a node
-out), and a grown source panel under the pointer could shadow the panel the user actually
+would let the source space follow the node out and swallow the drop (hard to drag a node
+out), and a grown source space under the pointer could shadow the space the user actually
 dropped onto (so the node never nested there). A node dropped with its centre inside a
-different panel's drag-start box nests into it; outside every box it lands at the root.
-Groups land in the panel that is the LCA of their members.
+different space's drag-start box nests into it; outside every box it lands at the root.
+Groups land in the space that is the LCA of their members.
 
-*Creating a panel* (`Create Panel…`): with a selection, the new panel is fitted around
-the selected nodes' bounds and **nested into the panel those nodes live in** (the GUI sends
-their panel as `parent_id`, or root for a mixed/none selection); with none, a square opens
+*Creating a space* (`Create Space…`): with a selection, the new space is fitted around
+the selected nodes' bounds and **nested into the space those nodes live in** (the GUI sends
+their space as `parent_id`, or root for a mixed/none selection); with none, a square opens
 in the middle of the viewport. The daemon takes the placement (`x/y/w/h`, converted to
-parent-relative) in `create_panel`.
+parent-relative) in `create_space`.
 
-Commands: `list_panels`, `reload_panels`, `create_panel`, `delete_panel`, `edit_panel`,
-`export_panel`, `clone_panel`, `list_panel_files`, `set_panel_file_autoload`,
-`place_panel`, `move_panel`, `set_panel_layout`, `move_nodes`, `reset_panel`,
-`set_panel_edit_mode`; `get_nodes` carries `panels` and per-node provenance is the id
+Commands: `list_spaces`, `reload_spaces`, `create_space`, `delete_space`, `edit_space`,
+`export_space`, `clone_space`, `list_space_files`, `set_space_file_autoload`,
+`place_space`, `move_space`, `set_space_layout`, `move_nodes`, `reset_space`,
+`set_space_edit_mode`; `get_nodes` carries `spaces` and per-node provenance is the id
 prefix.
 
 **Canvas selection.** Selection is a plain `set` of node ids. A plain left press on a node
@@ -1118,7 +1118,7 @@ This is the cycle to follow for basically any change:
    behavior. Most regressions came from a wrong assumption about an existing path.
 2. **Reproduce the bug / pin the behavior in a scratch script** before editing: a tiny
    `PYTHONPATH=. nix develop -c python` script that builds a `PatchSpaceDaemon()` and drives
-   `handle_command`/`_write_panels` directly. Run it again after the fix to confirm.
+   `handle_command`/`_write_spaces` directly. Run it again after the fix to confirm.
 3. **Make the smallest change** that fixes it, in the established style.
 4. **Syntax gate**: `python -m py_compile <changed files>` (from the dev shell).
 5. **Targeted tests first**, then the whole fast suite - both from `src/`:
@@ -1128,7 +1128,7 @@ This is the cycle to follow for basically any change:
    suite: exercise it with a small stub object and call the class method directly
    (`PatchSpaceGraphWidget._some_method(dummy, ...)`), or under broadway. Verify the
    numbers, not just that it runs.
-7. **Update a test whose contract legitimately changed** (e.g. `set_panel_layout` now
+7. **Update a test whose contract legitimately changed** (e.g. `set_space_layout` now
    moves nodes) instead of deleting it - the rename/adjustment is part of the change.
 8. **Commit focused chunks** with a short why-first message; stage explicit source paths
    (never `git add -A`). Re-run the suite right before committing.
@@ -1177,30 +1177,30 @@ approach for pure GUI behavior). "It passed pytest" is not proof an effect works
 **Icon lookups fail silently if you pass a viewport.** `_node_icon_pixbuf` renders a symbolic
 GTK icon through `Gsk.CairoRenderer.render_texture`.  Passing an explicit `None` viewport
 (`render_texture(node, None)`) is rejected by PyGObject - so *every* lookup returned None, the
-hand-drawn fallback glyphs were what actually drew, and both the node icons and the panel
+hand-drawn fallback glyphs were what actually drew, and both the node icons and the space
 header buttons looked wrong (a crescent "reset", an angled-rectangle "pencil").  Call
 `render_texture(node)` with the argument omitted.
 
-**An unpositioned panel is placed beside the graph, not at the origin.**  The module leaves a
-panel's `placement.x`/`y` unset (they are `nullOr`), which is also how the file says "this panel
-has never been positioned".  On load the daemon drops such a *top-level* panel to the right of
-the panels that do have a position, top-aligned with the topmost one (`_place_unplaced_panels`,
-`panels.PLACE_GAP`), and marks it `placed` - which is a session value, so it is remembered by
-the ordinary autosave rather than recomputed each start, and a panel the user then drags simply
-stops being unplaced.  Nested panels keep their parent's frame and are left alone; a graph with
+**An unpositioned space is placed beside the graph, not at the origin.**  The module leaves a
+space's `placement.x`/`y` unset (they are `nullOr`), which is also how the file says "this space
+has never been positioned".  On load the daemon drops such a *top-level* space to the right of
+the spaces that do have a position, top-aligned with the topmost one (`_place_unplaced_spaces`,
+`spaces.PLACE_GAP`), and marks it `placed` - which is a session value, so it is remembered by
+the ordinary autosave rather than recomputed each start, and a space the user then drags simply
+stops being unplaced.  Nested spaces keep their parent's frame and are left alone; a graph with
 nothing placed yet is left alone too, and gets placed on a later start.  Without this a
-declarative panel appeared in its own empty corner of the canvas, far from everything.
+declarative space appeared in its own empty corner of the canvas, far from everything.
 
-**Panel files are loaded by reference, and the auto-load adoption has to write
-before it reloads.** `panels.load_tree` reads the root panel and then only the
-children it *references* - a panel file that nothing mentions is simply not
-seen, which is why a Nix-generated read-only panel dir relies on `auto_load`.
+**Space files are loaded by reference, and the auto-load adoption has to write
+before it reloads.** `spaces.load_tree` reads the root space and then only the
+children it *references* - a space file that nothing mentions is simply not
+seen, which is why a Nix-generated read-only space dir relies on `auto_load`.
 The adoption ("spawn an unreferenced `auto_load` file at the root") built its
 new child reference on the tree it had in memory, then reloaded the root *from
 disk* - which cannot see a reference that has not been written - and wrote
-*that* back, so both halves were discarded and the panel never loaded, in that
+*that* back, so both halves were discarded and the space never loaded, in that
 run or any later one.  Order is load → append to a freshly read root → write →
-reload; `tests/test_panels_daemon.py` pins it.
+reload; `tests/test_spaces_daemon.py` pins it.
 
 
 **Two daemons must never share a session - and a daemon that cannot serve
@@ -1382,7 +1382,7 @@ supervision pass then recreates whatever vanished with the old PipeWire.
     their role names (`ctrl` on gate/switcher, `filter1` on a Filter, `in1` on Merge
     Bundle, `a`/`b` on the logic gates).  `port_kind` maps a legacy `"in"` to whatever that
     node's first input actually carries, and `session_repair` rewrites it on load, so a
-    saved session or panel file from before the rename still works.
+    saved session or space file from before the rename still works.
   - A node with an `impulse` input and *nothing wired* to it draws its own "Impulse" face
     (`_impulse_face_rect`), so a player can be fired without a Button; the face goes away
     once a wire arrives.
@@ -1471,28 +1471,47 @@ Also: do not commit unless asked, don't add a `.gitignore`/untrack code as a sid
 and do not "simplify" the rationale comments or the effect-sandwich/staging machinery
 without understanding the failure modes recorded in §5.
 
-### Naming, and the pre-rename migration
+### Naming, and the two renames' migrations
 
-This project is **Patch Space**; "PatchBay"/"PatchBayDaemon" was its old name. The rename
-touched more than prose, so a few things are *read* under their old names for one release
-and never written under them:
+This project is **Patch Space**; "PatchBay"/"PatchBayDaemon" was its old name. The
+container it saves its graph in is a **space**; "panel" was that word until S0
+(`agents/SPACES.md`, 2026-10-15). Each rename touched more than prose, so a few
+things are *read* under their old names for one release and never written under
+them (the removal list, and the step that deletes it, are in `agents/NOTES.md`):
 
 * `PATCHBAY_SOCKET` / `PATCHBAY_PANEL_DIR` / `PATCHBAY_ROOT_PANEL` / `PATCHBAY_DAEMON` are
   still read as fallbacks by the daemon, the GUI and the CLI (a session that is already
   running started its daemon with them in the environment). `PATCHSPACE_*` wins if both are
   set.
+* The pre-*S0* names are read the same way: `PATCHSPACE_PANEL_DIR` /
+  `PATCHSPACE_ROOT_PANEL` / `PATCHBAY_PANEL_DIR` / `PATCHBAY_ROOT_PANEL`, and
+  `--panel-dir` / `--root-panel` on the daemon's command line.
 * `~/.local/share/patchbay/panels` and `~/.cache/patchbay/last_session.json` are *copied*
   into their `patchspace` equivalents once, on load (`PatchSpaceDaemon._migrate_legacy_paths`):
-  only into a location that is missing or lacks the file, and never moved or deleted.
+  only into a location that is missing or lacks the file, and never moved or deleted. The
+  pre-S0 directory `~/.local/share/patchspace/panels` is copied into `.../spaces` the same
+  way (same function), so a graph built before the rename is found where the GUI left it.
+* A space file written before S0 keeps loading: its `"type": "panel"` marker reads as a
+  space file (`spaces.is_space_type` - reading it as "not a space" would rewrite the root
+  as an empty migrated session), its child list may sit under `config.panels`
+  (`spaces.raw_child_entries`), and the first save rewrites both under the new spelling.
 * `patchbay_*` node names and the old `PatchBay`/`PatchBay Mic` device names stay in
   `pwmatch.PATCHSPACE_OWNED_PREFIXES`/`PATCHSPACE_BUILTIN_NAMES`, so objects left behind by a
   pre-rename session are still recognised as ours (reaped at startup, kept out of External
   Only bundles) instead of lingering as duplicates.
 * The node type keys `patchbay_device`/`patchbay_mic_device` are registered as aliases of
   `patchspace_device`/`patchspace_mic_device` (after `CLASS_TO_TYPE`, and in
-  `node_specs.NODE_TYPE_SPECS`): an old panel or session loads and renders correctly, and
+  `node_specs.NODE_TYPE_SPECS`): an old space or session loads and renders correctly, and
   the next export writes the new spelling. `session_repair` validates them too, since it
-  reads the same spec table.
+  reads the same spec table. The space I/O ports do the same across S0:
+  `panel_in`/`panel_out`/`bool_panel_in`/`bool_panel_out` alias
+  `space_in`/`space_out`/`bool_space_in`/`bool_space_out` in the daemon's
+  `NODE_TYPE_REGISTRY` and in `catalog.json`'s `legacy_aliases`.
+* The protocol is read-old/**write-new**: the daemon still accepts the pre-S0
+  command names (`list_panels`, `set_panel_layout`, ...) and the old argument
+  keys (`panel_id`, `panel_files`), one deprecation line each
+  (`main._normalize_legacy_command`), because a GUI started before an activation
+  runs its old store path for hours. It only ever *emits* `spaces`/`space_id`.
 
 New files must be `git add`ed before `nix` sees them (the flake is a `git+file:` source), and
 a `path:` flake **input** needs `nix flake update <input>` after every edit to the source tree

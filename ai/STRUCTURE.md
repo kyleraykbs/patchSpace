@@ -24,10 +24,11 @@ gui/patchspace_gui.py  ──(unix socket, JSON lines, $XDG_RUNTIME_DIR/patchspa
 * **The GUI is a client.** It sends commands and polls `get_nodes` every 400 ms; it
   applies user actions optimistically and each poll is guarded so a stale echo can't
   undo them.
-* **Panels are files.** `central/panels.py` stores a nestable container tree;
-  nodes/edges/group membership serialize into the panel file that
-  last-common-ancestor owns.  The root panel is the session autosave
-  (`~/.cache/patchspace/last_session.json`).
+* **Spaces are files.** `central/spaces.py` stores a nestable container tree;
+  nodes/edges/group membership serialize into the space file that
+  last-common-ancestor owns.  The root space is the session autosave
+  (`~/.cache/patchspace/last_session.json`).  (Both the module, the class and
+  the container word were `panel`/`panels.py` before S0, `agents/SPACES.md`.)
 
 Everything runs with `src/` as the import root (CWD or `PYTHONPATH`): daemon code
 imports as `central.*`, the PipeWire substrate as `modules.pipewire.*`.  The packaged
@@ -41,7 +42,7 @@ entry points are `python -m central.main` / `python -m central.session_repair`.
 | Graph snapshot | `modules/pipewire/pwgraph.py` | `pw-dump -m` stream → live nodes/ports/links; connect/disconnect; node-created/removed callbacks. |
 | Matching | `modules/pipewire/pwmatch.py` | Filter dicts → live node ids; port groups → channel pairs (a lone `MONO` endpoint bridges every channel of its peer); which objects are Patch Space's own. |
 | Model | `modules/pipewire/pwnodes.py` | `Node` taxonomy + `PatchSpace` (the reconcile/supervise engine: `sync_locked` = structure, `supervise` = health).  It lives on the module's side (it imports `modules.pipewire.*` and nothing from `central`), so the daemon reaches into it in-process — the transitional state before the report (EXTRACTION.md step 2). |
-| Containers | `central/panels.py` | Panel tree, namespaced ids, edge ownership (LCA), read-only snapshots, legacy migration. |
+| Containers | `central/spaces.py` | Space tree, namespaced ids, edge ownership (LCA), read-only snapshots, legacy migration (pre-S0 spellings of the file/marker still read). |
 | Daemon | `central/main.py` | Socket protocol, node factory (`NODE_TYPE_REGISTRY`/`_create_node`), property handling, session load, watchdogs, built-in devices. |
 | Config | `central/migrations.py`, `central/session_repair.py`, `central/apply_config.py`, `central/export_config.py`, `central/patchspace_cli.py` | Versioned node migrations; validate/repair a session; CLI import/export. |
 

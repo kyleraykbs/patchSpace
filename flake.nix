@@ -74,13 +74,13 @@
 
           # The headless daemon: socket server + PipeWire graph supervisor.
           #
-          # Panels (file-backed node containers) are discovered from:
-          #   --panel-dir PATH[:rw|:ro]   repeatable; later dirs shadow
+          # Spaces (file-backed node containers) are discovered from:
+          #   --space-dir PATH[:rw|:ro]   repeatable; later dirs shadow
           #                               earlier ones.  Defaults to
-          #                               $PATCHSPACE_PANEL_DIR or
-          #                               ~/.local/share/patchspace/panels.
-          #   --root-panel PATH           root panel / session autosave;
-          #                               defaults to $PATCHSPACE_ROOT_PANEL or
+          #                               $PATCHSPACE_SPACE_DIR or
+          #                               ~/.local/share/patchspace/spaces.
+          #   --root-space PATH           root space / session autosave;
+          #                               defaults to $PATCHSPACE_ROOT_SPACE or
           #                               ~/.cache/patchspace/last_session.json.
           # Both flags can also be supplied through the environment for a
           # packaged service.  The wrapper forwards "$@" so they pass through.
@@ -121,11 +121,11 @@
             '';
           };
 
-          # Validate/repair a session or panel JSON with no daemon and no
+          # Validate/repair a session or space JSON with no daemon and no
           # PipeWire (session_repair is pure stdlib Python - node type/port
           # knowledge comes from gui/node_specs.py, which has no GTK
           # dependency).  What the NixOS/home-manager module runs at build
-          # time over every generated panel.
+          # time over every generated space.
           patchspace-repair = pkgs.writeShellApplication {
             name = "patchspace-repair";
             runtimeInputs = [ python ];
@@ -167,12 +167,12 @@
           checks =
             let
               patchspaceLibForCheck = import ./nix/lib.nix { inherit (pkgs) lib; };
-              # The module's own path: a panel's `imports` merged *under* the
-              # panel's definition, with a flat export, a panel-shaped file
-              # and Nix on top.  Exercising panelConfig here (not just
+              # The module's own path: a space's `imports` merged *under* the
+              # space's definition, with a flat export, a space-shaped file
+              # and Nix on top.  Exercising spaceConfig here (not just
               # mergeConfigs) is the point - the precedence rule that matters
-              # is "the panel's own Nix wins over everything it imports".
-              panel = patchspaceLibForCheck.panelConfig {
+              # is "the space's own Nix wins over everything it imports".
+              space = patchspaceLibForCheck.spaceConfig {
                 imports = [
                   {
                     nodes.vol = { type = "volume"; params = { initial_volume = 0.5; label = "from json"; }; };
@@ -180,7 +180,7 @@
                     edges = [ { from = "vol"; to = "gate"; } ];
                     groups = [ { id = "g"; label = "g"; nodes = [ "vol" ]; } ];
                   }
-                  { type = "panel"; config = { nodes.only_in_panel.type = "button"; edges = [ ]; groups = [ ]; }; }
+                  { type = "space"; config = { nodes.only_in_space.type = "button"; edges = [ ]; groups = [ ]; }; }
                 ];
                 nodes = {
                   vol.params.initial_volume = 0.9;   # override, `type` not restated
@@ -192,7 +192,7 @@
             in
             {
               module-merge = pkgs.runCommand "check-module-merge" { nativeBuildInputs = [ pkgs.jq ]; } ''
-                echo '${builtins.toJSON panel}' > merged.json
+                echo '${builtins.toJSON space}' > merged.json
                 # Nix wins for the field it sets ...
                 jq -e '.nodes.vol.params.initial_volume == 0.9' merged.json > /dev/null
                 # ... and the imported fields it does not mention survive,
@@ -202,7 +202,7 @@
                 # Nodes from every layer are present, and the edge declared
                 # twice is one edge (same identity).
                 jq -e '.nodes.boom.type == "sound_effect"' merged.json > /dev/null
-                jq -e '.nodes.only_in_panel.type == "button"' merged.json > /dev/null
+                jq -e '.nodes.only_in_space.type == "button"' merged.json > /dev/null
                 jq -e '.edges | length == 2' merged.json > /dev/null
                 jq -e '.groups | length == 1' merged.json > /dev/null
                 touch $out
@@ -336,7 +336,7 @@
                     (if soloUnit.serviceConfig.ExecStart or null != null then null
                      else "a NixOS-only configuration did not define the daemon")
                     (if solo.nodes.from_nixos.type == "gate" then null
-                     else "a NixOS-only configuration did not generate its panel")
+                     else "a NixOS-only configuration did not generate its space")
                     # The client is its own flake: installing it without saying
                     # where it comes from is an evaluation error, and naming it
                     # satisfies that.

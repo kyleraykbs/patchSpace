@@ -3,7 +3,11 @@
  "legacy_aliases": {
   "clip_previous": "replay_buffer",
   "patchbay_device": "patchspace_device",
-  "patchbay_mic_device": "patchspace_mic_device"
+  "patchbay_mic_device": "patchspace_mic_device",
+  "panel_in": "space_in",
+  "panel_out": "space_out",
+  "bool_panel_in": "bool_space_in",
+  "bool_panel_out": "bool_space_out"
  },
  "menu": [
   {
@@ -546,7 +550,7 @@
   },
   {
    "capabilities": [],
-   "class_name": "BoolPanelInNode",
+   "class_name": "BoolSpaceInNode",
    "controls": [
     {
      "key": "description",
@@ -560,9 +564,9 @@
    "display": {
     "category": "",
     "color": "accent_color",
-    "description": "A panel boolean input port (control signal from outside to inside).",
+    "description": "A space boolean input port (control signal from outside to inside).",
     "icon": "list-add-symbolic",
-    "name": "Bool Panel In"
+    "name": "Bool Space In"
    },
    "ports": [
     {
@@ -603,11 +607,11 @@
     "socket_labels": true,
     "toggle": null
    },
-   "type_id": "bool_panel_in"
+   "type_id": "bool_space_in"
   },
   {
    "capabilities": [],
-   "class_name": "BoolPanelOutNode",
+   "class_name": "BoolSpaceOutNode",
    "controls": [
     {
      "key": "description",
@@ -617,9 +621,9 @@
    "display": {
     "category": "",
     "color": "accent_color",
-    "description": "A panel boolean output port (control signal from inside to outside).",
+    "description": "A space boolean output port (control signal from inside to outside).",
     "icon": "list-add-symbolic",
-    "name": "Bool Panel Out"
+    "name": "Bool Space Out"
    },
    "ports": [
     {
@@ -655,7 +659,7 @@
     "socket_labels": true,
     "toggle": null
    },
-   "type_id": "bool_panel_out"
+   "type_id": "bool_space_out"
   },
   {
    "capabilities": [],
@@ -2313,7 +2317,7 @@
   },
   {
    "capabilities": [],
-   "class_name": "PanelInNode",
+   "class_name": "SpaceInNode",
    "controls": [
     {
      "key": "description",
@@ -2323,9 +2327,9 @@
    "display": {
     "category": "",
     "color": "accent_color",
-    "description": "A panel input port: wire audio in from outside; inside the panel it acts as a source.",
+    "description": "A space input port: wire audio in from outside; inside the space it acts as a source.",
     "icon": "list-add-symbolic",
-    "name": "Panel In"
+    "name": "Space In"
    },
    "ports": [
     {
@@ -2361,11 +2365,11 @@
     "socket_labels": true,
     "toggle": null
    },
-   "type_id": "panel_in"
+   "type_id": "space_in"
   },
   {
    "capabilities": [],
-   "class_name": "PanelOutNode",
+   "class_name": "SpaceOutNode",
    "controls": [
     {
      "key": "description",
@@ -2375,9 +2379,9 @@
    "display": {
     "category": "",
     "color": "accent_color",
-    "description": "A panel output port: wire audio to it from inside the panel; outside it acts as a source.",
+    "description": "A space output port: wire audio to it from inside the space; outside it acts as a source.",
     "icon": "list-add-symbolic",
-    "name": "Panel Out"
+    "name": "Space Out"
    },
    "ports": [
     {
@@ -2413,7 +2417,7 @@
     "socket_labels": true,
     "toggle": null
    },
-   "type_id": "panel_out"
+   "type_id": "space_out"
   },
   {
    "capabilities": [],

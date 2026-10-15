@@ -244,7 +244,7 @@ def test_impulse_command_rejects_a_non_button():
 
 
 def test_a_tilde_path_is_expanded_at_play_time():
-    """`~` is stored as written (portable across sessions/panels) and
+    """`~` is stored as written (portable across sessions/spaces) and
     expanded only when pw-cat is handed the path - nothing in that argv is
     a shell, so a literal `~` would be looked up as a directory name."""
     d, fx = _daemon_with_pair(path="~/sounds/clang.wav")

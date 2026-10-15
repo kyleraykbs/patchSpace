@@ -1,7 +1,7 @@
 """
 migrations.py
 
-Versioned, in-memory migration of saved session / panel node configs.
+Versioned, in-memory migration of saved session / space node configs.
 
 Why this exists
 ---------------
@@ -13,7 +13,7 @@ carries dead nodes forever and the user has to rebuild by hand.
 This module is the one place that says "config schema N is upgraded to
 N+1 by this function".  A config records its ``schema_version``; the
 loader calls :func:`migrate` before creating nodes, so an old session is
-brought forward in memory without touching the file until the panel is
+brought forward in memory without touching the file until the space is
 next written (the daemon's normal write-back persists it).  The repair
 CLI can force-persist the result (``session_repair.repair`` runs the same
 migrate pass, so ``--write`` rewrites it).
@@ -49,8 +49,8 @@ def _unique(base: str, taken: Set[str]) -> str:
 
 
 def _split_id(node_id: str) -> Tuple[str, str]:
-    """Split a possibly panel-qualified id into (prefix incl. "::",
-    local).  New nodes are created under the same panel as the legacy
+    """Split a possibly space-qualified id into (prefix incl. "::",
+    local).  New nodes are created under the same space as the legacy
     node they replace, so LCA edge ownership keeps them together."""
     if "::" in node_id:
         prefix, local = node_id.rsplit("::", 1)

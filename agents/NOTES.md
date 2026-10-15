@@ -963,3 +963,39 @@ Do those three first, then the move is mechanical.  Nothing was left half-split:
   spawns modules asynchronously, so every check must *poll* (a socket that
   answers is not a graph that is up); and a display connection has to greet
   (`hello` role=display) before the daemon will route a `node_control`.
+
+## 2026-10-15 — S0: panel -> space, and the aliases S1 has to delete
+
+* The rename is **vocabulary only**; `agents/SPACES.md` §9 is the frozen
+  contract, and the route's step S1 deletes what follows.  Two rules hold it
+  together: **data migrates** (an old graph is the user's work, not something
+  that can be re-derived) and **the protocol is read-old/write-new** (a GUI
+  started before an activation runs the old store path for hours, so it keeps
+  sending the old command names).
+* **S0 aliases — read, never written.  Delete these in S1:**
+  * `central/main.py`: `_LEGACY_COMMAND_ALIASES` (every `*_panel*` command
+    name) and `_LEGACY_ARG_KEYS` (`panel_id` -> `space_id`,
+    `panel_files` -> `space_files`), applied by `_normalize_legacy_command` in
+    `handle_command` (one deprecation line each);
+  * `central/main.py`: `NODE_TYPE_REGISTRY`'s `panel_in`/`panel_out`/
+    `bool_panel_in`/`bool_panel_out` entries (the module announces the same
+    four through `catalog.json`'s `legacy_aliases`);
+  * `central/main.py`: the env fallbacks (`PATCHSPACE_PANEL_DIR`,
+    `PATCHBAY_PANEL_DIR`, `PATCHSPACE_ROOT_PANEL`, `PATCHBAY_ROOT_PANEL`) and
+    `LEGACY_OLD_SPELLING_SPACE_DIR` (`~/.local/share/patchspace/panels`, the
+    S0 one-time copy into `.../spaces`), plus `--panel-dir`/`--root-panel` in
+    `build_parser`;
+  * `central/spaces.py`: `LEGACY_TYPE_SPACE` (the `"type": "panel"` marker
+    read by `is_space_type`) and `LEGACY_CHILD_KEY` (the `config.panels` child
+    list read by `raw_child_entries`);
+  * `nix/lib.nix`: `normalise`'s `"panel"` branch (an export written before
+    the rename still unwraps to its config);
+  * `nix/module.nix`: the three `mkRenamedOptionModule`s (`panelDirs`,
+    `rootPanel`, `panels`), the read-only `panelsDir` alias, and the four
+    `panel_*` ids kept in the `nodeTypes` enum.
+* The one non-symmetry to keep: `LEGACY_SPACE_DIR` (`~/.local/share/patchbay/
+  panels`) is *not* S0's - it is the older PatchBay -> Patch Space copy and
+  stays.
+* `--root-panel`/`PATCHSPACE_ROOT_PANEL` were renamed with the rest
+  (`--root-space`) because they are the same vocabulary; they are aliases in
+  the same one-release window, not permanent.

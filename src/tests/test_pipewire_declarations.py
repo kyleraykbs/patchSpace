@@ -87,6 +87,16 @@ def test_known_details_of_a_few_types(catalog):
     filter_ports = [p for p in by_type["filter"]["ports"] if p["kind"] == "filter"]
     assert filter_ports and all(p.get("dynamic") for p in filter_ports)
 
-    # The space/panel I/O nodes are real registered types (they carry a
+    # The space I/O nodes are real registered types (they carry a
     # space's face ports) even though no add-node menu offers them.
-    assert "panel_in" in by_type and "panel_out" in by_type
+    assert "space_in" in by_type and "space_out" in by_type
+    # Their pre-rename ids (`panel_in`, ...) are `legacy_aliases`: a space
+    # file or session written before S0 still resolves to the canonical type
+    # (the id is a persistent contract), while what this module announces -
+    # and what an export therefore writes - is the canonical one.
+    aliases = declarations.legacy_aliases()
+    assert aliases["panel_in"] == "space_in"
+    assert aliases["panel_out"] == "space_out"
+    assert aliases["bool_panel_in"] == "bool_space_in"
+    assert aliases["bool_panel_out"] == "bool_space_out"
+    assert "panel_in" not in by_type

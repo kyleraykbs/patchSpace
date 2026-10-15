@@ -9,7 +9,12 @@ re-routed.
 
 Sizes today (for scale): `central/main.py` 6289 lines,
 `modules/pipewire/pwnodes.py` 6061 (moved here in step 1),
-`modules/pipewire/{pwgraph,pwproc,pwmatch}` 2043, `central/panels.py` 560.
+`modules/pipewire/{pwgraph,pwproc,pwmatch}` 2043, `central/spaces.py` 560.
+
+**Naming**: this file was written before S0 (`agents/SPACES.md`, 2026-10-15),
+which renamed the container to *space*: read `panels.py`/`panels.*` here as
+`central/spaces.py`/`spaces.*`, and `_panels`/`panel` in a symbol name as
+`spaces`/`space`.
 
 **Status**: step 1 is done (2026-10-12) — the model lives in the module and the
 daemon reaches into it in-process.  Step 2 (the report) is the next one and the

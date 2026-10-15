@@ -76,7 +76,7 @@ def test_migrate_is_idempotent():
     assert twice["nodes"] == snapshot
 
 
-def test_migrate_preserves_panel_prefix():
+def test_migrate_preserves_space_prefix():
     cfg = _config(
         nodes={
             "kit::in1": {"type": "regex_input", "params": {"pattern": "a"}},
@@ -84,10 +84,10 @@ def test_migrate_preserves_panel_prefix():
         edges=[],
     )
     migrated, _ = migrations.migrate(cfg)
-    # The generated classifier/filter land in the same panel...
+    # The generated classifier/filter land in the same space...
     generated = [nid for nid in migrated["nodes"] if nid not in ("all_inputs",)]
     assert generated and all(nid.startswith("kit::") for nid in generated)
-    # ...while the shared preset stays at the root so panels reuse it.
+    # ...while the shared preset stays at the root so spaces reuse it.
     assert "all_inputs" in migrated["nodes"]
 
 

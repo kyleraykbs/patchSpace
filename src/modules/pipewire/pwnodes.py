@@ -1271,8 +1271,8 @@ class ButtonNode(Node):
         return "impulse" if direction == "out" else "audio"
 
 
-class PanelInNode(TransparentNode):
-    """A panel input port: external audio arrives on "in" and the panel's
+class SpaceInNode(TransparentNode):
+    """A space input port: external audio arrives on "in" and the space's
     internal nodes pull it from "out".  Pure logical pass-through (no
     backing).  Unlike other single-input transparent nodes it is a *bus*:
     several upstream edges may feed the same input and their sources are
@@ -1291,8 +1291,8 @@ class PanelInNode(TransparentNode):
         self.description = description
 
 
-class PanelOutNode(TransparentNode):
-    """A panel output port: internal audio arrives on "in" and external
+class SpaceOutNode(TransparentNode):
+    """A space output port: internal audio arrives on "in" and external
     nodes pull it from "out".  Pure logical pass-through (no backing).  Also
     a mixing bus - several internal edges may feed it."""
 
@@ -1307,12 +1307,12 @@ class PanelOutNode(TransparentNode):
         self.description = description
 
 
-class BoolPanelInNode(Node):
-    """Boolean counterpart of PanelInNode: a boolean enters from outside
+class BoolSpaceInNode(Node):
+    """Boolean counterpart of SpaceInNode: a boolean enters from outside
     on "in" and is republished internally on "out".
 
     ``default_state`` is what the port emits when its external input is
-    absent (the panel used standalone with nothing plumbed into this
+    absent (the space used standalone with nothing plumbed into this
     input); ``None`` means "no default" (downstream falls back to its own
     default, as before)."""
 
@@ -1332,12 +1332,12 @@ class BoolPanelInNode(Node):
         return "boolean"
 
 
-class BoolPanelOutNode(Node):
-    """Boolean counterpart of PanelOutNode: internal boolean on "in" is
+class BoolSpaceOutNode(Node):
+    """Boolean counterpart of SpaceOutNode: internal boolean on "in" is
     republished outside on "out"."""
 
     BOOLEAN_INPUT = "boolean"
-    # Like the audio panel ports, several edges may land on the same
+    # Like the audio space ports, several edges may land on the same
     # boolean port; resolution takes the first wired source (see
     # _resolve_boolean_input).
     ALLOW_MULTIPLE_BOOLEAN = True
@@ -1590,7 +1590,7 @@ class BundleMergeNode(TransparentNode):
     single bundle, so several specific lines can be gathered and then
     filtered/routed as a set.  Its input is a bus: any number of upstream
     edges may land on the one socket and their sources are unioned (the
-    same mixing rule the panel ports use)."""
+    same mixing rule the space ports use)."""
 
     MIX_INPUTS = True
 
@@ -2135,7 +2135,7 @@ class SoundPlayerNode(_SingleSinkNode):
             self._temp_files[name] = clipped
         self._player_seq += 1
         # `~` is expanded here rather than at set time: the stored value
-        # stays portable (it round-trips through sessions and panel files
+        # stays portable (it round-trips through sessions and space files
         # as the user wrote it, usually "~/..."), and pw-cat is handed a
         # real path - nothing in that argv is a shell, so a literal `~`
         # would be looked for as a directory of that name.  Only a leading
@@ -4556,7 +4556,7 @@ class PatchSpace:
                 raise ValueError(f"unknown port kind {from_kind!r}")
             if to_kind in ("boolean", "impulse"):
                 # A boolean input is usually a single control signal, not a
-                # mixable bus: exactly one source may drive it.  Panel
+                # mixable bus: exactly one source may drive it.  Space
                 # boolean ports opt out (ALLOW_MULTIPLE_BOOLEAN) so several
                 # sources can be offered; the first wired one wins.  An
                 # impulse input is the same - one button drives it.
@@ -4950,12 +4950,12 @@ class PatchSpace:
         if isinstance(node, BooleanLogicNode):
             values = self._resolve_boolean_inputs(node_id, seen)
             return node.combine(values) if values else None
-        if isinstance(node, (BoolPanelInNode, BoolPanelOutNode)):
-            # Panel boolean ports relay their input.  A panel *input* with
+        if isinstance(node, (BoolSpaceInNode, BoolSpaceOutNode)):
+            # Space boolean ports relay their input.  A space *input* with
             # nothing wired from outside falls back to its configured
             # default state (if any) rather than emitting nothing.
             value = self._resolve_boolean_input(node_id, seen)
-            if value is None and isinstance(node, BoolPanelInNode):
+            if value is None and isinstance(node, BoolSpaceInNode):
                 return getattr(node, "default_state", None)
             return value
         if isinstance(node, BooleanWarpOutNode):
@@ -5036,7 +5036,7 @@ class PatchSpace:
             upstream = [e for e in upstream if not self._edge_is_control(e)]
             if not upstream:
                 return []
-            # A mixing transparent node (a panel input/output bus) sums
+            # A mixing transparent node (a space input/output bus) sums
             # every inbound audio edge instead of selecting just one.
             if getattr(node, "MIX_INPUTS", False):
                 mixed: List[dict] = []

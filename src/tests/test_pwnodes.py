@@ -35,9 +35,9 @@ from modules.pipewire.pwnodes import (
     WarpOutNode,
     BooleanWarpInNode,
     BooleanWarpOutNode,
-    BoolPanelInNode,
-    PanelInNode,
-    PanelOutNode,
+    BoolSpaceInNode,
+    SpaceInNode,
+    SpaceOutNode,
     NoiseCancelNode,
     SplitterNode,
     VolumeProcessNode,
@@ -1435,15 +1435,15 @@ def test_boolean_warp_uses_first_publisher_and_separate_namespace():
     assert space._resolve_warp_audio(space.nodes["awo"], set()) == []
 
 
-def test_bool_panel_input_default_state_drives_when_unwired():
+def test_bool_space_input_default_state_drives_when_unwired():
     g = FakeGraph()
     space = make_space(g)
     space.mark_graph_loaded()
-    space.add_node(BoolPanelInNode("pin", default_state=True))
+    space.add_node(BoolSpaceInNode("pin", default_state=True))
     space.add_node(GateNode("gate", enabled=False))
     space.add_edge("pin", "gate", "ctrl")
     space.sync()
-    # Nothing wired into the panel input -> its configured default drives
+    # Nothing wired into the space input -> its configured default drives
     # the gate (which would otherwise stay at its own stored default).
     assert space.nodes["gate"].bool_driven is True
     assert space.nodes["gate"].bool_state is True
@@ -1456,7 +1456,7 @@ def test_bool_panel_input_default_state_drives_when_unwired():
 
     # With no default and nothing wired, the port emits nothing (the gate
     # falls back to its own default and is not "driven").
-    space.add_node(BoolPanelInNode("pin2"))
+    space.add_node(BoolSpaceInNode("pin2"))
     space.add_node(GateNode("gate2", enabled=True))
     space.add_edge("pin2", "gate2", "ctrl")
     space.sync()
@@ -1583,8 +1583,8 @@ def test_rename_preserves_internal_link_bookkeeping():
     assert space._inflight_links[(1, 2)][0] == "__internal__:new:0"
 
 
-def test_panel_input_mixes_multiple_external_sources():
-    """Unlike an ordinary single-input transparent node, a panel input is
+def test_space_input_mixes_multiple_external_sources():
+    """Unlike an ordinary single-input transparent node, a space input is
     a bus: several external sources may feed it and all of them reach the
     internal consumer."""
     g = FakeGraph()
@@ -1595,7 +1595,7 @@ def test_panel_input_mixes_multiple_external_sources():
     space.mark_graph_loaded()
     space.add_node(NamedSource("sa", "srcA"))
     space.add_node(NamedSource("sb", "srcB"))
-    space.add_node(PanelInNode("pin", port_name="Mic"))
+    space.add_node(SpaceInNode("pin", port_name="Mic"))
     space.add_node(NamedSink("snk", "sink"))
     space.add_edge("sa", "pin", "in")
     space.add_edge("sb", "pin", "in")
@@ -1605,7 +1605,7 @@ def test_panel_input_mixes_multiple_external_sources():
     assert (b_ports["FL"], sink_ports["FL"]) in g.linked_pairs()
 
 
-def test_panel_output_mixes_multiple_internal_sources():
+def test_space_output_mixes_multiple_internal_sources():
     g = FakeGraph()
     a_ports = g.add_source(10, "srcA")
     b_ports = g.add_source(20, "srcB")
@@ -1614,7 +1614,7 @@ def test_panel_output_mixes_multiple_internal_sources():
     space.mark_graph_loaded()
     space.add_node(NamedSource("sa", "srcA"))
     space.add_node(NamedSource("sb", "srcB"))
-    space.add_node(PanelOutNode("pout", port_name="Out"))
+    space.add_node(SpaceOutNode("pout", port_name="Out"))
     space.add_node(NamedSink("snk", "sink"))
     space.add_edge("sa", "pout", "in")
     space.add_edge("sb", "pout", "in")
@@ -1624,13 +1624,13 @@ def test_panel_output_mixes_multiple_internal_sources():
     assert (b_ports["FL"], sink_ports["FL"]) in g.linked_pairs()
 
 
-def test_panel_boolean_input_accepts_multiple_edges():
+def test_space_boolean_input_accepts_multiple_edges():
     g = FakeGraph()
     space = make_space(g)
     space.mark_graph_loaded()
     space.add_node(BooleanSourceNode("a", output=0))
     space.add_node(BooleanSourceNode("b", output=1))
-    space.add_node(BoolPanelInNode("pin"))
+    space.add_node(BoolSpaceInNode("pin"))
     # Both land on the same boolean port; the first wired one wins.
     space.add_edge("a", "pin", "in")
     space.add_edge("b", "pin", "in")

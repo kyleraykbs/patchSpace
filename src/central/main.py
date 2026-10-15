@@ -71,10 +71,10 @@ from modules.pipewire.pwnodes import (
     WarpOutNode,
     BooleanWarpInNode,
     BooleanWarpOutNode,
-    PanelInNode,
-    PanelOutNode,
-    BoolPanelInNode,
-    BoolPanelOutNode,
+    SpaceInNode,
+    SpaceOutNode,
+    BoolSpaceInNode,
+    BoolSpaceOutNode,
     VolumeProcessNode,
     NoiseCancelNode,
     SensitivityGateNode,
@@ -131,7 +131,7 @@ from modules.pipewire.pwnodes import (
 )
 
 from central import session_repair
-from central import panels
+from central import spaces
 from central import migrations
 from modules.pipewire import module as pw_module
 
@@ -183,7 +183,7 @@ def _install_log_ring() -> None:
 # a machine (a second user, a test instance, or a service whose socket
 # belongs in $XDG_RUNTIME_DIR) - otherwise the single-instance guard below
 # makes the second one refuse to start.  Same env-var convention as the
-# panel dirs/root panel below; `--socket` overrides it.
+# space dirs/root space below; `--socket` overrides it.
 #
 # The pre-rename `PATCHBAY_*` names are still read (below and in the two
 # clients): a session that is already running started its daemon with them in
@@ -215,7 +215,7 @@ SESSION_CACHE_PATH = os.path.expanduser("~/.cache/patchspace/last_session.json")
 
 # The GUI's canvas background opacity, when the deployment configures one (the
 # module sets this on the *unit*, so a locally started daemon reads it from the
-# environment like the socket and panel dirs - and it reaches a client that was
+# environment like the socket and space dirs - and it reaches a client that was
 # started by a launcher with a stale session environment, which a session
 # variable alone would not).  `None` (unset or unusable) means "no preference".
 def _env_canvas_opacity():
@@ -231,8 +231,8 @@ def _env_canvas_opacity():
 
 CANVAS_OPACITY = _env_canvas_opacity()
 
-# How often the tick rescans the panel directories for changes.
-PANEL_POLL_S = 1.5
+# How often the tick rescans the space directories for changes.
+SPACE_POLL_S = 1.5
 
 # The PipeWire graph monitor is a child process (`pw-dump -m`).  It exits by
 # itself when PipeWire goes away - most often because PipeWire was restarted,
@@ -243,38 +243,50 @@ PANEL_POLL_S = 1.5
 # stick" and backs off, rather than being respawned every tick.
 MONITOR_RESTART_GRACE_S = 5.0
 
-# Panels: each non-root panel is one file, referenced by stem.  The
+# Spaces: each non-root space is one file, referenced by stem.  The
 # daemon takes a list of directories to search (later shadows earlier);
 # a directory is writable unless it is a read-only source like a Nix
-# store path.  The root panel is the session autosave file.
-DEFAULT_PANEL_DIR = os.environ.get(
-    "PATCHSPACE_PANEL_DIR",
-    os.environ.get("PATCHBAY_PANEL_DIR")
-    or os.path.expanduser("~/.local/share/patchspace/panels"),
+# store path.  The root space is the session autosave file.
+#
+# The pre-rename environment names are still *read* (never written), like
+# the ``PATCHBAY_*`` ones: a session already running, or a user service
+# written before the rename, started the daemon with them in its
+# environment - see `--space-dir`/`--panel-dir` below for the same rule on
+# the command line.
+DEFAULT_SPACE_DIR = os.environ.get(
+    "PATCHSPACE_SPACE_DIR",
+    os.environ.get("PATCHSPACE_PANEL_DIR")
+    or os.environ.get("PATCHBAY_PANEL_DIR")
+    or os.path.expanduser("~/.local/share/patchspace/spaces"),
 )
-DEFAULT_ROOT_PANEL = os.environ.get(
-    "PATCHSPACE_ROOT_PANEL",
-    os.environ.get("PATCHBAY_ROOT_PANEL") or SESSION_CACHE_PATH,
+DEFAULT_ROOT_SPACE = os.environ.get(
+    "PATCHSPACE_ROOT_SPACE",
+    os.environ.get("PATCHSPACE_ROOT_PANEL")
+    or os.environ.get("PATCHBAY_ROOT_PANEL")
+    or SESSION_CACHE_PATH,
 )
 
-# Where this project kept its panels and its session before the rename
-# (PatchBay -> Patch Space).  See _migrate_legacy_paths: the old contents are
-# *copied* into the new locations, once, so a machine that has been running
-# the old code finds its graph where it always was - and the old files are
-# left alone rather than moved out from under a second checkout.
-LEGACY_PANEL_DIR = os.path.expanduser("~/.local/share/patchbay/panels")
+# Space directories this project used before: the pre-rename PatchBay
+# location, and the pre-S0 spelling under the current name
+# (`~/.local/share/patchspace/panels`, the default until the panel -> space
+# rename).  See _migrate_legacy_paths: the old contents are *copied* into the
+# new locations, once, so a machine that has been running the old code finds
+# its graph where it always was - and the old files are left alone rather
+# than moved out from under a second checkout.
+LEGACY_SPACE_DIR = os.path.expanduser("~/.local/share/patchbay/panels")
+LEGACY_OLD_SPELLING_SPACE_DIR = os.path.expanduser("~/.local/share/patchspace/panels")
 LEGACY_SESSION_CACHE = os.path.expanduser("~/.cache/patchbay/last_session.json")
 
 
 def _copy_missing_files(src_dir: str, dst_dir: str) -> int:
-    """Copy every panel file under `src_dir` that `dst_dir` doesn't have.
+    """Copy every space file under `src_dir` that `dst_dir` doesn't have.
 
     Returns how many were copied.  Never overwrites and never deletes: the
     destination wins on a name clash (it is the canonical location)."""
     copied = 0
-    for path in panels.list_files(src_dir):
-        stem = panels.file_stem(path)
-        target = os.path.join(dst_dir, stem + panels.PANEL_SUFFIX)
+    for path in spaces.list_files(src_dir):
+        stem = spaces.file_stem(path)
+        target = os.path.join(dst_dir, stem + spaces.SPACE_SUFFIX)
         if os.path.exists(target):
             continue
         try:
@@ -282,7 +294,7 @@ def _copy_missing_files(src_dir: str, dst_dir: str) -> int:
             shutil.copy2(path, target)
             copied += 1
         except OSError as exc:
-            logger.warning("Could not migrate panel %r: %s", path, exc)
+            logger.warning("Could not migrate space %r: %s", path, exc)
     return copied
 
 
@@ -388,10 +400,10 @@ NODE_TYPE_REGISTRY: Dict[str, type] = {
     "warp_out": WarpOutNode,
     "bool_warp_in": BooleanWarpInNode,
     "bool_warp_out": BooleanWarpOutNode,
-    "panel_in": PanelInNode,
-    "panel_out": PanelOutNode,
-    "bool_panel_in": BoolPanelInNode,
-    "bool_panel_out": BoolPanelOutNode,
+    "space_in": SpaceInNode,
+    "space_out": SpaceOutNode,
+    "bool_space_in": BoolSpaceInNode,
+    "bool_space_out": BoolSpaceOutNode,
     "volume": VolumeProcessNode,
     "noise_cancel": NoiseCancelNode,
     "sensitivity_gate": SensitivityGateNode,
@@ -414,7 +426,7 @@ NODE_TYPE_REGISTRY: Dict[str, type] = {
 CLASS_TO_TYPE = {cls: key for key, cls in NODE_TYPE_REGISTRY.items()}
 
 # Node type keys this project used before the rename (PatchBay -> Patch
-# Space).  Registered as aliases *after* CLASS_TO_TYPE so a panel or session
+# Space).  Registered as aliases *after* CLASS_TO_TYPE so a space or session
 # written under the old key still loads (the node keeps working), while
 # everything this daemon reports/serializes uses the canonical key - i.e. an
 # old file is read, then re-exported in the new spelling.
@@ -424,6 +436,15 @@ for _legacy_key, _canonical_key in {
     # A Clip Previous was renamed to Replay Buffer; sessions saved under the
     # old name still load.
     "clip_previous": "replay_buffer",
+    # The space I/O ports were Panel In/Out until the panel -> space rename
+    # (S0).  A persistent contract: the old ids stay readable (a session, a
+    # space file or a Nix-generated one written under them still loads and
+    # renders as the canonical type), and the module announces them as
+    # `legacy_aliases` too.  Removed in S1.
+    "panel_in": "space_in",
+    "panel_out": "space_out",
+    "bool_panel_in": "bool_space_in",
+    "bool_panel_out": "bool_space_out",
 }.items():
     NODE_TYPE_REGISTRY[_legacy_key] = NODE_TYPE_REGISTRY[_canonical_key]
 
@@ -544,11 +565,80 @@ def _apply_layout_attrs(node, config: dict) -> None:
             setattr(node, attr, config[attr])
 
 
+# ---------------------------------------------------------------------------
+# legacy command spellings (S0: panel -> space)
+# ---------------------------------------------------------------------------
+
+# Pre-rename command names -> the canonical one.  The daemon still *accepts*
+# them - mapped onto the same handler, one deprecation line each - but only
+# *emits* the new spelling.  This is a deliberate one-release window: a GUI
+# started before an activation keeps running the old store path for hours, so
+# its commands must not start failing the moment the daemon is upgraded.
+# Removal: step S1, recorded in agents/SPACES.md §9 and agents/NOTES.md.
+_LEGACY_COMMAND_ALIASES: Dict[str, str] = {
+    "reload_panels": "reload_spaces",
+    "list_panels": "list_spaces",
+    "set_panel_layout": "set_space_layout",
+    "reset_panel": "reset_space",
+    "set_panel_edit_mode": "set_space_edit_mode",
+    "move_panel": "move_space",
+    "create_panel": "create_space",
+    "delete_panel": "delete_space",
+    "delete_panel_file": "delete_space_file",
+    "edit_panel": "edit_space",
+    "export_panel": "export_space",
+    "clone_panel": "clone_space",
+    "list_panel_files": "list_space_files",
+    "set_panel_file_autoload": "set_space_file_autoload",
+    "place_panel": "place_space",
+    "remove_panel_placement": "remove_space_placement",
+}
+
+# Pre-rename argument keys -> the canonical key.  Applied to *any* command
+# (an old ``move_nodes`` carries ``panel_id`` too, and that command kept its
+# name), and like the command names: read, never written.
+_LEGACY_ARG_KEYS: Dict[str, str] = {
+    "panel_id": "space_id",
+    "panel_files": "space_files",
+}
+
+
+def _normalize_legacy_command(cmd: dict) -> dict:
+    """Map a pre-rename command spelling (and its argument keys) onto the
+    canonical one, with one deprecation line per call.
+
+    A canonical command with no legacy key comes back as the *same dict*
+    (two membership tests and nothing else) - this sits on the hot path of
+    every command the GUI sends."""
+    command = cmd.get("command")
+    renamed = _LEGACY_COMMAND_ALIASES.get(command)
+    legacy_keys = [k for k in _LEGACY_ARG_KEYS if k in cmd]
+    if renamed is None and not legacy_keys:
+        return cmd
+    out = dict(cmd)
+    if renamed is not None:
+        logger.warning(
+            "deprecation: command %r is the pre-rename spelling of %r; "
+            "the alias goes away in S1",
+            command, renamed,
+        )
+        out["command"] = renamed
+    for key in legacy_keys:
+        out[_LEGACY_ARG_KEYS[key]] = out.pop(key)
+    if legacy_keys:
+        logger.warning(
+            "deprecation: argument key(s) %s are the pre-rename spelling; "
+            "the alias goes away in S1",
+            ", ".join(repr(k) for k in legacy_keys),
+        )
+    return out
+
+
 class PatchSpaceDaemon:
     def __init__(
         self,
-        panel_dirs: Optional[List[tuple]] = None,
-        root_panel_path: Optional[str] = None,
+        space_dirs: Optional[List[tuple]] = None,
+        root_space_path: Optional[str] = None,
         modules_config_path: Optional[str] = None,
     ):
         self.graph = PipewireGraph(pw_cli_command=("pw-cli",))
@@ -601,39 +691,39 @@ class PatchSpaceDaemon:
         #: little is at risk if the daemon dies.
         self.AUTOSAVE_QUIET_S = 2.0
 
-        # Panels: first-class nested containers.  Each non-root panel is
-        # one file; the root panel is the session autosave.  `panel_dirs`
+        # Spaces: first-class nested containers.  Each non-root space is
+        # one file; the root space is the session autosave.  `space_dirs`
         # is a list of (path, writable) searched in order (later wins).
-        self.panel_dirs: List[tuple] = (
-            list(panel_dirs) if panel_dirs else [(DEFAULT_PANEL_DIR, True)]
+        self.space_dirs: List[tuple] = (
+            list(space_dirs) if space_dirs else [(DEFAULT_SPACE_DIR, True)]
         )
-        self.root_panel_path = root_panel_path or DEFAULT_ROOT_PANEL
-        # panel_id -> Panel (includes the root under "").
-        self.panels: Dict[str, panels.Panel] = {}
-        # Frozen copy of each read-only panel's file state, re-applied on
-        # reload/restart and on reset_panel.
-        self._readonly_snapshots: Dict[str, panels.Panel] = {}
-        # Last committed file state for *every* panel: parameter edits
-        # outside a panel's edit mode are not written back (they're served
+        self.root_space_path = root_space_path or DEFAULT_ROOT_SPACE
+        # space_id -> Space (includes the root under "").
+        self.spaces: Dict[str, spaces.Space] = {}
+        # Frozen copy of each read-only space's file state, re-applied on
+        # reload/restart and on reset_space.
+        self._readonly_snapshots: Dict[str, spaces.Space] = {}
+        # Last committed file state for *every* space: parameter edits
+        # outside a space's edit mode are not written back (they're served
         # from this snapshot), and entering edit mode refreshes to it.
-        self._panel_snapshots: Dict[str, panels.Panel] = {}
-        # Panels currently in edit mode (parameter changes are persisted).
-        self._edit_panels: set = set()
-        #: placement id -> its local changes (a partial panel config), so two
-        #: instances of one blueprint can differ.  Persisted in the root panel
+        self._space_snapshots: Dict[str, spaces.Space] = {}
+        # Spaces currently in edit mode (parameter changes are persisted).
+        self._edit_spaces: set = set()
+        #: placement id -> its local changes (a partial space config), so two
+        #: instances of one blueprint can differ.  Persisted in the root space
         #: (the session autosave) and replayed on load; see `_capture_diffs`.
         self._placement_diffs: Dict[str, dict] = {}
         #: Where they live: a sidecar beside the session autosave.
         self._placement_diffs_path = os.path.join(
-            os.path.dirname(self.root_panel_path) or ".", "placement_diffs.json"
+            os.path.dirname(self.root_space_path) or ".", "placement_diffs.json"
         )
-        self._panel_mtimes: Dict[str, float] = {}
-        self._panel_poll_at = 0.0
-        self._panel_reloading = False
-        self._panel_lock = threading.Lock()
+        self._space_mtimes: Dict[str, float] = {}
+        self._space_poll_at = 0.0
+        self._space_reloading = False
+        self._space_lock = threading.Lock()
 
         # True while any heavy (re)build runs: the startup session load, a
-        # panel reload, a rebuild, or a GUI-issued session load.  Surfaced
+        # space reload, a rebuild, or a GUI-issued session load.  Surfaced
         # to the GUI via get_nodes so it can show its loading overlay - the
         # GUI has no command-side signal for loads it didn't issue.
         # A counter so overlapping loads don't clear the flag early.
@@ -847,10 +937,10 @@ class PatchSpaceDaemon:
 
         self.started = True
 
-        # Snapshot the panel files up front so the tick's change watcher
+        # Snapshot the space files up front so the tick's change watcher
         # doesn't fire a reload on top of the startup load (which refreshes
         # this snapshot again when it finishes).
-        self._panel_mtimes = panels.snapshot(self._panel_dir_paths())
+        self._space_mtimes = spaces.snapshot(self._space_dir_paths())
 
         # Attach the built-in modules before the session load, so the
         # load's registry sync can announce the nodes it creates (a module
@@ -1353,7 +1443,7 @@ class PatchSpaceDaemon:
         # moved on: the GUI's polls then carried stale positions, so a dragged
         # selection snapped back to where the daemon last knew it, and the app
         # only caught up once the drag stopped.
-        if self._dirty and not self._panel_reloading:
+        if self._dirty and not self._space_reloading:
             if self._dirty_since == 0.0:
                 self._dirty_since = time.monotonic()
             elif time.monotonic() - self._dirty_since >= self.AUTOSAVE_QUIET_S:
@@ -1361,7 +1451,7 @@ class PatchSpaceDaemon:
                 self._dirty = False
                 # Each of these gets its own guard: they are independent jobs,
                 # and a failure in one must not starve the other (a bad export
-                # kept the panel poll from ever running).
+                # kept the space poll from ever running).
                 try:
                     self._auto_export_session()
                 except Exception:
@@ -1369,56 +1459,58 @@ class PatchSpaceDaemon:
         else:
             self._dirty_since = 0.0
         try:
-            self._poll_panels()
+            self._poll_spaces()
         except Exception:
-            logger.exception("panel poll failed")
+            logger.exception("space poll failed")
 
     # ------------------------------------------------------------------
     # declarative node files
     # ------------------------------------------------------------------
 
     # ------------------------------------------------------------------
-    # panels
+    # spaces
     # ------------------------------------------------------------------
 
-    def _panel_dir_paths(self) -> List[str]:
+    def _space_dir_paths(self) -> List[str]:
         seen: List[str] = []
-        for path, _writable in self.panel_dirs:
+        for path, _writable in self.space_dirs:
             if path and path not in seen:
                 seen.append(path)
         return seen
 
-    def _panel_dir_writable(self) -> Dict[str, bool]:
+    def _space_dir_writable(self) -> Dict[str, bool]:
         out: Dict[str, bool] = {}
-        for path, writable in self.panel_dirs:
+        for path, writable in self.space_dirs:
             if path:
                 out[path] = writable  # later dirs win
         return out
 
     def _migrate_legacy_paths(self) -> None:
-        """Adopt whatever the pre-rename paths (PatchBay) still hold: the
-        panel directory and the session cache.
+        """Adopt whatever the pre-rename paths still hold: the space
+        directory (PatchBay's, and this project's pre-S0 ``panels`` one) and
+        the session cache.
 
         Copied, not moved, and only into a location that is empty or missing
-        the file - so it is idempotent, it can never clobber a panel the
+        the file - so it is idempotent, it can never clobber a space the
         user made under the new name, and the old files stay put (a second
         checkout or an old daemon may still be using them)."""
         target_dir = next(
-            (d for d, w in self.panel_dirs if d and w), None
+            (d for d, w in self.space_dirs if d and w), None
         )
+        for legacy_dir in (LEGACY_SPACE_DIR, LEGACY_OLD_SPELLING_SPACE_DIR):
+            if (
+                target_dir
+                and os.path.realpath(target_dir) != os.path.realpath(legacy_dir)
+                and os.path.isdir(legacy_dir)
+            ):
+                copied = _copy_missing_files(legacy_dir, target_dir)
+                if copied:
+                    logger.info(
+                        "Migrated %d space file(s) from %s to %s",
+                        copied, legacy_dir, target_dir,
+                    )
         if (
-            target_dir
-            and os.path.realpath(target_dir) != os.path.realpath(LEGACY_PANEL_DIR)
-            and os.path.isdir(LEGACY_PANEL_DIR)
-        ):
-            copied = _copy_missing_files(LEGACY_PANEL_DIR, target_dir)
-            if copied:
-                logger.info(
-                    "Migrated %d panel file(s) from %s to %s",
-                    copied, LEGACY_PANEL_DIR, target_dir,
-                )
-        if (
-            self.root_panel_path == SESSION_CACHE_PATH
+            self.root_space_path == SESSION_CACHE_PATH
             and not os.path.exists(SESSION_CACHE_PATH)
             and os.path.exists(LEGACY_SESSION_CACHE)
         ):
@@ -1432,36 +1524,40 @@ class PatchSpaceDaemon:
             except OSError as exc:
                 logger.warning("Could not migrate the session cache: %s", exc)
 
-    def _load_panels_tree(self) -> Dict[str, panels.Panel]:
-        """Load the root panel + every reachable panel, migrating the
+    def _load_spaces_tree(self) -> Dict[str, spaces.Space]:
+        """Load the root space + every reachable space, migrating the
         legacy shapes in place (a bare session cache, and any old
-        declarative files sitting in the panel dirs)."""
+        declarative files sitting in the space dirs)."""
         self._migrate_legacy_paths()
-        root_path = self.root_panel_path
-        dirs = self._panel_dir_paths()
-        raw = panels.read_file(root_path) if root_path else None
-        if raw is not None and raw.get("type") != panels.TYPE_PANEL:
-            logger.info("Migrating legacy session cache %r to a root panel", root_path)
-            panels.write_file(root_path, panels.migrate_legacy_session(raw))
+        root_path = self.root_space_path
+        dirs = self._space_dir_paths()
+        raw = spaces.read_file(root_path) if root_path else None
+        # A file that *is* a space file under either spelling is loaded as
+        # one; only a bare session cache (no marker, or a foreign one) is
+        # migrated.  Reading the old "panel" marker as "not a space" would
+        # rewrite a pre-rename root as an empty migrated session.
+        if raw is not None and not spaces.is_space_type(raw):
+            logger.info("Migrating legacy session cache %r to a root space", root_path)
+            spaces.write_file(root_path, spaces.migrate_legacy_session(raw))
 
-        tree = panels.load_tree(root_path, dirs, self._panel_dir_writable())
+        tree = spaces.load_tree(root_path, dirs, self._space_dir_writable())
 
         # Migrate old declarative files that aren't referenced yet: make
-        # each a top-level panel and move its namespaced nodes out of the
+        # each a top-level space and move its namespaced nodes out of the
         # root config (the file is now the source of truth).
-        root = tree.get(panels.ROOT_ID)
+        root = tree.get(spaces.ROOT_ID)
         if root is not None:
             referenced = set(root.child_stems().values())
             adopted = []
             for directory in dirs:
-                for path in panels.list_files(directory):
-                    stem = panels.file_stem(path)
+                for path in spaces.list_files(directory):
+                    stem = spaces.file_stem(path)
                     if stem in referenced:
                         continue
-                    raw = panels.read_file(path)
+                    raw = spaces.read_file(path)
                     # Only files that opt in are spawned at the root;
                     # everything else comes up only when referenced as a
-                    # sub-panel (nested panels always auto-load).
+                    # sub-space (nested spaces always auto-load).
                     if not (isinstance(raw, dict) and raw.get("auto_load")):
                         continue
                     referenced.add(stem)
@@ -1473,153 +1569,153 @@ class PatchSpaceDaemon:
                 # writing a reload of the file discarded both halves - the
                 # added references lived only in the in-memory root, and the
                 # reload (which cannot see them: they were never written) is
-                # what got written back - so an auto_load panel in a
+                # what got written back - so an auto_load space in a
                 # read-only directory was never actually adopted.
-                tree = panels.load_tree(root_path, dirs, self._panel_dir_writable())
-                fresh = tree[panels.ROOT_ID]
+                tree = spaces.load_tree(root_path, dirs, self._space_dir_writable())
+                fresh = tree[spaces.ROOT_ID]
                 for stem in adopted:
-                    fresh.config.setdefault("panels", []).append(
-                        panels.child_ref(stem, stem)
+                    fresh.config.setdefault("spaces", []).append(
+                        spaces.child_ref(stem, stem)
                     )
-                # Drop root nodes that now belong to a migrated panel.
+                # Drop root nodes that now belong to a migrated space.
                 fresh.config["nodes"] = {
                     nid: cfg
                     for nid, cfg in (fresh.config.get("nodes") or {}).items()
-                    if panels.panel_of(nid) == panels.ROOT_ID
+                    if spaces.space_of(nid) == spaces.ROOT_ID
                 }
-                panels.write_file(root_path, fresh)
-                tree = panels.load_tree(root_path, dirs, self._panel_dir_writable())
-        self._place_unplaced_panels(tree)
+                spaces.write_file(root_path, fresh)
+                tree = spaces.load_tree(root_path, dirs, self._space_dir_writable())
+        self._place_unplaced_spaces(tree)
         return tree
 
-    def _place_unplaced_panels(self, tree: Dict[str, panels.Panel]) -> None:
-        """Drop a top-level panel that has no placement at all *beside* the
-        panels that do, instead of leaving it at the origin.
+    def _place_unplaced_spaces(self, tree: Dict[str, spaces.Space]) -> None:
+        """Drop a top-level space that has no placement at all *beside* the
+        spaces that do, instead of leaving it at the origin.
 
-        This is what makes a declarative panel appear next to the graph the
+        This is what makes a declarative space appear next to the graph the
         user has arranged rather than in its own empty corner of the canvas: a
-        Nix-generated panel carries no coordinates (the module's placement
+        Nix-generated space carries no coordinates (the module's placement
         defaults are unset), so it is placed to the right of the placed
-        panels, top-aligned with the topmost one.  The placement is marked on
-        the panel, which is a session value - so it is remembered, not
-        recomputed on every start, and a panel the user then drags simply
+        spaces, top-aligned with the topmost one.  The placement is marked on
+        the space, which is a session value - so it is remembered, not
+        recomputed on every start, and a space the user then drags simply
         stops being unplaced.
 
-        Nested panels keep their parent's frame and are left alone, and a
+        Nested spaces keep their parent's frame and are left alone, and a
         graph with nothing placed yet is left alone too (the next start
         places it, once there is something to sit beside)."""
-        root = tree.get(panels.ROOT_ID)
+        root = tree.get(spaces.ROOT_ID)
         if root is None:
             return
         placed = [
-            panel for pid, panel in tree.items()
-            if pid != panels.ROOT_ID
-            and panel.placed
-            and (panel.parent or panels.ROOT_ID) == panels.ROOT_ID
+            space for pid, space in tree.items()
+            if pid != spaces.ROOT_ID
+            and space.placed
+            and (space.parent or spaces.ROOT_ID) == spaces.ROOT_ID
         ]
         if not placed:
             return
-        right = max(panel.x + panel.w for panel in placed)
-        top = min(panel.y for panel in placed)
-        for pid, panel in tree.items():
-            if pid == panels.ROOT_ID or panel.placed:
+        right = max(space.x + space.w for space in placed)
+        top = min(space.y for space in placed)
+        for pid, space in tree.items():
+            if pid == spaces.ROOT_ID or space.placed:
                 continue
-            if (panel.parent or panels.ROOT_ID) != panels.ROOT_ID:
+            if (space.parent or spaces.ROOT_ID) != spaces.ROOT_ID:
                 continue
-            panel.x, panel.y = right + panels.PLACE_GAP, top
-            panel.placed = True
+            space.x, space.y = right + spaces.PLACE_GAP, top
+            space.placed = True
             logger.info(
-                "Placed unpositioned panel %r at (%.0f, %.0f), beside the "
-                "panels already on the graph", pid, panel.x, panel.y,
+                "Placed unpositioned space %r at (%.0f, %.0f), beside the "
+                "spaces already on the graph", pid, space.x, space.y,
             )
-            right = panel.x + panel.w
+            right = space.x + space.w
             self._dirty = True
 
     @staticmethod
-    def _panel_origin(tree: Dict[str, panels.Panel], panel_id: str) -> tuple:
-        """Absolute (x, y) of a panel's top-left, by folding ancestors.
+    def _space_origin(tree: Dict[str, spaces.Space], space_id: str) -> tuple:
+        """Absolute (x, y) of a space's top-left, by folding ancestors.
 
         Node runtime coordinates are absolute, so serialization converts
-        to panel-relative by subtracting this and loading adds it back."""
+        to space-relative by subtracting this and loading adds it back."""
         x = y = 0.0
-        pid = panel_id
+        pid = space_id
         guard = 0
         while pid and pid in tree and guard < 64:
-            panel = tree[pid]
-            x += panel.x
-            y += panel.y
-            pid = panel.parent or ""
+            space = tree[pid]
+            x += space.x
+            y += space.y
+            pid = space.parent or ""
             guard += 1
         return x, y
 
-    def _flatten_panels(self, tree: Dict[str, panels.Panel],
-                        only_panels: Optional[set] = None) -> dict:
-        """Panels -> one load-ready config with fully-qualified node ids
-        and absolute node coordinates.  ``only_panels`` restricts the
+    def _flatten_spaces(self, tree: Dict[str, spaces.Space],
+                        only_spaces: Optional[set] = None) -> dict:
+        """Spaces -> one load-ready config with fully-qualified node ids
+        and absolute node coordinates.  ``only_spaces`` restricts the
         emitted nodes/edges/groups (the whole ``tree`` is still used for
         origin folding)."""
         nodes: Dict[str, dict] = {}
         edges: List[dict] = []
         groups: List[dict] = []
-        for pid, panel in tree.items():
-            if only_panels is not None and pid not in only_panels:
+        for pid, space in tree.items():
+            if only_spaces is not None and pid not in only_spaces:
                 continue
-            ox, oy = self._panel_origin(tree, pid)
-            for local, cfg in panel.nodes.items():
-                qid = panels.make_id(pid, local)
+            ox, oy = self._space_origin(tree, pid)
+            for local, cfg in space.nodes.items():
+                qid = spaces.make_id(pid, local)
                 params = dict(cfg.get("params") or {})
                 if params.get("x") is not None:
                     params["x"] = float(params["x"]) + ox
                 if params.get("y") is not None:
                     params["y"] = float(params["y"]) + oy
-                params["declarative"] = pid != panels.ROOT_ID
+                params["declarative"] = pid != spaces.ROOT_ID
                 nodes[qid] = {"type": cfg.get("type"), "params": params}
-            for e in panel.edges:
+            for e in space.edges:
                 src, dst = e.get("from"), e.get("to")
                 if not src or not dst:
                     continue
                 entry = {
-                    "from": panels.make_id(pid, src),
-                    "to": panels.make_id(pid, dst),
-                    "declarative": pid != panels.ROOT_ID,
+                    "from": spaces.make_id(pid, src),
+                    "to": spaces.make_id(pid, dst),
+                    "declarative": pid != spaces.ROOT_ID,
                 }
                 if e.get("to_port"):
                     entry["to_port"] = e["to_port"]
                 if e.get("from_port"):
                     entry["from_port"] = e["from_port"]
                 edges.append(entry)
-            for g in panel.groups:
+            for g in space.groups:
                 gid = g.get("id")
                 if not gid:
                     continue
                 groups.append(
                     {
-                        "id": panels.make_id(pid, gid),
+                        "id": spaces.make_id(pid, gid),
                         "label": g.get("label", "Group"),
                         "color": g.get("color"),
-                        "declarative": pid != panels.ROOT_ID,
+                        "declarative": pid != spaces.ROOT_ID,
                         "nodes": [
-                            panels.make_id(pid, m) for m in g.get("nodes") or []
+                            spaces.make_id(pid, m) for m in g.get("nodes") or []
                         ],
                     }
                 )
         self._merge_placement_diffs(nodes)
         return {"nodes": nodes, "edges": edges, "groups": groups}
 
-    def _install_panels(self, tree: Dict[str, panels.Panel]) -> None:
-        """Adopt a loaded panel tree, freeze the read-only panels'
+    def _install_spaces(self, tree: Dict[str, spaces.Space]) -> None:
+        """Adopt a loaded space tree, freeze the read-only spaces'
         snapshots and the committed file state used for edit-mode
         gating."""
-        self.panels = tree
+        self.spaces = tree
         self._readonly_snapshots = {
             pid: p for pid, p in tree.items() if p.is_readonly
         }
-        self._panel_snapshots = dict(tree)
-        self._edit_panels &= set(tree)
+        self._space_snapshots = dict(tree)
+        self._edit_spaces &= set(tree)
         # Per-placement diffs: a placement's local changes, so two instances of
         # one blueprint can differ and both come back after a restart.  They
-        # are session state, not part of any panel's schema, so they live in a
-        # sidecar beside the root panel (the session autosave).  See
+        # are session state, not part of any space's schema, so they live in a
+        # sidecar beside the root space (the session autosave).  See
         # `_capture_diffs`.
         stored = {}
         try:
@@ -1639,12 +1735,12 @@ class PatchSpaceDaemon:
     def _merge_placement_diffs(self, nodes: Dict[str, dict]) -> None:
         """Overlay every placement's local changes on the config it loads.
 
-        A diff is a partial panel config (node params, by local id); keys for
+        A diff is a partial space config (node params, by local id); keys for
         nodes the blueprint no longer has are dropped, which is the rebase
         when the blueprint changes underneath."""
         for pid, diff in self._placement_diffs.items():
             for local, entry in (diff.get("nodes") or {}).items():
-                qid = panels.make_id(pid, local)
+                qid = spaces.make_id(pid, local)
                 node = nodes.get(qid)
                 if node is None:
                     continue
@@ -1656,15 +1752,15 @@ class PatchSpaceDaemon:
     def _load_new_placement(self, root_id: str) -> None:
         """Bring up just one newly-added placement subtree, without tearing
         down the rest of the graph (unlike a full reload)."""
-        tree = self._load_panels_tree()
-        self._install_panels(tree)
+        tree = self._load_spaces_tree()
+        self._install_spaces(tree)
         new_ids = {
             pid for pid in tree
-            if pid == root_id or pid.startswith(root_id + panels.NAMESPACE_SEP)
+            if pid == root_id or pid.startswith(root_id + spaces.NAMESPACE_SEP)
         }
         if not new_ids:
             return
-        config = self._flatten_panels(tree, only_panels=new_ids)
+        config = self._flatten_spaces(tree, only_spaces=new_ids)
         # Incremental placement of a live file's sibling: load it in the
         # file's own schema (no migration) so it matches the placements
         # already in the graph; a full session load migrates them all.
@@ -1672,66 +1768,66 @@ class PatchSpaceDaemon:
         self._dirty = True
         self._wake_ticker()
 
-    def _startup_load_panels(self) -> None:
-        tree = self._load_panels_tree()
-        self._install_panels(tree)
-        config = self._flatten_panels(tree)
+    def _startup_load_spaces(self) -> None:
+        tree = self._load_spaces_tree()
+        self._install_spaces(tree)
+        config = self._flatten_spaces(tree)
         if not config["nodes"]:
-            self._panel_mtimes = panels.snapshot(self._panel_dir_paths())
+            self._space_mtimes = spaces.snapshot(self._space_dir_paths())
             return
         logger.info(
-            "Auto-loading %d panel(s), %d node(s)",
+            "Auto-loading %d space(s), %d node(s)",
             max(0, len(tree) - 1), len(config["nodes"]),
         )
         # Full load from disk: bring any legacy node shapes forward.
         self._load_session(config, declarative=False, migrate=True)
-        self._panel_mtimes = panels.snapshot(self._panel_dir_paths())
+        self._space_mtimes = spaces.snapshot(self._space_dir_paths())
         self._dirty = True
 
-    def _build_panels_from_space(self, imperative_only: bool = False,
+    def _build_spaces_from_space(self, imperative_only: bool = False,
                                  use_snapshots: bool = True,
                                  freeze_params: bool = True
-                                 ) -> Dict[str, panels.Panel]:
-        """Serialize the live graph into a panel tree.  Read-only panels
+                                 ) -> Dict[str, spaces.Space]:
+        """Serialize the live graph into a space tree.  Read-only spaces
         keep their frozen snapshot (runtime edits are not persisted);
-        read-write panels and the root are rebuilt from live state.
-        ``use_snapshots=False`` rebuilds read-only panels from live state
+        read-write spaces and the root are rebuilt from live state.
+        ``use_snapshots=False`` rebuilds read-only spaces from live state
         too.  ``freeze_params=False`` also disables the edit-mode parameter
         freezing (used by copy/save-as-json and clone, which want the
         current live state)."""
-        out: Dict[str, panels.Panel] = {}
+        out: Dict[str, spaces.Space] = {}
 
-        def ensure(pid: str) -> panels.Panel:
+        def ensure(pid: str) -> spaces.Space:
             if pid in out:
                 return out[pid]
-            meta = self.panels.get(pid)
+            meta = self.spaces.get(pid)
             if meta is not None:
-                panel = panels.Panel(
+                space = spaces.Space(
                     id=pid, parent=meta.parent, label=meta.label, color=meta.color,
                     mode=meta.mode, x=meta.x, y=meta.y, w=meta.w, h=meta.h,
                     anchored=meta.anchored, path=meta.path, writable=meta.writable,
                     stem=meta.stem, auto_load=meta.auto_load,
                     config={"nodes": {}, "edges": [],
-                            "panels": list(meta.child_entries), "groups": []},
+                            "spaces": list(meta.child_entries), "groups": []},
                 )
             else:
-                panel = panels.Panel(
-                    id=pid, parent=panels.parent_panel(pid),
-                    label=panels.local_of(pid) if pid else "root",
-                    color=panels.DEFAULT_COLOR, mode=panels.MODE_RW,
-                    config={"nodes": {}, "edges": [], "panels": [], "groups": []},
+                space = spaces.Space(
+                    id=pid, parent=spaces.parent_space(pid),
+                    label=spaces.local_of(pid) if pid else "root",
+                    color=spaces.DEFAULT_COLOR, mode=spaces.MODE_RW,
+                    config={"nodes": {}, "edges": [], "spaces": [], "groups": []},
                 )
-            # Read-only panels are not rebuilt from live state (unless the
+            # Read-only spaces are not rebuilt from live state (unless the
             # caller explicitly asks for the current state).
-            if use_snapshots and panel.is_readonly and pid in self._readonly_snapshots:
+            if use_snapshots and space.is_readonly and pid in self._readonly_snapshots:
                 out[pid] = self._readonly_snapshots[pid]
                 return out[pid]
-            out[pid] = panel
-            return panel
+            out[pid] = space
+            return space
 
-        ensure(panels.ROOT_ID)
-        # Preserve existing panels even if empty.
-        for pid in self.panels:
+        ensure(spaces.ROOT_ID)
+        # Preserve existing spaces even if empty.
+        for pid in self.spaces:
             ensure(pid)
 
         with self._lock:
@@ -1740,16 +1836,16 @@ class PatchSpaceDaemon:
                     continue
                 if imperative_only and getattr(node, "declarative", False):
                     continue
-                pid = panels.panel_of(nid)
-                panel = ensure(pid)
+                pid = spaces.space_of(nid)
+                space = ensure(pid)
                 entry = self._export_node_params(nid, node)
                 inner = entry["params"]
-                ox, oy = self._panel_origin(out, pid)
+                ox, oy = self._space_origin(out, pid)
                 if inner.get("x") is not None:
                     inner["x"] = float(inner["x"]) - ox
                 if inner.get("y") is not None:
                     inner["y"] = float(inner["y"]) - oy
-                # Outside a panel's edit mode, write the file's committed
+                # Outside a space's edit mode, write the file's committed
                 # parameter values (only layout stays live), so runtime
                 # knob/switch tweaks aren't persisted until you edit.
                 #
@@ -1758,16 +1854,16 @@ class PatchSpaceDaemon:
                 # - which streams a filter lets through, how much a Replay
                 # Buffer holds - rather than a knob a runtime tweak turns, and
                 # both are edited from the node body while the graph is running.
-                # Freezing them meant setting either inside a panel was silently
+                # Freezing them meant setting either inside a space was silently
                 # lost the next time the file was written, while the same change
                 # at the root level stuck.
                 if (
                     freeze_params
-                    and pid not in self._edit_panels
-                    and pid != panels.ROOT_ID
+                    and pid not in self._edit_spaces
+                    and pid != spaces.ROOT_ID
                 ):
-                    snap = self._panel_snapshots.get(pid)
-                    snap_node = snap.nodes.get(panels.local_of(nid)) if snap else None
+                    snap = self._space_snapshots.get(pid)
+                    snap_node = snap.nodes.get(spaces.local_of(nid)) if snap else None
                     if snap_node:
                         frozen = dict(snap_node.get("params") or {})
                         for key in ("x", "y", "anchored", "exclude",
@@ -1775,7 +1871,7 @@ class PatchSpaceDaemon:
                             if key in inner:
                                 frozen[key] = inner[key]
                         entry["params"] = frozen
-                panel.config["nodes"][panels.local_of(nid)] = entry
+                space.config["nodes"][spaces.local_of(nid)] = entry
             for edge in self.space.edges.values():
                 logical = self._logical_edge(edge)
                 if logical is None:
@@ -1783,101 +1879,101 @@ class PatchSpaceDaemon:
                 if imperative_only and getattr(edge, "declarative", False):
                     continue
                 f, t, tp, fp = logical
-                owner = panels.edge_owner(f, t)
-                panel = ensure(owner)
+                owner = spaces.edge_owner(f, t)
+                space = ensure(owner)
                 entry = {
-                    "from": panels.relative_id(owner, f),
-                    "to": panels.relative_id(owner, t),
+                    "from": spaces.relative_id(owner, f),
+                    "to": spaces.relative_id(owner, t),
                 }
                 if tp != "in":
                     entry["to_port"] = tp
                 if fp != "out":
                     entry["from_port"] = fp
-                panel.config["edges"].append(entry)
+                space.config["edges"].append(entry)
             for gid, g in self.groups.items():
                 if imperative_only and g.get("declarative"):
                     continue
                 members = list(g.get("nodes") or [])
                 if not members:
                     continue
-                owner = panels.panel_of(members[0])
+                owner = spaces.space_of(members[0])
                 for m in members[1:]:
-                    owner = panels.lca(owner, panels.panel_of(m))
-                panel = ensure(owner)
-                panel.config["groups"].append(
+                    owner = spaces.lca(owner, spaces.space_of(m))
+                space = ensure(owner)
+                space.config["groups"].append(
                     {
-                        "id": panels.relative_id(owner, gid),
+                        "id": spaces.relative_id(owner, gid),
                         "label": g.get("label", "Group"),
                         "color": g.get("color"),
-                        "nodes": [panels.relative_id(owner, m) for m in members],
+                        "nodes": [spaces.relative_id(owner, m) for m in members],
                     }
                 )
         # Each placement's geometry lives in its *parent's* child reference
-        # (the panel file is shared), so rewrite the refs from the child
-        # panels we just built.
-        for pid, panel in out.items():
-            if not panel.config.get("panels"):
+        # (the space file is shared), so rewrite the refs from the child
+        # spaces we just built.
+        for pid, space in out.items():
+            if not space.config.get("spaces"):
                 continue
             refs = []
-            for entry in panel.child_entries:
-                name = panels.child_name(entry)
-                stem = panels.child_stem(entry)
-                child = out.get(panels.make_id(pid, name))
+            for entry in space.child_entries:
+                name = spaces.child_name(entry)
+                stem = spaces.child_stem(entry)
+                child = out.get(spaces.make_id(pid, name))
                 if child is not None:
                     refs.append(
-                        panels.child_ref(name, stem, child.placement())
+                        spaces.child_ref(name, stem, child.placement())
                     )
                 else:
                     refs.append(entry)
-            panel.config["panels"] = refs
+            space.config["spaces"] = refs
         return out
 
-    def _write_panels(self) -> None:
-        """Write the root panel and every writable read-write panel.
+    def _write_spaces(self) -> None:
+        """Write the root space and every writable read-write space.
 
-        Order matters: the panel *files* first (a committed change — edit
+        Order matters: the space *files* first (a committed change — edit
         mode, or the canonical placement of a shared file), then the snapshots
         those writes commit, then the per-placement diffs captured against
         those snapshots, and finally the root (the session autosave), which
         carries the diffs.  Capturing before the writes would record a
         committed change as a local diff.
         """
-        tree = self._build_panels_from_space()
+        tree = self._build_spaces_from_space()
         canon = self._canonical_by_stem()
         groups = self._plan_placement_groups()
         written = set()
-        for pid, panel in tree.items():
-            if pid == panels.ROOT_ID:
+        for pid, space in tree.items():
+            if pid == spaces.ROOT_ID:
                 continue
-            if not panel.writable or panel.is_readonly or not panel.path:
+            if not space.writable or space.is_readonly or not space.path:
                 continue
             # One write per file, from the placement that *committed* a change
             # (edit mode).  When several placements share a file and none of
             # them committed, the file keeps its blueprint content: their local
             # changes are their own diffs.  A lone placement writes as before.
-            if panel.path in written:
+            if space.path in written:
                 continue
-            written.add(panel.path)
-            canonical = canon.get(panel.stem or "")
+            written.add(space.path)
+            canonical = canon.get(space.stem or "")
             if canonical:
-                panels.write_file(panel.path, tree.get(canonical, panel))
+                spaces.write_file(space.path, tree.get(canonical, space))
                 continue
-            if len(groups.get(panel.stem or "", [])) > 1:
+            if len(groups.get(space.stem or "", [])) > 1:
                 continue
-            panels.write_file(panel.path, panel)
-        # A panel in edit mode (or one whose change was just written as the
+            spaces.write_file(space.path, space)
+        # A space in edit mode (or one whose change was just written as the
         # canonical placement) has committed; make that the frozen state.
-        for pid in list(self._edit_panels):
+        for pid in list(self._edit_spaces):
             if pid in tree:
-                self._panel_snapshots[pid] = tree[pid]
+                self._space_snapshots[pid] = tree[pid]
         for pid in canon.values():
             if pid in tree:
-                self._panel_snapshots[pid] = tree[pid]
-        root = tree.get(panels.ROOT_ID)
+                self._space_snapshots[pid] = tree[pid]
+        root = tree.get(spaces.ROOT_ID)
         if root is not None:
-            panels.write_file(self.root_panel_path, root)
+            spaces.write_file(self.root_space_path, root)
         # The per-placement diffs ride beside the session: local state, not
-        # part of any panel's schema.
+        # part of any space's schema.
         self._capture_diffs()
         try:
             os.makedirs(os.path.dirname(self._placement_diffs_path), exist_ok=True)
@@ -1887,7 +1983,7 @@ class PatchSpaceDaemon:
                 handle.write("\n")
         except OSError as exc:
             logger.warning("could not write %s: %s", self._placement_diffs_path, exc)
-        self._panel_mtimes = panels.snapshot(self._panel_dir_paths())
+        self._space_mtimes = spaces.snapshot(self._space_dir_paths())
 
     def _placement_differs(self, snap, live, include_params, positions=True):
         """Whether ``live`` differs from committed ``snap``.
@@ -1938,8 +2034,8 @@ class PatchSpaceDaemon:
 
     def _plan_placement_groups(self):
         groups: Dict[str, list] = {}
-        for pid, p in self.panels.items():
-            if pid == panels.ROOT_ID or not p.stem:
+        for pid, p in self.spaces.items():
+            if pid == spaces.ROOT_ID or not p.stem:
                 continue
             groups.setdefault(p.stem, []).append(pid)
         return groups
@@ -1955,7 +2051,7 @@ class PatchSpaceDaemon:
         groups = self._plan_placement_groups()
         if not any(len(v) > 1 for v in groups.values()):
             return {}
-        live_all = self._build_panels_from_space(
+        live_all = self._build_spaces_from_space(
             use_snapshots=False, freeze_params=False
         )
         canon: Dict[str, str] = {}
@@ -1963,9 +2059,9 @@ class PatchSpaceDaemon:
             if len(pids) < 2:
                 continue
             for pid in pids:
-                if pid not in self._edit_panels:
+                if pid not in self._edit_spaces:
                     continue
-                snap = self._panel_snapshots.get(pid)
+                snap = self._space_snapshots.get(pid)
                 live = live_all.get(pid)
                 if snap is not None and live is not None and self._placement_differs(
                     snap, live, True
@@ -1981,16 +2077,16 @@ class PatchSpaceDaemon:
         the user turned, a node they moved) keeps that difference *here* and
         nowhere else: the blueprint file is not touched and the file's other
         placements are not affected — that is what lets two instances of one
-        panel diverge.  The diffs are written into the root panel (the session
-        autosave) by `_write_panels`, and replayed on load.
+        space diverge.  The diffs are written into the root space (the session
+        autosave) by `_write_spaces`, and replayed on load.
         """
-        live_all = self._build_panels_from_space(
+        live_all = self._build_spaces_from_space(
             use_snapshots=False, freeze_params=False
         )
-        for pid, panel in self.panels.items():
-            if pid == panels.ROOT_ID or not panel.stem:
+        for pid, space in self.spaces.items():
+            if pid == spaces.ROOT_ID or not space.stem:
                 continue
-            snap = self._panel_snapshots.get(pid)
+            snap = self._space_snapshots.get(pid)
             live = live_all.get(pid)
             if snap is None or live is None:
                 continue
@@ -2017,265 +2113,265 @@ class PatchSpaceDaemon:
                 # matches).
                 self._placement_diffs.pop(pid, None)
         for pid in list(self._placement_diffs):
-            if pid not in self.panels:
+            if pid not in self.spaces:
                 self._placement_diffs.pop(pid, None)
-    def _cmd_list_panels(self, cmd: dict) -> dict:
+    def _cmd_list_spaces(self, cmd: dict) -> dict:
         files = []
-        for pid, panel in sorted(self.panels.items()):
-            if pid == panels.ROOT_ID:
+        for pid, space in sorted(self.spaces.items()):
+            if pid == spaces.ROOT_ID:
                 continue
             files.append({
                 "id": pid,
-                "name": panels.local_of(pid),
-                "label": panel.label,
-                "color": panel.color,
-                "mode": panel.mode,
-                "readonly": panel.is_readonly,
-                "writable": panel.writable,
-                "auto_load": panel.auto_load,
-                "stem": panel.stem,
-                "path": panel.path,
-                "directory": os.path.dirname(panel.path) if panel.path else None,
-                "nodes": [panels.make_id(pid, n) for n in panel.nodes],
-                "children": panel.child_ids(),
+                "name": spaces.local_of(pid),
+                "label": space.label,
+                "color": space.color,
+                "mode": space.mode,
+                "readonly": space.is_readonly,
+                "writable": space.writable,
+                "auto_load": space.auto_load,
+                "stem": space.stem,
+                "path": space.path,
+                "directory": os.path.dirname(space.path) if space.path else None,
+                "nodes": [spaces.make_id(pid, n) for n in space.nodes],
+                "children": space.child_ids(),
             })
         return {
             "status": "ok",
-            "root": self.root_panel_path,
+            "root": self.root_space_path,
             "directories": [
-                {"path": p, "writable": w} for p, w in self.panel_dirs
+                {"path": p, "writable": w} for p, w in self.space_dirs
             ],
             "files": files,
         }
 
-    def _panel_slug(self, name: str) -> str:
-        """A filesystem-safe panel stem from a display name."""
+    def _space_slug(self, name: str) -> str:
+        """A filesystem-safe space stem from a display name."""
         stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", (name or "").strip()).strip("_")
-        return stem or f"panel_{int(time.time() * 1000)}"
+        return stem or f"space_{int(time.time() * 1000)}"
 
-    def _cmd_create_panel(self, cmd: dict) -> dict:
-        """Create a new panel (a file) and move the selection into it.
+    def _cmd_create_space(self, cmd: dict) -> dict:
+        """Create a new space (a file) and move the selection into it.
 
-        When ``parent_id`` names a panel (the selection's own panel), the
-        new panel is nested inside it; otherwise it is created at the
-        root.  This is the panel form of the old "Declare" action."""
+        When ``parent_id`` names a space (the selection's own space), the
+        new space is nested inside it; otherwise it is created at the
+        root.  This is the space form of the old "Declare" action."""
         name = (cmd.get("name") or "").strip()
         if not name:
             return {"status": "error", "message": "name required"}
-        stem = self._panel_slug(name)
-        parent_id = cmd.get("parent_id", "") or panels.ROOT_ID
-        parent = self.panels.get(parent_id)
+        stem = self._space_slug(name)
+        parent_id = cmd.get("parent_id", "") or spaces.ROOT_ID
+        parent = self.spaces.get(parent_id)
         if parent is None:
-            if parent_id != panels.ROOT_ID:
-                return {"status": "error", "message": f"no panel {parent_id!r}"}
+            if parent_id != spaces.ROOT_ID:
+                return {"status": "error", "message": f"no space {parent_id!r}"}
             # A daemon that hasn't loaded a root file yet still needs one to
             # own top-level children.
-            parent = panels.Panel(
-                id=panels.ROOT_ID, parent=None, label="root",
-                color=panels.DEFAULT_COLOR, mode=panels.MODE_RW,
-                path=self.root_panel_path, writable=True,
-                config={"nodes": {}, "edges": [], "panels": [], "groups": []},
+            parent = spaces.Space(
+                id=spaces.ROOT_ID, parent=None, label="root",
+                color=spaces.DEFAULT_COLOR, mode=spaces.MODE_RW,
+                path=self.root_space_path, writable=True,
+                config={"nodes": {}, "edges": [], "spaces": [], "groups": []},
             )
-            self.panels[panels.ROOT_ID] = parent
+            self.spaces[spaces.ROOT_ID] = parent
         # A unique local name among the parent's children.
         local = stem
         n = 2
         while local in parent.children:
             local = f"{stem}_{n}"
             n += 1
-        new_panel_id = panels.make_id(parent_id, local)
-        if new_panel_id in self.panels:
-            return {"status": "error", "message": f"panel {new_panel_id!r} exists"}
+        new_space_id = spaces.make_id(parent_id, local)
+        if new_space_id in self.spaces:
+            return {"status": "error", "message": f"space {new_space_id!r} exists"}
         target_dir = next(
-            (d for d, w in self.panel_dirs if d and w), None
+            (d for d, w in self.space_dirs if d and w), None
         )
         if target_dir is None:
-            return {"status": "error", "message": "no writable panel directory"}
-        path = os.path.join(target_dir, local + panels.PANEL_SUFFIX)
+            return {"status": "error", "message": "no writable space directory"}
+        path = os.path.join(target_dir, local + spaces.SPACE_SUFFIX)
         node_ids = list(cmd.get("node_ids") or [])
         moved: List[str] = []
-        px, py = self._panel_origin(self.panels, parent_id)
+        px, py = self._space_origin(self.spaces, parent_id)
         with self._lock:
             for nid in node_ids:
                 if nid not in self.space.nodes:
                     continue
-                new_id = panels.make_id(new_panel_id, panels.local_of(nid))
+                new_id = spaces.make_id(new_space_id, spaces.local_of(nid))
                 if new_id in self.space.nodes:
                     continue
                 try:
                     self._rename_owned_node(nid, new_id)
                     moved.append(new_id)
                 except (KeyError, ValueError) as exc:
-                    logger.warning("create_panel move %r failed: %s", nid, exc)
-            mode = panels.MODE_RO if cmd.get("readonly") else panels.MODE_RW
-            self.panels[new_panel_id] = panels.Panel(
-                id=new_panel_id, parent=parent_id,
+                    logger.warning("create_space move %r failed: %s", nid, exc)
+            mode = spaces.MODE_RO if cmd.get("readonly") else spaces.MODE_RW
+            self.spaces[new_space_id] = spaces.Space(
+                id=new_space_id, parent=parent_id,
                 label=cmd.get("label") or name,
-                color=cmd.get("color") or panels.DEFAULT_COLOR,
+                color=cmd.get("color") or spaces.DEFAULT_COLOR,
                 mode=mode, path=path, writable=True, stem=local,
-                # New panels start pinned/paused so the layout doesn't shove
-                # them around the moment they're created (the panel header's
+                # New spaces start pinned/paused so the layout doesn't shove
+                # them around the moment they're created (the space header's
                 # physics toggle re-arms them).
                 anchored=True,
                 x=float(cmd.get("x", 0.0) or 0.0) - px,
                 y=float(cmd.get("y", 0.0) or 0.0) - py,
-                w=max(panels.MIN_W, float(cmd.get("w", panels.DEFAULT_W) or 0.0)),
-                h=max(panels.MIN_H, float(cmd.get("h", panels.DEFAULT_H) or 0.0)),
-                config={"nodes": {}, "edges": [], "panels": [], "groups": []},
+                w=max(spaces.MIN_W, float(cmd.get("w", spaces.DEFAULT_W) or 0.0)),
+                h=max(spaces.MIN_H, float(cmd.get("h", spaces.DEFAULT_H) or 0.0)),
+                config={"nodes": {}, "edges": [], "spaces": [], "groups": []},
             )
             if local not in parent.children:
-                parent.config.setdefault("panels", []).append(
-                    panels.child_ref(local, local)
+                parent.config.setdefault("spaces", []).append(
+                    spaces.child_ref(local, local)
                 )
         self._standardize_nodes(moved)
-        # Refresh the in-memory tree from live state so list_panels (and a
+        # Refresh the in-memory tree from live state so list_spaces (and a
         # later reset) sees the just-moved nodes as members immediately.
-        self._install_panels(self._build_panels_from_space())
-        self._write_panels()
+        self._install_spaces(self._build_spaces_from_space())
+        self._write_spaces()
         self._dirty = True
         self._wake_ticker()
         return {
-            "status": "ok", "panel_id": new_panel_id,
+            "status": "ok", "space_id": new_space_id,
             "moved": moved, "path": path,
         }
 
-    def _cmd_delete_panel(self, cmd: dict) -> dict:
-        """Delete a panel file.
+    def _cmd_delete_space(self, cmd: dict) -> dict:
+        """Delete a space file.
 
-        ``keep_nodes`` (default False) removes just the panel container and
-        moves its direct nodes up into the parent panel (re-qualified);
-        otherwise the panel's whole subtree - nodes and child panels - is
+        ``keep_nodes`` (default False) removes just the space container and
+        moves its direct nodes up into the parent space (re-qualified);
+        otherwise the space's whole subtree - nodes and child spaces - is
         removed with it."""
-        panel_id = cmd.get("panel_id", "")
-        panel = self.panels.get(panel_id)
-        if not panel_id or panel is None:
-            return {"status": "error", "message": f"no panel {panel_id!r}"}
-        if panel.is_readonly or not panel.writable:
-            return {"status": "error", "message": f"panel {panel_id!r} is read-only"}
+        space_id = cmd.get("space_id", "")
+        space = self.spaces.get(space_id)
+        if not space_id or space is None:
+            return {"status": "error", "message": f"no space {space_id!r}"}
+        if space.is_readonly or not space.writable:
+            return {"status": "error", "message": f"space {space_id!r} is read-only"}
         keep_nodes = bool(cmd.get("keep_nodes"))
-        parent_id = panel.parent or ""
-        prefix = panel_id + panels.NAMESPACE_SEP
+        parent_id = space.parent or ""
+        prefix = space_id + spaces.NAMESPACE_SEP
         with self._lock:
             if keep_nodes:
-                if panel.children:
+                if space.children:
                     return {
                         "status": "error",
-                        "message": "panel has child panels; delete them first",
+                        "message": "space has child spaces; delete them first",
                     }
                 for nid in [
                     n for n in self.space.nodes
-                    if panels.panel_of(n) == panel_id
+                    if spaces.space_of(n) == space_id
                 ]:
-                    new_id = panels.make_id(parent_id, panels.local_of(nid))
+                    new_id = spaces.make_id(parent_id, spaces.local_of(nid))
                     if new_id == nid or new_id in self.space.nodes:
                         continue
                     try:
                         self._rename_owned_node(nid, new_id)
                     except (KeyError, ValueError) as exc:
                         logger.warning(
-                            "delete_panel keep %r -> %r failed: %s",
+                            "delete_space keep %r -> %r failed: %s",
                             nid, new_id, exc,
                         )
-                self.panels.pop(panel_id, None)
+                self.spaces.pop(space_id, None)
             else:
                 for nid in [
                     n for n in self.space.nodes
-                    if n == panel_id or n.startswith(prefix)
+                    if n == space_id or n.startswith(prefix)
                 ]:
                     self.space.remove_node(nid)
                 for pid in [
-                    p for p in self.panels
-                    if p == panel_id or p.startswith(prefix)
+                    p for p in self.spaces
+                    if p == space_id or p.startswith(prefix)
                 ]:
-                    self.panels.pop(pid, None)
-            parent = self.panels.get(parent_id)
+                    self.spaces.pop(pid, None)
+            parent = self.spaces.get(parent_id)
             if parent is not None:
-                local = panels.local_of(panel_id)
-                parent.config["panels"] = [
-                    s for s in parent.config.get("panels", [])
-                    if panels.child_name(s) != local
+                local = spaces.local_of(space_id)
+                parent.config["spaces"] = [
+                    s for s in parent.config.get("spaces", [])
+                    if spaces.child_name(s) != local
                 ]
         others = [
-            p for p in self.panels.values()
-            if p.id != panel_id and p.stem and p.stem == panel.stem
+            p for p in self.spaces.values()
+            if p.id != space_id and p.stem and p.stem == space.stem
         ]
-        if not others and panel.path and os.path.isfile(panel.path):
+        if not others and space.path and os.path.isfile(space.path):
             try:
-                os.remove(panel.path)
+                os.remove(space.path)
             except OSError as exc:
-                logger.warning("Could not delete panel file %r: %s", panel.path, exc)
-        # Refresh the in-memory tree so list_panels reflects the moved or
+                logger.warning("Could not delete space file %r: %s", space.path, exc)
+        # Refresh the in-memory tree so list_spaces reflects the moved or
         # removed nodes immediately.
-        self._install_panels(self._build_panels_from_space())
-        self._write_panels()
+        self._install_spaces(self._build_spaces_from_space())
+        self._write_spaces()
         self._dirty = True
         self._wake_ticker()
-        return {"status": "ok", "panel_id": panel_id, "kept_nodes": keep_nodes}
+        return {"status": "ok", "space_id": space_id, "kept_nodes": keep_nodes}
 
-    def _cmd_delete_panel_file(self, cmd: dict) -> dict:
-        """Delete a panel *file* (the backend) from the side view.
+    def _cmd_delete_space_file(self, cmd: dict) -> dict:
+        """Delete a space *file* (the backend) from the side view.
 
-        Unlike ``delete_panel`` (one placement, with a keep-nodes choice),
+        Unlike ``delete_space`` (one placement, with a keep-nodes choice),
         this removes the file itself, so every loaded placement of it goes
-        too - along with each placement's subtree (nested child panels)."""
+        too - along with each placement's subtree (nested child spaces)."""
         stem = (cmd.get("stem") or "").strip()
         if not stem:
             return {"status": "error", "message": "stem required"}
-        path, writable = self._panel_file_path(stem)
+        path, writable = self._space_file_path(stem)
         if not path:
-            return {"status": "error", "message": f"no panel file {stem!r}"}
+            return {"status": "error", "message": f"no space file {stem!r}"}
         if not writable:
-            return {"status": "error", "message": f"panel file {stem!r} is read-only"}
+            return {"status": "error", "message": f"space file {stem!r} is read-only"}
         placements = [
-            pid for pid, panel in self.panels.items()
-            if pid != panels.ROOT_ID and panel.stem == stem
+            pid for pid, space in self.spaces.items()
+            if pid != spaces.ROOT_ID and space.stem == stem
         ]
         with self._lock:
-            # A placement's subtree includes its nested child panels; gather
-            # every doomed panel id before mutating anything.
+            # A placement's subtree includes its nested child spaces; gather
+            # every doomed space id before mutating anything.
             doomed = set()
             for pid in placements:
-                prefix = pid + panels.NAMESPACE_SEP
-                for p in self.panels:
+                prefix = pid + spaces.NAMESPACE_SEP
+                for p in self.spaces:
                     if p == pid or p.startswith(prefix):
                         doomed.add(p)
             for pid in doomed:
-                prefix = pid + panels.NAMESPACE_SEP
+                prefix = pid + spaces.NAMESPACE_SEP
                 for nid in [
                     n for n in self.space.nodes
                     if n == pid or n.startswith(prefix)
                 ]:
                     self.space.remove_node(nid)
             for pid in placements:
-                parent = self.panels.get(self.panels[pid].parent or "")
+                parent = self.spaces.get(self.spaces[pid].parent or "")
                 if parent is None:
                     continue
-                local = panels.local_of(pid)
-                parent.config["panels"] = [
-                    s for s in parent.config.get("panels", [])
-                    if panels.child_name(s) != local
+                local = spaces.local_of(pid)
+                parent.config["spaces"] = [
+                    s for s in parent.config.get("spaces", [])
+                    if spaces.child_name(s) != local
                 ]
             for pid in doomed:
-                self.panels.pop(pid, None)
+                self.spaces.pop(pid, None)
         try:
             if os.path.isfile(path):
                 os.remove(path)
         except OSError as exc:
-            logger.warning("Could not delete panel file %r: %s", path, exc)
+            logger.warning("Could not delete space file %r: %s", path, exc)
             return {"status": "error", "message": f"could not delete {path}: {exc}"}
-        self._prune_empty_panel_dirs(os.path.dirname(path))
-        self._install_panels(self._build_panels_from_space())
-        self._write_panels()
+        self._prune_empty_space_dirs(os.path.dirname(path))
+        self._install_spaces(self._build_spaces_from_space())
+        self._write_spaces()
         self._dirty = True
         self._wake_ticker()
         return {"status": "ok", "stem": stem, "removed": sorted(placements)}
 
-    def _prune_empty_panel_dirs(self, start: str) -> None:
-        """Remove now-empty sub-folders left after deleting a panel file,
-        walking up but never past a configured panel directory."""
+    def _prune_empty_space_dirs(self, start: str) -> None:
+        """Remove now-empty sub-folders left after deleting a space file,
+        walking up but never past a configured space directory."""
         start = os.path.abspath(start)
         bases = [
-            os.path.abspath(d) for d, _w in self.panel_dirs if d
+            os.path.abspath(d) for d, _w in self.space_dirs if d
         ]
         cur = start
         while True:
@@ -2291,145 +2387,145 @@ class PatchSpaceDaemon:
                 return
             cur = os.path.dirname(cur)
 
-    def _cmd_edit_panel(self, cmd: dict) -> dict:
-        """Change a writable panel's display label and/or color."""
-        panel_id = cmd.get("panel_id", "")
-        panel = self.panels.get(panel_id)
-        if not panel_id or panel is None:
-            return {"status": "error", "message": f"no panel {panel_id!r}"}
-        if panel.is_readonly or not panel.writable:
-            return {"status": "error", "message": f"panel {panel_id!r} is read-only"}
+    def _cmd_edit_space(self, cmd: dict) -> dict:
+        """Change a writable space's display label and/or color."""
+        space_id = cmd.get("space_id", "")
+        space = self.spaces.get(space_id)
+        if not space_id or space is None:
+            return {"status": "error", "message": f"no space {space_id!r}"}
+        if space.is_readonly or not space.writable:
+            return {"status": "error", "message": f"space {space_id!r} is read-only"}
         label = (cmd.get("label") or "").strip()
         if label:
-            panel.label = label
+            space.label = label
         color = (cmd.get("color") or "").strip()
         if color:
-            panel.color = color
+            space.color = color
         if cmd.get("auto_load") is not None:
-            panel.auto_load = bool(cmd["auto_load"])
-        self._write_panels()
+            space.auto_load = bool(cmd["auto_load"])
+        self._write_spaces()
         self._dirty = True
         self._wake_ticker()
         return {
             "status": "ok",
-            "panel_id": panel_id,
-            "label": panel.label,
-            "color": panel.color,
+            "space_id": space_id,
+            "label": space.label,
+            "color": space.color,
         }
 
-    def _cmd_export_panel(self, cmd: dict) -> dict:
-        """Return a panel's *current* file payload (live state, even for a
-        read-only panel) for the GUI's copy/save actions."""
-        panel_id = cmd.get("panel_id", "")
-        if panel_id not in self.panels:
-            return {"status": "error", "message": f"no panel {panel_id!r}"}
-        tree = self._build_panels_from_space(use_snapshots=False, freeze_params=False)
-        panel = tree.get(panel_id)
-        if panel is None:
-            return {"status": "error", "message": f"no panel {panel_id!r}"}
+    def _cmd_export_space(self, cmd: dict) -> dict:
+        """Return a space's *current* file payload (live state, even for a
+        read-only space) for the GUI's copy/save actions."""
+        space_id = cmd.get("space_id", "")
+        if space_id not in self.spaces:
+            return {"status": "error", "message": f"no space {space_id!r}"}
+        tree = self._build_spaces_from_space(use_snapshots=False, freeze_params=False)
+        space = tree.get(space_id)
+        if space is None:
+            return {"status": "error", "message": f"no space {space_id!r}"}
         return {
             "status": "ok",
-            "panel_id": panel_id,
-            "payload": panels.build_payload(panel),
+            "space_id": space_id,
+            "payload": spaces.build_payload(space),
         }
 
-    def _cmd_clone_panel(self, cmd: dict) -> dict:
-        """Duplicate a panel (its current live nodes/edges/groups) into a
-        new panel file, offset slightly, then reload so the copy is live."""
-        panel_id = cmd.get("panel_id", "")
-        src = self.panels.get(panel_id)
-        if panel_id == "" or src is None:
-            return {"status": "error", "message": f"no panel {panel_id!r}"}
+    def _cmd_clone_space(self, cmd: dict) -> dict:
+        """Duplicate a space (its current live nodes/edges/groups) into a
+        new space file, offset slightly, then reload so the copy is live."""
+        space_id = cmd.get("space_id", "")
+        src = self.spaces.get(space_id)
+        if space_id == "" or src is None:
+            return {"status": "error", "message": f"no space {space_id!r}"}
         name = (cmd.get("name") or "").strip()
         if not name:
             return {"status": "error", "message": "name required"}
-        stem = self._panel_slug(name)
-        if stem in self.panels:
-            return {"status": "error", "message": f"panel {stem!r} already exists"}
+        stem = self._space_slug(name)
+        if stem in self.spaces:
+            return {"status": "error", "message": f"space {stem!r} already exists"}
         src_dir = None
         if src.path and src.writable and not src.is_readonly:
             src_dir = os.path.dirname(src.path)
         target_dir = src_dir if src_dir and os.path.isdir(src_dir) else next(
-            (d for d, w in self.panel_dirs if d and w), None
+            (d for d, w in self.space_dirs if d and w), None
         )
         if target_dir is None:
-            return {"status": "error", "message": "no writable panel directory"}
-        path = os.path.join(target_dir, stem + panels.PANEL_SUFFIX)
-        live = self._build_panels_from_space(use_snapshots=False, freeze_params=False).get(panel_id)
+            return {"status": "error", "message": "no writable space directory"}
+        path = os.path.join(target_dir, stem + spaces.SPACE_SUFFIX)
+        live = self._build_spaces_from_space(use_snapshots=False, freeze_params=False).get(space_id)
         if live is None:
-            return {"status": "error", "message": f"no panel {panel_id!r}"}
-        clone = panels.Panel(
+            return {"status": "error", "message": f"no space {space_id!r}"}
+        clone = spaces.Space(
             id=stem, parent=src.parent, label=name, color=src.color,
-            mode=panels.MODE_RW, x=src.x + 40.0, y=src.y + 40.0,
+            mode=spaces.MODE_RW, x=src.x + 40.0, y=src.y + 40.0,
             w=src.w, h=src.h, path=path, writable=True,
             auto_load=src.auto_load,
-            # A fresh clone starts pinned/paused like a newly created panel.
+            # A fresh clone starts pinned/paused like a newly created space.
             anchored=True,
             config={
                 "nodes": dict(live.config.get("nodes") or {}),
                 "edges": list(live.config.get("edges") or []),
-                "panels": [],
+                "spaces": [],
                 "groups": list(live.config.get("groups") or []),
             },
         )
-        panels.write_file(path, clone)
+        spaces.write_file(path, clone)
         # Persist the parent's child list so the reload finds the clone.
-        parent = self.panels.get(src.parent or "")
+        parent = self.spaces.get(src.parent or "")
         if parent is not None:
             if stem not in parent.children:
-                parent.config.setdefault("panels", []).append(
-                    panels.child_ref(stem, stem)
+                parent.config.setdefault("spaces", []).append(
+                    spaces.child_ref(stem, stem)
                 )
             if parent.path:
-                parent_now = self._build_panels_from_space(
+                parent_now = self._build_spaces_from_space(
                     use_snapshots=False
                 ).get(parent.id)
                 if parent_now is not None:
                     if stem not in parent_now.children:
-                        parent_now.config.setdefault("panels", []).append(
-                            panels.child_ref(stem, stem)
+                        parent_now.config.setdefault("spaces", []).append(
+                            spaces.child_ref(stem, stem)
                         )
-                    panels.write_file(parent.path, parent_now)
+                    spaces.write_file(parent.path, parent_now)
         # Bring the clone's nodes up (without reloading everything).
         self._load_new_placement(stem)
-        return {"status": "ok", "panel_id": stem, "path": path}
+        return {"status": "ok", "space_id": stem, "path": path}
 
-    def _panel_file_path(self, stem: str):
-        """Locate a panel file by stem across the load dirs (later dirs
+    def _space_file_path(self, stem: str):
+        """Locate a space file by stem across the load dirs (later dirs
         shadow earlier).  Returns (path, writable) or (None, False)."""
         found = None
-        for directory, writable in self.panel_dirs:
+        for directory, writable in self.space_dirs:
             if not directory:
                 continue
-            for path in panels.list_files(directory):
-                if panels.file_stem(path) == stem:
+            for path in spaces.list_files(directory):
+                if spaces.file_stem(path) == stem:
                     found = (path, writable)
         return found if found else (None, False)
 
-    def _cmd_list_panel_files(self, cmd: dict) -> dict:
-        """The panel *files* (backends), de-duplicated by stem; the side
+    def _cmd_list_space_files(self, cmd: dict) -> dict:
+        """The space *files* (backends), de-duplicated by stem; the side
         view lists these and each can be placed and auto-loaded."""
         by_stem = {}
-        for directory, writable in self.panel_dirs:
+        for directory, writable in self.space_dirs:
             if not directory:
                 continue
-            for path in panels.list_files(directory):
-                stem = panels.file_stem(path)
-                raw = panels.read_file(path) or {}
-                config = panels.config_from_raw(raw)
+            for path in spaces.list_files(directory):
+                stem = spaces.file_stem(path)
+                raw = spaces.read_file(path) or {}
+                config = spaces.config_from_raw(raw)
                 children = [
-                    panels.child_name(c)
-                    for c in (config.get("panels") or [])
+                    spaces.child_name(c)
+                    for c in (config.get("spaces") or [])
                 ]
                 rel = os.path.relpath(path, directory)
                 by_stem[stem] = {
                     "stem": stem,
                     "label": raw.get("label") or stem,
-                    "color": raw.get("color") or panels.DEFAULT_COLOR,
-                    "mode": panels.mode_from_raw(raw),
+                    "color": raw.get("color") or spaces.DEFAULT_COLOR,
+                    "mode": spaces.mode_from_raw(raw),
                     "auto_load": bool(raw.get("auto_load")),
                     "path": path,
-                    # Sub-folder relative to the panel directory ("" for a
+                    # Sub-folder relative to the space directory ("" for a
                     # top-level file); the side view groups rows by it.
                     "folder": os.path.dirname(rel),
                     "writable": writable,
@@ -2438,19 +2534,19 @@ class PatchSpaceDaemon:
                 }
         return {
             "status": "ok",
-            "panel_files": True,
+            "space_files": True,
             "files": [by_stem[s] for s in sorted(by_stem)],
         }
 
-    def _cmd_set_panel_file_autoload(self, cmd: dict) -> dict:
-        """Toggle a panel file's auto-load flag (writes the file)."""
+    def _cmd_set_space_file_autoload(self, cmd: dict) -> dict:
+        """Toggle a space file's auto-load flag (writes the file)."""
         stem = (cmd.get("stem") or "").strip()
-        path, writable = self._panel_file_path(stem)
+        path, writable = self._space_file_path(stem)
         if not path:
-            return {"status": "error", "message": f"no panel file {stem!r}"}
+            return {"status": "error", "message": f"no space file {stem!r}"}
         if not writable:
-            return {"status": "error", "message": f"panel file {stem!r} is read-only"}
-        raw = panels.read_file(path) or {}
+            return {"status": "error", "message": f"space file {stem!r} is read-only"}
+        raw = spaces.read_file(path) or {}
         raw["auto_load"] = bool(cmd.get("enabled"))
         tmp = path + ".tmp"
         with open(tmp, "w") as f:
@@ -2458,146 +2554,146 @@ class PatchSpaceDaemon:
             f.write("\n")
         os.replace(tmp, path)
         # Reflect it on any loaded placement of the same file.
-        for p in self.panels.values():
+        for p in self.spaces.values():
             if p.stem == stem:
                 p.auto_load = bool(cmd.get("enabled"))
-        self._panel_mtimes = panels.snapshot(self._panel_dir_paths())
+        self._space_mtimes = spaces.snapshot(self._space_dir_paths())
         return {"status": "ok", "stem": stem, "auto_load": bool(cmd.get("enabled"))}
 
-    def _cmd_place_panel(self, cmd: dict) -> dict:
-        """Add a placement of a panel file under ``parent_id`` (root by
+    def _cmd_place_space(self, cmd: dict) -> dict:
+        """Add a placement of a space file under ``parent_id`` (root by
         default), then reload so its nodes come up."""
         stem = (cmd.get("stem") or "").strip()
         parent_id = cmd.get("parent_id", "")
         if not stem:
             return {"status": "error", "message": "stem required"}
-        path, writable = self._panel_file_path(stem)
+        path, writable = self._space_file_path(stem)
         if not path:
-            return {"status": "error", "message": f"no panel file {stem!r}"}
-        parent = self.panels.get(parent_id)
+            return {"status": "error", "message": f"no space file {stem!r}"}
+        parent = self.spaces.get(parent_id)
         if parent is None:
-            return {"status": "error", "message": f"no panel {parent_id!r}"}
+            return {"status": "error", "message": f"no space {parent_id!r}"}
         name = (cmd.get("name") or stem).strip() or stem
         placement = {
             "x": float(cmd.get("x", 0.0) or 0.0),
             "y": float(cmd.get("y", 0.0) or 0.0),
-            "w": max(panels.MIN_W, float(cmd.get("w", panels.DEFAULT_W) or 0.0)),
-            "h": max(panels.MIN_H, float(cmd.get("h", panels.DEFAULT_H) or 0.0)),
-            # Pinned/paused by default so a freshly placed panel holds still.
+            "w": max(spaces.MIN_W, float(cmd.get("w", spaces.DEFAULT_W) or 0.0)),
+            "h": max(spaces.MIN_H, float(cmd.get("h", spaces.DEFAULT_H) or 0.0)),
+            # Pinned/paused by default so a freshly placed space holds still.
             "anchored": bool(cmd.get("anchored", True)),
         }
         with self._lock:
             existing = set(parent.children)
-            base = panels.file_stem(name) or stem
+            base = spaces.file_stem(name) or stem
             local = base
             n = 2
             while local in existing:
                 local = f"{base}_{n}"
                 n += 1
-            ref = panels.child_ref(local, stem, placement)
-            parent.config.setdefault("panels", []).append(ref)
+            ref = spaces.child_ref(local, stem, placement)
+            parent.config.setdefault("spaces", []).append(ref)
             # Persist the parent file so the reload finds the new child.
             if parent.path:
-                parent_now = self._build_panels_from_space().get(parent.id)
+                parent_now = self._build_spaces_from_space().get(parent.id)
                 if parent_now is not None:
                     if local not in parent_now.children:
-                        parent_now.config.setdefault("panels", []).append(ref)
-                    panels.write_file(parent.path, parent_now)
-        self._load_new_placement(panels.make_id(parent_id, local))
+                        parent_now.config.setdefault("spaces", []).append(ref)
+                    spaces.write_file(parent.path, parent_now)
+        self._load_new_placement(spaces.make_id(parent_id, local))
         return {"status": "ok", "stem": stem, "name": local, "parent_id": parent_id}
 
-    def _cmd_remove_panel_placement(self, cmd: dict) -> dict:
+    def _cmd_remove_space_placement(self, cmd: dict) -> dict:
         """Remove this placement (and its nodes) from the workspace, but
-        keep the panel file."""
-        panel_id = cmd.get("panel_id", "")
-        panel = self.panels.get(panel_id)
-        if not panel_id or panel_id == panels.ROOT_ID or panel is None:
-            return {"status": "error", "message": f"no panel {panel_id!r}"}
-        parent_id = panel.parent or ""
-        prefix = panel_id + panels.NAMESPACE_SEP
+        keep the space file."""
+        space_id = cmd.get("space_id", "")
+        space = self.spaces.get(space_id)
+        if not space_id or space_id == spaces.ROOT_ID or space is None:
+            return {"status": "error", "message": f"no space {space_id!r}"}
+        parent_id = space.parent or ""
+        prefix = space_id + spaces.NAMESPACE_SEP
         with self._lock:
             for nid in [
                 n for n in list(self.space.nodes)
-                if n == panel_id or n.startswith(prefix)
+                if n == space_id or n.startswith(prefix)
             ]:
                 self.space.remove_node(nid)
             for pid in [
-                p for p in list(self.panels)
-                if p == panel_id or p.startswith(prefix)
+                p for p in list(self.spaces)
+                if p == space_id or p.startswith(prefix)
             ]:
-                self.panels.pop(pid, None)
-            for store in (self._readonly_snapshots, self._panel_snapshots):
+                self.spaces.pop(pid, None)
+            for store in (self._readonly_snapshots, self._space_snapshots):
                 for pid in [
                     p for p in list(store)
-                    if p == panel_id or p.startswith(prefix)
+                    if p == space_id or p.startswith(prefix)
                 ]:
                     store.pop(pid, None)
-            self._edit_panels = {
-                p for p in self._edit_panels
-                if p != panel_id and not p.startswith(prefix)
+            self._edit_spaces = {
+                p for p in self._edit_spaces
+                if p != space_id and not p.startswith(prefix)
             }
-            parent = self.panels.get(parent_id)
+            parent = self.spaces.get(parent_id)
             if parent is not None:
-                local = panels.local_of(panel_id)
-                parent.config["panels"] = [
-                    s for s in parent.config.get("panels", [])
-                    if panels.child_name(s) != local
+                local = spaces.local_of(space_id)
+                parent.config["spaces"] = [
+                    s for s in parent.config.get("spaces", [])
+                    if spaces.child_name(s) != local
                 ]
-        self._write_panels()
+        self._write_spaces()
         self._dirty = True
         self._wake_ticker()
-        return {"status": "ok", "panel_id": panel_id}
+        return {"status": "ok", "space_id": space_id}
 
-    def _cmd_reload_panels(self, cmd: dict) -> dict:
-        with self._panel_lock:
-            self._panel_reloading = True
+    def _cmd_reload_spaces(self, cmd: dict) -> dict:
+        with self._space_lock:
+            self._space_reloading = True
             self._begin_heavy_load()
             try:
-                tree = self._load_panels_tree()
-                self._install_panels(tree)
-                config = self._flatten_panels(tree)
-                self._remove_panels_from_space()
+                tree = self._load_spaces_tree()
+                self._install_spaces(tree)
+                config = self._flatten_spaces(tree)
+                self._remove_spaces_from_space()
                 # Full reload from disk: migrate any legacy nodes.
                 result = self._load_session(config, declarative=True, migrate=True)
-                result["panels"] = len(tree) - 1
+                result["spaces"] = len(tree) - 1
                 self._dirty = True
                 self._wake_ticker()
                 return result
             finally:
-                self._panel_reloading = False
+                self._space_reloading = False
                 self._end_heavy_load()
-                self._panel_mtimes = panels.snapshot(self._panel_dir_paths())
+                self._space_mtimes = spaces.snapshot(self._space_dir_paths())
 
-    def _cmd_set_panel_layout(self, cmd: dict) -> dict:
-        """Set a panel's placement (x/y/w/h/anchored).
+    def _cmd_set_space_layout(self, cmd: dict) -> dict:
+        """Set a space's placement (x/y/w/h/anchored).
 
-        Moving the panel also shifts its subtree's *nodes* by the same
-        delta so the panel keeps its contents (the GUI sends matching
+        Moving the space also shifts its subtree's *nodes* by the same
+        delta so the space keeps its contents (the GUI sends matching
         absolute positions afterwards, so this is idempotent).  Doing it
-        here keeps node-relative-to-panel stable even if an autosave lands
+        here keeps node-relative-to-space stable even if an autosave lands
         before the GUI's node layout arrives, which otherwise looked like a
         content change and rebuilt the file's other placements."""
-        panel_id = cmd.get("panel_id", "")
-        panel = self.panels.get(panel_id)
-        if panel is None:
-            return {"status": "error", "message": f"no panel {panel_id!r}"}
-        old_x, old_y = panel.x, panel.y
+        space_id = cmd.get("space_id", "")
+        space = self.spaces.get(space_id)
+        if space is None:
+            return {"status": "error", "message": f"no space {space_id!r}"}
+        old_x, old_y = space.x, space.y
         if cmd.get("x") is not None:
-            panel.x = float(cmd["x"])
+            space.x = float(cmd["x"])
         if cmd.get("y") is not None:
-            panel.y = float(cmd["y"])
+            space.y = float(cmd["y"])
         if cmd.get("w") is not None:
-            panel.w = max(panels.MIN_W, float(cmd["w"]))
+            space.w = max(spaces.MIN_W, float(cmd["w"]))
         if cmd.get("h") is not None:
-            panel.h = max(panels.MIN_H, float(cmd["h"]))
+            space.h = max(spaces.MIN_H, float(cmd["h"]))
         if cmd.get("anchored") is not None:
-            panel.anchored = bool(cmd["anchored"])
-        dx, dy = panel.x - old_x, panel.y - old_y
+            space.anchored = bool(cmd["anchored"])
+        dx, dy = space.x - old_x, space.y - old_y
         if dx or dy:
-            prefix = panel_id + panels.NAMESPACE_SEP
+            prefix = space_id + spaces.NAMESPACE_SEP
             with self._lock:
                 for nid, node in self.space.nodes.items():
-                    if nid != panel_id and not nid.startswith(prefix):
+                    if nid != space_id and not nid.startswith(prefix):
                         continue
                     if getattr(node, "x", None) is not None:
                         node.x += dx
@@ -2605,51 +2701,51 @@ class PatchSpaceDaemon:
                         node.y += dy
         self._dirty = True
         self._wake_ticker()
-        return {"status": "ok", "panel_id": panel_id}
+        return {"status": "ok", "space_id": space_id}
 
     @staticmethod
-    def _in_panel_subtree(node_id: str, panel_id: str) -> bool:
-        return node_id == panel_id or node_id.startswith(
-            panel_id + panels.NAMESPACE_SEP
+    def _in_space_subtree(node_id: str, space_id: str) -> bool:
+        return node_id == space_id or node_id.startswith(
+            space_id + spaces.NAMESPACE_SEP
         )
 
-    def _revert_panel(self, panel_id: str, snapshots) -> bool:
-        """Revert one panel's subtree to a snapshot: membership, positions,
-        edges, groups and params.  Edges that merely cross into the panel
+    def _revert_space(self, space_id: str, snapshots) -> bool:
+        """Revert one space's subtree to a snapshot: membership, positions,
+        edges, groups and params.  Edges that merely cross into the space
         (owned by an ancestor, hence imperative) are preserved and
         re-added."""
-        with self._panel_lock:
-            self._panel_reloading = True
+        with self._space_lock:
+            self._space_reloading = True
             self._begin_heavy_load()
             try:
                 subtree = {
                     pid: p for pid, p in snapshots.items()
-                    if pid == panel_id
-                    or pid.startswith(panel_id + panels.NAMESPACE_SEP)
+                    if pid == space_id
+                    or pid.startswith(space_id + spaces.NAMESPACE_SEP)
                 }
-                if panel_id not in subtree:
+                if space_id not in subtree:
                     return False
                 imperative = [
                     e for e in self._build_export_config(imperative_only=True)["edges"]
-                    if self._in_panel_subtree(e.get("from", ""), panel_id)
-                    or self._in_panel_subtree(e.get("to", ""), panel_id)
+                    if self._in_space_subtree(e.get("from", ""), space_id)
+                    or self._in_space_subtree(e.get("to", ""), space_id)
                 ]
                 with self._lock:
                     for nid in [
                         n for n in self.space.nodes
-                        if self._in_panel_subtree(n, panel_id)
+                        if self._in_space_subtree(n, space_id)
                     ]:
                         self.space.remove_node(nid)
                     for gid in list(self.groups):
                         members = self.groups[gid].get("nodes") or []
                         if members and all(
-                            self._in_panel_subtree(m, panel_id) for m in members
+                            self._in_space_subtree(m, space_id) for m in members
                         ):
                             self.groups.pop(gid, None)
                     for pid, p in subtree.items():
-                        self.panels[pid] = p
-                config = self._flatten_panels(
-                    {**self.panels, **subtree}, only_panels=set(subtree)
+                        self.spaces[pid] = p
+                config = self._flatten_spaces(
+                    {**self.spaces, **subtree}, only_spaces=set(subtree)
                 )
                 # Rebuilding one placement's subtree to match its sibling
                 # keeps the file's own schema (see _load_new_placement).
@@ -2659,40 +2755,40 @@ class PatchSpaceDaemon:
                 self._wake_ticker()
                 return True
             except Exception:
-                logger.exception("revert panel %r failed", panel_id)
+                logger.exception("revert space %r failed", space_id)
                 return False
             finally:
-                self._panel_reloading = False
+                self._space_reloading = False
                 self._end_heavy_load()
 
-    def _cmd_reset_panel(self, cmd: dict) -> dict:
-        """Revert one read-only panel's subtree to its file snapshot."""
-        panel_id = cmd.get("panel_id", "")
-        if panel_id not in self._readonly_snapshots:
-            return {"status": "error", "message": f"no read-only panel {panel_id!r}"}
-        if not self._revert_panel(panel_id, self._readonly_snapshots):
-            return {"status": "error", "message": f"reset {panel_id!r} failed"}
-        return {"status": "ok", "panel_id": panel_id, "reverted": True}
+    def _cmd_reset_space(self, cmd: dict) -> dict:
+        """Revert one read-only space's subtree to its file snapshot."""
+        space_id = cmd.get("space_id", "")
+        if space_id not in self._readonly_snapshots:
+            return {"status": "error", "message": f"no read-only space {space_id!r}"}
+        if not self._revert_space(space_id, self._readonly_snapshots):
+            return {"status": "error", "message": f"reset {space_id!r} failed"}
+        return {"status": "ok", "space_id": space_id, "reverted": True}
 
-    def _refresh_panel_params_from_file(self, panel_id: str) -> bool:
-        """Re-apply a panel file's parameter values to its live nodes
+    def _refresh_space_params_from_file(self, space_id: str) -> bool:
+        """Re-apply a space file's parameter values to its live nodes
         *without* recreating them.
 
         Entering edit mode only needs to discard runtime knob/switch tweaks
         and restore the file's values; membership, edges and layout already
-        track the file, so a full node teardown/rebuild (``_revert_panel``)
+        track the file, so a full node teardown/rebuild (``_revert_space``)
         is unnecessary - and was re-loading every effect each time."""
-        panel = self.panels.get(panel_id)
-        if panel is None or not panel.path:
+        space = self.spaces.get(space_id)
+        if space is None or not space.path:
             return False
-        raw = panels.read_file(panel.path)
+        raw = spaces.read_file(space.path)
         if raw is None:
             return False
-        cfg = panels.config_from_raw(raw)
-        ox, oy = self._panel_origin(self.panels, panel_id)
+        cfg = spaces.config_from_raw(raw)
+        ox, oy = self._space_origin(self.spaces, space_id)
         with self._lock:
             for local, ncfg in (cfg.get("nodes") or {}).items():
-                node = self.space.nodes.get(panels.make_id(panel_id, local))
+                node = self.space.nodes.get(spaces.make_id(space_id, local))
                 if node is None:
                     continue
                 params = dict(ncfg.get("params") or {})
@@ -2704,13 +2800,13 @@ class PatchSpaceDaemon:
             self.space.sync()
         return True
 
-    def _apply_panel_params(self, panel_id: str, source) -> None:
+    def _apply_space_params(self, space_id: str, source) -> None:
         """Apply another placement's parameter values to this placement's
         live nodes in place (no reload) - used to sync an edit across
         placements of the same file."""
         with self._lock:
             for local, cfg in (source.config.get("nodes") or {}).items():
-                node = self.space.nodes.get(panels.make_id(panel_id, local))
+                node = self.space.nodes.get(spaces.make_id(space_id, local))
                 if node is None:
                     continue
                 params = dict(cfg.get("params") or {})
@@ -2719,145 +2815,145 @@ class PatchSpaceDaemon:
                 self._apply_node_config(node, params)
             self.space.sync()
 
-    def _cmd_set_panel_edit_mode(self, cmd: dict) -> dict:
-        """Enter/leave a panel's edit mode.
+    def _cmd_set_space_edit_mode(self, cmd: dict) -> dict:
+        """Enter/leave a space's edit mode.
 
-        Entering refreshes the panel to the file state, then parameter
+        Entering refreshes the space to the file state, then parameter
         changes are written back to the file while editing."""
-        panel_id = cmd.get("panel_id", "")
-        panel = self.panels.get(panel_id)
-        if panel is None or panel_id == panels.ROOT_ID:
-            return {"status": "error", "message": f"no panel {panel_id!r}"}
+        space_id = cmd.get("space_id", "")
+        space = self.spaces.get(space_id)
+        if space is None or space_id == spaces.ROOT_ID:
+            return {"status": "error", "message": f"no space {space_id!r}"}
         enabled = bool(cmd.get("enabled"))
         if enabled:
-            if panel.is_readonly:
+            if space.is_readonly:
                 return {
                     "status": "error",
-                    "message": f"panel {panel_id!r} is read-only",
+                    "message": f"space {space_id!r} is read-only",
                 }
-            if not self._refresh_panel_params_from_file(panel_id):
-                return {"status": "error", "message": f"refresh {panel_id!r} failed"}
-            self._edit_panels.add(panel_id)
+            if not self._refresh_space_params_from_file(space_id):
+                return {"status": "error", "message": f"refresh {space_id!r} failed"}
+            self._edit_spaces.add(space_id)
         else:
-            self._edit_panels.discard(panel_id)
+            self._edit_spaces.discard(space_id)
         self._dirty = True
         self._wake_ticker()
-        return {"status": "ok", "panel_id": panel_id, "edit_mode": enabled}
+        return {"status": "ok", "space_id": space_id, "edit_mode": enabled}
 
-    def _cmd_move_panel(self, cmd: dict) -> dict:
-        """Nest one panel inside another (``parent_id``, "" = root).
+    def _cmd_move_space(self, cmd: dict) -> dict:
+        """Nest one space inside another (``parent_id``, "" = root).
 
-        The moved panel keeps its absolute placement; every panel in its
+        The moved space keeps its absolute placement; every space in its
         subtree is re-keyed under the new path and every node id is
         re-qualified (edges are rebuilt by rename, groups re-pointed), so
         arbitrary nesting depth round-trips through the files."""
-        panel_id = cmd.get("panel_id", "")
+        space_id = cmd.get("space_id", "")
         new_parent = cmd.get("parent_id", "")
-        panel = self.panels.get(panel_id)
-        if not panel_id or panel_id == panels.ROOT_ID or panel is None:
-            return {"status": "error", "message": f"no panel {panel_id!r}"}
-        if panel.is_readonly or not panel.writable:
-            return {"status": "error", "message": f"panel {panel_id!r} is read-only"}
+        space = self.spaces.get(space_id)
+        if not space_id or space_id == spaces.ROOT_ID or space is None:
+            return {"status": "error", "message": f"no space {space_id!r}"}
+        if space.is_readonly or not space.writable:
+            return {"status": "error", "message": f"space {space_id!r} is read-only"}
         if new_parent:
-            target = self.panels.get(new_parent)
+            target = self.spaces.get(new_parent)
             if target is None:
-                return {"status": "error", "message": f"no panel {new_parent!r}"}
+                return {"status": "error", "message": f"no space {new_parent!r}"}
             if target.is_readonly or not target.writable:
                 return {
                     "status": "error",
-                    "message": f"panel {new_parent!r} is read-only",
+                    "message": f"space {new_parent!r} is read-only",
                 }
-        if new_parent == panel_id or (
+        if new_parent == space_id or (
             new_parent
-            and new_parent.startswith(panel_id + panels.NAMESPACE_SEP)
+            and new_parent.startswith(space_id + spaces.NAMESPACE_SEP)
         ):
-            return {"status": "error", "message": "cannot nest a panel in itself"}
-        old_parent = panel.parent or ""
+            return {"status": "error", "message": "cannot nest a space in itself"}
+        old_parent = space.parent or ""
         if old_parent == new_parent:
-            return {"status": "ok", "panel_id": panel_id, "parent_id": new_parent}
-        prefix = panel_id + panels.NAMESPACE_SEP
+            return {"status": "ok", "space_id": space_id, "parent_id": new_parent}
+        prefix = space_id + spaces.NAMESPACE_SEP
         with self._lock:
             subtree = [
-                p for p in self.panels
-                if p == panel_id or p.startswith(prefix)
+                p for p in self.spaces
+                if p == space_id or p.startswith(prefix)
             ]
-            new_root = panels.make_id(new_parent, panels.local_of(panel_id))
-            id_map = {p: new_root + p[len(panel_id):] for p in subtree}
+            new_root = spaces.make_id(new_parent, spaces.local_of(space_id))
+            id_map = {p: new_root + p[len(space_id):] for p in subtree}
             for old, new in id_map.items():
-                if new in self.panels and new not in subtree:
+                if new in self.spaces and new not in subtree:
                     return {"status": "error", "message": f"{new!r} already exists"}
-            old_abs = self._panel_origin(self.panels, panel_id)
+            old_abs = self._space_origin(self.spaces, space_id)
             new_abs = (
-                self._panel_origin(self.panels, new_parent)
+                self._space_origin(self.spaces, new_parent)
                 if new_parent else (0.0, 0.0)
             )
-            panel.x = old_abs[0] - new_abs[0]
-            panel.y = old_abs[1] - new_abs[1]
+            space.x = old_abs[0] - new_abs[0]
+            space.y = old_abs[1] - new_abs[1]
             # Re-qualify every node in the subtree (rebuilds their edges).
             for nid in [
                 n for n in list(self.space.nodes)
-                if panels.panel_of(n) in id_map
+                if spaces.space_of(n) in id_map
             ]:
-                new_nid = panels.make_id(
-                    id_map[panels.panel_of(nid)], panels.local_of(nid)
+                new_nid = spaces.make_id(
+                    id_map[spaces.space_of(nid)], spaces.local_of(nid)
                 )
                 self._rename_owned_node(nid, new_nid)
-            # Re-key the panels (and their snapshots).
+            # Re-key the spaces (and their snapshots).
             moved = {}
             for p in subtree:
-                obj = self.panels.pop(p)
+                obj = self.spaces.pop(p)
                 obj.id = id_map[p]
-                obj.parent = new_parent if p == panel_id else id_map.get(
+                obj.parent = new_parent if p == space_id else id_map.get(
                     obj.parent, new_parent
                 )
                 moved[obj.id] = obj
-            self.panels.update(moved)
-            for store in (self._readonly_snapshots, self._panel_snapshots):
+            self.spaces.update(moved)
+            for store in (self._readonly_snapshots, self._space_snapshots):
                 for old, new in id_map.items():
                     if old in store:
                         store[new] = store.pop(old)
-            self._edit_panels = {id_map.get(p, p) for p in self._edit_panels}
-            local = panels.local_of(panel_id)
-            ref = panels.child_ref(local, panel.stem or local)
-            op = self.panels.get(old_parent)
+            self._edit_spaces = {id_map.get(p, p) for p in self._edit_spaces}
+            local = spaces.local_of(space_id)
+            ref = spaces.child_ref(local, space.stem or local)
+            op = self.spaces.get(old_parent)
             if op is not None:
-                op.config["panels"] = [
-                    s for s in op.config.get("panels", [])
-                    if panels.child_name(s) != local
+                op.config["spaces"] = [
+                    s for s in op.config.get("spaces", [])
+                    if spaces.child_name(s) != local
                 ]
-            np_ = self.panels.get(new_parent)
+            np_ = self.spaces.get(new_parent)
             if np_ is not None and local not in np_.children:
-                np_.config.setdefault("panels", []).append(ref)
-        self._install_panels(self._build_panels_from_space())
-        self._write_panels()
+                np_.config.setdefault("spaces", []).append(ref)
+        self._install_spaces(self._build_spaces_from_space())
+        self._write_spaces()
         self._dirty = True
         self._wake_ticker()
-        return {"status": "ok", "panel_id": id_map[panel_id], "parent_id": new_parent}
+        return {"status": "ok", "space_id": id_map[space_id], "parent_id": new_parent}
 
     def _cmd_move_nodes(self, cmd: dict) -> dict:
-        """Reparent a selection into ``panel_id``.  Node ids are
-        re-qualified to the new panel, which re-homes every incident edge
+        """Reparent a selection into ``space_id``.  Node ids are
+        re-qualified to the new space, which re-homes every incident edge
         to its new least-common-ancestor automatically.  Refused (for the
-        GUI to snap back) when the node's current panel or the target is
+        GUI to snap back) when the node's current space or the target is
         read-only."""
-        panel_id = cmd.get("panel_id", "")
+        space_id = cmd.get("space_id", "")
         node_ids = list(cmd.get("node_ids") or [])
-        target = self.panels.get(panel_id)
+        target = self.spaces.get(space_id)
         if target is None:
-            return {"status": "error", "message": f"no panel {panel_id!r}"}
+            return {"status": "error", "message": f"no space {space_id!r}"}
         moved, refused = [], []
         with self._lock:
             for nid in node_ids:
                 if nid not in self.space.nodes:
                     continue
-                cur = panels.panel_of(nid)
-                if cur == panel_id:
+                cur = spaces.space_of(nid)
+                if cur == space_id:
                     continue
-                cur_panel = self.panels.get(cur)
-                if (cur_panel is not None and cur_panel.is_readonly) or target.is_readonly:
+                cur_space = self.spaces.get(cur)
+                if (cur_space is not None and cur_space.is_readonly) or target.is_readonly:
                     refused.append(nid)
                     continue
-                new_id = panels.make_id(panel_id, panels.local_of(nid))
+                new_id = spaces.make_id(space_id, spaces.local_of(nid))
                 if new_id in self.space.nodes:
                     refused.append(nid)
                     continue
@@ -2870,25 +2966,25 @@ class PatchSpaceDaemon:
         self._standardize_nodes(moved)
         if moved:
             # Keep the in-memory tree in step with the renames so
-            # list_panels and reset_panel see the new membership.
-            self._install_panels(self._build_panels_from_space())
+            # list_spaces and reset_space see the new membership.
+            self._install_spaces(self._build_spaces_from_space())
             self._dirty = True
             self._wake_ticker()
         return {"status": "ok", "moved": moved, "refused": refused}
 
-    def _poll_panels(self) -> None:
-        """Cheap mtime scan on the tick; reload when a panel file is
+    def _poll_spaces(self) -> None:
+        """Cheap mtime scan on the tick; reload when a space file is
         added, removed or touched."""
-        if self._panel_reloading:
+        if self._space_reloading:
             return
         now = time.monotonic()
-        if now < self._panel_poll_at:
+        if now < self._space_poll_at:
             return
-        self._panel_poll_at = now + PANEL_POLL_S
-        state = panels.snapshot(self._panel_dir_paths())
-        if state != self._panel_mtimes:
-            self._panel_mtimes = state
-            self._cmd_reload_panels({})
+        self._space_poll_at = now + SPACE_POLL_S
+        state = spaces.snapshot(self._space_dir_paths())
+        if state != self._space_mtimes:
+            self._space_mtimes = state
+            self._cmd_reload_spaces({})
 
     def _begin_heavy_load(self) -> None:
         with self._loading_lock:
@@ -2917,11 +3013,11 @@ class PatchSpaceDaemon:
             self._end_heavy_load()
 
     def _load_startup_sessions(self) -> None:
-        """Boot the graph from the panel tree (root autosave + panel
+        """Boot the graph from the space tree (root autosave + space
         files), migrating the legacy session/declarative shapes."""
-        self._startup_load_panels()
+        self._startup_load_spaces()
 
-    def _remove_panels_from_space(self) -> None:
+    def _remove_spaces_from_space(self) -> None:
         """Drop every declarative node/edge/group so the files can be
         re-applied cleanly.  Imperative edges that touched declarative
         nodes are captured first (by the caller) and re-added after."""
@@ -3090,13 +3186,13 @@ class PatchSpaceDaemon:
 
     def _auto_export_session(self) -> None:
         try:
-            # Panels are the persistence unit now: the root panel (and
-            # every writable read-write panel) is rewritten from live
-            # state; read-only panels keep their frozen snapshot so a
+            # Spaces are the persistence unit now: the root space (and
+            # every writable read-write space) is rewritten from live
+            # state; read-only spaces keep their frozen snapshot so a
             # runtime edit is reverted on the next boot.
-            self._write_panels()
+            self._write_spaces()
         except OSError as exc:
-            logger.warning("Failed to auto-save panels: %s", exc)
+            logger.warning("Failed to auto-save spaces: %s", exc)
 
     # ------------------------------------------------------------------
     # staged session load
@@ -3914,7 +4010,7 @@ class PatchSpaceDaemon:
         (a Sensitivity gate's pre/post pass-throughs).  rename_node()
         rebuilds the incident edges, so this stays live - no teardown.
         Group membership is re-pointed too, so a selected set dragged into
-        another panel keeps the groups it was part of."""
+        another space keeps the groups it was part of."""
         hidden = [
             (prefix + old_id, prefix + new_id)
             for prefix in (_SENS_PRE_PREFIX, _SENS_POST_PREFIX)
@@ -4016,7 +4112,7 @@ class PatchSpaceDaemon:
             return cls(node_id)
         if cls in (WarpInNode, WarpOutNode, BooleanWarpInNode, BooleanWarpOutNode):
             return cls(node_id, g("warp_name", ""))
-        if cls in (PanelInNode, PanelOutNode, BoolPanelInNode, BoolPanelOutNode):
+        if cls in (SpaceInNode, SpaceOutNode, BoolSpaceInNode, BoolSpaceOutNode):
             return cls(node_id, g("port_name", ""), g("description", ""))
         if cls is ExcludeFilterNode:
             return cls(node_id, g("pattern", ""))
@@ -5309,7 +5405,7 @@ class PatchSpaceDaemon:
                 "nodes": self._serialize_nodes(),
                 "edges": self._serialize_edges(),
                 "groups": groups,
-                "panels": self._serialize_panels(),
+                "spaces": self._serialize_spaces(),
                 "loading": self._startup_loading,
                 # The deployment's UI preference, so a client does not have to
                 # be launched with the session environment for it to apply.
@@ -5461,10 +5557,10 @@ class PatchSpaceDaemon:
         and the socket protocol is one-in-flight.  The GUI's get_nodes
         poll observes the nodes land, so the reply just says the rebuild
         started."""
-        # Panel nodes are deliberately left out of the captured config: a
+        # Space nodes are deliberately left out of the captured config: a
         # rebuild should re-derive them from their files (that is the whole
         # point), not replay the possibly-edited in-memory copies.  They are
-        # brought back by _startup_load_panels() below.
+        # brought back by _startup_load_spaces() below.
         config = self._build_export_config(imperative_only=True)
         self._teardown_public_graph()
         with self._lock:
@@ -5474,9 +5570,9 @@ class PatchSpaceDaemon:
             self._begin_heavy_load()
             try:
                 self._load_session(config)
-                # Second pass: re-derive panel nodes from disk, then wire the
+                # Second pass: re-derive space nodes from disk, then wire the
                 # imperative edges that target them.
-                self._startup_load_panels()
+                self._startup_load_spaces()
             except Exception:
                 logger.exception("Background rebuild failed")
             finally:
@@ -5548,32 +5644,32 @@ class PatchSpaceDaemon:
     # serialization
     # ------------------------------------------------------------------
 
-    def _serialize_panels(self) -> list:
-        """Panel metadata for get_nodes.  Panel placement is stored on the
-        daemon; a panel's on-canvas bounds are derived by the GUI from its
+    def _serialize_spaces(self) -> list:
+        """Space metadata for get_nodes.  Space placement is stored on the
+        daemon; a space's on-canvas bounds are derived by the GUI from its
         member nodes (the box auto-fits, with an explicit min w/h)."""
         with self._lock:
             return [
                 {
                     "id": pid,
-                    "parent": panel.parent or "",
-                    "label": panel.label,
-                    "color": panel.color,
-                    "mode": panel.mode,
-                    "readonly": panel.is_readonly,
-                    "writable": panel.writable,
-                    "x": panel.x,
-                    "y": panel.y,
-                    "w": panel.w,
-                    "h": panel.h,
-                    "anchored": panel.anchored,
-                    "stem": panel.stem,
-                    "auto_load": panel.auto_load,
-                    "edit_mode": pid in self._edit_panels,
-                    "path": panel.path,
-                    "children": panel.child_ids(),
+                    "parent": space.parent or "",
+                    "label": space.label,
+                    "color": space.color,
+                    "mode": space.mode,
+                    "readonly": space.is_readonly,
+                    "writable": space.writable,
+                    "x": space.x,
+                    "y": space.y,
+                    "w": space.w,
+                    "h": space.h,
+                    "anchored": space.anchored,
+                    "stem": space.stem,
+                    "auto_load": space.auto_load,
+                    "edit_mode": pid in self._edit_spaces,
+                    "path": space.path,
+                    "children": space.child_ids(),
                 }
-                for pid, panel in self.panels.items()
+                for pid, space in self.spaces.items()
             ]
 
     def _serialize_nodes(self) -> dict:
@@ -5984,6 +6080,7 @@ class PatchSpaceDaemon:
         # moves the display over.
         if "type" in cmd:
             return self._protocol.handle(cmd, conn or protocol_mod.Connection())
+        cmd = _normalize_legacy_command(cmd)
         command = cmd.get("command")
         try:
             if command == "add_node":
@@ -6050,40 +6147,40 @@ class PatchSpaceDaemon:
                 response = self._cmd_export_config(cmd)
             elif command == "load_session":
                 response = self._cmd_load_session(cmd)
-            elif command == "reload_panels":
-                response = self._cmd_reload_panels(cmd)
-            elif command == "list_panels":
-                response = self._cmd_list_panels(cmd)
-            elif command == "set_panel_layout":
-                response = self._cmd_set_panel_layout(cmd)
-            elif command == "reset_panel":
-                response = self._cmd_reset_panel(cmd)
-            elif command == "set_panel_edit_mode":
-                response = self._cmd_set_panel_edit_mode(cmd)
+            elif command == "reload_spaces":
+                response = self._cmd_reload_spaces(cmd)
+            elif command == "list_spaces":
+                response = self._cmd_list_spaces(cmd)
+            elif command == "set_space_layout":
+                response = self._cmd_set_space_layout(cmd)
+            elif command == "reset_space":
+                response = self._cmd_reset_space(cmd)
+            elif command == "set_space_edit_mode":
+                response = self._cmd_set_space_edit_mode(cmd)
             elif command == "move_nodes":
                 response = self._cmd_move_nodes(cmd)
-            elif command == "move_panel":
-                response = self._cmd_move_panel(cmd)
-            elif command == "create_panel":
-                response = self._cmd_create_panel(cmd)
-            elif command == "delete_panel":
-                response = self._cmd_delete_panel(cmd)
-            elif command == "delete_panel_file":
-                response = self._cmd_delete_panel_file(cmd)
-            elif command == "edit_panel":
-                response = self._cmd_edit_panel(cmd)
-            elif command == "export_panel":
-                response = self._cmd_export_panel(cmd)
-            elif command == "clone_panel":
-                response = self._cmd_clone_panel(cmd)
-            elif command == "list_panel_files":
-                response = self._cmd_list_panel_files(cmd)
-            elif command == "set_panel_file_autoload":
-                response = self._cmd_set_panel_file_autoload(cmd)
-            elif command == "place_panel":
-                response = self._cmd_place_panel(cmd)
-            elif command == "remove_panel_placement":
-                response = self._cmd_remove_panel_placement(cmd)
+            elif command == "move_space":
+                response = self._cmd_move_space(cmd)
+            elif command == "create_space":
+                response = self._cmd_create_space(cmd)
+            elif command == "delete_space":
+                response = self._cmd_delete_space(cmd)
+            elif command == "delete_space_file":
+                response = self._cmd_delete_space_file(cmd)
+            elif command == "edit_space":
+                response = self._cmd_edit_space(cmd)
+            elif command == "export_space":
+                response = self._cmd_export_space(cmd)
+            elif command == "clone_space":
+                response = self._cmd_clone_space(cmd)
+            elif command == "list_space_files":
+                response = self._cmd_list_space_files(cmd)
+            elif command == "set_space_file_autoload":
+                response = self._cmd_set_space_file_autoload(cmd)
+            elif command == "place_space":
+                response = self._cmd_place_space(cmd)
+            elif command == "remove_space_placement":
+                response = self._cmd_remove_space_placement(cmd)
             elif command == "connect_ports":
                 response = self._cmd_connect_ports(cmd)
             elif command == "disconnect_ports":
@@ -6215,12 +6312,14 @@ class PatchSpaceDaemon:
                 pass
 
 
-def main():
-    import argparse
+def build_parser():
+    """The daemon's command line.
 
-    # SOCKET_PATH is read here (as the flag's default) and reassigned below,
-    # so the global declaration has to come first in this scope.
-    global SOCKET_PATH
+    Split out of `main` so a test can exercise the flags without running a
+    daemon.  `--panel-dir`/`--root-panel` are the pre-rename spellings and
+    stay accepted (same destination, so an old service unit or a stale
+    launcher keeps working); they go away, with the other aliases, in S1."""
+    import argparse
 
     parser = argparse.ArgumentParser(
         prog="patchspace-daemon", description="Patch Space daemon"
@@ -6234,17 +6333,21 @@ def main():
         "/tmp/patchspace.sock)",
     )
     parser.add_argument(
-        "--panel-dir",
+        "--space-dir",
+        "--panel-dir",  # legacy spelling (S0)
+        dest="space_dir",
         action="append",
         default=None,
         metavar="PATH[:rw|:ro]",
-        help="Directory to load panel files from (repeatable; later dirs "
+        help="Directory to load space files from (repeatable; later dirs "
         "shadow earlier).  Suffix :ro marks it unwritable.",
     )
     parser.add_argument(
-        "--root-panel",
-        default=DEFAULT_ROOT_PANEL,
-        help="Path of the root panel file (session autosave).",
+        "--root-space",
+        "--root-panel",  # legacy spelling (S0)
+        dest="root_space",
+        default=DEFAULT_ROOT_SPACE,
+        help="Path of the root space file (session autosave).",
     )
     parser.add_argument(
         "--modules-config",
@@ -6253,25 +6356,42 @@ def main():
         help="Which built-in modules are enabled (default: "
         "$PATCHSPACE_MODULES_CONFIG, else ~/.config/patchspace/modules.json).",
     )
-    args = parser.parse_args()
+    return parser
+
+
+def parse_space_dirs(specs: Optional[List[str]]) -> Optional[List[tuple]]:
+    """``PATH[:rw|:ro]`` specs -> ``[(path, writable), ...]``.
+
+    No suffix (or an unusable one) is read-write, which is also what a path
+    that contains a colon needs (only the *last* ``:`` is a suffix)."""
+    if not specs:
+        return None
+    space_dirs: List[tuple] = []
+    for spec in specs:
+        path, _, mode = spec.rpartition(":")
+        if mode not in ("rw", "ro") or not path:
+            path, mode = spec, "rw"
+        space_dirs.append((path, mode == "rw"))
+    return space_dirs
+
+
+def main():
+    # SOCKET_PATH is read here (as the flag's default) and reassigned below,
+    # so the global declaration has to come first in this scope.
+    global SOCKET_PATH
+
+    args = build_parser().parse_args()
 
     # The server and the single-instance guard read SOCKET_PATH straight off
     # the module global, so the flag lands there (declared above).
     SOCKET_PATH = args.socket
 
-    panel_dirs = None
-    if args.panel_dir:
-        panel_dirs = []
-        for spec in args.panel_dir:
-            path, _, mode = spec.rpartition(":")
-            if mode not in ("rw", "ro") or not path:
-                path, mode = spec, "rw"
-            panel_dirs.append((path, mode == "rw"))
+    space_dirs = parse_space_dirs(args.space_dir)
 
     _install_log_ring()
     daemon = PatchSpaceDaemon(
-        panel_dirs=panel_dirs,
-        root_panel_path=args.root_panel,
+        space_dirs=space_dirs,
+        root_space_path=args.root_space,
         modules_config_path=args.modules_config,
     )
     try:

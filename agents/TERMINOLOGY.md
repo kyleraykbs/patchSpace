@@ -12,8 +12,14 @@ that isn't here, ask (and then add it).  When a mapping here is a guess, it is m
 | "the patchspace" / "patch space" | the whole app: daemon `main.py` + canvas `gui/` |
 | "the daemon" / "the backend" | `main.py`, `PatchSpaceDaemon` (owns the live PipeWire graph) |
 | "the GUI" / "the canvas" | `gui/patchspace_widget.py` (`PatchSpaceGraphWidget`) |
-| "session" / "save" | the root panel file (`~/.cache/patchspace/last_session.json`) |
-| "panel" | `panels.py` panel: a nestable, file-backed container of nodes |
+| "session" / "save" | the root space file (`~/.cache/patchspace/last_session.json`) |
+| "space" (until 2026-10-15: **"panel"**) | `spaces.py` space: a nestable, file-backed container of nodes |
+
+The container was called a **panel** until S0 (`agents/SPACES.md`, 2026-10-15), and
+Kyle still says "panel" for it.  `space` is now the word in code, files, the
+protocol, the daemon flags and the Nix options; the *old* spellings are still
+read for one release - the exact list is in `agents/NOTES.md` ("S0 aliases").
+("side panel"/"panel" in the UI sense - a GTK panel - stays a panel.)
 
 ## Graph vocabulary
 
@@ -47,9 +53,9 @@ that isn't here, ask (and then add it).  When a mapping here is a guess, it is m
 | "~/" (in a path) | stored as written, expanded by the daemon at play time (`os.path.expanduser`) |
 | "slider" | `control="volume" / "gain" / "wetdry" / "sensitivity"` |
 | "the green dot / the number" | `spec.indicator="playing"` → `_draw_play_indicator` (`playing` count) |
-| "gear / hamburger / three dots" | settings gear (`show_settings_dialog`), panel hamburger, node menu |
-| "anchor" / "pin" / "pause physics" | `anchored` flag; `_panel_is_paused` for a panel |
-| "the side panel" | the panels side view (`main_window._build_panels_view`), or the Add-Node panel |
+| "gear / hamburger / three dots" | settings gear (`show_settings_dialog`), space hamburger, node menu |
+| "anchor" / "pin" / "pause physics" | `anchored` flag; `_space_is_paused` for a space |
+| "the side panel" | the *spaces* side view (`main_window._build_spaces_view`), or the Add-Node panel - a UI panel, not a space |
 
 ## Behaviour words
 
@@ -60,7 +66,7 @@ that isn't here, ask (and then add it).  When a mapping here is a guess, it is m
 | "black box" / "module" | a DSP plugin load (LADSPA/LV2 filter-chain, echo-cancel) |
 | "reload the interior" | `_coalesce_reload` → `reload_module()` (load-time controls) |
 | "wiring" / "it's wiring" | `edge_wired` (a poll-level "this edge's links aren't live yet") |
-| "declare" | the declarative panel files (`--panel-dir`, read-only panels) |
+| "declare" | the declarative space files (`--space-dir`, read-only spaces) |
 
 ## Other repos Kyle references
 
@@ -70,6 +76,6 @@ that isn't here, ask (and then add it).  When a mapping here is a guess, it is m
 
 ## To confirm (guessed, not yet heard from Kyle)
 
-* "chip" → the panel-color square at a node's bottom-left (`_panel_of_node` chip)?
-* "the box" → a panel box vs the node box - he has said both; ask which.
-* "stamp" / "water-mark" → the EDIT MODE overlay on a panel in edit mode.
+* "chip" → the space-color square at a node's bottom-left (`_space_of_node` chip)?
+* "the box" → a space box vs the node box - he has said both; ask which.
+* "stamp" / "water-mark" → the EDIT MODE overlay on a space in edit mode.

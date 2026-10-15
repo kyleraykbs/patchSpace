@@ -98,6 +98,11 @@ def declarations(type_map: Mapping[str, type]) -> List[Dict[str, Any]]:
 
 
 def legacy_aliases() -> Dict[str, str]:
-    """Pre-rename type keys this module still answers to (a panel or
-    session written under one loads and renders as its canonical type)."""
+    """Pre-rename type keys this module still answers to (a space or
+    session written under one loads and renders as its canonical type).
+
+    Two renames contribute: PatchBay's `patchbay_device`/`patchbay_mic_device`
+    and the S0 panel -> space ones (`panel_in`/`panel_out`/`bool_panel_in`/
+    `bool_panel_out` -> their `space_*` spellings - a type id is a persistent
+    contract).  Read only: what `declarations()` announces is canonical."""
     return dict(_payload().get("legacy_aliases", {}))

@@ -50,30 +50,34 @@ let
     groups = mergeGroups (a.groups or [ ]) (b.groups or [ ]);
   };
 
-  # Serializable-only view of a panel: everything the daemon's panel file
+  # Serializable-only view of a space: everything the daemon's space file
   # format knows, with the imports merged *under* the Nix-side definition -
-  # the panel's own `nodes`/`edges` come last, so Nix wins per node and per
-  # edge (that is the whole point of writing a panel in Nix on top of an
+  # the space's own `nodes`/`edges` come last, so Nix wins per node and per
+  # edge (that is the whole point of writing a space in Nix on top of an
   # export).
   #
-  # An import may be a path to JSON (what `export_config.py` wrote, or a panel
+  # An import may be a path to JSON (what `export_config.py` wrote, or a space
   # file the GUI exported) or an inline attrset; the GUI has export paths for
-  # both shapes, so accept either.
+  # both shapes, so accept either.  The pre-rename `"panel"` marker (S0:
+  # panel -> space) is read too, so an export written before the rename is
+  # still unwrapped to its config rather than merged as a bare one; the alias
+  # goes away in S1.
   normalise = raw:
-    if (raw.type or null) == "panel" then (raw.config or { }) else raw;
+    let marker = raw.type or null;
+    in if marker == "space" || marker == "panel" then (raw.config or { }) else raw;
 
   readConfig = p:
     normalise (builtins.fromJSON (builtins.readFile p));
 
   asConfig = p: if builtins.isPath p || builtins.isString p then readConfig p else normalise p;
 
-  panelConfig = panel:
-    foldl' mergeOne empty (map asConfig (panel.imports or [ ])
-      ++ [ { nodes = panel.nodes; edges = panel.edges; groups = panel.groups; } ]);
+  spaceConfig = space:
+    foldl' mergeOne empty (map asConfig (space.imports or [ ])
+      ++ [ { nodes = space.nodes; edges = space.edges; groups = space.groups; } ]);
 
 in
 {
-  inherit edgeKey mergeEdges mergeGroups mergeOne panelConfig normalise
+  inherit edgeKey mergeEdges mergeGroups mergeOne spaceConfig normalise
     readConfig asConfig empty;
   mergeConfigs = configs: foldl' mergeOne empty (map asConfig configs);
 }

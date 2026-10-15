@@ -5,13 +5,13 @@
 # It runs a *private* PipeWire + WirePlumber in a temp runtime dir (the recipe
 # in agents/NOTES.md — never the live session, and the daemon's orphan sweep is
 # pointed at an instance the user has nothing on), starts the daemon on a temp
-# socket with a temp panel dir, and drives the whole thing over that socket:
+# socket with a temp space dir, and drives the whole thing over that socket:
 #
 #   * the module set (`patchspace-modules` list, disable/enable)
-#   * a declarative panel loading, its nodes online
+#   * a declarative space loading, its nodes online
 #   * the primitives module: the daemon creates a node, the module runs it,
 #     a control reaches it, the values it computes come back
-#   * two placements of one panel diverging (phase 4's per-placement diffs)
+#   * two placements of one space diverging (phase 4's per-placement diffs)
 #
 # Everything is torn down at the end, including the private PipeWire.
 #
@@ -41,7 +41,7 @@ check() { # check <description> <expected> <actual>
   if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (expected '$2', got '$3')"; fi
 }
 
-mkdir -p "$RT/run" "$RT/config/wireplumber/wireplumber.conf.d" "$RT/panels" "$RT/cache"
+mkdir -p "$RT/run" "$RT/config/wireplumber/wireplumber.conf.d" "$RT/spaces" "$RT/cache"
 chmod 700 "$RT/run"
 cat > "$RT/config/wireplumber/wireplumber.conf.d/90-no-hardware.conf" << 'EOF'
 wireplumber.profiles = {
@@ -63,7 +63,7 @@ mkdir -p "$XDG_DATA_HOME" "$HOME"
 
 export PYTHONPATH="$SRC${PYTHONPATH:+:$PYTHONPATH}"
 SOCKET="$RT/patchspace.sock"
-PANEL="$RT/panels/kit.json"
+SPACE="$RT/spaces/kit.json"
 
 step "private PipeWire + WirePlumber"
 pipewire > "$RT/pipewire.log" 2>&1 & PIDS+=($!)
@@ -72,11 +72,11 @@ wireplumber > "$RT/wireplumber.log" 2>&1 & PIDS+=($!)
 sleep 1.2
 if [ -S "$RT/run/pipewire-0" ]; then ok "private pipewire is up"; else bad "no private pipewire socket"; fi
 
-step "a declarative panel"
-python3 - "$PANEL" << 'PYEOF'
+step "a declarative space"
+python3 - "$SPACE" << 'PYEOF'
 import json, sys
 json.dump({
-    "type": "panel", "mode": "read-only", "label": "Kit", "auto_load": True,
+    "type": "space", "mode": "read-only", "label": "Kit", "auto_load": True,
     "placement": {"x": 0, "y": 0, "w": 420, "h": 260, "anchored": True},
     "config": {
         "nodes": {
@@ -87,11 +87,11 @@ json.dump({
     },
 }, open(sys.argv[1], "w"))
 PYEOF
-[ -f "$PANEL" ] && ok "panel file written" || bad "panel file missing"
+[ -f "$SPACE" ] && ok "space file written" || bad "space file missing"
 
-step "the daemon (temp socket, temp panel dir)"
+step "the daemon (temp socket, temp space dir)"
 PATCHSPACE_SOCKET="$SOCKET" python -m central.main \
-  --socket "$SOCKET" --panel-dir "$RT/panels:rw" --root-panel "$RT/root.json" \
+  --socket "$SOCKET" --space-dir "$RT/spaces:rw" --root-space "$RT/root.json" \
   > "$RT/daemon.log" 2>&1 & PIDS+=($!)
 for _ in $(seq 1 60); do [ -S "$SOCKET" ] && break; sleep 0.5; done
 if [ -S "$SOCKET" ]; then ok "daemon is serving"; else bad "daemon never bound its socket"; fi
@@ -159,8 +159,8 @@ def wait_for(desc, predicate, timeout=45.0):
         time.sleep(0.25)
     check(desc, False)
 
-# The declarative panel's nodes come up asynchronously.
-wait_for("the panel's volume node is online",
+# The declarative space's nodes come up asynchronously.
+wait_for("the space's volume node is online",
          lambda: call({"command": "get_nodes"})["nodes"].get("kit::vol", {}).get("status") == "online")
 wait_for("its edge is wired",
          lambda: any(e.get("from_node") == "kit::vol" and e.get("to_node") == "kit::out"
@@ -203,8 +203,8 @@ for _ in range(40):
     time.sleep(0.25)
 check("the module applied it", node.get("values", {}).get("out") == 42.0, node)
 
-# Two placements of one panel diverge.
-call({"command": "place_panel", "stem": "kit", "name": "kit_2", "x": 500, "y": 0})
+# Two placements of one space diverge.
+call({"command": "place_space", "stem": "kit", "name": "kit_2", "x": 500, "y": 0})
 time.sleep(1.0)
 nodes = call({"command": "get_nodes"})["nodes"]
 check("the second placement came up", nodes.get("kit_2::vol", {}).get("status") == "online",

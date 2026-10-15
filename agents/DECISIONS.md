@@ -212,3 +212,24 @@
   helpers' argv carried a matching backing name.  A helper attached to another
   PipeWire instance is not ours to reap, whatever its argv says.
 - Reversible: yes (pass no candidates for the old machine-wide behaviour).
+
+## [2026-10-15] panel -> space: data migrates, the protocol is a one-release window
+- Decision: S0 (`agents/SPACES.md` §9) renames the container word to `space`
+  in code, files, the protocol, the daemon flags and the Nix options, with two
+  asymmetries: **data migrates** (old space files, the old `panels` directory,
+  the old session cache, `--panel-dir`, `services.patchspace.panelDirs` all
+  keep working) and **the protocol is read-old/write-new** (the daemon accepts
+  the old command names and argument keys, logging one deprecation line each,
+  and emits only `spaces`/`space_id`).
+- Why: an existing graph is the user's work - it is not re-derived from
+  anything, so a rename that loses it is a rename that lost the data.  The
+  protocol is different in kind: a GUI started before an activation keeps
+  running the old *store path* for hours, so its commands must not start
+  failing the moment the daemon is upgraded - but the daemon has no way to
+  know which client it is talking to, so it emits one spelling (the new one)
+  and reads both.
+- Reversible: yes - the alias tables are single dicts
+  (`main._LEGACY_COMMAND_ALIASES`/`_LEGACY_ARG_KEYS`,
+  `spaces.LEGACY_TYPE_SPACE`/`LEGACY_CHILD_KEY`, the `catalog.json`
+  `legacy_aliases`, the nix `mkRenamedOptionModule`s).  The removal list and
+  the step that deletes them (S1) are in `agents/NOTES.md`.
