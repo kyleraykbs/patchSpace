@@ -164,6 +164,25 @@ def test_the_graph_holds_no_kind_list_of_its_own():
     assert ok, message
 
 
+def test_edges_from_finds_what_a_producer_feeds():
+    """The consumer side of the value relay looks a producer's reported port
+    up here (agents/SPACES.md §14), the mirror of `edges_into`."""
+    graph = g.Graph()
+    kinds = _kinds({
+        ("n1", "out", "out"): "number",
+        ("s1", "gain", "in"): "number",
+        ("s2", "in", "in"): "number",
+    })
+    graph.connect("n1", "s1", "gain", "out", kinds)
+    graph.connect("n1", "s2", "in", "out", kinds)
+
+    assert [e.to_node for e in graph.edges_from("n1")] == ["s1", "s2"]
+    assert [e.to_node for e in graph.edges_from("n1", "out")] == ["s1", "s2"]
+    assert graph.edges_from("n1", "other") == []
+    assert graph.edges_from("s1") == []
+    assert graph.edges_from("nobody") == []
+
+
 def test_disconnect_by_id_and_by_endpoints():
     graph = g.Graph()
     kinds = _kinds({("a", "out", "out"): "audio", ("b", "in", "in"): "audio"})

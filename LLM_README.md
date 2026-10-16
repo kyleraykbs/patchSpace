@@ -313,6 +313,33 @@ what the old docstrings claimed and the by-kind list denied.  `merge` travels to
 a display unchanged in `catalog_reply` (`api.validate_type_decl` refuses an
 unknown `cardinality`/`merge` value at declare time rather than ignoring it).
 
+**A node's parameter is an addressable input, and the relay is real (S3).**  Every
+control a module declares whose value kind is `number`, `boolean`, `text` or
+`choice` also becomes an **input port on that node type**, auto-declared by the
+daemon from the module's own `controls` list — `{name: <control key>, kind,
+direction: "in", drives_control: true, cardinality: "one"}` — so a module
+declares no extra metadata and there is no second declaration to keep in sync
+(`Registry.declare_types` merges the ports into the type, which is why a
+display, `type_query`, the snapshot and the graph rules all see them).  The
+value kind is derived from the control's widget
+(`api.WIDGET_VALUE_KINDS`: `slider`/`gain`/`volume`/`sensitivity`… → number,
+`switch`/`toggle`/`fallback_onoff` ↔ boolean, `field` → text, `choice` →
+choice); a widget that is not a value (`setting`, a button, a readout) gets no
+port at all, and a control may state `kind` instead.  `text` and `choice` are
+port kinds now, so each value kind pairs with itself.  **`value_set` becomes
+real as the relay**: a producer's reported value (`node_values`) is forwarded to
+the module owning the port at the other end of each outgoing edge, spelled
+`control_set` for the control the port is named for — the path every module
+already implements, so no module needs a new callback and a driven control
+behaves exactly as a user-set one.  Wiring an edge onto such a port forwards
+`edge_apply` (wiring bookkeeping) and then relays what the producer last
+reported; **unwiring the last driver puts the control back to its stored local
+value** (captured when the drive began, updated when the user sets the control).
+A control nothing has ever set has no stored value and is not restored to an
+invented one.  The stored value lives in the registry, the relay in
+`ProtocolHandler` beside the three messages it joins, and a node's removal
+releases the controls it was driving (`main._release_control_drives`).
+
 * `AllInputsNode` / `AllAppsNode` (`InputNode`) produce a source bundle from
   `source_filters()`; `AllOutputsNode` (`Node`) produces a sink bundle from
   `sink_filters()`. `bundle_side()` reports which.

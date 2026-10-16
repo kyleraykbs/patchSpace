@@ -64,6 +64,7 @@ So the module reports **data**, not objects:
 | `node_control {id, key, value}` (exists) | it applies it (its own setter) |
 | `node_edge {edge, op}` (exists) | it realizes/drops the PipeWire links |
 | `node_values {id: {port: value}}` (exists) | what its nodes compute |
+| `control_set {id, key, value}` (exists, **S3**) | the daemon's half of the relay: a *producer's* reported value, delivered to the consumer that owns the driven control — the same message a user's `node_control` becomes, so a module applies both through one path |
 | **`node_report {id: {type, params, ready, health, ports}}` (new)** | the data a display draws: exactly what `_serialize_nodes`/`_export_node_params` produce today, per node |
 | **`node_edge_report {id: {wired}}` (new, or fold into the above)** | whether an edge's links are live (`edge_wired`) |
 
@@ -71,6 +72,15 @@ So the module reports **data**, not objects:
 `space.nodes` to build a payload or a panel file.  It is *data*, so the daemon can
 keep it in the registry (`InstanceRecord.config`/`values`, plus a `params`
 blob) without ever holding a node object.
+
+`node_values` stopped being display-only in S3 (`agents/SPACES.md` §14): the
+daemon follows each reported port's edges and delivers the value to the consumer
+module that owns the port at the other end, as a `control_set` — the same
+message a user's `node_control` becomes.  So a report is now *both* "what a node
+computes" (for a display) and "drive this parameter" (for a consumer), which is
+one more reason the report has to be data the daemon can read: the relay is
+built entirely out of `InstanceRecord.values` + `Graph.edges_from` +
+`Registry.port_drives_control`, with no attribute-level access anywhere.
 
 ## The steps (each ends green; the daemon serves the GUI at every point)
 

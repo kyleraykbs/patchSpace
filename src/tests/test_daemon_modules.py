@@ -11,6 +11,7 @@ from central import module_api as api
 from central.main import NODE_TYPE_REGISTRY, PatchSpaceDaemon
 from central.protocol import Connection
 from modules.pipewire import declarations
+from modules.primitives import types as primitives_types
 
 
 def fresh_daemon():
@@ -263,6 +264,58 @@ def test_a_display_wires_a_second_driver_onto_a_bus_port():
     assert edge("b1", "g1", "ctrl")["type"] == "ok"
     refused = edge("b2", "g1", "ctrl")
     assert refused["type"] == "error" and "already driven" in refused["message"]
+
+
+def test_a_control_is_an_input_port_in_the_catalog_a_display_installs():
+    """The step's generalization, through the daemon (agents/SPACES.md §14):
+    a control that carries a value arrives as an input port named for it —
+    in the catalog the display draws from, and in the rules the graph
+    resolves edges through — so "drive this parameter" needs no new concept.
+    """
+    daemon = fresh_daemon()
+    daemon.attach_modules()
+    add_node(daemon, "gate", "g1")
+
+    display = Connection()
+    daemon.handle_command(api.hello(api.ROLE_DISPLAY, "patchspaceGui"), display)
+    catalog = daemon.handle_command(api.catalog_request(), display)
+    gate = next(t for t in catalog["types"] if t["type_id"] == "gate")
+    port = next(p for p in gate["ports"] if p["name"] == "fallback_onoff")
+    assert port == {"name": "fallback_onoff", "kind": "boolean",
+                    "direction": "in", "drives_control": True,
+                    "cardinality": "one"}
+    assert daemon.registry.port_drives_control("g1", "fallback_onoff") == "fallback_onoff"
+    assert daemon.registry.port_cardinality("g1", "fallback_onoff", "in") == "one"
+
+    # A control that is a widget rather than a value (`setting`) gains
+    # nothing: `bool_space_in` declares only those.
+    bool_in = next(t for t in catalog["types"] if t["type_id"] == "bool_space_in")
+    assert [p["name"] for p in bool_in["ports"]] == ["boolean", "out"]
+
+
+def test_the_primitives_types_gain_the_ports_they_lacked():
+    """`modules/primitives` declared eight types and not one input port; the
+    daemon turns each of its value controls into one, with no change to the
+    module's own data (`types.py` is untouched)."""
+    daemon = fresh_daemon()
+    errors, _ = daemon.registry.declare_types("primitives", primitives_types.TYPES)
+    assert errors == []
+
+    def port(type_id, name):
+        return next(p for p in daemon.registry.type_decl(type_id).ports
+                    if p["name"] == name)
+
+    assert port("number", "value") == {
+        "name": "value", "kind": "number", "direction": "in",
+        "drives_control": True, "cardinality": "one",
+    }
+    assert port("slider", "value")["kind"] == "number"
+    assert port("toggle", "on")["kind"] == "boolean"
+    assert port("math", "op")["kind"] == "choice"
+    # `invert` and `display` declare no controls, so they gain nothing.
+    for type_id in ("invert", "display"):
+        assert all(not p.get("drives_control")
+                   for p in daemon.registry.type_decl(type_id).ports)
 
 
 def test_a_declared_merge_is_surfaced_where_it_is_consumed():

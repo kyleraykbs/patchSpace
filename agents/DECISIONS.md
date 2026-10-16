@@ -402,3 +402,79 @@
   force; the boolean pair's `many` is the deliberate opt-out the docstrings
   promised.
 - Reversible: yes (drop the `cardinality` key and the pre-S4 rule returns).
+
+## [2026-10-15] S3: the relay is spelled `control_set`, not `value_set`
+- Decision: when a producer's reported value drives a `drives_control` port,
+  the daemon sends the consumer module a **`control_set`** for the control that
+  port is named for.  `value_set` stays defined as the same relay addressed at
+  a *raw* input port (a module's `on_value`), and nothing emits it yet.
+- Why: §14 says the consumer must apply the relayed value "exactly as if the
+  user had set the control (its `on_control` path), so no module needs a new
+  callback" - and `control_set` is that path, while `value_set` reaches a
+  *different* callback (`on_value`) that no shipped module implements
+  (`modules/pipewire/module.py` explicitly drops `value_set`; the primitives
+  module has `apply_value` but never registers it).  Sending both would
+  double-apply for a module that does implement both.  The port name is the
+  control key by construction, so `control_set` needs no extra field to
+  address it.
+- Reversible: yes (one line in `ProtocolHandler.deliver_control`; the port
+  carries the name either message needs).
+
+## [2026-10-15] S3: a control's value kind is derived from its widget
+- Decision: a module declares a control's **widget** and never its value kind;
+  `api.WIDGET_VALUE_KINDS` maps the widget vocabulary to one of
+  `number`/`boolean`/`text`/`choice`, and a widget that carries no value
+  (`setting`, `impulse`, `indicator`, `picker`, `clip`, `recorder`, `dump`,
+  `filter_mode`) declares no port.  A control may *also* state `kind`
+  (`api.VALUE_KINDS`); the stated kind wins, and an unknown one is refused at
+  declare time.
+- Why: §14's rule is "every declared control whose value kind is number,
+  boolean, text or choice", while the module's data has no such field - so
+  something has to read the vocabulary it does have.  `widget` is it (PLAN §7's
+  "generic widget vocabulary ... now declared by modules instead of
+  hardcoded"), and the table lives in `module_api` so the daemon, the modules
+  and the client read one list.  The alternative - the daemon guessing by
+  control *key* ("volume" → number) - would be an unstated rule with no way for
+  a module to opt out; the widget table is explicit and a module that needs an
+  unusual one states `kind`.  `setting` is the load-bearing exclusion: it is
+  the catalog's generic "inline setting" spelling, and the acceptance's
+  "a type declaring only `setting` widgets gains nothing" is exactly this.
+- Reversible: yes (the table is data; drop a row and that widget's controls
+  stop being routable, drop the merge and nothing has a port).
+
+## [2026-10-15] S3: the auto-declared port declares `one`, and the control's
+stored value lives in the registry
+- Decision: a port the daemon auto-declares for a value control carries
+  `cardinality: "one"` (a parameter has one producer; a module that wants a bus
+  declares its own `drives_control` port with `many`).  The value a control
+  holds locally - what unwiring its driver restores - is kept in the registry:
+  captured off the instance config when a drive *begins*
+  (`capture_control`), and overwritten whenever the user sets the control
+  (`set_control_value`, which also writes it into the instance config).
+- Why: §15 says declare `one` for value inputs "unless a merge is meaningful",
+  and §14's revert needs a value nothing else holds.  Reading it off the
+  instance config at unwire time would be wrong: a module that re-announces its
+  config (a reconnect, a re-spawn) announces what it currently holds, which
+  while driven is the *relayed* value - so the daemon freezes the value the
+  control had when the drive began.  A control nothing has ever set has no
+  stored value: the daemon restores nothing rather than inventing one, because
+  what an unset control means (the module's default) is the module's business.
+- Reversible: yes (drop the `cardinality` key to fall back to the kind's
+  default; `capture_control` is the only writer of the frozen value).
+
+## [2026-10-15] S3: the space face in `value` mode is the same mechanism, later
+- Decision: this step does not touch the space face.  A face input with
+  `mode: "value"` + `method: "edge"` is, per §14, "the space's `space_in` node
+  in value mode, a value source inside its own space" - the same relay - but
+  making the *jack* routable needs two things this step does not carry: the
+  face node types (`space_in`/`bool_space_in`) must declare a value-kind output
+  for the face's `kind`, and the face record needs the `field` method's stored
+  value (`set_space_input` writes mode/kind/method/choices today, no value).
+  Those land with S5's value sources (the routable slider/`const`/`string`
+  nodes) and the client's face jack.
+- Why: the step's contract is the four pieces that make the relay real (the
+  auto-declared port, the edge→control binding, the relay, the revert), and
+  inventing half of the face's value field now would leave a stored value
+  nothing applies (the daemon does not proxy the model; a face's `space_in`
+  node is a module-owned node, so its ports come from the catalog).
+- Reversible: yes (it is additive work, nothing here forecloses it).

@@ -67,12 +67,70 @@ HEALTH_UNKNOWN = ""
 #: Port kinds the daemon itself knows.  A module may only declare ports
 #: whose kind is in here.  `number` is the primitives module's kind (a
 #: numeric value: a constant, a slider, a maths result); like every other
-#: non-audio kind it pairs only with itself.
+#: non-audio kind it pairs only with itself.  `text` and `choice` are the
+#: two remaining *value* kinds (agents/SPACES.md §14): a string, and one of
+#: a fixed option list, each pairing with itself as well.
 PORT_KINDS = ("audio", "bundle", "boolean", "filter", "impulse", "sound",
-              "camera", "number")
+              "camera", "number", "text", "choice")
 
 DIR_IN = "in"
 DIR_OUT = "out"
+
+#: What a *control* can carry (agents/SPACES.md §14): a control whose value
+#: kind is one of these is a node parameter made addressable, so the daemon
+#: auto-declares an input port for it
+#: (:func:`control_input_ports`).  Any other control a module declares - a
+#: button, a readout, a file dialog, a generic inline `setting` - is a
+#: widget, not a value, and gains nothing.
+VALUE_KINDS = ("number", "boolean", "text", "choice")
+
+#: Which value kind a control's *widget* carries.  A module declares the
+#: widget (PLAN §7's vocabulary: `slider`/`switch`/`field`/`choice` and the
+#: module's own richer spellings) and never a value kind, so the kind is
+#: derived here - one table, in the vocabulary both sides read.  A control
+#: may also state its own ``kind`` (in :data:`VALUE_KINDS`) when its widget
+#: says nothing; the stated kind wins.  A widget absent from this table
+#: carries no value and gets no port.
+WIDGET_VALUE_KINDS = {
+    # a number (a level, a gain, a ratio)
+    "slider": "number",
+    "number": "number",
+    "spin": "number",
+    "percent": "number",
+    "gain": "number",
+    "volume": "number",
+    "level": "number",
+    "sensitivity": "number",
+    "wetdry": "number",
+    # an on/off state
+    "switch": "boolean",
+    "toggle": "boolean",
+    "checkbox": "boolean",
+    "boolean": "boolean",
+    "fallback_onoff": "boolean",
+    # a string (a pattern, a name, a path)
+    "field": "text",
+    "text": "text",
+    "string": "text",
+    # one of a declared option list
+    "choice": "choice",
+    "select": "choice",
+    "enum": "choice",
+}
+
+
+def control_value_kind(control: Dict[str, Any]) -> str:
+    """What a declared control carries: one of :data:`VALUE_KINDS`, or ``""``
+    for a control that is not a value (a button, an indicator, a `setting`).
+
+    The control's own ``kind`` says so when it states one; otherwise its
+    ``widget`` is resolved through :data:`WIDGET_VALUE_KINDS`.  Either way a
+    module declares no extra metadata (agents/SPACES.md §14)."""
+    declared = str(control.get("kind") or "")
+    if declared in VALUE_KINDS:
+        return declared
+    return WIDGET_VALUE_KINDS.get(str(control.get("widget") or ""), "")
+
 
 #: How many drivers a *receiving* port takes, declared per port as
 #: ``cardinality`` in the type declaration: ``"one"`` refuses a second
@@ -106,6 +164,50 @@ DEFAULT_ONE_KINDS = ("boolean", "impulse", "sound", "camera")
 def default_cardinality(kind: str) -> str:
     """The cardinality of a port that declares none — the pre-S4 rule."""
     return CARDINALITY_ONE if kind in DEFAULT_ONE_KINDS else CARDINALITY_MANY
+
+
+def control_input_ports(ports: List[Dict[str, Any]],
+                        controls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The input ports a type's ``controls`` auto-declare (agents/SPACES.md
+    §14).
+
+    Every value control becomes an input port *named for the control* —
+    ``{name: <control key>, kind, direction: "in", drives_control: true}`` —
+    so a node's parameter is an addressable input, and the daemon can relay
+    a producer's value onto it as a ``control_set`` (the consumer's own
+    ``on_control`` path, so no module needs a new callback).  The port
+    declares ``cardinality: "one"``: a parameter is driven by one producer,
+    and a module that wants several says ``many`` in its own declaration.
+
+    The daemon calls this when a type is declared, and merges the result into
+    the type's ``ports`` — so the auto-declared port appears wherever a
+    type's ports are asked for (the catalog a display installs, the
+    snapshot, and the connection rules).  Two rules keep it out of the way of
+    what the module declared:
+
+    * a name the type already declares as an **input port** is left exactly
+      as it is (the module's declaration wins; this adds nothing);
+    * a control key declared twice (the shipped catalog does this: a
+      `sensitivity` control spelled once as its own widget and once as a
+      generic `setting`) contributes one port, never two.
+    """
+    taken = {str(port.get("name")) for port in ports
+             if port.get("direction") == DIR_IN}
+    auto: List[Dict[str, Any]] = []
+    for control in controls:
+        key = str(control.get("key") or "")
+        kind = control_value_kind(control)
+        if not key or not kind or key in taken:
+            continue
+        taken.add(key)
+        auto.append({
+            "name": key,
+            "kind": kind,
+            "direction": DIR_IN,
+            "drives_control": True,
+            "cardinality": CARDINALITY_ONE,
+        })
+    return auto
 
 
 # ----------------------------------------------------------------------
@@ -229,7 +331,23 @@ def migrate(instance_id: str, type_id: str, config: Dict[str, Any],
 
 
 def value_set(instance_id: str, port: str, value: Any) -> Dict[str, Any]:
-    """Relayed control-plane value (number/boolean) from producer to consumer."""
+    """A relayed value, addressed at the instance *and port* it drives
+    (agents/SPACES.md §14).
+
+    The daemon is the bus: a producer reports its outputs (``node_values``),
+    the daemon looks up the edges leaving each reported port, and hands the
+    value to the consumer module that owns the port at the other end.  Where
+    that port drives a control — every value control gets a ``drives_control``
+    input port named for it — the relay is spelled ``control_set``, because
+    that is the path the consumer already implements (``on_control``, exactly
+    as if the user had set the control), so no module needs a new callback.
+
+    This shape is that same relay addressed at a raw port: the value of an
+    input port that is *not* a control, which a module takes through
+    ``on_value``.  Nothing emits it yet — the control path above is the one
+    every shipped consumer implements — but it is the seam for a module that
+    wants the value rather than a parameter.
+    """
     return {"type": "value_set", "instance_id": instance_id, "port": port, "value": value}
 
 
@@ -369,6 +487,22 @@ def validate_type_decl(decl: Dict[str, Any]) -> Tuple[bool, str]:
     schema = decl.get("schema", 1)
     if not isinstance(schema, int) or schema < 1:
         return False, f"{decl.get('type_id')}: schema must be a positive int"
+    # The controls come first: a port may declare that it drives one, and
+    # the declaration is only meaningful against the control it names.
+    controls = decl.get("controls", [])
+    if not isinstance(controls, list) or any(
+        not isinstance(c, dict) or not _is_str(c.get("key")) for c in controls
+    ):
+        return False, f"{decl.get('type_id')}: every control needs a key"
+    for control in controls:
+        stated = control.get("kind")
+        if stated is not None and stated not in VALUE_KINDS:
+            return False, (
+                f"{decl.get('type_id')}.{control.get('key')}: unknown control kind "
+                f"{stated!r} (expected one of {', '.join(VALUE_KINDS)}, or absent "
+                f"to derive it from the widget)"
+            )
+    control_keys = {str(control.get("key")) for control in controls}
     ports = decl.get("ports", [])
     if not isinstance(ports, list):
         return False, f"{decl.get('type_id')}: ports must be a list"
@@ -398,11 +532,28 @@ def validate_type_decl(decl: Dict[str, Any]) -> Tuple[bool, str]:
                 f"{decl.get('type_id')}.{port.get('name')}: unknown merge "
                 f"{merge!r} (expected one of {', '.join(MERGES)}, or absent)"
             )
-    controls = decl.get("controls", [])
-    if not isinstance(controls, list) or any(
-        not isinstance(c, dict) or not _is_str(c.get("key")) for c in controls
-    ):
-        return False, f"{decl.get('type_id')}: every control needs a key"
+        # A port that drives a control is named for it, so the name *is* the
+        # key the relay addresses (agents/SPACES.md §14).  The daemon
+        # declares these itself for every value control; a module declaring
+        # one must therefore point at a control it declared, on an input.
+        drives = port.get("drives_control")
+        if drives is not None and not isinstance(drives, bool):
+            return False, (
+                f"{decl.get('type_id')}.{port.get('name')}: drives_control must "
+                f"be true or false"
+            )
+        if drives:
+            if port.get("direction") != DIR_IN:
+                return False, (
+                    f"{decl.get('type_id')}.{port.get('name')}: a port that "
+                    f"drives a control is an input, not an output"
+                )
+            if str(port.get("name")) not in control_keys:
+                return False, (
+                    f"{decl.get('type_id')}.{port.get('name')}: drives a control, "
+                    f"so it must be named for one ({decl.get('type_id')} declares "
+                    f"{', '.join(sorted(control_keys)) or 'none'})"
+                )
     return True, ""
 
 

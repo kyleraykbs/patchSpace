@@ -217,6 +217,15 @@ class Graph:
             return [e for e in self.edges.values()
                     if e.to_node == to_node and (not to_port or e.to_port == to_port)]
 
+    def edges_from(self, from_node: str, from_port: str = "") -> List[Edge]:
+        """Every edge leaving one node (or one of its output ports).  The
+        consumer side of the value relay looks a producer's reported port up
+        here (agents/SPACES.md §14)."""
+        with self._lock:
+            return [e for e in self.edges.values()
+                    if e.from_node == from_node
+                    and (not from_port or e.from_port == from_port)]
+
     def edges_touching(self, instance_id: str) -> List[Edge]:
         with self._lock:
             return [e for e in self.edges.values()

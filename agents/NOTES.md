@@ -1178,3 +1178,74 @@ should take several edges had no way to say so.
 * Backward compatible on the wire: an old `type_declare` with no `cardinality`
   (including `multi: true`) keeps working exactly as it did.  No persisted data
   changes; edge ids untouched.
+
+## 2026-10-15 — S3: a node's parameter is an input port, and the relay is real
+
+`agents/SPACES.md` §14, the daemon half.  Before this, `modules/primitives`
+declared eight node types and **not one input port**, and `value_set` - the
+message that would let a node feed another node's control - was defined in
+`central/module_api.py` and emitted nowhere.
+
+* **The auto-declared port.**  `api.control_input_ports(ports, controls)`
+  builds, for every *value* control, an input port named for it:
+  `{name: <control key>, kind, direction: "in", drives_control: true,
+  cardinality: "one"}`.  **The registry merges it into `TypeDecl.ports` at
+  declare time** (`Registry.declare_types`), which is why a display, the
+  snapshot, `type_query` and the connection rules all see it: there is one
+  declaration, not a second one to keep in sync.  A name the module already
+  declares as an *input* port wins (the module's own declaration is not
+  touched); a control key declared twice (the shipped catalog does this: the
+  sensitivity gate's `sensitivity`, once as its own widget and once as a
+  generic `setting`) contributes one port.
+* **What counts as a value.**  A module declares a control's *widget*, never a
+  value kind, so the kind is derived: `api.WIDGET_VALUE_KINDS` maps the
+  vocabulary (`slider`/`number`/`spin`/`gain`/`volume`/`level`/`sensitivity`/
+  `wetdry` → number, `switch`/`toggle`/`checkbox`/`boolean`/`fallback_onoff` →
+  boolean, `field`/`text`/`string` → text, `choice`/`select`/`enum` → choice).
+  A widget that is not a value - `setting`, `impulse`, `indicator`, `picker`,
+  `clip`, `recorder`, `dump`, `filter_mode` - gets **nothing**, which is the
+  rule acceptance asks for ("a type declaring only `setting` widgets gains
+  nothing"): `bool_space_in`/`bool_space_out` declare only settings and their
+  ports are unchanged.  A module may state `kind` on a control instead (or as
+  well); the stated kind wins, and an unknown one is refused at declare time.
+  `text`/`choice` joined `api.PORT_KINDS` - a value kind has to be a kind a
+  port may declare, or the four value kinds could not pair with themselves.
+* **The relay.**  `ProtocolHandler.relay_values` follows the edges leaving each
+  reported port (`Graph.edges_from`, the new mirror of `edges_into`) and hands
+  the value to the consumer module that owns the other end, as a
+  **`control_set`** addressed at the control the port is named for - the
+  callback every module already has, so **no module needs a new callback** and
+  the consumer applies it exactly as if the user had set the control.  It is
+  triggered from `node_values` (a producer reported), `node_edge add` (relay
+  whatever the producer last reported: the wiring itself carries no value) and
+  `node_edge remove`.
+* **The binding and the revert.**  `Registry.port_drives_control(instance,
+  port)` is the one place that answers "does this port drive a control, and
+  which".  Adding an edge onto such a port makes no state change beyond the
+  edge; **removing the last driver puts the control back to its stored local
+  value** (`Registry.local_control_value`), and while another driver remains
+  (a port the module declared `many`) the remaining one's value is relayed
+  instead.  The stored value is captured `when the drive begins`
+  (`Registry.capture_control`, off the instance config) and updated whenever
+  the user sets the control (`node_control` → `Registry.set_control_value`,
+  which also records it in the instance config - what a re-attaching module is
+  handed).  A control nothing has ever set has **no** stored value and is not
+  restored to an invented one: the module's own default stands.
+* **The auto port declares `one`.**  A parameter has one producer.  A module
+  that wants a bus declares its own `drives_control` port with
+  `cardinality: "many"` - `validate_type_decl` holds it to `drives_control ==
+  true`, `direction: "in"`, and a name that *is* a control it declares.
+* **Where it lands in the shipped catalog.**  Every numeric/boolean/text/choice
+  control of the PipeWire catalog now has a port: `gate.fallback_onoff`,
+  `volume.volume`, `sensitivity_gate.sensitivity`, `normalize.gain`,
+  `reverb.wetdry`, the classifier `pattern`/`description`/`app_key` fields, the
+  space ports' `default_state`, and the primitives types (`number`/`slider` →
+  `value`, `toggle` → `on`, `math`/`compare`/`logic` → `op`).  Nothing about a
+  module's own data changed: `modules/primitives/types.py` and
+  `modules/pipewire/catalog.json` are untouched, and `declarations.py` still
+  serves the raw file - the daemon is what adds the port.
+* **Not touched by this step** (the boundary, in agents/DECISIONS.md): a space
+  *face* whose `mode` is `value` + `method` `edge` is the same mechanism, but
+  making the face jack routable needs the face node types to declare a
+  value-kind output and the face record to carry the `field` method's stored
+  value - S5's value sources and the client's face UI, not this step.

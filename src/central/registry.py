@@ -127,6 +127,15 @@ class Registry:
         self._lock = threading.RLock()
         self._modules: Dict[str, ModuleRecord] = {}
         self._instances: Dict[str, InstanceRecord] = {}
+        #: (instance_id, control key) -> ``(known, value)``: what a control
+        #: holds when nothing drives it.  Captured when a driver is wired
+        #: onto the control's port (agents/SPACES.md §14), so the value the
+        #: module had *then* is what unwiring restores, and updated whenever
+        #: the user sets the control.  The instance's own ``config`` stays the
+        #: record of what the module was told; this is the drive's
+        #: bookkeeping, kept apart so a module re-announcing its config
+        #: cannot make a driven value look like the stored one.
+        self._local_controls: Dict[Tuple[str, str], Tuple[bool, Any]] = {}
         #: type_id -> the module that declared it last (kept after detach so
         #: a disabled module's placements report offline_module, not unbacked)
         self._type_owner: Dict[str, str] = {}
@@ -231,12 +240,22 @@ class Registry:
                     )
                     continue
                 self._type_owner[type_id] = module_id
+                # A value control is a node parameter made addressable: the
+                # daemon auto-declares an input port for it, named for the
+                # control (agents/SPACES.md §14).  Merged here, once, so
+                # every place that asks a type for its ports - the catalog a
+                # display installs, the snapshot, and the connection rules -
+                # sees the declared ports and the auto-declared ones alike.
+                declared_ports = list(decl.get("ports", []))
+                controls = list(decl.get("controls", []))
                 record.types[type_id] = TypeDecl(
                     type_id=type_id,
                     module_id=module_id,
                     schema=int(decl.get("schema", 1)),
-                    ports=list(decl.get("ports", [])),
-                    controls=list(decl.get("controls", [])),
+                    ports=declared_ports + api.control_input_ports(
+                        declared_ports, controls
+                    ),
+                    controls=controls,
                     display=dict(decl.get("display", {})),
                     capabilities=list(decl.get("capabilities", [])),
                     requires=list(decl.get("requires", [])),
@@ -422,6 +441,8 @@ class Registry:
         daemon calls this only for instances a module was running."""
         with self._lock:
             instance = self._instances.pop(instance_id, None)
+            for marker in [m for m in self._local_controls if m[0] == instance_id]:
+                del self._local_controls[marker]
             if instance is not None and instance.declared_by:
                 record = self._modules.get(instance.declared_by)
                 if record is not None:
@@ -571,6 +592,86 @@ class Registry:
                 return ""
             declared = entry.get("merge")
             return str(declared) if declared in api.MERGES else ""
+
+    def port_drives_control(self, instance_id: str, port: str,
+                            direction: str = api.DIR_IN) -> str:
+        """The control key a port drives, or ``""`` for an ordinary port.
+
+        A ``drives_control`` port is *named for* the control it drives
+        (agents/SPACES.md §14), so the name **is** the key: the daemon relays
+        a producer's value onto such a port as a ``control_set`` for exactly
+        this key, and the consumer module applies it through the callback it
+        already has.  The port is either the one the daemon auto-declared for
+        a value control (:func:`api.control_input_ports`) or one the module
+        declared itself — which ``validate_type_decl`` holds to the same
+        rule, an input named for a control it declares.
+        """
+        with self._lock:
+            entry = self._port_entry(instance_id, port, direction)
+            if entry is None or not entry.get("drives_control"):
+                return ""
+            return str(entry.get("name") or "")
+
+    # -- a control's local value (agents/SPACES.md §14) ------------------
+    #
+    # A driven control has to have somewhere to go back to when its driver is
+    # unwired.  That value lives here rather than being read off the instance
+    # config at unwire time: a module re-announcing its config (a reconnect,
+    # a re-spawn) announces what it currently holds, which while driven is the
+    # *relayed* value - so the daemon freezes what the control held when the
+    # drive began.  The user setting the control is the other writer: that is
+    # what the control is stored as when nothing drives it.
+
+    def capture_control(self, instance_id: str, key: str) -> Tuple[bool, Any]:
+        """Freeze what a control holds locally, before a driver takes it over.
+
+        Called when an edge lands on the control's port.  A control already
+        captured (a second driver on a port declared ``many``, or a control
+        the user has set) keeps what it has: the drive is not a new value, it
+        is the value the control goes back to.
+        """
+        with self._lock:
+            marker = (str(instance_id), str(key))
+            if marker in self._local_controls:
+                return self._local_controls[marker]
+            instance = self._instances.get(str(instance_id))
+            if instance is None:
+                return False, None
+            stored = (str(key) in instance.config,
+                      instance.config.get(str(key)))
+            self._local_controls[marker] = stored
+            return stored
+
+    def set_control_value(self, instance_id: str, key: str, value: Any) -> bool:
+        """Record the user setting a control: it is now the control's stored
+        local value (what unwiring a driver restores), and part of the
+        instance's config — which is what the daemon hands a module that
+        re-attaches, and what a display reads in a snapshot.
+
+        The module keeps running its own copy; this is the daemon's.
+        """
+        with self._lock:
+            instance = self._instances.get(str(instance_id))
+            if instance is None:
+                return False
+            instance.config[str(key)] = value
+            self._local_controls[(str(instance_id), str(key))] = (True, value)
+            return True
+
+    def local_control_value(self, instance_id: str, key: str) -> Tuple[bool, Any]:
+        """``(known, value)``: the value a control holds when nothing drives
+        it, as far as the daemon knows it.
+
+        Known when the user has set the control, or when the drive that is
+        ending captured a value off the instance config.  A control nothing
+        has ever set has *no* stored value — the daemon says so and restores
+        nothing rather than inventing one, because what an unset control
+        means (its module's default) is the module's own business.
+        """
+        with self._lock:
+            return self._local_controls.get(
+                (str(instance_id), str(key)), (False, None)
+            )
 
     def _port_entry(self, instance_id: str, port: str,
                     direction: str = "") -> Optional[Dict[str, Any]]:

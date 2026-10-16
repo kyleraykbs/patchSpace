@@ -258,3 +258,105 @@ def test_snapshot_is_serialisable_and_complete():
     assert [m["module_id"] for m in snapshot["modules"]] == [module_id]
     assert [t["type_id"] for t in snapshot["types"]] == ["camera_in"]
     assert snapshot["instances"][0]["status"] == api.STATUS_ONLINE
+
+
+# ----------------------------------------------------------------------
+# a node's parameter as an input port (agents/SPACES.md §14)
+# ----------------------------------------------------------------------
+
+CONTROL_SINK = {
+    "type_id": "control_sink",
+    "schema": 1,
+    "ports": [{"name": "in", "kind": "number", "direction": "in"}],
+    "controls": [
+        {"key": "gain", "widget": "gain"},
+        {"key": "gain", "widget": "setting"},
+        {"key": "note", "widget": "field"},
+        {"key": "mode", "widget": "choice", "choices": ["a", "b"]},
+        {"key": "label", "widget": "setting"},
+    ],
+    "display": {"name": "Control Sink"},
+}
+
+SETTINGS_ONLY = {
+    "type_id": "settings_only",
+    "schema": 1,
+    "ports": [{"name": "out", "kind": "audio", "direction": "out"}],
+    "controls": [{"key": "description", "widget": "setting"}],
+    "display": {"name": "Settings Only"},
+}
+
+
+def _control_reg():
+    reg = Registry()
+    module_id = _attached(reg)
+    errors, _ = reg.declare_types(module_id, [CONTROL_SINK, SETTINGS_ONLY])
+    assert errors == []
+    reg.announce(module_id, [
+        {"instance_id": "s1", "type_id": "control_sink",
+         "config": {"gain": 0.25, "note": "hi"}},
+    ])
+    return reg, module_id
+
+
+def test_a_value_control_is_an_input_port_in_the_type_a_display_reads():
+    """The auto-declared port appears wherever a type's ports are asked for
+    — the catalog/type_query the display installs, and the graph rules — so
+    there is one declaration, not two."""
+    reg, _ = _control_reg()
+    ports = reg.type_query("control_sink")["type"]["ports"]
+    assert {(p["name"], p.get("kind"), p["direction"]) for p in ports} == {
+        ("in", "number", "in"),
+        ("gain", "number", "in"),
+        ("note", "text", "in"),
+        ("mode", "choice", "in"),
+    }
+    gain = next(p for p in ports if p["name"] == "gain")
+    assert gain == {"name": "gain", "kind": "number", "direction": "in",
+                    "drives_control": True, "cardinality": "one"}
+    # ...and it is what the daemon's side of the rules resolves.
+    assert reg.port_kind("s1", "gain", "in") == "number"
+    assert reg.port_drives_control("s1", "gain") == "gain"
+    assert reg.port_cardinality("s1", "gain", "in") == "one"
+    assert reg.port_drives_control("s1", "note") == "note"
+    # An ordinary port drives nothing, and neither does an output.
+    assert reg.port_drives_control("s1", "in") == ""
+    assert reg.port_drives_control("s1", "out") == ""
+
+
+def test_a_type_that_declares_only_settings_gains_nothing():
+    """`setting` is a widget, not a value: an old-style declaration keeps
+    exactly the ports it declared (nothing here breaks an existing type)."""
+    reg, _ = _control_reg()
+    assert reg.type_query("settings_only")["type"]["ports"] == [
+        {"name": "out", "kind": "audio", "direction": "out"},
+    ]
+
+
+def test_a_controls_local_value_is_captured_and_the_user_overrides_it():
+    """The stored value the unwire goes back to: what the control held when
+    it was first driven, updated whenever the user sets it — and nothing at
+    all for a control nothing has ever set."""
+    reg, _ = _control_reg()
+    # Nothing stored yet, and no drive has captured anything.
+    assert reg.local_control_value("s1", "gain") == (False, None)
+
+    # Driving it captures the config's value: that is what it held.
+    assert reg.capture_control("s1", "gain") == (True, 0.25)
+    assert reg.local_control_value("s1", "gain") == (True, 0.25)
+    # A second capture (another driver on a `many` port) does not move it.
+    assert reg.capture_control("s1", "gain") == (True, 0.25)
+
+    # The user setting the control is the other writer, and it is recorded
+    # in the instance's config too (what a re-attaching module is handed).
+    assert reg.set_control_value("s1", "gain", 0.9) is True
+    assert reg.local_control_value("s1", "gain") == (True, 0.9)
+    assert reg.instance("s1").config["gain"] == 0.9
+
+    # A control with no config entry has no stored value: the daemon says so
+    # instead of inventing one.
+    assert reg.capture_control("s1", "mode") == (False, None)
+
+    # Forgetting the instance forgets its controls with it.
+    reg.forget_instance("s1")
+    assert reg.local_control_value("s1", "gain") == (False, None)
