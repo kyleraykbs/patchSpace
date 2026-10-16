@@ -648,6 +648,76 @@ def readonly_portal_problem(space_id: str) -> str:
     )
 
 
+def readonly_edit_problem(space_ids: List[str], what: str, action: str) -> str:
+    """The refusal for editing one thing inside a *declarative* space.
+
+    One sentence for the whole rule (agents/SPACES.md §20): the space (or
+    spaces) that declare ``what`` first — ``space 'fx' is read-only`` — then
+    what was refused and which change was refused, so every refusal names what
+    it refused and why.  `readonly_portal_problem` says the same thing for a
+    portal; this is the interior half, and the two are one rule.
+    """
+    unique = sorted(set(space_ids))
+    if len(unique) == 1:
+        subject = f"space {unique[0]!r} is read-only"
+    else:
+        subject = (
+            "spaces " + " and ".join(repr(s) for s in unique) + " are read-only"
+        )
+    return (
+        f"{subject}: {what} is declared by its file and cannot be "
+        f"{action} at runtime"
+    )
+
+
+def readonly_node_problem(tree: Dict[str, "Space"], node_id: Any,
+                          action: str, what: str = "") -> Optional[str]:
+    """Why the node ``node_id`` may not be <action>, or None.
+
+    A node inside a declarative (read-only) space is *declared*: that space's
+    file is where it is written down, and the load/export/reload paths already
+    treat everything in such a space that way (the reload re-applies it, the
+    export never writes it back imperatively, the rebuild keeps the frozen
+    snapshot) — so a runtime edit here is dropped on the next reload instead
+    of persisted.  Refusing it says so, which is what §20's "a declarative
+    live space is readonly and uneditable" means.
+
+    The node's own space is the question (`space_of`), exactly the one the
+    move/reparent refusal asks, so there is one notion of declared and never a
+    second opinion about it.  ``what`` names the thing in the message when it
+    is narrower than the node itself (a property, the node's position).
+    """
+    pid = space_of(str(node_id))
+    space = tree.get(pid)
+    if space is None or not space.is_readonly:
+        return None
+    return readonly_edit_problem([pid], what or f"node {node_id!r}", action)
+
+
+def readonly_edge_problem(tree: Dict[str, "Space"], from_node: Any,
+                          to_node: Any, action: str) -> Optional[str]:
+    """Why an edge between two declared nodes may not be <action>, or None.
+
+    Only an edge whose **both** endpoints are declared is refused: that is
+    editing the declared wiring, and the file is the only thing that owns it.
+    An edge that crosses the boundary — a declared node wired to one outside
+    the space, either direction — is exactly "we should be able to plug things
+    into it", and the reload path deliberately preserves those (they are
+    imperative: no file declares them, so nothing re-applies or drops them).
+    """
+    declared: List[str] = []
+    for endpoint in (from_node, to_node):
+        pid = space_of(str(endpoint))
+        space = tree.get(pid)
+        if space is not None and space.is_readonly:
+            declared.append(pid)
+    if len(declared) < 2:
+        return None
+    return readonly_edit_problem(
+        declared, f"the edge {from_node!r} -> {to_node!r}", action
+    )
+
+
 def portal_cycle(parent_id: str, target_id: str) -> bool:
     """Would a portal from ``parent_id`` to ``target_id`` be a cycle?
 

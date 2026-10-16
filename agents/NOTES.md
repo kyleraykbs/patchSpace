@@ -1513,3 +1513,72 @@ about *where* the sites were.
 Suite 576 passed, 28 skipped before this step, 741 after (S9's own file is 157
 of them — the kind matrix is 144 of that, and `tests/test_graph.py` gained 8
 more pairs); `scripts/smoke.sh` passes every step.
+
+## 2026-10-15 — S10: declarative means uneditable, except being plugged into
+
+`agents/SPACES.md` §20.  An audit of both repos found the spec's "a declarative live
+space should be readonly and uneditable" only partly true: of the node operations only
+*move/reparent* was refused inside a declarative space, and (un)wiring was refused by
+neither side.  This step states the rule and enforces it.  Mostly a *where* step, like
+S9 before it.
+
+* **The rule is two predicates and one sentence, in `central/spaces.py`.**
+  `readonly_node_problem(tree, node_id, action, what="")` and
+  `readonly_edge_problem(tree, from_node, to_node, action)` answer "may this be
+  edited?", and `readonly_edit_problem(space_ids, what, action)` is the one message
+  builder — the sibling of `readonly_portal_problem`, in the same voice, because a
+  portal and the interior are one rule seen from two sides.  Both predicates ask the
+  **space's own space** (`spaces.space_of`) and read `Space.is_readonly` — the flag
+  the load/export/reload paths already key on (`_readonly_snapshots`, the imperative
+  export filter, the rebuild that keeps a read-only space's frozen snapshot) — so
+  there is **one notion of declared**, no second provenance field, and nothing new is
+  persisted.
+* **The edge rule is "both endpoints declared", and crossing stays allowed.**  Exactly
+  what §20's allowed list asks: an edge between a declared node and one outside is
+  "plug things into it" in either direction (and its removal), and the reload path's
+  deliberate preservation of those imperative edges is untouched — the check is never
+  asked on the load path.
+* **Where it is enforced, and why that binds every path.**  There is no single choke
+  point in the model: the command path stores through `PatchSpace` (the model), while
+  `protocol._node_edge` records in `central/graph.py`'s topology and tells the owning
+  modules — and the load path goes through both `_store_edge` and `PatchSpace.add_edge`
+  (and through `_ensure_sensitivity_internals`), so putting the rule *there* would
+  refuse the very declaration being applied.  So the rule lives in the predicates (one
+  definition) and is **asked at every mutating entry point**: `_cmd_remove_node`,
+  `_cmd_rename_node`, `_cmd_set_node_property`, `_cmd_set_node_layout`,
+  `_cmd_add_edge`, `_cmd_remove_edge` — and `ProtocolHandler._node_edge` for add and
+  remove, which is the module-API path a module or a display reports an edge over
+  (the GUI's own wire commands are the legacy ones, so the display path is the command
+  half; both answer the same sentence, so neither is a way around the other).
+  Idempotent and read paths are untouched (`add_edge`'s `already_existed`, every
+  `get_*`), as are the runtime knobs `set_volume`/`set_gate`/`set_volume_range`: a
+  control is not an edit of the declaration, and the smoke test's two-placement diff in
+  a *read-only* space is the live proof that they must stay live.
+* **Boundary decisions (in `DECISIONS.md`, 2026-10-15 S10).**  A rename that *re-homes*
+  a node into a declarative space is refused as the reparent `move_nodes` already
+  refuses; `set_node_layout` skips the declared entries and applies the rest (the GUI
+  sends the whole canvas in one command, so an all-or-nothing refusal would throw away
+  the position of every editable node); `add_node` into a declarative space is *not*
+  refused (it is outside §20's closed list and §1's "tamper-evident, not
+  tamper-proof"); groups are untouched for the same reason.
+* **The refusals, verbatim** (`spaces.readonly_edit_problem`): `space 'frozen' is
+  read-only: node 'frozen::a' is declared by its file and cannot be deleted at
+  runtime` (rename/property/position: `renamed` / `node 'frozen::a' property 'pattern'
+  ... changed` / `node 'frozen::a' position ... changed`), and for an edge `space
+  'frozen' is read-only: the edge 'frozen::a' -> 'frozen::b' is declared by its file
+  and cannot be wired/unwired at runtime` (two declarative spaces at once read `spaces
+  'one' and 'two' are read-only`).  Every one of them is returned *before* anything is
+  touched, so a refusal changes nothing; the single-node commands also carry
+  `node_id`/`edge_id` so the client's notice (§20, its own half) can name the target.
+* **Tests** (`src/tests/test_readonly_space.py`, 13): each named refusal with the state
+  it left alone (the file byte-for-byte for the delete case, the node's `pattern`/x/y
+  otherwise), the two-declarative-space wording, and the positive half — a crossing edge
+  accepted and removed both ways with the root's own crossing edge still there after
+  the load, a declarative space as a portal target, a space instantiated from a
+  read-only template, a read-write space unaffected in all six, and the module-API
+  `node_edge` refused by the same predicate as the commands (nothing recorded in the
+  topology).  `test_the_rule_is_the_same_one_the_portal_refusal_uses` pins the sentence
+  and the three "no refusal" cases (read-write, the root, an unknown space).
+* **Suite** 754 passed, 28 skipped (S9's 741 + these 13); `scripts/smoke.sh` passes every
+  step, including the declarative space's load, its declared edge, and `set_volume` on
+  one of its nodes in a second placement.

@@ -601,6 +601,19 @@ class ProtocolHandler:
         from_port = str(msg.get("from_port") or "out")
         if not from_node or not to_node:
             return api.error("node_edge needs both endpoints")
+        # The same §20 rule the legacy `add_edge`/`remove_edge` commands
+        # answer, asked of the same tree by the same predicate: a display or a
+        # module reporting this edge over the module API is refused exactly
+        # where the command path is, so neither path is a way around the other
+        # (and neither is a second opinion about what "declared" means).
+        tree = self.space_tree()
+        if tree:
+            problem = spaces_mod.readonly_edge_problem(
+                tree, from_node, to_node,
+                "wired" if op == "add" else "unwired",
+            )
+            if problem:
+                return api.error(problem)
         eid = graph_edge_id(from_node, to_node, to_port, from_port)
         edge = {
             "id": eid,

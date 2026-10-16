@@ -746,3 +746,63 @@ stored value lives in the registry
   that is what it now says).
 - Reversible: yes (the three methods are the whole surface; only the relay and
   the node-removal path call them).
+
+## [2026-10-15] S10: the declared-interior rule is asked at every mutating entry point
+- Decision: §20's rule lives in `central/spaces.py` as two predicates over the space
+  tree — `readonly_node_problem` (delete/rename/property/position) and
+  `readonly_edge_problem` (both endpoints declared) — plus one message builder
+  (`readonly_edit_problem`, beside `readonly_portal_problem`), and it is **asked** in
+  `main.py`'s `_cmd_remove_node`/`_cmd_rename_node`/`_cmd_set_node_property`/
+  `_cmd_set_node_layout`/`_cmd_add_edge`/`_cmd_remove_edge` and in
+  `protocol.ProtocolHandler._node_edge` (add and remove), before anything is touched.
+  Not in `PatchSpace.add_edge`/`add_node`/`rename_node` (the model) and not in
+  `Graph.connect`: the load path goes through both (`_load_session` →
+  `_store_edge` → `PatchSpace.add_edge`, and `_ensure_sensitivity_internals`), so a
+  rule there would refuse the declaration being applied.  Provenance is
+  `Space.is_readonly` read through `spaces.space_of(node_id)` — the same flag the
+  load/export/reload paths key on, and the same question `_cmd_move_nodes` already
+  asks.
+- Why: the two edge stores (the model for the legacy commands, `graph.py`'s topology
+  for the module API) mean no single model-level choke point can bind both a display's
+  command and a module's edge report; one predicate asked at each entry point is the
+  only shape where both answer the *same sentence*, which is what makes the refusal
+  true rather than a per-path opinion.  Putting it in `spaces.py` (where the readonly
+  flag and the portal refusal already live) keeps "what is declared" in one module.
+- Reversible: yes (the predicates and the five call sites are the whole surface).
+
+## [2026-10-15] S10: a rename that re-homes into a declarative space is a reparent
+- Decision: `rename_node` refuses when the node's *own* space is declarative (§20's
+  "renaming it") **and** when the new id lands in a declarative space, with a message
+  naming both ids and that space.
+- Why: a rename whose id path changes is how the daemon re-homes a node
+  (`_rename_owned_node` is what `move_nodes` uses), so the second half is not a new
+  rule — it is `move_nodes`' existing source-or-target-readonly refusal reached by
+  another name, and leaving it open would have made the already-refused reparent
+  available through a rename.
+- Reversible: yes (one branch; drop it and only the declared-node half remains).
+
+## [2026-10-15] S10: `set_node_layout` skips declared entries instead of refusing the map
+- Decision: a declared node's entry in a `set_node_layout` map is skipped and reported
+  as a reason in the reply's `refused` list (the §19 precedent for a list of reason
+  strings), while every other entry in the same command still applies.  `add_edge`
+  keeps its `already_existed` no-op and `remove_edge` reports the refusal before the
+  model is touched.
+- Why: the GUI sends the *whole* canvas in one `set_node_layout` (its debounced layout
+  save builds the map from every node it has), so an all-or-nothing refusal would throw
+  away the position of every editable node whenever one declared node is in the map —
+  a regression in an ordinary interaction, and a refusal wider than §20 asks.  Skipping
+  is still "changes nothing" for the declared node, which is what the rule requires of
+  it.
+- Reversible: yes (the loop is the seam).
+
+## [2026-10-15] S10: `add_node` into a declarative space, and groups, stay allowed
+- Decision: §20's refused list is the closed one it states — delete, rename,
+  property/position, and (un)wiring between two declared endpoints.  Adding a *new*
+  node inside a declarative space and the group commands are not refused, and neither
+  are the runtime knobs (`set_volume`, `set_gate`, `set_volume_range`).
+- Why: "do not make the daemon stricter than §20 allows", and §1's "tamper-evident,
+  not tamper-proof — another program may edit a space by name" is the standing reading
+  of everything the contract does not refuse.  The knobs have a live requirement too:
+  the smoke test turns a *declared* node's volume in a second placement and the
+  placement diff must survive, so a control is not an edit of the declaration.
+- Reversible: yes (each would be one more predicate call).

@@ -562,7 +562,32 @@ it cannot outlive the session; the app re-declares the same id on its next attac
 *Read-only spaces* (`mode: "read-only"`) keep a frozen snapshot
 (`self._readonly_snapshots`); the GUI controls stay live but `reset_space` / reload /
 restart re-apply the file's membership, positions, edges and params. `read-write` (the
-default) reads and writes. The GUI draws a space as a tinted-grid box (grid shares the
+default) reads and writes.
+
+**A declarative space's interior is uneditable (S10, `agents/SPACES.md` §20).** The
+file that declares the space is the only thing that owns its interior, so the daemon
+refuses — with a reason, changing nothing — deleting a declared node (`remove_node`),
+renaming one (`rename_node`, including a rename that would re-home a node *into* the
+declarative space: that is the reparent `move_nodes` already refuses), changing a
+declared node's properties (`set_node_property`) or its stored position
+(`set_node_layout`), and adding or removing an edge whose **both** endpoints are
+declared (`add_edge`/`remove_edge`, and `node_edge` on the module API — the same
+predicate answers both, so neither path is a way around the other). What stays
+allowed is the other half of the same sentence: an edge between a declared node and a
+node outside the space in **either** direction ("plug things into it"), and its
+removal; a portal *to* a declarative space; instantiating a space *from* a read-only
+template (copying out is not editing); and every read. The provenance is the space's
+own `readonly` (`spaces.Space.is_readonly`) — the same flag the load/export/reload
+paths already key on, asked by the space's own space (`spaces.space_of`), so there is
+one notion of declared and never a second opinion. The predicate
+(`spaces.readonly_node_problem`/`readonly_edge_problem`, one message builder beside
+`readonly_portal_problem`) is asked at each command's entry point, *before* anything is
+touched; the reload path is deliberately not among them (the file is the declaration
+being applied). Runtime knobs — `set_volume`, `set_gate`, `set_volume_range` — are not
+edits of the declaration and stay live, which is also what keeps the two-placement
+diff story working in a declarative space.
+
+The GUI draws a space as a tinted-grid box (grid shares the
 world grid's origin/spacing so it overlays it). Its title floats just above the box like a
 group's title (space color, zoom-scaled font clamped so it stops growing past a point)
 and is drawn **bold** to read as a heading (`draw_text_unbounded(..., bold=True)`; the
@@ -1080,7 +1105,9 @@ group membership, so a selected set moved into a space keeps its groups. Draggin
 *space* onto another space sends `move_space`: the space keeps its absolute placement,
 is re-keyed under the target's path (`fx` -> `kit::fx`), and every descendant space/node
 id is re-qualified (edges rebuilt, groups re-pointed), to arbitrary depth; cycles are
-refused. Refused (GUI snaps back) when the source or target space is read-only. While a node is being dragged
+refused. Refused (GUI snaps back) when the source or target space is read-only — and
+that is not the only such refusal: §20 makes every other interior edit of a declarative
+space a refusal too (see the spaces section above). While a node is being dragged
 it is excluded from its space's auto-grown bounds, so the source space doesn't stretch
 under the cursor and steal the drop. After the rename the GUI immediately re-sends the
 moved nodes' positions under their *new* ids (`_reparent_after_drag`), because the

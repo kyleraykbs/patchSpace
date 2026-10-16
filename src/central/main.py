@@ -4999,6 +4999,13 @@ class PatchSpaceDaemon:
 
     def _cmd_remove_node(self, cmd: dict) -> dict:
         node_id = cmd.get("node_id")
+        # A node inside a declarative space is declared by that space's file:
+        # deleting it here would be undone by the next reload, so it is
+        # refused with the reason (agents/SPACES.md §20).  The lock is not
+        # entered at all, so a refusal really does change nothing.
+        problem = spaces.readonly_node_problem(self.spaces, node_id, "deleted")
+        if problem:
+            return {"status": "error", "message": problem, "node_id": node_id}
         with self._lock:
             if (
                 node_id not in self.space.nodes
@@ -5064,6 +5071,26 @@ class PatchSpaceDaemon:
                 "status": "error",
                 "message": "old_node_id and new_node_id required",
             }
+        # A rename of a declared node is an edit of the declaring file's
+        # interior (agents/SPACES.md §20); a rename that re-homes the node
+        # into a declarative space is the *reparent* the move refusal already
+        # refuses, reached by another name.  Both name what they refused and
+        # change nothing.
+        problem = spaces.readonly_node_problem(self.spaces, old_id, "renamed")
+        if problem:
+            return {"status": "error", "message": problem, "node_id": old_id}
+        new_space = spaces.space_of(new_id)
+        if new_space != spaces.space_of(old_id):
+            target = self.spaces.get(new_space)
+            if target is not None and target.is_readonly:
+                return {
+                    "status": "error",
+                    "node_id": old_id,
+                    "message": (
+                        f"node {old_id!r} cannot be renamed to {new_id!r}: "
+                        f"space {new_space!r} is read-only"
+                    ),
+                }
         with self._lock:
             is_sensitivity = isinstance(
                 self.space.nodes.get(old_id), SensitivityGateNode
@@ -5224,6 +5251,17 @@ class PatchSpaceDaemon:
             )
             if stored_id in self.space.edges:
                 return {"status": "ok", "edge_id": logical_id, "already_existed": True}
+            # An edge whose *both* endpoints are declared is declared wiring,
+            # and only the file that declares it owns it (agents/SPACES.md
+            # §20).  An edge that crosses the boundary — either direction — is
+            # "plug things into it" and passes: the endpoints are not both
+            # declared.  Checked before anything is stored, so the refusal
+            # leaves no partial state.
+            problem = spaces.readonly_edge_problem(
+                self.spaces, from_node, to_node, "wired"
+            )
+            if problem:
+                return {"status": "error", "message": problem}
             try:
                 self._store_edge(from_node, to_node, to_port, from_port)
             except (KeyError, ValueError) as exc:
@@ -5262,6 +5300,27 @@ class PatchSpaceDaemon:
             )
             if stored_id is None:
                 return {"status": "error", "message": f"Edge {edge_id} not found"}
+            # Pulling an edge whose both endpoints are declared is editing the
+            # declared wiring too (agents/SPACES.md §20), so it is refused
+            # before the model is touched.  A crossing edge (one endpoint
+            # outside) is imperative and comes out as usual.  The *logical*
+            # endpoints are the question, so the hidden sensitivity pre/post
+            # pair - which never surfaces to a client - is never the subject.
+            edge = self.space.edges.get(stored_id)
+            logical = self._logical_edge(edge) if edge is not None else None
+            problem = (
+                spaces.readonly_edge_problem(
+                    self.spaces, logical[0], logical[1], "unwired"
+                )
+                if logical
+                else None
+            )
+            if problem:
+                return {
+                    "status": "error",
+                    "message": problem,
+                    "edge_id": edge_id,
+                }
             self.space.remove_edge(stored_id)
             self.space.sync()
             self._dirty = True
@@ -5437,6 +5496,17 @@ class PatchSpaceDaemon:
             node = self.space.nodes.get(node_id)
             if node is None:
                 return {"status": "error", "message": f"Node {node_id} not found"}
+
+            # A declared node's properties are the declaring file's
+            # (agents/SPACES.md §20): the change would be dropped on the next
+            # reload, so it is refused and named instead.  Nothing has been
+            # touched yet, so the refusal leaves the node exactly as it was.
+            problem = spaces.readonly_node_problem(
+                self.spaces, node_id, "changed",
+                f"node {node_id!r} property {prop!r}",
+            )
+            if problem:
+                return {"status": "error", "message": problem, "node_id": node_id}
 
             if prop == "label":
                 node.label = value
@@ -5738,16 +5808,32 @@ class PatchSpaceDaemon:
         """Persist the GUI's canvas layout: {node_id: {x, y, anchored}}.
         Purely presentational - it never touches the live PipeWire graph;
         it exists so positions and the anchored flag round-trip through
-        export/import and the auto-saved last-session cache."""
+        export/import and the auto-saved last-session cache.
+
+        A declared node's stored position is the declaring file's
+        (agents/SPACES.md §20): its entry is skipped and the refusal is
+        reported, while every other entry in the map still applies - the GUI
+        sends the whole canvas in one command, so refusing the batch would
+        throw away the position of every node that *is* editable."""
         layout = cmd.get("layout") or {}
+        refused: List[str] = []
         with self._lock:
             for node_id, props in layout.items():
                 node = self.space.nodes.get(node_id)
                 if node is None or not isinstance(props, dict):
                     continue
+                problem = spaces.readonly_node_problem(
+                    self.spaces, node_id, "changed", f"node {node_id!r} position"
+                )
+                if problem:
+                    refused.append(problem)
+                    continue
                 _apply_layout_attrs(node, props)
             self._dirty = True
-        return {"status": "ok"}
+        reply: dict = {"status": "ok"}
+        if refused:
+            reply["refused"] = refused
+        return reply
 
     def _duplicate_group_id(self, nodes, exclude_gid=None):
         """Id of an existing group whose (live) member set is exactly
