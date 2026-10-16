@@ -34,6 +34,8 @@ from central.registry import Registry
 
 Reply = Union[Dict[str, Any], List[Dict[str, Any]]]
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class Connection:
@@ -352,17 +354,36 @@ class ProtocolHandler:
         if not isinstance(values, dict):
             return api.error("node_values needs a mapping")
         self.registry.set_values(conn.module_id, values)
-        self.relay_values(values)
-        return {"type": "ok", "ref": "node_values"}
+        refused: List[str] = []
+        self.relay_values(values, refused)
+        reply: Dict[str, Any] = {"type": "ok", "ref": "node_values"}
+        if refused:
+            # A value the consumer's declaration cannot take is refused here —
+            # with the reason — rather than handed to a module that would have
+            # to drop it (agents/SPACES.md §19).
+            for reason in refused:
+                logger.warning("value relay refused: %s", reason)
+            reply["refused"] = refused
+        return reply
 
-    # -- the value relay (agents/SPACES.md §14) ---------------------------
+    # -- the value relay (agents/SPACES.md §14, §19) ----------------------
     #
     # A node's parameter is an addressable input: every value control gets an
     # input port named for it (`drives_control`, auto-declared from the
     # module's own `controls` list), and a producer's reported value drives
-    # the consumer's control exactly as the user's `node_control` does.  The
-    # daemon stays the bus: it never looks inside the value, and the consumer
-    # applies it through the callback it already has.
+    # the consumer's control exactly as the user's `node_control` does.  §19
+    # makes the *other* way a value can arrive the same one: an input port
+    # whose kind is a value kind is a **value slot** whatever it is called
+    # (`Registry.value_slot`), and the relay reaches it too — a `drives_control`
+    # slot is spelled `control_set` (the callback every module already has),
+    # any other value slot `value_set` (the module's `on_value` path).  Two
+    # spellings, one slot, one resolution order.
+    #
+    # The daemon stays the bus: it does not coerce a value, and the consumer
+    # applies it through the callback it has.  What it does decide is whether
+    # the consumer's *declaration* can take the value at all — a `choice`
+    # option the slot does not declare — and it refuses to deliver one it
+    # cannot, with the reason (`api.value_problem`, asked by the consumer too).
     #
     # Three moments join here — and they are the three messages this handler
     # already owns, which is why the relay lives with them rather than in
@@ -370,15 +391,18 @@ class ProtocolHandler:
     #
     #   node_values   a producer reported what it computes -> relay it;
     #   node_edge     a driver was wired or unwired -> relay the producer's
-    #                 value, or put the control back to its stored value;
+    #                 value, or put the slot back to its stored value;
     #   node_control  the user set a control -> remember that as the value it
     #                 holds locally.
 
-    def relay_values(self, values: Dict[str, Dict[str, Any]]) -> int:
-        """Forward each reported output to every control its edges drive.
+    def relay_values(self, values: Dict[str, Dict[str, Any]],
+                     refused: Optional[List[str]] = None) -> int:
+        """Forward each reported output to every value slot its edges reach.
 
         Returns how many relays were sent (a value a producer reports on a
-        port nothing consumes goes nowhere, which is not an error)."""
+        port nothing consumes goes nowhere, which is not an error).  A value a
+        slot's declaration cannot take is not delivered: its reason is
+        appended to ``refused`` when the caller wants to hear about it."""
         if self.topology is None:
             return 0
         sent = 0
@@ -387,68 +411,86 @@ class ProtocolHandler:
                 continue
             for port, value in ports.items():
                 for edge in self.topology.edges_from(str(instance_id), str(port)):
-                    if self.deliver_control(edge.to_node, edge.to_port, value):
+                    if self.deliver_value(edge.to_node, edge.to_port, value,
+                                          refused):
                         sent += 1
         return sent
 
-    def bind_control_edge(self, edge: Dict[str, Any], op: str) -> bool:
-        """An edge onto a ``drives_control`` port was made or dropped.
+    def bind_value_edge(self, edge: Dict[str, Any], op: str,
+                        refused: Optional[List[str]] = None) -> bool:
+        """An edge onto a value slot's port was made or dropped.
 
         On ``add`` the producer's last reported value is relayed, if it has
         reported one: the wiring itself carries no value, so the consumer only
         hears about it when there is something to say (and it hears every
         later report through :meth:`relay_values`).
 
-        On ``remove`` the control goes back to what it holds locally — unless
+        On ``remove`` the slot goes back to what it holds locally — unless
         another driver remains (a port the module declared ``many``), in which
-        case that driver's reported value is relayed instead and the control
-        is still driven.
+        case that driver's reported value is relayed instead and the slot is
+        still driven.  A slot nothing has ever held a value for has nothing to
+        go back to, and the module's own default stands.
         """
         if self.topology is None:
             return False
         to_node = str(edge.get("to_node") or "")
         to_port = str(edge.get("to_port") or "")
-        if not self.registry.port_drives_control(to_node, to_port):
+        if self.registry.value_slot(to_node, to_port) is None:
             return False
         if op == "add":
             return self.relay_current_value(
                 str(edge.get("from_node") or ""),
                 str(edge.get("from_port") or ""),
-                to_node, to_port,
+                to_node, to_port, refused,
             )
         remaining = self.topology.edges_into(to_node, to_port)
         if remaining:
             driver = remaining[-1]
             return self.relay_current_value(driver.from_node, driver.from_port,
-                                            to_node, to_port)
-        return self.restore_control(to_node, to_port)
+                                            to_node, to_port, refused)
+        return self.restore_slot(to_node, to_port, refused)
 
-    def restore_control(self, instance_id: str, port: str) -> bool:
-        """Put one control back to the value it holds locally (if the daemon
-        knows one — a control nothing has ever set has nothing to go back
+    def restore_slot(self, instance_id: str, port: str,
+                     refused: Optional[List[str]] = None) -> bool:
+        """Put one value slot back to the value it holds locally (if the
+        daemon knows one — a slot nothing has ever held has nothing to go back
         to), and stop driving it."""
-        key = self.registry.port_drives_control(instance_id, port)
-        if not key:
+        slot = self.registry.value_slot(instance_id, port)
+        if slot is None:
             return False
-        known, value = self.registry.local_control_value(instance_id, key)
+        known, value = self.registry.local_slot_value(instance_id, slot["name"])
         if not known:
             return False
-        return self.deliver_control(instance_id, key, value)
+        return self.deliver_value(instance_id, slot["name"], value, refused)
 
     def relay_current_value(self, from_node: str, from_port: str,
-                            to_node: str, to_port: str) -> bool:
+                            to_node: str, to_port: str,
+                            refused: Optional[List[str]] = None) -> bool:
         """Relay the value a producer last reported on one of its outputs."""
         producer = self.registry.instance(from_node)
         if producer is None or from_port not in producer.values:
             return False
-        return self.deliver_control(to_node, to_port, producer.values[from_port])
+        return self.deliver_value(to_node, to_port, producer.values[from_port],
+                                  refused)
 
-    def deliver_control(self, instance_id: str, port: str, value: Any) -> bool:
+    def deliver_value(self, instance_id: str, port: str, value: Any,
+                      refused: Optional[List[str]] = None) -> bool:
         """Hand one value to the module that owns ``instance_id``, addressed
-        at the control ``port`` names — as a ``control_set``, the path that
-        module already applies (so no module needs a new callback)."""
-        key = self.registry.port_drives_control(instance_id, port)
-        if not key:
+        at the value slot ``port`` is — ``control_set`` for a slot that drives
+        a control (the path that module already applies, so no module needs a
+        new callback), ``value_set`` for any other value port.
+
+        Refuses (with the reason appended to ``refused``) a value the slot's
+        declaration cannot take, and a port that is not a value slot at all
+        (agents/SPACES.md §19): nothing is delivered, so nothing is applied
+        and nothing is silently kept."""
+        slot = self.registry.value_slot(instance_id, port)
+        if slot is None:
+            return False
+        problem = api.value_problem(slot["kind"], slot["choices"], value)
+        if problem:
+            if refused is not None:
+                refused.append(f"{instance_id}.{port}: {problem}")
             return False
         instance = self.registry.instance(instance_id)
         if instance is None or not instance.declared_by:
@@ -456,7 +498,11 @@ class ProtocolHandler:
         target = self._module_conns.get(instance.declared_by)
         if target is None:
             return False
-        return target.send(api.control_set(instance_id, key, value))
+        if slot["control"]:
+            return target.send(
+                api.control_set(instance_id, slot["control"], value)
+            )
+        return target.send(api.value_set(instance_id, slot["name"], value))
 
     # -- the daemon asking a module to run something ----------------------
 
@@ -522,13 +568,20 @@ class ProtocolHandler:
         target = self._module_conns.get(instance.declared_by)
         if target is None:
             return api.error(f"{instance.declared_by} is not attached")
+        # A value the consumer's declaration cannot take is refused here with
+        # the reason (agents/SPACES.md §19) — the same decision the relay and
+        # the consumer ask — rather than sent on to be dropped, and the
+        # control's stored value is left alone: nothing was applied.
+        problem = self.registry.value_problem(instance_id, key, msg.get("value"))
+        if problem:
+            return api.error(f"{problem} (nothing applied)")
         if not target.send(api.control_set(instance_id, key, msg.get("value"))):
             return api.error(f"could not reach {instance.declared_by}")
         # The control's stored local value is now this one: it is what
         # unwiring a driver puts back (agents/SPACES.md §14), and it is part
         # of the instance's config, which is what the daemon hands the module
         # when it re-attaches.
-        self.registry.set_control_value(instance_id, key, msg.get("value"))
+        self.registry.set_slot_value(instance_id, key, msg.get("value"))
         return {"type": "ok", "ref": "node_control", "instance_id": instance_id}
 
     def _node_edge(self, msg: Dict[str, Any], conn: Connection) -> Reply:
@@ -578,16 +631,28 @@ class ProtocolHandler:
             target = self._module_conns.get(instance.declared_by)
             if target is not None:
                 target.send(api.edge_apply(edge, op))
-        # An edge landing on a control's port means the control is now driven
-        # (agents/SPACES.md §14): the wiring bookkeeping above has gone out,
-        # so remember what the control held and relay what the producer has.
-        # Unwiring the last driver puts the stored value back.
+        # An edge landing on a value slot's port means the slot is now driven
+        # (agents/SPACES.md §14, §19): the wiring bookkeeping above has gone
+        # out, so remember what the slot held and relay what the producer has.
+        # Unwiring the last driver puts the stored value back.  A
+        # `drives_control` port and a declared value port go through this one
+        # path, because the port name is the slot either way.
+        refused: List[str] = []
         if op == "add":
-            key = self.registry.port_drives_control(to_node, to_port)
-            if key:
-                self.registry.capture_control(to_node, key)
-        self.bind_control_edge(edge, op)
-        return {"type": "ok", "ref": "node_edge", "op": op, "edge": edge}
+            slot = self.registry.value_slot(to_node, to_port)
+            if slot is not None:
+                self.registry.capture_slot(to_node, slot["name"])
+        self.bind_value_edge(edge, op, refused)
+        reply: Dict[str, Any] = {"type": "ok", "ref": "node_edge", "op": op,
+                                 "edge": edge}
+        if refused:
+            # The *wire* is legal (the kinds pair); a value it carries that
+            # the declaration cannot take is refused, with the reason, and
+            # nothing is applied (agents/SPACES.md §19).
+            for reason in refused:
+                logger.warning("value relay refused: %s", reason)
+            reply["refused"] = refused
+        return reply
 
     def _catalog_request(self, msg: Dict[str, Any], conn: Connection) -> Reply:
         """The whole type catalog (plus the modules' menu and vocabulary):

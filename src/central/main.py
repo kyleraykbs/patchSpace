@@ -5012,7 +5012,7 @@ class PatchSpaceDaemon:
                     edges = self.topology.edges_touching(node_id)
                     self.registry.forget_instance(node_id)
                     self.topology.forget(node_id)
-                    self._release_control_drives(edges)
+                    self._release_value_drives(edges)
                     self._mirrored.discard(node_id)
                     self._dirty = True
                     return {"status": "ok"}
@@ -5039,22 +5039,23 @@ class PatchSpaceDaemon:
         self.registry.forget_instance(node_id)
         edges = self.topology.edges_touching(node_id)
         self.topology.forget(node_id)
-        self._release_control_drives(edges)
+        self._release_value_drives(edges)
         return {"status": "ok"}
 
-    def _release_control_drives(self, edges) -> None:
+    def _release_value_drives(self, edges) -> None:
         """A node's removal takes its edges with it, and an edge that drove a
-        control was the only reason that control was driven (agents/SPACES.md
-        §14): put each one back to its stored local value.
+        value slot was the only reason that slot was driven (agents/SPACES.md
+        §14, §19): put each one back to its stored local value — the same path
+        for a `drives_control` port and for a declared value port.
 
         The edges are read *before* the topology forgets them (the graph
         hands back only their ids); the consumer side of each is a node that
-        is still there, and a control whose own node is gone needs nothing.
+        is still there, and a slot whose own node is gone needs nothing.
         """
         if self.topology is None:
             return
         for edge in edges:
-            self._protocol.bind_control_edge(edge.to_dict(), "remove")
+            self._protocol.bind_value_edge(edge.to_dict(), "remove")
 
     def _cmd_rename_node(self, cmd: dict) -> dict:
         old_id, new_id = cmd.get("old_node_id"), cmd.get("new_node_id")

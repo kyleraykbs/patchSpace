@@ -64,25 +64,38 @@ HEALTH_STARTING = "starting"
 HEALTH_DEAD = "dead"
 HEALTH_UNKNOWN = ""
 
-#: Port kinds the daemon itself knows.  A module may only declare ports
-#: whose kind is in here.  `number` is the primitives module's kind (a
-#: numeric value: a constant, a slider, a maths result); like every other
-#: non-audio kind it pairs only with itself.  `text` and `choice` are the
-#: two remaining *value* kinds (agents/SPACES.md §14): a string, and one of
-#: a fixed option list, each pairing with itself as well.
+#: The kinds that are *not* values: a stream, a set of streams, a classifier
+#: predicate, an event, a file reference, a video feed.  A port of one of
+#: these kinds never carries a value (agents/SPACES.md §19): it is wired, and
+#: what flows is the module's own business.
+NODE_KINDS = ("audio", "bundle", "filter", "impulse", "sound", "camera")
+
+#: **The** value vocabulary (§19): what a value port carries, and what a
+#: *control* can carry (§14) - a control whose value kind is one of these is
+#: a node parameter made addressable, so the daemon auto-declares an input
+#: port for it (:func:`control_input_ports`).  Any other control a module
+#: declares - a button, a readout, a file dialog, a generic inline `setting`
+#: - is a widget, not a value, and gains nothing.  One tuple, read by the
+#: connection rules, the relay, the type validation and the consumer side;
+#: `boolean` is deliberately in here and not in :data:`NODE_KINDS` (a
+#: control signal *is* a value; the PipeWire model's own boolean wires are
+#: one module's way of reading one).
+VALUE_KINDS = ("number", "boolean", "text", "choice")
+
+#: The kind whose value is one of a declared option list - the one kind whose
+#: *value* a declaration constrains (:func:`value_problem`).
+CHOICE_KIND = "choice"
+
+#: Port kinds the daemon itself knows: the node kinds and the value kinds
+#: together (a test holds this to `NODE_KINDS | VALUE_KINDS`, so the two
+#: vocabularies cannot drift).  A module may only declare ports whose kind is
+#: in here.  Each pairs only with itself, except audio and bundle
+#: (:func:`central.graph.kinds_compatible`).
 PORT_KINDS = ("audio", "bundle", "boolean", "filter", "impulse", "sound",
               "camera", "number", "text", "choice")
 
 DIR_IN = "in"
 DIR_OUT = "out"
-
-#: What a *control* can carry (agents/SPACES.md §14): a control whose value
-#: kind is one of these is a node parameter made addressable, so the daemon
-#: auto-declares an input port for it
-#: (:func:`control_input_ports`).  Any other control a module declares - a
-#: button, a readout, a file dialog, a generic inline `setting` - is a
-#: widget, not a value, and gains nothing.
-VALUE_KINDS = ("number", "boolean", "text", "choice")
 
 #: Which value kind a control's *widget* carries.  A module declares the
 #: widget (PLAN §7's vocabulary: `slider`/`switch`/`field`/`choice` and the
@@ -130,6 +143,55 @@ def control_value_kind(control: Dict[str, Any]) -> str:
     if declared in VALUE_KINDS:
         return declared
     return WIDGET_VALUE_KINDS.get(str(control.get("widget") or ""), "")
+
+
+def is_value_kind(kind: str) -> bool:
+    """Whether a port of this kind carries a **value** (agents/SPACES.md
+    §19): ``number``, ``boolean``, ``text`` or ``choice``.
+
+    The kind decides what a value port is - not a flag - which is why a port
+    a connection rule lets a value wire into is also a port the relay carries
+    one to.  A kind outside :data:`VALUE_KINDS` is a node kind (a stream, an
+    event, a feed) and takes no value."""
+    return kind in VALUE_KINDS
+
+
+def choices_of(declared: Any) -> Tuple[str, ...]:
+    """An option list a declaration carries (a control's or a value port's),
+    as strings - ``()`` when it declares none, and also for anything that is
+    not a list (validation refuses that; reading one is not a crash).  One
+    reader, so a control and a port state their options the same way."""
+    if not isinstance(declared, (list, tuple)):
+        return ()
+    return tuple(str(option) for option in declared)
+
+
+def value_problem(kind: str, choices: Any, value: Any) -> str:
+    """Why a slot of ``kind`` (declaring ``choices``) cannot take ``value``,
+    or ``""`` when it can - **the one acceptance rule** (§19).
+
+    Both sides of the relay ask it: the daemon before it hands a producer's
+    value to a consumer, and the consuming module before it keeps one.  So an
+    option a declaration does not name is refused with a reason rather than
+    silently delivered by the bus or silently coerced by the node.
+
+    Only ``choice`` constrains the *value*: it travels as its option, and an
+    option the slot does not declare (or a choice slot that declares nothing)
+    is the whole of the refusal.  Every other value kind takes what it is
+    handed - how a node turns it into what it computes with (a number from a
+    string, a boolean from a bit) is that module's own coercion, as §14 has
+    it - so this returns ``""`` for them."""
+    if kind not in VALUE_KINDS:
+        return (f"{kind or 'an unknown kind'} is not a value kind "
+                f"({', '.join(VALUE_KINDS)})")
+    if kind != CHOICE_KIND:
+        return ""
+    options = choices_of(choices)
+    if not options:
+        return "a choice slot declares no options"
+    if str(value) not in options:
+        return f"{value!r} is not one of {', '.join(options)}"
+    return ""
 
 
 #: How many drivers a *receiving* port takes, declared per port as
@@ -208,6 +270,53 @@ def control_input_ports(ports: List[Dict[str, Any]],
             "cardinality": CARDINALITY_ONE,
         })
     return auto
+
+
+def value_slots(ports: List[Dict[str, Any]],
+                controls: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Every **value slot** one type declares, by port name - the one listing
+    (§19), built from the module's own declaration.
+
+    A slot is an **input port whose kind is a value kind**
+    (:func:`is_value_kind`): the vocabulary decides, not a flag, so a port the
+    connection rules let a producer's value wire into is exactly a port the
+    relay carries that value to.  The auto-declared ports of the type's value
+    controls (:func:`control_input_ports`) are slots like any other, which is
+    what makes S3's path and S5's the same one.
+
+    Each entry is ``{"name", "kind", "control", "choices"}``:
+
+    * ``control`` is the control key when the delivery is spelled
+      ``control_set`` (a ``drives_control`` port is named for the control it
+      drives, so the name *is* the key), ``""`` for a raw port the consumer
+      takes through its ``on_value`` path;
+    * ``choices`` is what the slot accepts when it is a choice - the control's
+      own option list, or the port's.
+    """
+    slots: Dict[str, Dict[str, Any]] = {}
+    by_key: Dict[str, Dict[str, Any]] = {}
+    for control in controls or []:
+        if isinstance(control, dict):
+            by_key.setdefault(str(control.get("key") or ""), control)
+    declared = list(ports or [])
+    for port in declared + control_input_ports(declared, list(controls or [])):
+        if not isinstance(port, dict) or port.get("direction") != DIR_IN:
+            continue
+        kind = str(port.get("kind") or "")
+        name = str(port.get("name") or "")
+        if not name or name in slots or not is_value_kind(kind):
+            continue
+        control = by_key.get(name) if port.get("drives_control") else None
+        options = (control or {}).get("choices")
+        if options is None:
+            options = port.get("choices")
+        slots[name] = {
+            "name": name,
+            "kind": kind,
+            "control": name if port.get("drives_control") else "",
+            "choices": choices_of(options),
+        }
+    return slots
 
 
 # ----------------------------------------------------------------------
@@ -532,6 +641,28 @@ def validate_type_decl(decl: Dict[str, Any]) -> Tuple[bool, str]:
                 f"{stated!r} (expected one of {', '.join(VALUE_KINDS)}, or absent "
                 f"to derive it from the widget)"
             )
+        # A choice's options are the *declaration's* (agents/SPACES.md §19):
+        # the daemon and the consumer both read them from here to decide
+        # whether a value may land, so a choice that names none can take
+        # nothing and is refused at declare time rather than silently
+        # swallowing every value later.
+        declared_choices = control.get("choices")
+        if declared_choices is not None and (
+            not isinstance(declared_choices, list)
+            or any(not isinstance(option, str) for option in declared_choices)
+        ):
+            return False, (
+                f"{decl.get('type_id')}.{control.get('key')}: choices must be a "
+                f"list of strings"
+            )
+        if control_value_kind(control) == CHOICE_KIND and not choices_of(
+            declared_choices
+        ):
+            return False, (
+                f"{decl.get('type_id')}.{control.get('key')}: a choice control "
+                f"must declare its options (a choice that names none can take "
+                f"no value)"
+            )
     control_keys = {str(control.get("key")) for control in controls}
     ports = decl.get("ports", [])
     if not isinstance(ports, list):
@@ -548,6 +679,33 @@ def validate_type_decl(decl: Dict[str, Any]) -> Tuple[bool, str]:
             return False, (
                 f"{decl.get('type_id')}.{port.get('name')}: unknown port kind "
                 f"{port.get('kind')!r}"
+            )
+        # `choices` is a *value port's* field (§19): the options a choice port
+        # accepts, or the suggestions a text one offers.  A node kind has no
+        # values to name options for, a `choices` list has to be strings, and
+        # a choice **input** that names none can take none — all three are
+        # refused here rather than ignored or silently swallowed later.
+        port_choices = port.get("choices")
+        if port_choices is not None:
+            if not is_value_kind(port.get("kind")):
+                return False, (
+                    f"{decl.get('type_id')}.{port.get('name')}: choices is a value "
+                    f"port's field, and {port.get('kind')!r} is not a value kind"
+                )
+            if not isinstance(port_choices, list) or any(
+                not isinstance(option, str) for option in port_choices
+            ):
+                return False, (
+                    f"{decl.get('type_id')}.{port.get('name')}: choices must be a "
+                    f"list of strings"
+                )
+        if (port.get("kind") == CHOICE_KIND
+                and port.get("direction") == DIR_IN
+                and not choices_of(port_choices)):
+            return False, (
+                f"{decl.get('type_id')}.{port.get('name')}: a choice input port "
+                f"must declare its options (a choice that names none can take no "
+                f"value)"
             )
         cardinality = port.get("cardinality")
         if cardinality is not None and cardinality not in CARDINALITIES:

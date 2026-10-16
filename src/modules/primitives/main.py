@@ -30,7 +30,11 @@ class Primitives:
     """The module: an engine, and the host that carries its messages."""
 
     def __init__(self, socket_path: str = "") -> None:
-        self.engine = Engine()
+        # The engine is handed this module's own declarations: which ports
+        # are value slots, and what a `choice` accepts, come from one listing
+        # (`api.value_slots`) — the same one the daemon derives, so the two
+        # sides of the relay cannot disagree (agents/SPACES.md §19).
+        self.engine = Engine(types.TYPES)
         self.host = ModuleHost(
             "primitives",
             "1.0",
@@ -97,12 +101,13 @@ class Primitives:
         """A value arriving from another module (`value_set`), addressed at
         the instance and the *port* it drives.
 
-        The port's name is the control key by construction (agents/SPACES.md
-        §14), so this lands exactly where the daemon's other spelling of the
-        same relay does — `control_set`, which is what it sends for a port
-        that drives a control — and the node's input reads it either way.
-        Nothing emits `value_set` today; the callback is wired so a relayed
-        value is applied rather than dropped.
+        This is the daemon's spelling of the relay for a value port that is
+        not a control (`display.text`); the other spelling is `control_set`,
+        which `_control` handles.  Both land in `set_control`, which is the
+        node's one slot per input and the one place a value is refused if
+        this module's declaration cannot take it (agents/SPACES.md §19) — so
+        a relayed value is applied rather than dropped, and an undeclared
+        `choice` option is refused rather than kept.
         """
         instance_id = str(message.get("instance_id") or "")
         port = str(message.get("port") or "")

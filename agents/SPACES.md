@@ -174,7 +174,8 @@ client keeps working at every point.
 | S6 | **sidebar spaces menu** (live spaces) + **dropdown&search** to switch/embed anywhere | **done** — client `66df741` |
 | S7 | mycelion wiring + live smoke | **wiring done** (mycelion `ed160ea`); the **live smoke is Kyle's** — it needs the machine and his session |
 | S8 | **an app declares its own space** (§18) — `space_declare`, app-owned and non-permanent, takeover refused | open — the spec's opening promise, and the last gap it named |
-| S9 | **one value grammar** (§19) — the S3 and S5 paths resolved, ranked and kind-checked in one place | open |
+| S9 | **one value grammar** (§19) — the S3 and S5 paths resolved, ranked and kind-checked in one place | **done** — client `6b0e63a` (patchSpaceGui); daemon half this change (one vocabulary, one `value_slot` listing, one `api.value_problem`, one resolution order) |
+| S10 | **declarative means uneditable** (§20) — refuse interior edits inside a readonly space while still allowing it to be plugged into | open — an audit found the rule only partly enforced, which contradicts the spec |
 
 Verified at each step: the daemon suite (560 passed, 28 skipped at S5), the
 client suite (347 passed), `scripts/smoke.sh` on a private instance, the
@@ -220,8 +221,41 @@ From `PLAN.md` / `EXTRACTION.md` / the notes:
   the source of a drop; both come from one list with a type filter.
 * [D] a space's color source: `theme_class_color` vocabulary, so stylix keeps
   working.
-* [D] when a template is edited while instances exist: instances rebase (the
-  existing diff-rebase rule), and a template's own edit requires edit mode.
+* [D] when a template is edited while instances exist: **implemented as a copy,
+  not a rebase.**  `instantiate_template` materializes an independent live space
+  whose `template` field only records where it came from; editing the template
+  afterwards does not touch the live space, and there is no diff model between
+  them.  Rationale: a half-following child would need the blueprint/instance diff
+  machinery pointed at templates as well as space files, and the spec does not
+  ask for it — the spec asks that a template's nodes stay unloaded until it is
+  dropped.  If live rebase is wanted, it is a follow-up, and this line is where to
+  say so.
+
+## 20. S10 contract (frozen) — declarative means uneditable, except being plugged into
+
+The spec: "a declarative live space should be readonly and uneditable, however we
+should be able to plug things into it and drop it into other spaces of course."
+
+An audit of both repos found the first half only partly true today: of the node
+operations, only *move/reparent* is refused inside a declarative space; delete,
+rename, property/layout edits and (un)wiring are refused by neither the daemon
+nor the client.  That contradicts "uneditable", so this step states and enforces
+the rule:
+
+* **Refused inside a declarative space**: deleting a declared node, renaming it,
+  changing its properties or its stored position, and adding or removing an edge
+  whose *both* endpoints are declared (that is editing the declared wiring).
+  Each refusal names what it refused and changes nothing.
+* **Allowed**: an edge between a declared node and a node outside the space, in
+  either direction — "plug things into it" — and its removal; embedding the space
+  as a portal target; instantiating a space *from* a readonly template (copying
+  out is not editing); and every read.
+* **Where**: the daemon is the authority (the client may grey an affordance for
+  responsiveness, but the daemon's refusal is what makes it true), and the
+  provenance is the same `declarative` flag the load/export/reload paths already
+  use — one notion of declared, not a second one.
+* **Not changed**: a read-only space's own portals remain declared by its file
+  (S2), and a read-only space may still be an embedding *target*.
 * [D] how a non-permanent space announces itself: the app re-creates it on
   attach and its placement comes from the app's own `space_announce` payload, so
   the daemon must accept a layout for a space it has never persisted.

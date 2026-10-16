@@ -13,7 +13,11 @@ Node records are looked up by id, never duplicated here.  The edge rules
 live in exactly one place (``kinds_compatible`` plus the cardinality rule
 in ``Graph.can_connect``) so that the old three-way mirror — the
 model, the GUI's ``node_catalog`` and ``session_repair`` each re-checking
-compatibility — has one authority to defer to.
+compatibility — has one authority to defer to.  Which *kinds* may pair is
+decided here; whether the *value* on a wire may land on the port
+(a `choice` option the consumer does not declare) is the other half of
+agents/SPACES.md §19 and lives in ``central.module_api.value_problem``,
+which the relay and the consuming module both ask.
 
 How many drivers a receiving port takes is **declared, never assumed**:
 ``cardinality: "one" | "many"`` in the type declaration (S4, agents/SPACES.md
@@ -33,18 +37,34 @@ from central import module_api as api
 
 #: Port kinds that interoperate with each other: a bundle is a set of
 #: audio streams and one stream is a bundle of one (see the bundle nodes).
+#: Every other kind pairs only with itself — including every value kind
+#: (`central.module_api.VALUE_KINDS`: `number`, `boolean`, `text`, `choice`),
+#: so a `choice` port pairs with a `choice` port and nothing else, and a
+#: value never lands on a stream (agents/SPACES.md §19).
 LINKABLE_KINDS = frozenset({"audio", "bundle"})
 
 
 def kinds_compatible(from_kind: str, to_kind: str) -> bool:
-    """Whether an output of ``from_kind`` may drive an input of ``to_kind``.
+    """Whether an output of ``from_kind`` may drive an input of ``to_kind`` —
+    **the one** place that decides it (agents/SPACES.md §19).
 
-    Only declared kinds may pair, and only with themselves — except audio
-    and bundle, which mix either way.  (The legacy rule let an unknown kind
-    pair with anything; the registry-era rule is strict, which is what a
-    numeric/boolean primitive needs to stay honest.)
+    Only *declared* kinds may pair (`central.module_api.PORT_KINDS`), and only
+    with themselves — except audio and bundle, which mix either way.  An
+    unknown kind pairs with nothing, including another copy of itself: the
+    vocabulary is what a pair is judged against, so a kind nothing declared
+    is not a connection the daemon invents.  (The legacy rule let an unknown
+    kind pair with anything; the registry-era rule is strict, which is what a
+    numeric/boolean primitive needs to stay honest — and what the display's
+    own mirror of this function states.)
+
+    A value kind pairs only with itself, so a `choice` port pairs only with a
+    `choice` port.  Whether a *value* may land on the port is the other half
+    of §19 and lives in `central.module_api.value_problem`, asked by the relay
+    and by the consuming module.
     """
     if not from_kind or not to_kind:
+        return False
+    if from_kind not in api.PORT_KINDS or to_kind not in api.PORT_KINDS:
         return False
     if from_kind in LINKABLE_KINDS and to_kind in LINKABLE_KINDS:
         return True

@@ -229,7 +229,7 @@ def test_the_stored_value_is_whatever_the_control_held_when_the_drive_began():
 
     assert [e["op"] for e in rig.to("sink", "edge_apply")] == ["remove"]
     assert rig.to("sink", "control_set") == []
-    assert rig.registry.local_control_value("bus1", "gain") == (False, None)
+    assert rig.registry.local_slot_value("bus1", "gain") == (False, None)
 
 
 def test_a_control_takes_one_driver_unless_its_port_declares_many():
@@ -253,31 +253,48 @@ def test_a_control_takes_one_driver_unless_its_port_declares_many():
     assert [m["value"] for m in rig.to("sink", "control_set")] == [0.1]
 
 
-def test_only_a_control_port_relays_and_only_where_an_edge_points():
-    """A value reported on a port nothing consumes goes nowhere, and an edge
-    onto an *ordinary* input port is not a control: it is the module's own
-    business to read it."""
+def test_every_value_port_an_edge_points_at_gets_the_value():
+    """Which ports a reported value reaches is the **kind vocabulary**, not a
+    flag (agents/SPACES.md §19): `s1.in` is a number input port, so it is a
+    value slot exactly as `s1.gain` is — delivered as a `value_set` (the
+    `on_value` path) where a control is delivered as a `control_set`, which is
+    the only difference between the two.  A value reported on a port nothing
+    consumes still goes nowhere."""
     rig = Rig()
     assert rig.report({"n1": {"out": 1.0}}) == {"type": "ok", "ref": "node_values"}
     assert rig.to("sink", "control_set") == []
+    assert rig.to("sink", "value_set") == []
 
-    # `s1.in` is a plain number input, not a control.
+    # `s1.in` is a plain number input — a value port, not a control.
     assert rig.registry.port_drives_control("s1", "in") == ""
+    assert rig.registry.value_slot("s1", "in")["kind"] == "number"
     assert rig.wire("n1", "s1", "in")["type"] == "ok"
+    # Wiring carries no value of its own: the daemon relays what the producer
+    # last reported (1.0, above) — exactly as it does onto a control port —
+    # and every later report follows it.
+    assert [m["value"] for m in rig.to("sink", "value_set")] == [1.0]
     rig.report({"n1": {"out": 2.0}})
     assert rig.to("sink", "control_set") == []
+    assert [m["value"] for m in rig.to("sink", "value_set")] == [1.0, 2.0]
+
+    # A port no edge leaves carries nothing, whatever was reported on it.
     assert rig.handler.relay_values({"n1": {"nobody": 3.0}}) == 0
+    assert rig.registry.value_slot("n1", "out") is None      # an output
+    assert rig.registry.value_slot("s1", "gain")["control"] == "gain"
 
 
 def test_a_declaration_with_no_controls_is_untouched():
-    """An old-style type keeps exactly the ports it declared: nothing to
-    drive, and nothing relayed onto it."""
+    """An old-style type keeps exactly the ports it declared, and no port
+    drives a control — but a value port it *did* declare is reachable by the
+    relay like any other (§19), which is why this one arrives at `values`
+    (the module that declared and announced the type) as a `value_set`."""
     rig = Rig()
     assert rig.registry.type_decl("old_style").ports == OLD_STYLE["ports"]
     assert rig.registry.port_drives_control("old1", "in") == ""
     assert rig.wire("n1", "old1", "in")["type"] == "ok"
     rig.report({"n1": {"out": 5.0}})
     assert rig.to("sink", "control_set") == []
+    assert [m["value"] for m in rig.to("values", "value_set")] == [5.0]
 
 
 def test_a_delivered_control_never_reaches_a_node_whose_module_is_gone():

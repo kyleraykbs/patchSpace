@@ -1415,3 +1415,101 @@ no label, no owner, and no way for a UI to say whose space it was.
   not app-owned).  `delete_space` on a declared space needs no daemon change:
   the record goes and the app's next attach brings it back, which is the
   honesty §18 asks for rather than a special case.
+
+## 2026-10-15 — S9: one value grammar
+
+`agents/SPACES.md` §19.  A coherence step, not a feature: after S3 and S5 a value
+can reach a consumer two ways — an auto-declared `drives_control` port and a
+declared value input port (S5's `display.text`) — and each of the two had grown
+its own small piece of the rule.  There is one now, and this section is mostly
+about *where* the sites were.
+
+* **The vocabulary is one list, in two roles.**  `module_api` now names the
+  *node* kinds (`NODE_KINDS`: a stream, a bus, a predicate, an event, a file
+  reference, a feed) and the *value* kinds (`VALUE_KINDS`: `number`,
+  `boolean`, `text`, `choice`) separately, with `PORT_KINDS` their union (a test
+  holds that, so the two cannot drift).  `central/spaces.py`'s
+  `FACE_KINDS` was a **third copy** of the value vocabulary spelled out inline —
+  a face input is one more place a value port lives — and now reads
+  `(FACE_KIND_AUDIO,) + api.VALUE_KINDS`.
+* **`is_value_kind` decides what a value port is**, and nothing else does: an
+  input port whose kind is in `VALUE_KINDS` is a value slot, whether it is a
+  `drives_control` port (S3) or a plain declared port (S5).  A flag would have
+  left the gap it was meant to close: the client draws a jack for every value
+  port, and a value wired into a port the relay would not reach is exactly the
+  silent divergence §19 forbids.  So `display.text`'s "declared value port" and
+  `math.op`'s auto-declared control port are one listing
+  (`api.value_slots` → `TypeDecl.slots` in the registry, and `Engine.slots` in
+  the consuming module), and the relay spells the delivery by what the consumer
+  already implements: `control_set` for a slot that drives a control,
+  `value_set` for any other value port.  Two spellings, one slot.
+* **The one acceptance rule** is `api.value_problem(kind, choices, value)`: the
+  only kind that constrains the *value* is `choice` (it travels as its option),
+  and an option the slot does not declare is refused — by the daemon before it
+  delivers (`ProtocolHandler._node_values`/`_node_edge` answer `refused` with
+  the reason; `node_control` answers an `error` and stores nothing) and by the
+  consumer before it keeps (`Engine.set_control` returns `False`, nothing
+  applied).  Both sides ask the *same* function, so neither can grow a second
+  opinion.  A `choice` that declares no options is refused where it is declared
+  (`validate_type_decl`), because such a slot could never take anything.
+* **The sites that were resolving differently, and are not now:**
+  1. `Engine._compute`'s `math`/`compare`/`logic` read `op` straight out of
+     `config` — the one slot in that module that ignored a wire and silently
+     fell back to "add"/"<"/"and" for an option nobody declared.  It reads
+     `given("op", <declared default>)` now, like every other slot.
+  2. `Engine._compute`'s *sources* (`number`/`const`/`slider`/`toggle`/
+     `string`) read `config` only for their own `value`/`on` slot, so a wire
+     onto a source's own parameter was ignored where the same wire onto an
+     operand drove it.  They read `given(...)` too: one resolution order for
+     every value slot in the module.
+  3. `graph.kinds_compatible` claimed "only declared kinds may pair" and then
+     paired two copies of an *undeclared* kind (`"widget"`→`"widget"` was
+     True).  The declaration is consulted now; the display's mirror of this
+     function had already documented the strict rule.
+  4. The relay reached only `drives_control` ports: a value on a wire into
+     S5's `display.text` from *another* module was dropped without a word
+     (`deliver_control` refused it because the port drives no control).  It
+     reaches every value slot now — that is where `display.text` becomes a real
+     input rather than a port the canvas draws.
+  5. The daemon's drive bookkeeping was keyed by *control key* and gated on
+     `port_drives_control`, so only a control was captured on wire-in and
+     restored on wire-out.  It is keyed by the **port name** (`capture_slot`/
+     `local_slot_value`/`set_slot_value`), which *is* the control key for a
+     `drives_control` port, so a declared value port gets the same three ranks:
+     edge, then what the slot held, then the module's own default.  The
+     end-to-end difference: pulling a wire off `display.text` used to leave the
+     slot cleared; now what it held comes back, exactly as for `math.a`.
+* **What was deliberately left alone:** `ModuleHost._call` still reads whatever
+  line is queued as the reply it waits for, so over a *socket* a daemon push can
+  be swallowed while the module publishes what it just applied — the hole S5's
+  notes already carry ("reply routing by `ref`, its own piece of work").  The
+  socket test therefore proves the drive on both paths (reporting again if one
+  report is swallowed, which is honest: a report is a *level*, superseded by the
+  next), and the restore is proved on the daemon's own side with an in-process
+  consumer (`tests/test_value_grammar.py`), where the ordering is the daemon's
+  alone.  Two rules that *look* like siblings and are not:
+  * a face input's `field` value has no application site in the daemon yet
+    (§5's typed-inline-field path is the client's face work), so there was no
+    third resolver to unify;
+  * `PatchSpace.add_edge` (`modules/pipewire/pwnodes.py`) still judges the
+    *model's* kinds with per-kind equality checks, and `_resolve_boolean` still
+    resolves the model's boolean wires (edge → the port's declared default).
+    Neither knows the value kinds — the model refuses a kind it was not built
+    with, and its nodes carry none — it is the PipeWire module's own guard for
+    its live graph, in the module's own process, and the daemon's authority for
+    every API edge stays `graph.kinds_compatible`.  Touching it would change
+    accepted/refused pairs for camera/sound/filter/boolean (and put `central.*`
+    in the module's import graph), so §19's named sites are what moved.
+* **Tests** (`src/tests/test_value_grammar.py`): the whole kind matrix pinned
+  (12×12, kinds × kinds including nothing and an undeclared kind — accepts
+  exactly and only what it accepted before), `choice` pairs only with `choice`,
+  the declaration rules for options, the daemon's listing equal to the
+  consumer's, one parameterised resolution test over *both* paths (edge beats
+  stored, stored beats the default, unwiring clears the driven slot), the
+  consumer's refusal on both paths, the two spellings ending in one shape with
+  the restore for each, and the end-to-end run over a real socket (a producer
+  in another module driving both `display.in` and `display.text`).
+
+Suite 576 passed, 28 skipped before this step, 741 after (S9's own file is 157
+of them — the kind matrix is 144 of that, and `tests/test_graph.py` gained 8
+more pairs); `scripts/smoke.sh` passes every step.

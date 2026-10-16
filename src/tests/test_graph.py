@@ -28,9 +28,21 @@ def _cardinality(mapping):
         ("bundle", "bundle", True),
         ("boolean", "boolean", True),
         ("number", "number", True),
+        ("text", "text", True),
+        ("choice", "choice", True),
         ("audio", "boolean", False),
         ("boolean", "audio", False),
         ("number", "audio", False),
+        # The value kinds pair only with themselves (§19), so a `choice`
+        # port pairs with a `choice` port and nothing else.
+        ("text", "choice", False),
+        ("choice", "text", False),
+        ("number", "text", False),
+        ("choice", "boolean", False),
+        # An undeclared kind pairs with nothing — not even itself: the
+        # vocabulary is what a pair is judged against (§19).
+        ("widget", "widget", False),
+        ("widget", "audio", False),
         ("camera", "camera", True),
         ("camera", "audio", False),
         ("", "audio", False),

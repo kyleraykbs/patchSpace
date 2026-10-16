@@ -371,6 +371,53 @@ refuses for a module-owned node — a client-side gap), and a pre-existing hole 
 so a push already in flight can be dropped — see `agents/NOTES.md` for the
 repro; fixing it is reply routing by `ref`, its own piece of work).
 
+**One value grammar (S9, `agents/SPACES.md` §19).**  The two ways a value can
+reach a consumer — an auto-declared `drives_control` port (S3) and a declared
+value input port (S5's `display.text`) — are one mechanism read through one
+rule, because a second slightly-different rule is exactly what a
+hyper-generalization grows on its own.  The pieces:
+
+* **The vocabulary is two lists in one place.**  `module_api` names the *node*
+  kinds (`NODE_KINDS`) and the *value* kinds (`VALUE_KINDS` = `number`,
+  `boolean`, `text`, `choice`) separately, `PORT_KINDS` is their union (a test
+  holds it), and `api.is_value_kind` is what "this port carries a value" means
+  — a port's kind decides, never a separate flag, so a port the connection
+  rules let a value wire into is exactly a port the relay carries one to.
+  `spaces.FACE_KINDS` reads the same list rather than respelling it.
+* **One listing of the slots.**  `api.value_slots(ports, controls)` maps every
+  value input port of a type to `{name, kind, control, choices}` — the control
+  key the delivery is spelled for, and the options a `choice` accepts.  The
+  daemon builds it when a type is declared (`Registry`'s `TypeDecl.slots`, read
+  by `Registry.value_slot`/`value_problem`) and the consuming module builds it
+  from its own declarations (`Engine(declarations)`), so the two sides cannot
+  disagree about *which* ports take a value.
+* **One connection decision**, unchanged in outcome: `graph.kinds_compatible`
+  is the only place a kind pair is judged — audio/bundle mix either way, every
+  other *declared* kind pairs only with itself (so a `choice` pairs only with a
+  `choice`), and an undeclared kind pairs with nothing, not even itself (it
+  used to pair with itself, which its own docstring and the display's mirror
+  already denied).
+* **One resolution order**, read only through the consumer's `given`: the edge
+  wins, then what the slot holds, then the node's own default.  `math`/
+  `compare`/`logic`'s `op` used to read `config` directly and a *source*'s own
+  `value`/`on` slot did too — the two places in that module where the rank
+  differed; they read their slot like everything else now.
+* **One acceptance rule**, `api.value_problem(kind, choices, value)`: only
+  `choice` constrains the *value* and only against its declared options.  The
+  daemon asks it before it delivers (a refused value is *not* delivered —
+  `node_values`/`node_edge` answer `refused` with the reason and `node_control`
+  answers an `error`, storing nothing) and the consumer asks it before it keeps
+  one (`Engine.set_control` refuses, nothing applied).  A `choice` that
+  declares no options is refused at `validate_type_decl`, since such a slot
+  could never take anything.
+* **The relay reaches both spellings**: `Registry.value_slot` decides capture
+  and restore for *any* value slot (keyed by port name — which is the control
+  key for a `drives_control` port), so pulling a wire off `display.text` puts
+  back what it held exactly as it does for `math.a`.  Delivery is
+  `control_set` for a slot that drives a control (the callback every module
+  has) and `value_set` for any other value port (the `on_value` path S5
+  registered).
+
 * `AllInputsNode` / `AllAppsNode` (`InputNode`) produce a source bundle from
   `source_filters()`; `AllOutputsNode` (`Node`) produces a sink bundle from
   `sink_filters()`. `bundle_side()` reports which.

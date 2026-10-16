@@ -333,30 +333,30 @@ def test_a_type_that_declares_only_settings_gains_nothing():
     ]
 
 
-def test_a_controls_local_value_is_captured_and_the_user_overrides_it():
-    """The stored value the unwire goes back to: what the control held when
-    it was first driven, updated whenever the user sets it — and nothing at
-    all for a control nothing has ever set."""
+def test_a_slots_local_value_is_captured_and_the_user_overrides_it():
+    """The stored value the unwire goes back to: what the slot held when it
+    was first driven, updated whenever the user sets it — and nothing at all
+    for a slot nothing has ever set."""
     reg, _ = _control_reg()
     # Nothing stored yet, and no drive has captured anything.
-    assert reg.local_control_value("s1", "gain") == (False, None)
+    assert reg.local_slot_value("s1", "gain") == (False, None)
 
     # Driving it captures the config's value: that is what it held.
-    assert reg.capture_control("s1", "gain") == (True, 0.25)
-    assert reg.local_control_value("s1", "gain") == (True, 0.25)
+    assert reg.capture_slot("s1", "gain") == (True, 0.25)
+    assert reg.local_slot_value("s1", "gain") == (True, 0.25)
     # A second capture (another driver on a `many` port) does not move it.
-    assert reg.capture_control("s1", "gain") == (True, 0.25)
+    assert reg.capture_slot("s1", "gain") == (True, 0.25)
 
     # The user setting the control is the other writer, and it is recorded
     # in the instance's config too (what a re-attaching module is handed).
-    assert reg.set_control_value("s1", "gain", 0.9) is True
-    assert reg.local_control_value("s1", "gain") == (True, 0.9)
+    assert reg.set_slot_value("s1", "gain", 0.9) is True
+    assert reg.local_slot_value("s1", "gain") == (True, 0.9)
     assert reg.instance("s1").config["gain"] == 0.9
 
     # A control with no config entry has no stored value: the daemon says so
     # instead of inventing one.
-    assert reg.capture_control("s1", "mode") == (False, None)
+    assert reg.capture_slot("s1", "mode") == (False, None)
 
-    # Forgetting the instance forgets its controls with it.
+    # Forgetting the instance forgets its slots with it.
     reg.forget_instance("s1")
-    assert reg.local_control_value("s1", "gain") == (False, None)
+    assert reg.local_slot_value("s1", "gain") == (False, None)

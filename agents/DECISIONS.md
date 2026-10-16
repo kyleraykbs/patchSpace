@@ -676,3 +676,73 @@ stored value lives in the registry
   hard-coded "main" entry is gone once a tree is loaded (its value was the
   pre-container default, and the root's id is `""`).
 - Reversible: yes (one branch in `_snapshot_request`).
+
+## [2026-10-15] S9: a value port is the *kind*, not a flag
+- Decision: an input port whose kind is one of `api.VALUE_KINDS` is a value
+  slot — the port the relay carries a value to — whether it drives a control
+  (`math.a`, auto-declared) or not (`display.text`, declared by S5).  The
+  delivery is spelled by what the consumer already implements: `control_set`
+  for a `drives_control` slot, `value_set` for any other value port.
+- Why: the client draws a jack for every value-kind port, and a wire the
+  daemon accepts into a port the relay would never reach is exactly the silent
+  divergence §19 exists to forbid.  An opt-in flag (`value: true`) would have
+  made the daemon's reach narrower than the connection rules' and left that
+  gap; the vocabulary is the one thing both sides already agree on, because it
+  is also what a control's value kind and a connection rule are written
+  against.  Consequence accepted: `value_set` is now sent for a value-kind
+  input port of any module, including the PipeWire module's boolean
+  control-plane inputs, which ignores it (`modules/pipewire/module.py`'s
+  `value_set` branch remembers nothing) — harmless, and it means that module
+  can adopt the relay without a daemon change.
+- Reversible: yes (gate `Registry.value_slot` on a declaration field).
+
+## [2026-10-15] S9: refusal is one function, asked by both sides
+- Decision: `api.value_problem(kind, choices, value)` is the one acceptance
+  rule; the daemon asks it before it delivers (`node_values`/`node_edge`
+  answer `refused` with the reason, `node_control` answers an `error` and
+  stores nothing) and the consuming module asks it before it keeps a value
+  (`Engine.set_control` refuses, nothing applied).  Only `choice` constrains
+  the *value*: it travels as its option, and an option the slot does not
+  declare is refused there.  Nothing else is inspected — §14's "the daemon
+  never looks inside the value" still holds for every other kind, and how a
+  node coerces a number or a boolean stays that module's business.
+- Why: §19 says an unknown option is refused "at the consumer rather than
+  silently kept"; the daemon has the declaration (the module's own `choices`)
+  and the reason a display needs, and the consumer has to refuse anyway (a
+  module can be handed a value by a path the daemon did not relay — a local
+  wire).  One function means the two can never disagree about *why* it was
+  refused.  The consumer read is guarded at both ends: intake
+  (`set_control`) and read (`_compute`'s `given`), so a locally-wired
+  undeclared option falls through to the next rank rather than being used.
+- Reversible: yes (the function is the seam; a stricter rule for another kind
+  is a branch in it).
+
+## [2026-10-15] S9: a choice with no options cannot be declared
+- Decision: `validate_type_decl` refuses a `choice` control, or a choice
+  **input** port, that declares no `choices` (and refuses a `choices` list on
+  a port of a non-value kind, or one that is not a list of strings).
+- Why: options are the declaration's (the daemon and the consumer both read
+  them from there), so a choice naming none can take no value at all — every
+  value would be refused at runtime with "a choice slot declares no options".
+  Refusing it where it is declared turns a permanent silent-failure into a
+  declare-time error.  No shipped type declares a `choice` port at all, and
+  every choice control in the tree already carries its list (the primitives'
+  `math`/`compare`/`logic` `op`), so nothing accepted today is refused now.
+- Reversible: yes (one branch in `validate_type_decl`).
+
+## [2026-10-15] S9: the daemon's drive bookkeeping is keyed by port name
+- Decision: `Registry.capture_slot`/`local_slot_value`/`set_slot_value` (was
+  `capture_control`/`local_control_value`/`set_control_value`) key on the
+  **port name**, and the relay gates capture/restore on `value_slot` rather
+  than on `port_drives_control`.
+- Why: a `drives_control` port is named for the control it drives, so the port
+  name *is* the control key — one bookkeeping then serves both ways a value
+  arrives, and a declared value port gets the same three ranks as a control
+  (edge, then what the slot held, then the module's own default).  Before this,
+  pulling a wire off `display.text` left the slot cleared instead of restoring
+  what it held while `math.a` restored it: a second, slightly different rule,
+  which is the thing §19 forbids.  Renaming rather than overloading keeps the
+  names honest (`set_slot_value` is also used where a user sets a control, and
+  that is what it now says).
+- Reversible: yes (the three methods are the whole surface; only the relay and
+  the node-removal path call them).

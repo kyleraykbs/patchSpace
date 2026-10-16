@@ -47,6 +47,14 @@ class TypeDecl:
     display: Dict[str, Any] = field(default_factory=dict)
     capabilities: List[str] = field(default_factory=list)
     requires: List[str] = field(default_factory=list)
+    #: port name -> the **value slot** that port is (``api.value_slots``):
+    #: every input port whose kind is a value kind, with the control key the
+    #: delivery is spelled for and the options it accepts.  Derived from the
+    #: declaration when the type is declared — one listing, built by the
+    #: module API, read by the relay and by the consumer side of every module
+    #: (agents/SPACES.md §19).  Not serialized: it is the same declaration a
+    #: display already installs, seen through the value grammar.
+    slots: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -132,12 +140,14 @@ class Registry:
         self._lock = threading.RLock()
         self._modules: Dict[str, ModuleRecord] = {}
         self._instances: Dict[str, InstanceRecord] = {}
-        #: (instance_id, control key) -> ``(known, value)``: what a control
-        #: holds when nothing drives it.  Captured when a driver is wired
-        #: onto the control's port (agents/SPACES.md §14), so the value the
-        #: module had *then* is what unwiring restores, and updated whenever
-        #: the user sets the control.  The instance's own ``config`` stays the
-        #: record of what the module was told; this is the drive's
+        #: (instance_id, port) -> ``(known, value)``: what a **value slot** holds
+        #: when nothing drives it - the port name *is* the control key a
+        #: `drives_control` port is named for, so one bookkeeping serves a
+        #: control port and a declared value port alike (agents/SPACES.md §19).
+        #: Captured when a driver is wired onto the slot's port (§14), so the
+        #: value the module had *then* is what unwiring restores, and updated
+        #: whenever the user sets the control.  The instance's own ``config``
+        #: stays the record of what the module was told; this is the drive's
         #: bookkeeping, kept apart so a module re-announcing its config
         #: cannot make a driven value look like the stored one.
         self._local_controls: Dict[Tuple[str, str], Tuple[bool, Any]] = {}
@@ -261,17 +271,23 @@ class Registry:
                 # sees the declared ports and the auto-declared ones alike.
                 declared_ports = list(decl.get("ports", []))
                 controls = list(decl.get("controls", []))
+                ports = declared_ports + api.control_input_ports(
+                    declared_ports, controls
+                )
                 record.types[type_id] = TypeDecl(
                     type_id=type_id,
                     module_id=module_id,
                     schema=int(decl.get("schema", 1)),
-                    ports=declared_ports + api.control_input_ports(
-                        declared_ports, controls
-                    ),
+                    ports=ports,
                     controls=controls,
                     display=dict(decl.get("display", {})),
                     capabilities=list(decl.get("capabilities", [])),
                     requires=list(decl.get("requires", [])),
+                    # The value grammar, derived once from the declaration:
+                    # which ports carry a value, the control key their
+                    # delivery is spelled for, and what a `choice` accepts
+                    # (agents/SPACES.md §19).
+                    slots=api.value_slots(ports, controls),
                 )
             # Persisted instances of the types just declared that nothing is
             # running: hand them to the module for migration.  Only types
@@ -642,23 +658,83 @@ class Registry:
                 return ""
             return str(entry.get("name") or "")
 
-    # -- a control's local value (agents/SPACES.md §14) ------------------
+    # -- the value grammar (agents/SPACES.md §19) ------------------------
+
+    def value_slot(self, instance_id: str, port: str,
+                   direction: str = api.DIR_IN) -> Optional[Dict[str, Any]]:
+        """The **value slot** an input port is, or ``None``.
+
+        A slot is an input port whose kind is a value kind
+        (:func:`api.value_slots`, built from the type's declaration): the
+        vocabulary is what decides, so a port the connection rules let a
+        value wire into is exactly a port the relay carries one to.  ``None``
+        means the port takes no value at all — an audio/bundle/filter/
+        impulse/sound/camera port, an output, a port this instance's type
+        does not declare, or a port whose direction does not match.
+
+        This is the same listing the consuming module builds for itself from
+        the declarations it announced, so the daemon and the consumer cannot
+        disagree about *which* ports take a value, only about whether one
+        particular value fits — and that is :meth:`value_problem`."""
+        with self._lock:
+            instance = self._instances.get(str(instance_id))
+            if instance is None:
+                return None
+            decl = self._type_decl(instance.type_id)
+            if decl is None:
+                return None
+            slot = decl.slots.get(str(port))
+            if slot is None:
+                return None
+            # The declaration still has to answer for this instance's port —
+            # with a direction given, an output of the same name is not it.
+            if self._port_entry(instance_id, port, direction) is None:
+                return None
+            return dict(slot)
+
+    def value_problem(self, instance_id: str, port: str, value: Any) -> str:
+        """Why this value cannot land in this port, or ``""``.
+
+        **The one acceptance rule** (agents/SPACES.md §19), asked of the
+        declaration: the daemon refuses to deliver a value the consumer's
+        declaration cannot take, with this as the reason, and the consumer
+        module refuses to keep one.
+
+        ``""`` when the port is no value slot at all — a `setting`, a button,
+        an audio jack — because such a port takes no value and nothing here is
+        refusing it (the relay simply has nothing to carry), and ``""`` when
+        the slot takes what it is given."""
+        slot = self.value_slot(instance_id, port)
+        if slot is None:
+            return ""
+        problem = api.value_problem(slot["kind"], slot["choices"], value)
+        if not problem:
+            return ""
+        return f"{instance_id}.{port}: {problem}"
+
+    # -- a value slot's local value (agents/SPACES.md §14, §19) ----------
     #
-    # A driven control has to have somewhere to go back to when its driver is
+    # A driven slot has to have somewhere to go back to when its driver is
     # unwired.  That value lives here rather than being read off the instance
     # config at unwire time: a module re-announcing its config (a reconnect,
     # a re-spawn) announces what it currently holds, which while driven is the
-    # *relayed* value - so the daemon freezes what the control held when the
+    # *relayed* value - so the daemon freezes what the slot held when the
     # drive began.  The user setting the control is the other writer: that is
-    # what the control is stored as when nothing drives it.
+    # what the slot is stored as when nothing drives it.
+    #
+    # The key is the **port name**, which is also the control key a
+    # `drives_control` port is named for (§14) - so one bookkeeping serves
+    # both ways a value arrives: an auto-declared control port and a declared
+    # value port resolve, rank and restore identically (§19).
 
-    def capture_control(self, instance_id: str, key: str) -> Tuple[bool, Any]:
-        """Freeze what a control holds locally, before a driver takes it over.
+    def capture_slot(self, instance_id: str, key: str) -> Tuple[bool, Any]:
+        """Freeze what a value slot holds locally, before a driver takes it
+        over.
 
-        Called when an edge lands on the control's port.  A control already
+        Called when an edge lands on the slot's port.  A slot already
         captured (a second driver on a port declared ``many``, or a control
         the user has set) keeps what it has: the drive is not a new value, it
-        is the value the control goes back to.
+        is the value the slot goes back to.
         """
         with self._lock:
             marker = (str(instance_id), str(key))
@@ -672,8 +748,8 @@ class Registry:
             self._local_controls[marker] = stored
             return stored
 
-    def set_control_value(self, instance_id: str, key: str, value: Any) -> bool:
-        """Record the user setting a control: it is now the control's stored
+    def set_slot_value(self, instance_id: str, key: str, value: Any) -> bool:
+        """Record the user setting a control: it is now the slot's stored
         local value (what unwiring a driver restores), and part of the
         instance's config — which is what the daemon hands a module that
         re-attaches, and what a display reads in a snapshot.
@@ -688,15 +764,16 @@ class Registry:
             self._local_controls[(str(instance_id), str(key))] = (True, value)
             return True
 
-    def local_control_value(self, instance_id: str, key: str) -> Tuple[bool, Any]:
-        """``(known, value)``: the value a control holds when nothing drives
-        it, as far as the daemon knows it.
+    def local_slot_value(self, instance_id: str, key: str) -> Tuple[bool, Any]:
+        """``(known, value)``: the value a slot holds when nothing drives it,
+        as far as the daemon knows it.
 
         Known when the user has set the control, or when the drive that is
-        ending captured a value off the instance config.  A control nothing
-        has ever set has *no* stored value — the daemon says so and restores
-        nothing rather than inventing one, because what an unset control
-        means (its module's default) is the module's own business.
+        ending captured a value off the instance config.  A slot nothing has
+        ever set has *no* stored value — the daemon says so and restores
+        nothing rather than inventing one, because what an unset slot means
+        (the module's own default) is the module's own business (§19's third
+        rank: the declared default belongs to the node, not to the daemon).
         """
         with self._lock:
             return self._local_controls.get(

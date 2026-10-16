@@ -107,6 +107,8 @@ import shutil
 from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Optional, Tuple
 
+from central import module_api as api
+
 logger = logging.getLogger(__name__)
 
 SPACE_SUFFIX = ".json"
@@ -139,7 +141,12 @@ FACE_MODE_VALUE = "value"
 FACE_MODES = (FACE_MODE_NODE, FACE_MODE_VALUE)
 
 FACE_KIND_AUDIO = "audio"
-FACE_KINDS = ("audio", "number", "boolean", "text", "choice")
+#: A face input's kind: an ordinary jack (`audio`) or a value.  The value
+#: half is **the** value vocabulary (`central.module_api.VALUE_KINDS`), read
+#: rather than respelled (agents/SPACES.md §19): a face is one more place a
+#: value port lives, so it cannot drift from the kinds the relay and the
+#: connection rules are written against.
+FACE_KINDS = (FACE_KIND_AUDIO,) + api.VALUE_KINDS
 
 FACE_METHOD_FIELD = "field"
 FACE_METHOD_EDGE = "edge"
