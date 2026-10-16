@@ -434,10 +434,14 @@ def test_face_input_rules():
 
 def test_copy_config_does_not_alias_the_source():
     """An instantiated template's definition must not share the template's
-    dictionaries: editing the instance would edit the definition."""
+    dictionaries: editing the instance would edit the definition.  A portal
+    comes along (a copy of a space that shows another space shows the *same*
+    space), still without aliasing."""
     source = {"nodes": {"a": {"type": "regex_input", "params": {"x": 1}}},
               "edges": [{"from": "a", "to": "a"}],
               "spaces": [{"name": "inner", "stem": "inner"}],
+              "portals": [{"space_id": "other", "view": "node",
+                           "x": 1.0, "y": 2.0}],
               "groups": [{"id": "g", "nodes": ["a"]}]}
     copied = spaces.copy_config(source)
     assert copied == source
@@ -445,7 +449,229 @@ def test_copy_config_does_not_alias_the_source():
     copied["edges"].append({})
     copied["spaces"][0]["name"] = "other"
     copied["groups"][0]["nodes"].append("b")
+    copied["portals"][0]["view"] = "inside"
     assert source["nodes"]["a"]["params"]["x"] == 1
     assert source["edges"] == [{"from": "a", "to": "a"}]
     assert source["spaces"][0]["name"] == "inner"
     assert source["groups"][0]["nodes"] == ["a"]
+    assert source["portals"][0]["view"] == "node"
+
+
+# --- portals (SPACES.md §13): placement by reference, never a copy ---------
+
+
+def test_a_portal_round_trips_through_the_file(tmp_path):
+    """`portals` is part of the space's own saved record: it is written with
+    the space that *embeds* the other, and the space it names is not touched
+    (its interior is not written here at all)."""
+    path = tmp_path / "host.json"
+    host = _space("host", config={
+        "nodes": {"n": {"type": "regex_input", "params": {}}},
+        "edges": [], "spaces": [], "groups": [],
+        "portals": [{"space_id": "kit", "view": "node", "x": 12.5, "y": -3.0},
+                    {"space_id": "kit::eq", "view": "inside", "x": 0, "y": 40}],
+    })
+    spaces.write_file(str(path), host)
+
+    raw = json.load(open(path))
+    assert raw["config"]["portals"] == [
+        {"space_id": "kit", "view": "node", "x": 12.5, "y": -3.0},
+        {"space_id": "kit::eq", "view": "inside", "x": 0.0, "y": 40.0},
+    ]
+    # Nothing about the target: the file is the *parent's* record.
+    assert set(raw["config"]) == {"nodes", "edges", "portals"}
+
+    back = spaces.load_space(str(path), "host", ROOT_ID, True, stem="host")
+    assert back.portals == raw["config"]["portals"]
+    assert back.portal_ids == ["kit", "kit::eq"]
+    assert back.portal("kit")["view"] == "node"
+    assert back.portal("nope") is None
+    # A file with no `portals` key has none - the field's default.
+    assert spaces.portals_from_raw({"nodes": {}}) == []
+
+
+def test_a_portal_entry_is_normalized_and_defaults_to_inside(tmp_path):
+    """A hand-written entry with no view reads as `inside` - the space's
+    `node_view` is only the default a *new* embedding is created with - and
+    an entry that names no space is dropped."""
+    config = {"portals": [
+        {"space_id": "kit"},
+        {"space_id": "eq", "view": "sideways", "x": "3"},
+        None,
+        {"view": "node"},
+    ]}
+    assert spaces.portals_from_raw(config) == [
+        {"space_id": "kit", "view": "inside", "x": 0.0, "y": 0.0},
+        {"space_id": "eq", "view": "inside", "x": 3.0, "y": 0.0},
+    ]
+    assert spaces.portal_entry("kit", "nonsense")["view"] == "inside"
+    assert spaces.PORTAL_KEY == "portals"
+
+
+def test_embedded_in_is_derived_from_the_portals_that_remain():
+    """`embedded_in` is the reverse view of every space's `portals`: one
+    source of truth, so a removal on either side cannot disagree."""
+    root = _space(ROOT_ID, parent=None, config={
+        "nodes": {}, "edges": [], "spaces": [], "groups": [],
+        "portals": [{"space_id": "kit", "view": "node", "x": 0, "y": 0}],
+    })
+    kit = _space("kit", config={
+        "nodes": {}, "edges": [], "spaces": [], "groups": [],
+        "portals": [{"space_id": "kit::eq", "view": "inside", "x": 1, "y": 1}],
+    })
+    eq = _space("kit::eq", parent="kit")
+    tree = _tree(root, kit, eq)
+    assert spaces.embedded_in("kit", tree) == [""]
+    assert spaces.embedded_in("kit::eq", tree) == ["kit"]
+    assert spaces.embedded_in("elsewhere", tree) == []
+    assert spaces.portal_index(tree) == {"kit": [""], "kit::eq": ["kit"]}
+
+    # The target side is not stored anywhere: it is exactly what the portals
+    # say.  Drop the root's portal and the target's `embedded_in` is empty.
+    root.config["portals"] = []
+    assert spaces.embedded_in("kit", tree) == []
+
+    # A space that names itself is ignored (never written, but a hand-edited
+    # file must not make the UI claim a space is inside itself).
+    eq.config["portals"] = [{"space_id": "kit::eq", "view": "node",
+                             "x": 0, "y": 0}]
+    assert spaces.embedded_in("kit::eq", tree) == ["kit"]
+
+
+def test_embed_problem_refuses_every_cycle_and_type_violation():
+    """The whole embed rule: both spaces must exist, the parent editable, the
+    target live, no cycle (self or descendant) and no duplicate."""
+    root = _space(ROOT_ID, parent=None)
+    kit = _space("kit")
+    inner = _space("kit::inner", parent="kit")
+    other = _space("other")
+    tmpl = _space("tmpl", type=spaces.TEMPLATE)
+    decl = _space("decl", mode=spaces.MODE_RO)
+    tree = _tree(root, kit, inner, other, tmpl, decl)
+
+    # Allowed: a sibling, and a child space shown in its own parent.
+    assert spaces.embed_problem("other", "kit", tree) is None
+    assert spaces.embed_problem("kit::inner", "kit", tree) is None
+    # A child may show a space *outside* its subtree.
+    assert spaces.embed_problem("other", "kit::inner", tree) is None
+
+    assert "no space" in spaces.embed_problem("nope", "kit", tree)
+    assert "no space" in spaces.embed_problem("kit", "nope", tree)
+    assert "template" in spaces.embed_problem("tmpl", "kit", tree)
+    assert "itself" in spaces.embed_problem("kit", "kit", tree)
+    assert "descendant" in spaces.embed_problem("kit", "kit::inner", tree)
+    # The root contains every space: a portal to it is always a cycle.
+    assert "descendant" in spaces.embed_problem("", "kit", tree)
+    assert "read-only" in spaces.embed_problem("kit", "decl", tree)
+
+    # A duplicate is refused rather than silently re-placed.
+    kit.config["portals"] = [{"space_id": "other", "view": "node",
+                              "x": 5, "y": 5}]
+    assert "already embedded" in spaces.embed_problem("other", "kit", tree)
+    # …but another parent may show the same space (that is the point).
+    assert spaces.embed_problem("other", "kit::inner", tree) is None
+
+
+def test_portal_cycle_and_move_cycle():
+    assert spaces.portal_cycle("kit", "kit")
+    assert spaces.portal_cycle("kit::inner", "kit")
+    assert spaces.portal_cycle("kit", "")
+    assert not spaces.portal_cycle("kit", "other")
+    assert not spaces.portal_cycle("kit", "kit::inner")
+
+    root = _space(ROOT_ID, parent=None)
+    host = _space("host", config={
+        "nodes": {}, "edges": [], "spaces": [], "groups": [],
+        "portals": [{"space_id": "kit", "view": "node", "x": 0, "y": 0}],
+    })
+    kit = _space("kit")
+    tree = _tree(root, host, kit)
+    # Nesting the space that shows `kit` *into* `kit` would embed a space in
+    # its own descendant - the move is refused (no id_map entry == unchanged).
+    assert "cycle" in spaces.move_cycle(tree, {"host": "kit::host"})
+    # A move somewhere else is fine, and so is moving the target.
+    assert spaces.move_cycle(tree, {"host": "moved"}) is None
+    assert spaces.move_cycle(tree, {"kit": "moved"}) is None
+
+
+def test_pruning_keeps_a_portal_to_a_non_permanent_space():
+    """A portal is the *parent's* placement: it is written with the parent
+    even when the space it shows is written nowhere (its owner re-creates it
+    - agents/SPACES.md §13)."""
+    app = _space("app", permanent=False, config={
+        "nodes": {"a": {"type": "regex_input", "params": {}}},
+        "edges": [], "spaces": [], "groups": [],
+    })
+    host = _space("host", config={
+        "nodes": {}, "edges": [], "spaces": ["app"], "groups": [],
+        "portals": [{"space_id": "app", "view": "inside", "x": 7, "y": 7},
+                    {"space_id": "ghost", "view": "node", "x": 0, "y": 0}],
+    })
+    root = _space(ROOT_ID, parent=None, config={
+        "nodes": {}, "edges": [], "spaces": [], "groups": [],
+        "portals": [{"space_id": "app", "view": "node", "x": 1, "y": 2}],
+    })
+    tree = _tree(root, host, app)
+    out = spaces.prune_unpersisted(tree)
+
+    assert set(out) == {"", "host"}                 # `app` is written nowhere
+    assert out[""].portals == [{"space_id": "app", "view": "node",
+                                "x": 1.0, "y": 2.0}]
+    assert out["host"].portals == [
+        {"space_id": "app", "view": "inside", "x": 7.0, "y": 7.0},
+        {"space_id": "ghost", "view": "node", "x": 0.0, "y": 0.0},
+    ]
+    # The child reference to the non-permanent space *is* dropped: that is
+    # containment, which only exists while the space does.
+    assert out["host"].config["spaces"] == []
+    # A portal is not a containment, so a portal to a space the file never
+    # had is kept as it is (there is nothing to prune it against).
+    assert out["host"] is not host                  # copied, not mutated
+    assert len(host.portals) == 2
+
+
+def test_drop_portals_to_removes_only_the_entries_that_name_them():
+    root = _space(ROOT_ID, parent=None, config={
+        "nodes": {}, "edges": [], "spaces": [], "groups": [],
+        "portals": [{"space_id": "kit", "view": "node", "x": 0, "y": 0},
+                    {"space_id": "kit::eq", "view": "inside", "x": 0, "y": 9},
+                    {"space_id": "other", "view": "node", "x": 3, "y": 3}],
+    })
+    kit = _space("kit", config={
+        "nodes": {}, "edges": [], "spaces": ["eq"], "groups": [],
+        "portals": [{"space_id": "other", "view": "inside", "x": 1, "y": 1}],
+    })
+    eq = _space("kit::eq", parent="kit")
+    other = _space("other")
+    tree = _tree(root, kit, eq, other)
+
+    dropped = spaces.drop_portals_to(tree, {"kit", "kit::eq"})
+    assert sorted(dropped) == [("", "kit"), ("", "kit::eq")]
+    assert [p["space_id"] for p in root.portals] == ["other"]
+    # A portal *inside* a doomed space is not touched (it goes with it).
+    assert [p["space_id"] for p in kit.portals] == ["other"]
+    assert spaces.embedded_in("kit", tree) == []
+    assert spaces.embedded_in("other", tree) == ["", "kit"]
+
+
+def test_retarget_portals_follows_a_re_keyed_space():
+    root = _space(ROOT_ID, parent=None, config={
+        "nodes": {}, "edges": [], "spaces": [], "groups": [],
+        "portals": [{"space_id": "kit", "view": "node", "x": 0, "y": 0},
+                    {"space_id": "other", "view": "node", "x": 0, "y": 0}],
+    })
+    kit = _space("kit", config={
+        "nodes": {}, "edges": [], "spaces": [], "groups": [],
+        "portals": [{"space_id": "kit::eq", "view": "inside", "x": 2, "y": 2}],
+    })
+    eq = _space("kit::eq", parent="kit")
+    other = _space("other")
+    tree = _tree(root, kit, eq, other)
+
+    id_map = {"kit": "nest::kit", "kit::eq": "nest::kit::eq"}
+    assert spaces.retarget_portals(tree, id_map) == 2
+    assert [p["space_id"] for p in root.portals] == ["nest::kit", "other"]
+    assert [p["space_id"] for p in kit.portals] == ["nest::kit::eq"]
+    # No change: nothing was re-keyed for it, so the list is left alone.
+    assert root.portals[1]["view"] == "node"
+    assert spaces.retarget_portals(tree, {"unrelated": "x"}) == 0

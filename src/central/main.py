@@ -1787,7 +1787,11 @@ class PatchSpaceDaemon:
                 config = (
                     spaces.copy_config(meta.config) if meta.is_template
                     else {"nodes": {}, "edges": [],
-                          "spaces": list(meta.child_entries), "groups": []}
+                          "spaces": list(meta.child_entries), "groups": [],
+                          # A portal is the parent's own placement (§13): the
+                          # rebuild takes it from the record, since nothing in
+                          # the live graph represents it.
+                          spaces.PORTAL_KEY: list(meta.portals)}
                 )
                 space = spaces.Space(
                     id=pid, parent=meta.parent, label=meta.label, color=meta.color,
@@ -2136,6 +2140,7 @@ class PatchSpaceDaemon:
                 self._placement_diffs.pop(pid, None)
     def _cmd_list_spaces(self, cmd: dict) -> dict:
         files = []
+        embedded = spaces.portal_index(self.spaces)
         for pid, space in sorted(self.spaces.items()):
             if pid == spaces.ROOT_ID:
                 continue
@@ -2157,6 +2162,8 @@ class PatchSpaceDaemon:
                 "directory": os.path.dirname(space.path) if space.path else None,
                 "nodes": [spaces.make_id(pid, n) for n in space.nodes],
                 "children": space.child_ids(),
+                "portals": self._space_portals(space),
+                "embedded_in": list(embedded.get(pid, [])),
                 "face": self._space_face(pid, space),
             })
         return {
@@ -2399,6 +2406,179 @@ class PatchSpaceDaemon:
             "face": self._space_face(space_id, space),
         }
 
+    # -- portals: one live space shown inside another (SPACES.md §13) -----
+
+    @staticmethod
+    def _space_portals(space: spaces.Space) -> list:
+        """A space's portal list, in the shape the payload carries: what this
+        space embeds, with each placement's own view and position."""
+        return [
+            {
+                "space_id": portal["space_id"],
+                "view": portal["view"],
+                "x": portal["x"],
+                "y": portal["y"],
+            }
+            for portal in space.portals
+        ]
+
+    def _embedded_in(self, space_id: str) -> list:
+        """The spaces that portal `space_id` (its `embedded_in`, derived)."""
+        return spaces.embedded_in(space_id, self.spaces)
+
+    def _drop_portals_to(self, doomed) -> None:
+        """Delete every portal that pointed at a space being deleted, so no
+        dangling portal survives (agents/SPACES.md §13).
+
+        A portal is a placement of a *live* space; with the target gone the
+        entry would be a placement of nothing, and the target's `embedded_in`
+        entry would name a space that is not there.  Only the entries naming
+        a doomed space go: the other spaces the same parent shows stay."""
+        for parent_id, space_id in spaces.drop_portals_to(self.spaces, doomed):
+            logger.info(
+                "Removed the portal from %r to deleted space %r",
+                parent_id or "root", space_id,
+            )
+
+    def _cmd_embed_space(self, cmd: dict) -> dict:
+        """Drop a live space into another space as a *portal*: a placement of
+        it, by reference, never a copy (agents/SPACES.md §13).
+
+        The parent gains a `portals` entry naming the space; the embedded
+        space keeps its interior - nodes, module instances and diffs stay
+        exactly where they were, and its face is untouched, so a wire onto a
+        portal jack is a wire onto the space's own `space_in`/`space_out`
+        node (`<space_id>::<key>`).  The only things the embedding contributes
+        are the position (parent-relative, the daemon's) and the view, which
+        starts from the space's `node_view` - the "Node" checkbox is only the
+        default; `set_embedding_view` is what overrides it per embedding.
+
+        Every refusal (an unknown space, a template as the target, a cycle, a
+        read-only parent, a duplicate embedding) is decided *before* anything
+        is touched, so a refusal leaves no partial state."""
+        target_id = str(cmd.get("space_id") or "")
+        if not target_id:
+            return {"status": "error", "message": "space_id required"}
+        parent_id = str(cmd.get("parent_space") or "")
+        try:
+            x = float(cmd.get("x") or 0.0)
+            y = float(cmd.get("y") or 0.0)
+        except (TypeError, ValueError):
+            return {"status": "error", "message": "x and y must be numbers"}
+        problem = spaces.embed_problem(target_id, parent_id, self.spaces)
+        if problem:
+            return {"status": "error", "message": problem}
+        target = self.spaces[target_id]
+        parent = self.spaces[parent_id]
+        view = spaces.VIEW_NODE if target.node_view else spaces.VIEW_INSIDE
+        with self._lock:
+            parent.config.setdefault(spaces.PORTAL_KEY, []).append(
+                spaces.portal_entry(target_id, view, x, y)
+            )
+        self._write_spaces()
+        self._dirty = True
+        self._wake_ticker()
+        logger.info(
+            "Space %r now shows %r (portal, %s)",
+            parent_id or "root", target_id, view,
+        )
+        return {
+            "status": "ok",
+            "space_id": target_id,
+            "parent_space": parent_id,
+            "view": view,
+            "x": x,
+            "y": y,
+            "portals": self._space_portals(parent),
+            "embedded_in": self._embedded_in(target_id),
+        }
+
+    def _cmd_remove_space_embedding(self, cmd: dict) -> dict:
+        """Drop a portal: the parent stops showing the space - never the space
+        itself (agents/SPACES.md §13).
+
+        Removing a portal removes a *placement*, so the space stays live, in
+        the graph, with its file untouched; the target's `embedded_in` loses
+        the parent because that list is derived from the portals that remain."""
+        space_id = str(cmd.get("space_id") or "")
+        parent_id = str(cmd.get("parent_space") or "")
+        parent = self.spaces.get(parent_id)
+        if parent is None:
+            return {"status": "error", "message": f"no space {parent_id!r}"}
+        if parent.is_readonly:
+            return {
+                "status": "error",
+                "message": spaces.readonly_portal_problem(parent_id),
+            }
+        if parent.portal(space_id) is None:
+            return {
+                "status": "error",
+                "message": f"space {space_id!r} is not embedded in {parent_id!r}",
+            }
+        with self._lock:
+            parent.config[spaces.PORTAL_KEY] = [
+                entry for entry in parent.portals
+                if entry["space_id"] != space_id
+            ]
+        self._write_spaces()
+        self._dirty = True
+        self._wake_ticker()
+        logger.info(
+            "Space %r no longer shows %r", parent_id or "root", space_id
+        )
+        return {
+            "status": "ok",
+            "space_id": space_id,
+            "parent_space": parent_id,
+            "portals": self._space_portals(parent),
+            "embedded_in": self._embedded_in(space_id),
+        }
+
+    def _cmd_set_embedding_view(self, cmd: dict) -> dict:
+        """Set one embedding's view mode: `inside` (expanded in place) or
+        `node` (collapsed to a node-faced box).
+
+        A pure view flag, per *embedding* - the space's own `node_view` is
+        only the default a new embedding starts from, and one embedding
+        switching to Node says nothing about another (agents/SPACES.md §13)."""
+        space_id = str(cmd.get("space_id") or "")
+        parent_id = str(cmd.get("parent_space") or "")
+        view = cmd.get("view")
+        if view not in spaces.VIEWS:
+            return {
+                "status": "error",
+                "message": f"view must be one of {', '.join(spaces.VIEWS)}",
+            }
+        parent = self.spaces.get(parent_id)
+        if parent is None:
+            return {"status": "error", "message": f"no space {parent_id!r}"}
+        if parent.is_readonly:
+            return {
+                "status": "error",
+                "message": spaces.readonly_portal_problem(parent_id),
+            }
+        if parent.portal(space_id) is None:
+            return {
+                "status": "error",
+                "message": f"space {space_id!r} is not embedded in {parent_id!r}",
+            }
+        with self._lock:
+            entries = parent.portals
+            for entry in entries:
+                if entry["space_id"] == space_id:
+                    entry["view"] = view
+            parent.config[spaces.PORTAL_KEY] = entries
+        self._write_spaces()
+        self._dirty = True
+        self._wake_ticker()
+        return {
+            "status": "ok",
+            "space_id": space_id,
+            "parent_space": parent_id,
+            "view": view,
+            "portals": self._space_portals(parent),
+        }
+
     def _cmd_instantiate_template(self, cmd: dict) -> dict:
         """Instantiate a template into a live space nested in `parent_space`
         (root by default).
@@ -2589,6 +2769,24 @@ class PatchSpaceDaemon:
             path = (os.path.join(target_dir, local + spaces.SPACE_SUFFIX)
                     if target_dir else None)
         stem = spaces.file_stem(path) if path else None
+        # The copy's portals are the definition's portals: a portal is a
+        # reference, so the copy shows the *same* live space the template
+        # names.  One that would show a space containing the copy itself is
+        # dropped - the copy may not be embedded in its own descendant (§13).
+        config = spaces.copy_config(src.config)
+        entries = config.get(spaces.PORTAL_KEY) or []
+        kept = []
+        for portal in entries:
+            if spaces.portal_cycle(new_id, portal["space_id"]):
+                logger.warning(
+                    "template %r shows %r, which contains its instance %r: "
+                    "the portal is not copied (it would be a cycle)",
+                    template_id, portal["space_id"], new_id,
+                )
+                continue
+            kept.append(portal)
+        if len(kept) != len(entries):
+            config[spaces.PORTAL_KEY] = kept
         new = spaces.Space(
             id=new_id, parent=parent_id, label=src.label, color=src.color,
             mode=spaces.MODE_RW, path=path, writable=path is not None,
@@ -2597,7 +2795,7 @@ class PatchSpaceDaemon:
             template=template_id,
             # Pinned/paused like any newly created space.
             anchored=True, x=x, y=y,
-            config=spaces.copy_config(src.config),
+            config=config,
         )
         self.spaces[new_id] = new
         refs = []
@@ -2659,17 +2857,22 @@ class PatchSpaceDaemon:
                             "delete_space keep %r -> %r failed: %s",
                             nid, new_id, exc,
                         )
+                # Delete the portals that showed it *before* it goes: a portal
+                # to a space that no longer exists must not survive (§13).
+                self._drop_portals_to([space_id])
                 self.spaces.pop(space_id, None)
             else:
+                doomed = [
+                    p for p in self.spaces
+                    if p == space_id or p.startswith(prefix)
+                ]
                 for nid in [
                     n for n in self.space.nodes
                     if n == space_id or n.startswith(prefix)
                 ]:
                     self.space.remove_node(nid)
-                for pid in [
-                    p for p in self.spaces
-                    if p == space_id or p.startswith(prefix)
-                ]:
+                self._drop_portals_to(doomed)
+                for pid in doomed:
                     self.spaces.pop(pid, None)
             parent = self.spaces.get(parent_id)
             if parent is not None:
@@ -2729,6 +2932,8 @@ class PatchSpaceDaemon:
                     if n == pid or n.startswith(prefix)
                 ]:
                     self.space.remove_node(nid)
+            # The placements go, so the portals that showed them go too (§13).
+            self._drop_portals_to(doomed)
             for pid in placements:
                 parent = self.spaces.get(self.spaces[pid].parent or "")
                 if parent is None:
@@ -2855,6 +3060,10 @@ class PatchSpaceDaemon:
                 "edges": list(live.config.get("edges") or []),
                 "spaces": [],
                 "groups": list(live.config.get("groups") or []),
+                # A clone of a space that shows another space is another
+                # placement of that *reference*: it shows the same live space,
+                # never a copy of it (agents/SPACES.md §13).
+                spaces.PORTAL_KEY: spaces.portals_from_raw(live.config),
             },
         )
         spaces.write_file(path, clone)
@@ -3004,15 +3213,18 @@ class PatchSpaceDaemon:
         parent_id = space.parent or ""
         prefix = space_id + spaces.NAMESPACE_SEP
         with self._lock:
+            doomed = [
+                p for p in list(self.spaces)
+                if p == space_id or p.startswith(prefix)
+            ]
             for nid in [
                 n for n in list(self.space.nodes)
                 if n == space_id or n.startswith(prefix)
             ]:
                 self.space.remove_node(nid)
-            for pid in [
-                p for p in list(self.spaces)
-                if p == space_id or p.startswith(prefix)
-            ]:
+            # The placement is gone, so no portal may still show it (§13).
+            self._drop_portals_to(doomed)
+            for pid in doomed:
                 self.spaces.pop(pid, None)
             for store in (self._readonly_snapshots, self._space_snapshots):
                 for pid in [
@@ -3274,6 +3486,14 @@ class PatchSpaceDaemon:
             for old, new in id_map.items():
                 if new in self.spaces and new not in subtree:
                     return {"status": "error", "message": f"{new!r} already exists"}
+            # A move re-keys every id in the subtree, and a portal names a
+            # space *by id*: the portals that named a moved space follow it
+            # (`spaces.retarget_portals`), and a move that would fold a space
+            # into itself - a portal on one side of the new boundary, its
+            # target on the other - is refused with it (§13).
+            problem = spaces.move_cycle(self.spaces, id_map)
+            if problem:
+                return {"status": "error", "message": problem}
             old_abs = self._space_origin(self.spaces, space_id)
             new_abs = (
                 self._space_origin(self.spaces, new_parent)
@@ -3305,6 +3525,9 @@ class PatchSpaceDaemon:
                     if old in store:
                         store[new] = store.pop(old)
             self._edit_spaces = {id_map.get(p, p) for p in self._edit_spaces}
+            # Portals name their target by id, so they follow the space
+            # rather than the path it used to live at.
+            spaces.retarget_portals(self.spaces, id_map)
             local = spaces.local_of(space_id)
             ref = spaces.child_ref(local, space.stem or local)
             op = self.spaces.get(old_parent)
@@ -6056,11 +6279,16 @@ class PatchSpaceDaemon:
 
         This record is the *whole* story a client reads: its kind
         (`type`), whether it is persisted (`permanent`), its default view
-        when embedded (`node_view`), the template it came from, and its
+        when embedded (`node_view`), the template it came from, its
         `face` - derived here from the `space_in`/`space_out` nodes placed
-        inside it (the node is the one source of truth)."""
+        inside it (the node is the one source of truth) - and its
+        `portals`/`embedded_in`: the spaces it shows by reference, and the
+        spaces that show it (agents/SPACES.md §13).  `embedded_in` is
+        derived from every space's `portals`, never stored, so the two sides
+        cannot disagree."""
         with self._lock:
             live_faces = self._faces_by_space()
+            embedded = spaces.portal_index(self.spaces)
             return [
                 {
                     "id": pid,
@@ -6084,6 +6312,8 @@ class PatchSpaceDaemon:
                     "edit_mode": pid in self._edit_spaces,
                     "path": space.path,
                     "children": space.child_ids(),
+                    "portals": self._space_portals(space),
+                    "embedded_in": list(embedded.get(pid, [])),
                     "face": self._space_face(pid, space, live_faces),
                 }
                 for pid, space in self.spaces.items()
@@ -6671,6 +6901,12 @@ class PatchSpaceDaemon:
                 response = self._cmd_set_space_input(cmd)
             elif command == "instantiate_template":
                 response = self._cmd_instantiate_template(cmd)
+            elif command == "embed_space":
+                response = self._cmd_embed_space(cmd)
+            elif command == "remove_space_embedding":
+                response = self._cmd_remove_space_embedding(cmd)
+            elif command == "set_embedding_view":
+                response = self._cmd_set_embedding_view(cmd)
             elif command == "delete_space":
                 response = self._cmd_delete_space(cmd)
             elif command == "delete_space_file":

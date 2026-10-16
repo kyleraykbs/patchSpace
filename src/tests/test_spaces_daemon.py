@@ -1493,3 +1493,439 @@ def test_the_space_record_carries_the_s1_fields(tmp_path):
     root_record = next(s for s in d._serialize_spaces() if s["id"] == "")
     assert root_record["type"] == "live"
     assert root_record["permanent"] is True
+
+
+# --- portals: one live space shown inside another (SPACES.md §13) ----------
+
+
+def test_embed_space_adds_a_portal_and_both_sides_round_trip(tmp_path):
+    """Dropping a live space into another space is a *placement by
+    reference*: the parent's record gains the portal - with its own position
+    and view - and the embedded space gains the parent in `embedded_in`,
+    while its interior, its file and its face are untouched.  Both sides
+    round-trip through save and load."""
+    d, root, pdir = _daemon(tmp_path)
+    d.spaces = d._load_spaces_tree()
+    d._cmd_create_space({"name": "Kitchen"})
+    d._cmd_create_space({"name": "Eq"})
+    d.handle_command({"command": "add_node", "node_type": "regex_input",
+                      "node_id": "Eq::fx", "config": {"pattern": "x",
+                                                      "x": 4, "y": 5}})
+
+    resp = d.handle_command({
+        "command": "embed_space", "space_id": "Eq", "parent_space": "Kitchen",
+        "x": 30, "y": 40,
+    })
+    assert resp["status"] == "ok", resp
+    assert resp["space_id"] == "Eq" and resp["parent_space"] == "Kitchen"
+    assert resp["view"] == "inside"          # `node_view` is false on Eq
+    assert (resp["x"], resp["y"]) == (30.0, 40.0)
+    assert resp["portals"] == [
+        {"space_id": "Eq", "view": "inside", "x": 30.0, "y": 40.0}
+    ]
+    assert resp["embedded_in"] == ["Kitchen"]
+
+    # The parent record carries it; the target's does not - and the target is
+    # still exactly one live space, with its own node.
+    kitchen = next(s for s in d._serialize_spaces() if s["id"] == "Kitchen")
+    assert kitchen["portals"] == [
+        {"space_id": "Eq", "view": "inside", "x": 30.0, "y": 40.0}
+    ]
+    assert kitchen["embedded_in"] == []
+    eq = next(s for s in d._serialize_spaces() if s["id"] == "Eq")
+    assert eq["portals"] == []
+    assert eq["embedded_in"] == ["Kitchen"]
+    assert "Eq::fx" in d.space.nodes
+    # The portal adds no second interior and no node of its own.
+    assert not [n for n in d.space.nodes if n.startswith("Kitchen::")]
+
+    d._write_spaces()
+    raw = json.load(open(os.path.join(pdir, "Kitchen.json")))
+    assert raw["config"]["portals"] == [
+        {"space_id": "Eq", "view": "inside", "x": 30.0, "y": 40.0}
+    ]
+    assert "Eq" not in raw["config"]["nodes"]
+    # The space the portal shows is its own file, unchanged by being shown.
+    raw_eq = json.load(open(os.path.join(pdir, "Eq.json")))
+    assert set(raw_eq["config"]) == {"nodes", "edges"}
+    assert set(raw_eq["config"]["nodes"]) == {"fx"}
+
+    # Round-trip: the tree that comes back carries both sides of the portal.
+    tree = d._load_spaces_tree()
+    assert tree["Kitchen"].portals == [
+        {"space_id": "Eq", "view": "inside", "x": 30.0, "y": 40.0}
+    ]
+    assert tree["Kitchen"].portal_ids == ["Eq"]
+    assert spaces.embedded_in("Eq", tree) == ["Kitchen"]
+    assert tree["Eq"].portals == []
+
+
+def test_an_embeddings_view_is_per_embedding_and_round_trips(tmp_path):
+    """`node_view` on the space is only the default a *new* embedding starts
+    from: one embedding's view says nothing about another, and each one
+    survives save/load."""
+    d, root, pdir = _daemon(tmp_path)
+    d.spaces = d._load_spaces_tree()
+    d._cmd_create_space({"name": "Kitchen"})
+    d._cmd_create_space({"name": "Booth"})
+    d._cmd_create_space({"name": "Eq", "node_view": True})
+
+    def embed(**kw):
+        return d.handle_command({"command": "embed_space", **kw})
+
+    # Two placements of the same space, in two different parents: the
+    # default view comes from `node_view` for each new embedding.
+    assert embed(space_id="Eq", parent_space="Kitchen",
+                 x=10, y=10)["view"] == "node"
+    assert embed(space_id="Eq", parent_space="Booth",
+                 x=5, y=5)["view"] == "node"
+
+    resp = d.handle_command({
+        "command": "set_embedding_view", "space_id": "Eq",
+        "parent_space": "Booth", "view": "inside",
+    })
+    assert resp["status"] == "ok", resp
+    assert resp["portals"] == [
+        {"space_id": "Eq", "view": "inside", "x": 5.0, "y": 5.0}
+    ]
+    # The other embedding kept its own view, and the space is now shown in
+    # both places (that is what `embedded_in` is for).
+    kitchen = next(s for s in d._serialize_spaces() if s["id"] == "Kitchen")
+    assert kitchen["portals"][0]["view"] == "node"
+    eq = next(s for s in d._serialize_spaces() if s["id"] == "Eq")
+    assert eq["embedded_in"] == ["Kitchen", "Booth"]
+
+    d._write_spaces()
+    raw = json.load(open(os.path.join(pdir, "Booth.json")))
+    assert raw["config"]["portals"] == [
+        {"space_id": "Eq", "view": "inside", "x": 5.0, "y": 5.0}
+    ]
+    tree = d._load_spaces_tree()
+    assert tree["Kitchen"].portals[0]["view"] == "node"
+    assert tree["Booth"].portals[0]["view"] == "inside"
+    assert spaces.embedded_in("Eq", tree) == ["Kitchen", "Booth"]
+
+    # A view that is neither inside nor node is refused, nothing changes.
+    bad = d.handle_command({
+        "command": "set_embedding_view", "space_id": "Eq",
+        "parent_space": "Booth", "view": "sideways",
+    })
+    assert bad["status"] == "error" and "view must be" in bad["message"]
+    assert d.spaces["Booth"].portals == [
+        {"space_id": "Eq", "view": "inside", "x": 5.0, "y": 5.0}
+    ]
+    # …as is a view for a space that is not embedded, or an unknown parent.
+    assert d._cmd_set_embedding_view(
+        {"space_id": "Kitchen", "parent_space": "Booth", "view": "node"}
+    )["status"] == "error"
+    assert d._cmd_set_embedding_view(
+        {"space_id": "Eq", "parent_space": "nope", "view": "node"}
+    )["status"] == "error"
+
+
+def test_removing_an_embedding_clears_both_sides(tmp_path):
+    """Removing a portal removes the *placement*, never the space: the
+    parent stops showing it, the target loses that `embedded_in` entry, and
+    the target is still live with its own file."""
+    d, root, pdir = _daemon(tmp_path)
+    d.spaces = d._load_spaces_tree()
+    d._cmd_create_space({"name": "Kitchen"})
+    d._cmd_create_space({"name": "Eq"})
+    d.handle_command({"command": "embed_space", "space_id": "Eq",
+                      "parent_space": "Kitchen", "x": 1, "y": 2})
+    assert os.path.isfile(os.path.join(pdir, "Eq.json"))
+
+    resp = d.handle_command({
+        "command": "remove_space_embedding", "space_id": "Eq",
+        "parent_space": "Kitchen",
+    })
+    assert resp["status"] == "ok", resp
+    assert resp["portals"] == []
+    assert resp["embedded_in"] == []
+
+    kitchen = next(s for s in d._serialize_spaces() if s["id"] == "Kitchen")
+    assert kitchen["portals"] == []
+    eq = next(s for s in d._serialize_spaces() if s["id"] == "Eq")
+    assert eq["embedded_in"] == []
+    assert "Eq" in d.spaces                      # the space itself survives
+
+    d._write_spaces()
+    assert json.load(open(os.path.join(pdir, "Kitchen.json")))["config"].get(
+        "portals", []
+    ) == []
+    assert os.path.isfile(os.path.join(pdir, "Eq.json"))
+    tree = d._load_spaces_tree()
+    assert tree["Kitchen"].portals == []
+    assert spaces.embedded_in("Eq", tree) == []
+
+    # Removing one that is not embedded (or from an unknown parent) is an
+    # error, and no other embedding is touched.
+    assert d._cmd_remove_space_embedding(
+        {"space_id": "Eq", "parent_space": "Kitchen"}
+    )["status"] == "error"
+    assert d._cmd_remove_space_embedding(
+        {"space_id": "Eq", "parent_space": "nope"}
+    )["status"] == "error"
+
+
+def test_embed_space_refusals_leave_no_partial_state(tmp_path):
+    """An unknown space, a template, itself, its own descendant, a read-only
+    parent, a duplicate and bad coordinates are each refused with a clear
+    message - and a refusal changes nothing."""
+    d, root, pdir = _daemon(tmp_path)
+    d.spaces = d._load_spaces_tree()
+    d._cmd_create_space({"name": "Kitchen"})
+    d._cmd_create_space({"name": "Inner", "parent_id": "Kitchen"})
+    d._cmd_create_space({"name": "Tmpl", "type": "template"})
+    d._cmd_create_space({"name": "Decl", "readonly": True})
+    d._cmd_create_space({"name": "Eq"})
+
+    def embed(**kw):
+        return d.handle_command({"command": "embed_space", **kw})
+
+    unknown = embed(space_id="nope", parent_space="Kitchen")
+    assert unknown["status"] == "error" and "no space 'nope'" in unknown["message"]
+    assert "no space 'nope'" in embed(space_id="Eq",
+                                      parent_space="nope")["message"]
+    assert embed(parent_space="Kitchen")["status"] == "error"
+    bad_xy = embed(space_id="Eq", parent_space="Kitchen", x="wide")
+    assert "numbers" in bad_xy["message"]
+    self_embed = embed(space_id="Kitchen", parent_space="Kitchen")
+    assert "itself" in self_embed["message"]
+    descendant = embed(space_id="Kitchen", parent_space="Kitchen::Inner")
+    assert "descendant" in descendant["message"]
+    template = embed(space_id="Tmpl", parent_space="Kitchen")
+    assert "template" in template["message"]
+    readonly = embed(space_id="Eq", parent_space="Decl")
+    assert "read-only" in readonly["message"]
+
+    # A duplicate is refused rather than silently re-placed.
+    assert embed(space_id="Eq", parent_space="Kitchen",
+                 x=1, y=2)["status"] == "ok"
+    dup = embed(space_id="Eq", parent_space="Kitchen", x=9, y=9)
+    assert dup["status"] == "error" and "already embedded" in dup["message"]
+
+    # None of the refusals left a portal behind, or moved the one that is
+    # there.
+    assert d.spaces["Kitchen"].portals == [
+        {"space_id": "Eq", "view": "inside", "x": 1.0, "y": 2.0}
+    ]
+    assert d.spaces["Decl"].portals == []
+    assert d.spaces["Tmpl"].portals == []
+    assert d.spaces["Kitchen::Inner"].portals == []
+    d._write_spaces()
+    raw = json.load(open(os.path.join(pdir, "Kitchen.json")))
+    assert raw["config"]["portals"] == [
+        {"space_id": "Eq", "view": "inside", "x": 1.0, "y": 2.0}
+    ]
+    assert not os.path.exists(os.path.join(pdir, "Decl.json"))
+
+
+def test_a_portal_to_a_non_permanent_space_is_still_saved(tmp_path):
+    """Persistence is filtered per space, and a portal is part of the
+    *parent's* record: the parent keeps the placement while the space it
+    shows is written nowhere - no file, no node, nothing of its interior
+    (agents/SPACES.md §13)."""
+    d, root, pdir = _daemon(tmp_path)
+    d.spaces = d._load_spaces_tree()
+    d._cmd_create_space({"name": "Keep"})
+    resp = d._cmd_create_space({"name": "App", "permanent": False})
+    assert resp["status"] == "ok", resp
+    d.handle_command({"command": "add_node", "node_type": "regex_input",
+                      "node_id": "App::a", "config": {"pattern": "app",
+                                                      "x": 2, "y": 2}})
+    embed = d.handle_command({"command": "embed_space", "space_id": "App",
+                              "parent_space": "", "x": 300, "y": 20})
+    assert embed["status"] == "ok", embed
+    assert embed["embedded_in"] == [""]
+    d._write_spaces()
+
+    raw = json.load(open(root))
+    print("--- root space file (the session) ---")
+    print(json.dumps(raw, indent=2, sort_keys=True))
+    assert raw["config"]["portals"] == [
+        {"space_id": "App", "view": "inside", "x": 300.0, "y": 20.0}
+    ]
+    assert [spaces.child_name(c) for c in raw["config"]["spaces"]] == ["Keep"]
+    assert raw["config"]["nodes"] == {}              # nothing of App at all
+    assert not os.path.exists(os.path.join(pdir, "App.json"))
+
+    # The portal survives a restart - only the space it shows has to be
+    # re-created by its owner (which is the point of non-permanence).
+    tree = d._load_spaces_tree()
+    assert sorted(tree) == ["", "Keep"]
+    assert tree[""].portals == [
+        {"space_id": "App", "view": "inside", "x": 300.0, "y": 20.0}
+    ]
+    assert spaces.embedded_in("App", tree) == [""]
+
+
+def test_deleting_a_space_removes_the_portals_that_pointed_at_it(tmp_path):
+    """A dangling portal must not survive: when the space a portal shows is
+    deleted, the portal goes with it - from memory, from the file, and from
+    the target's `embedded_in` - and the other portals of the same parent
+    stay."""
+    d, root, pdir = _daemon(tmp_path)
+    d.spaces = d._load_spaces_tree()
+    d._cmd_create_space({"name": "Kitchen"})
+    d._cmd_create_space({"name": "Eq"})
+    d._cmd_create_space({"name": "Fx"})
+    for target in ("Eq", "Fx"):
+        assert d.handle_command({
+            "command": "embed_space", "space_id": target,
+            "parent_space": "Kitchen", "x": 1, "y": 2,
+        })["status"] == "ok"
+
+    resp = d.handle_command({"command": "delete_space", "space_id": "Eq"})
+    assert resp["status"] == "ok", resp
+    assert [p["space_id"] for p in d.spaces["Kitchen"].portals] == ["Fx"]
+    d._write_spaces()
+    raw = json.load(open(os.path.join(pdir, "Kitchen.json")))
+    assert raw["config"]["portals"] == [
+        {"space_id": "Fx", "view": "inside", "x": 1.0, "y": 2.0}
+    ]
+    tree = d._load_spaces_tree()
+    assert sorted(tree) == ["", "Fx", "Kitchen"]
+    assert spaces.embedded_in("Eq", tree) == []
+    assert spaces.embedded_in("Fx", tree) == ["Kitchen"]
+
+    # `keep_nodes` takes the container and drops the portals with it.
+    d._cmd_create_space({"name": "Booth"})
+    assert d.handle_command({"command": "embed_space", "space_id": "Booth",
+                             "parent_space": "Kitchen",
+                             "x": 5, "y": 5})["status"] == "ok"
+    assert d.handle_command({"command": "delete_space", "space_id": "Booth",
+                             "keep_nodes": True})["status"] == "ok"
+    assert d.spaces["Kitchen"].portals == [
+        {"space_id": "Fx", "view": "inside", "x": 1.0, "y": 2.0}
+    ]
+    assert "Booth" not in d.spaces
+
+
+def test_moving_a_space_carries_the_portals_that_name_it(tmp_path):
+    """A portal names a space by id, and a move re-keys ids: the portals
+    follow the space.  A move that would nest a space into the one it shows
+    is refused instead of leaving a self-referential portal."""
+    d, root, pdir = _daemon(tmp_path)
+    d.spaces = d._load_spaces_tree()
+    d._cmd_create_space({"name": "Kitchen"})
+    d._cmd_create_space({"name": "Sub"})
+    assert d.handle_command({"command": "embed_space", "space_id": "Sub",
+                             "parent_space": "", "x": 9, "y": 9})["status"] == "ok"
+
+    resp = d.handle_command({"command": "move_space", "space_id": "Sub",
+                             "parent_id": "Kitchen"})
+    assert resp["status"] == "ok", resp
+    assert resp["space_id"] == "Kitchen::Sub"
+    assert d.spaces[""].portals == [
+        {"space_id": "Kitchen::Sub", "view": "inside", "x": 9.0, "y": 9.0}
+    ]
+    d._write_spaces()
+    raw = json.load(open(root))
+    assert raw["config"]["portals"] == [
+        {"space_id": "Kitchen::Sub", "view": "inside", "x": 9.0, "y": 9.0}
+    ]
+    tree = d._load_spaces_tree()
+    assert spaces.embedded_in("Kitchen::Sub", tree) == [""]
+
+    # A space that shows another one may not be nested into it: that is the
+    # same cycle `embed_space` refuses, and the move is refused with it.
+    d._cmd_create_space({"name": "Host"})
+    d._cmd_create_space({"name": "Target"})
+    assert d.handle_command({"command": "embed_space", "space_id": "Target",
+                             "parent_space": "Host",
+                             "x": 0, "y": 0})["status"] == "ok"
+    refused = d.handle_command({"command": "move_space",
+                                "space_id": "Host", "parent_id": "Target"})
+    assert refused["status"] == "error" and "cycle" in refused["message"]
+    assert "Host" in d.spaces                 # nothing moved, nothing lost
+    assert spaces.embedded_in("Target", d.spaces) == ["Host"]
+
+
+def test_the_payload_a_display_gets_for_two_portals(tmp_path):
+    """The record a display reads: `portals` with each placement's own view
+    and position, `embedded_in` on the target - one embedding left inside,
+    one collapsed to node."""
+    d, root, pdir = _daemon(tmp_path)
+    d.spaces = d._load_spaces_tree()
+    d._cmd_create_space({"name": "Kitchen"})
+    d._cmd_create_space({"name": "Eq"})
+    d._cmd_create_space({"name": "Fx", "node_view": True})
+    assert d.handle_command({"command": "embed_space", "space_id": "Eq",
+                             "parent_space": "Kitchen",
+                             "x": 20, "y": 30})["status"] == "ok"
+    assert d.handle_command({"command": "embed_space", "space_id": "Fx",
+                             "parent_space": "Kitchen",
+                             "x": 200, "y": 30})["status"] == "ok"
+    # The per-embedding toggle wins over the default `node_view`.
+    assert d.handle_command({"command": "set_embedding_view",
+                             "space_id": "Eq", "parent_space": "Kitchen",
+                             "view": "node"})["status"] == "ok"
+    assert d.handle_command({"command": "set_embedding_view",
+                             "space_id": "Eq", "parent_space": "Kitchen",
+                             "view": "inside"})["status"] == "ok"
+
+    record = next(s for s in d._serialize_spaces() if s["id"] == "Kitchen")
+    assert record["portals"] == [
+        {"space_id": "Eq", "view": "inside", "x": 20.0, "y": 30.0},
+        {"space_id": "Fx", "view": "node", "x": 200.0, "y": 30.0},
+    ]
+    assert record["embedded_in"] == []
+    for target in ("Eq", "Fx"):
+        target_record = next(s for s in d._serialize_spaces() if s["id"] == target)
+        assert target_record["embedded_in"] == ["Kitchen"]
+        assert target_record["portals"] == []
+    # `list_spaces` says the same thing (the sidebar and the payload cannot
+    # disagree).
+    listed = next(f for f in d._cmd_list_spaces({})["files"]
+                  if f["id"] == "Kitchen")
+    assert listed["portals"] == record["portals"]
+
+
+def test_a_templates_portals_are_copied_but_never_into_itself(tmp_path):
+    """A template's portals are part of its definition, so instantiating it
+    gives a live space that shows the *same* live spaces (a portal is a
+    reference, never a copy).  One that would show a space containing the
+    instance itself is not copied: that would be a cycle."""
+    d, root, pdir = _daemon(tmp_path)
+    d.spaces = d._load_spaces_tree()
+    d._cmd_create_space({"name": "Host"})
+    d._cmd_create_space({"name": "Sub"})
+    d._cmd_create_space({"name": "Shows", "type": "template"})
+    d._cmd_create_space({"name": "Folds", "type": "template"})
+    d.spaces["Shows"].config["portals"] = [
+        {"space_id": "Sub", "view": "node", "x": 3, "y": 4}
+    ]
+    # `Folds` shows the space it is about to be instantiated into.
+    d.spaces["Folds"].config["portals"] = [
+        {"space_id": "Host", "view": "inside", "x": 1, "y": 1}
+    ]
+
+    resp = d._cmd_instantiate_template({"template_id": "Shows",
+                                        "parent_space": "Host"})
+    assert resp["status"] == "ok", resp
+    shows_id = resp["space_id"]
+    inst = d.spaces[shows_id]
+    assert inst.portals == [{"space_id": "Sub", "view": "node",
+                             "x": 3.0, "y": 4.0}]
+    # The template's own record still holds the portal (it is part of the
+    # definition) *and* the instance shows Sub: both name Sub as a target.
+    assert spaces.embedded_in("Sub", d.spaces) == ["Shows", shows_id]
+
+    resp = d._cmd_instantiate_template({"template_id": "Folds",
+                                        "parent_space": "Host"})
+    assert resp["status"] == "ok", resp
+    folds_id = resp["space_id"]
+    assert d.spaces[folds_id].portals == []      # not copied: a cycle
+    # Only the template's own definition still names Host as a target: the
+    # instance's portal was not copied (that is the warning above).
+    assert spaces.embedded_in("Host", d.spaces) == ["Folds"]
+    assert folds_id not in spaces.embedded_in("Host", d.spaces)
+
+    # Both survived the round trip through the file.
+    d._write_spaces()
+    tree = d._load_spaces_tree()
+    assert tree[shows_id].portals == [
+        {"space_id": "Sub", "view": "node", "x": 3.0, "y": 4.0}
+    ]
+    assert tree[folds_id].portals == []

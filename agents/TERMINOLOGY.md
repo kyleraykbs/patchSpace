@@ -21,6 +21,10 @@ that isn't here, ask (and then add it).  When a mapping here is a guess, it is m
 | "Node" (checkbox) | `node_view`: the *default* view when the space is embedded elsewhere (collapsed to a node); the per-embedding toggle overrides it |
 | "face" / "the space's inputs and outputs" | the space record's `face`: derived by the daemon from the `space_in`/`space_out` nodes placed in the space (see below) |
 | "space input is a node input or an externalized value" | a face input's `mode`: `node` (an ordinary jack) or `value` (externalized).  A value input declares a `kind` (`number`/`boolean`/`text`/`choice`) and a `method` (`field` on the face, or `edge` from a value node).  Audio is node-only |
+| "drop a 'panel' of a space" (into another space) / "cross between spaces" / "space embedding" | a **portal**: a placement of a *live* space inside another space **by reference** - never a copy.  The embedding space's record carries `portals[]` (`{space_id, view, x, y}`); `embed_space`/`remove_space_embedding`.  One interior, one set of module instances, shown in more than one place |
+| "there should always be a toggle for node per instance of a space in another space" | the portal's own `view`: `inside` (expanded in place) or `node` (collapsed to a node-faced box whose tooltip shows the interior).  One embedding's toggle says nothing about another - `set_embedding_view` |
+| "where is this space shown?" | the space record's `embedded_in[]`: the spaces that portal it.  Derived from every space's `portals`, never stored, so the two sides cannot disagree |
+| "route nodes into that live space and have them aggregate into its input nodes" | a wire dropped on a portal jack **is** a wire onto the embedded space's own face node: the portal's jacks are the space's `face[]` entries, and the real node is `<space_id>::<key>`.  The `space_in` node already does the fan-in, so there is no second wire concept |
 
 The container was called a **panel** until S0 (`agents/SPACES.md`, 2026-10-15), and
 Kyle still says "panel" for it.  `space` is now the word in code, files, the
@@ -32,6 +36,11 @@ old files (`type: "space"`/`"panel"`) still load as live spaces, as do the old
 directory, flags and node type ids - those are data, not protocol.
 ("side panel"/"panel" in the UI sense - a GTK panel - stays a panel.)
 
+S2 (2026-10-15) added **portals** (`agents/SPACES.md` §13): `portals`/`embedded_in`
+on the space record and `embed_space`/`remove_space_embedding`/
+`set_embedding_view` in the protocol.  No renames, no data aliases - a portal is
+a new key in an existing record.
+
 A space's **face** is what a client reads instead of walking the nodes: the
 space record carries `face[]`, one entry per `space_in`/`space_out` node placed
 in the space (`direction` `in`/`out`; an input also carries
@@ -40,6 +49,18 @@ is *stored on the port node* (`SpaceFaceInput` in `pwnodes`, written by
 `set_space_input`), so the node is the one source of truth and there is no
 second copy to drift.  A template's face is derived from its definition, since
 a template's nodes are not live.
+
+A **portal** (a space embedded in another space) draws the *target's* face, so
+its jacks need no new model: the real node behind a portal jack is
+`<space_id>::<key>`, where `<space_id>` is the embedded space and `<key>` is
+the face entry's key in its own record.  Wires onto a portal therefore land on
+the target's real `space_in`/`space_out` nodes, and an edge may already leave a
+box (the daemon does not enforce that a wire respects a space boundary).
+
+Kyle's "portal" (a space shown inside another space) is *this repo's*
+vocabulary.  The **XDG desktop portal** - the desktop's file chooser, used by
+the GTK client (`portal_file_dialog.open_file`) - is a coincidence of words and
+lives in the client repo; the daemon has nothing to do with it.
 
 ## Graph vocabulary
 

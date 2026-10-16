@@ -45,6 +45,7 @@ File shape
         "nodes":  {"<local>": {"type","params"}},   # x/y space-relative
         "edges":  [{"from","to","to_port?","from_port?"}],
         "spaces": ["<child-stem>", ...],            # references by stem
+        "portals": [{"space_id","view","x","y"}],   # spaces this one embeds
         "groups": [{"id","label","color","nodes":[...]}]
       }
     }
@@ -53,6 +54,13 @@ File shape
 files.  Edge endpoints inside this space's subtree are written relative
 to it (``eq::a``).  Placement of a child space lives in the child file,
 not the parent (child owns its placement).
+
+``portals`` are the spaces this space shows *by reference* (agents/SPACES.md
+§13): the target keeps its own file, nodes and diffs, and is never written
+here - only the placement (``x``/``y`` in this space's frame, and the
+per-embedding ``view``).  The reverse list, ``embedded_in``, is derived from
+every space's ``portals`` (``portal_index``), never stored: one source of
+truth, and a non-permanent target has no file to store it in anyway.
 
 Legacy spellings (S0, `panel` -> `space`, one-release window)
 -------------------------------------------------------------
@@ -121,6 +129,22 @@ FACE_KINDS = ("audio", "number", "boolean", "text", "choice")
 FACE_METHOD_FIELD = "field"
 FACE_METHOD_EDGE = "edge"
 FACE_METHODS = (FACE_METHOD_FIELD, FACE_METHOD_EDGE)
+
+# --- a portal: a placement of a live space inside another (SPACES.md §13) --
+#
+# A portal is a *reference*, never a copy: the embedded space keeps its own
+# nodes, module instances and diffs, and the embedding contributes only a
+# position and a view mode.  It is stored in the embedding space's own record
+# (`config.portals`), so the portal is part of the parent's file and the
+# target's file stays exactly as it was - see `portal_entry`.
+PORTAL_KEY = "portals"
+
+#: The portal's view mode: expanded in place, or collapsed to a node-faced
+#: box whose tooltip shows the interior.  A pure view flag, per embedding;
+#: the space's `node_view` is only the default a *new* embedding starts from.
+VIEW_INSIDE = "inside"
+VIEW_NODE = "node"
+VIEWS = (VIEW_INSIDE, VIEW_NODE)
 
 ROOT_ID = ""
 #: A space with no color of its own.  The client derives one from the space's
@@ -350,6 +374,24 @@ class Space:
     def groups(self) -> List[dict]:
         return list(self.config.get("groups") or [])
 
+    @property
+    def portals(self) -> List[dict]:
+        """The spaces this space embeds, by reference (§13): a list of
+        ``{space_id, view, x, y}``, normalized."""
+        return portals_from_raw(self.config)
+
+    @property
+    def portal_ids(self) -> List[str]:
+        """The ids of the spaces this space portals."""
+        return [portal["space_id"] for portal in self.portals]
+
+    def portal(self, space_id: str) -> Optional[dict]:
+        """This space's portal entry naming ``space_id``, or None."""
+        for portal in self.portals:
+            if portal["space_id"] == space_id:
+                return portal
+        return None
+
     def child_ids(self) -> List[str]:
         return [make_id(self.id, stem) for stem in self.children]
 
@@ -420,6 +462,226 @@ def face_input_problem(mode: str, kind: str, method: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# portals (agents/SPACES.md §13)
+# ---------------------------------------------------------------------------
+#
+# A portal is a placement of a live space inside another space, **by
+# reference**: there is never a second interior.  The embedded space keeps its
+# own nodes, module instances and diffs; the embedding contributes a position
+# (`x`/`y`, in the *parent's* frame) and a view mode, and is stored in the
+# parent's own record - so the portal is saved with the parent, and the target
+# is saved (or not) exactly as it would have been without the portal.
+#
+# The target side, `embedded_in`, is *derived* from every space's portal list
+# rather than stored: the parent's entry is the one source of truth, so the
+# two sides can never disagree, a removal is consistent by construction, and
+# a non-permanent target - which has no file to write - still reports where it
+# is being shown.
+
+
+def _space_label(space_id: str) -> str:
+    """A space named the way a message should read (the root has no id)."""
+    return "the root space" if space_id == ROOT_ID else f"space {space_id!r}"
+
+
+def portal_entry(space_id: str, view: str = VIEW_INSIDE,
+                 x: float = 0.0, y: float = 0.0) -> dict:
+    """One portal: the space it shows, its view mode and its position."""
+    return {
+        "space_id": str(space_id),
+        "view": view if view in VIEWS else VIEW_INSIDE,
+        "x": float(x or 0.0),
+        "y": float(y or 0.0),
+    }
+
+
+def portal_from_raw(entry) -> Optional[dict]:
+    """A raw portal entry, normalized, or None when it names no space.
+
+    A missing ``view`` reads as ``inside``: the space's ``node_view`` is only
+    the default a *new* embedding is *created* with (``embed_space``), never
+    something a stored entry is re-interpreted against - the portal's own view
+    wins once set (agents/SPACES.md §13)."""
+    if not isinstance(entry, dict):
+        return None
+    target = entry.get("space_id")
+    if target is None:
+        return None
+    return portal_entry(
+        str(target), entry.get("view") or VIEW_INSIDE,
+        entry.get("x") or 0.0, entry.get("y") or 0.0,
+    )
+
+
+def portals_from_raw(config: dict) -> List[dict]:
+    """A raw space config's portal list, normalized."""
+    found = []
+    for entry in config.get(PORTAL_KEY) or []:
+        portal = portal_from_raw(entry)
+        if portal is not None:
+            found.append(portal)
+    return found
+
+
+def portal_index(tree: Dict[str, "Space"]) -> Dict[str, List[str]]:
+    """``{space id: [ids of the spaces that portal it]}`` - ``embedded_in``
+    for the whole tree, in one pass.
+
+    Every space's portal list counts, templates included: a template's portals
+    are part of its *definition* (they materialize when it is instantiated),
+    and the client has the parent's record, so it can see for itself which of
+    the entries are a place the space is really shown in right now."""
+    index: Dict[str, List[str]] = {}
+    for pid, space in tree.items():
+        for portal in space.portals:
+            target = portal["space_id"]
+            if target == pid:
+                continue    # never: no space portals itself
+            index.setdefault(target, []).append(pid)
+    return index
+
+
+def embedded_in(space_id: str, tree: Dict[str, "Space"]) -> List[str]:
+    """The spaces that portal ``space_id`` (its ``embedded_in``)."""
+    return list(portal_index(tree).get(space_id, []))
+
+
+def drop_portals_to(tree: Dict[str, "Space"], doomed) -> List[Tuple[str, str]]:
+    """Remove every portal that names a space in ``doomed``, returning the
+    ``(parent space id, space id)`` pairs dropped.
+
+    Deleting a space deletes the portals that pointed at it: a portal is a
+    placement of a *live* space, and with the target gone the entry would be a
+    placement of nothing - a dangling portal must not survive, and neither may
+    its ``embedded_in`` entry.  Only the entries naming a doomed space go; the
+    other spaces the same parent portals are untouched."""
+    doomed = set(doomed)
+    dropped: List[Tuple[str, str]] = []
+    for pid, space in tree.items():
+        if pid in doomed:
+            continue
+        entries = space.portals
+        kept = [e for e in entries if e["space_id"] not in doomed]
+        if len(kept) == len(entries):
+            continue
+        dropped.extend(
+            (pid, e["space_id"]) for e in entries if e["space_id"] in doomed
+        )
+        space.config[PORTAL_KEY] = kept
+    return dropped
+
+
+def retarget_portals(tree: Dict[str, "Space"], id_map: Dict[str, str]) -> int:
+    """Follow the spaces a portal names through a re-keying (a space moved
+    under a new parent changes id), returning how many entries changed.
+
+    Without this a move would leave every portal aimed at the path the space
+    used to live at - a dangling portal that says nothing about a space that
+    exists."""
+    changed = 0
+    for space in tree.values():
+        entries = space.config.get(PORTAL_KEY)
+        if not entries:
+            continue
+        rewrote: List[dict] = []
+        local = 0
+        for entry in entries:
+            portal = portal_from_raw(entry)
+            if portal is None:
+                continue
+            new = id_map.get(portal["space_id"])
+            if new is not None and new != portal["space_id"]:
+                portal["space_id"] = new
+                local += 1
+            rewrote.append(portal)
+        if local:
+            space.config[PORTAL_KEY] = rewrote
+            changed += local
+    return changed
+
+
+def readonly_portal_problem(space_id: str) -> str:
+    """The refusal for changing a *read-only* space's portals.
+
+    A declarative (Nix-generated) space's interior is not editable - its
+    portals are written in the file that declares it - so an embedding change
+    there would be silently dropped on the next reload instead of persisted.
+    Refusing it says so."""
+    return (
+        f"space {space_id!r} is read-only: its portals are declared by its "
+        f"file and cannot be changed at runtime"
+    )
+
+
+def portal_cycle(parent_id: str, target_id: str) -> bool:
+    """Would a portal from ``parent_id`` to ``target_id`` be a cycle?
+
+    A space may not be embedded in itself or in any of its own descendants -
+    the id path makes both halves of the test cheap."""
+    return target_id == parent_id or is_descendant(parent_id, target_id)
+
+
+def move_cycle(tree: Dict[str, "Space"],
+               id_map: Dict[str, str]) -> Optional[str]:
+    """The first portal a re-keying would turn into a cycle, or None.
+
+    Moving a space under a new parent changes the id path, and the id path is
+    what says who contains whom: ``X`` showing ``T`` and then ``X`` being
+    nested *into* ``T`` is the same self-referential tree ``embed_space``
+    refuses, so the move is refused with it (the alternative - dropping the
+    user's portal for them - hides the reason)."""
+    for pid, space in tree.items():
+        new_pid = id_map.get(pid, pid)
+        for portal in space.portals:
+            target = portal["space_id"]
+            if portal_cycle(new_pid, id_map.get(target, target)):
+                return (
+                    f"the portal from {pid!r} to {target!r} would become a "
+                    f"cycle: a space cannot be embedded in its own descendant"
+                )
+    return None
+
+
+def embed_problem(target_id: str, parent_id: str,
+                  tree: Dict[str, "Space"]) -> Optional[str]:
+    """Why ``target_id`` may not be embedded in ``parent_id``, or None.
+
+    The whole embed rule in one place (the daemon's ``embed_space`` calls
+    this before it touches anything, so a refusal leaves no partial state):
+    both spaces must exist; the parent must be editable (a read-only space's
+    portals are declared by its file); the target must be **live** - a
+    template is a definition, not something running anywhere, so the client
+    instantiates it into a live space first; the embedding may not create a
+    cycle, and the id path makes that test cheap (a space may not be embedded
+    in itself or in any of its own descendants); and a space may be portaled
+    into a given parent only once."""
+    target = tree.get(target_id)
+    if target is None:
+        return f"no space {target_id!r}"
+    parent = tree.get(parent_id)
+    if parent is None:
+        return f"no space {parent_id!r}"
+    if parent.is_readonly:
+        return readonly_portal_problem(parent_id)
+    if target.is_template:
+        return (
+            f"space {target_id!r} is a template: its interior is a definition "
+            f"and nothing of it runs - instantiate it into a live space and "
+            f"embed that"
+        )
+    if target_id == parent_id:
+        return f"space {target_id!r} cannot be embedded in itself"
+    if portal_cycle(parent_id, target_id):
+        return (
+            f"{_space_label(target_id)} contains {parent_id!r}: a space cannot "
+            f"be embedded in its own descendant"
+        )
+    if parent.portal(target_id) is not None:
+        return f"space {target_id!r} is already embedded in {parent_id!r}"
+    return None
+
+
+# ---------------------------------------------------------------------------
 # the spawn rule and the write filter (agents/SPACES.md §2, §3, §12)
 # ---------------------------------------------------------------------------
 
@@ -468,7 +730,14 @@ def prune_unpersisted(tree: Dict[str, "Space"]) -> Dict[str, "Space"]:
     would otherwise be written into a *permanent* space and reference a node
     that comes back nowhere), and a group member.  The surviving records are
     copies only where something had to be pruned, so a snapshot object is
-    never mutated in place."""
+    never mutated in place.
+
+    **Portals are the exception**: a portal is not a reference a surviving
+    space can drop without losing its own layout - the portal *is* the
+    parent's placement, and the target's owner re-creates the target, so the
+    portal stays even when the space it shows is written nowhere
+    (agents/SPACES.md §13: "the parent still saves the portal placement and
+    the target's interior is saved nowhere")."""
     keep = {pid for pid in tree if persists(pid, tree)}
     if len(keep) == len(tree):
         return tree
@@ -512,12 +781,15 @@ def copy_config(config: dict) -> dict:
 
     A space file is shared by every placement of it, and a template's
     definition is copied into each live space instantiated from it, so the
-    copy must not alias the source's dictionaries."""
+    copy must not alias the source's dictionaries.  Portals come along: a
+    portal is a reference, so a copy of a space that embeds another space
+    embeds the *same* space (both placements of it portal it)."""
     return {
         "nodes": copy.deepcopy(dict(config.get("nodes") or {})),
         "edges": copy.deepcopy(list(config.get("edges") or [])),
         "spaces": copy.deepcopy(list(config.get("spaces") or [])),
         "groups": copy.deepcopy(list(config.get("groups") or [])),
+        PORTAL_KEY: copy.deepcopy(portals_from_raw(config)),
     }
 
 
@@ -609,6 +881,8 @@ def config_from_raw(raw: dict) -> dict:
         "edges": list(config.get("edges") or []),
         "spaces": raw_child_entries(config),
         "groups": list(config.get("groups") or []),
+        # The portals this space embeds: part of its own saved record (§13).
+        PORTAL_KEY: portals_from_raw(config),
     }
 
 
@@ -635,6 +909,12 @@ def build_payload(space: Space) -> dict:
         payload["config"]["spaces"] = space.child_entries
     if space.config.get("groups"):
         payload["config"]["groups"] = space.groups
+    if space.portals:
+        # A portal is written with the space that *embeds* it, never with the
+        # space it shows: the target's file is not touched by becoming
+        # embedded, and a non-permanent target writes no file at all while the
+        # portal that shows it is still saved here (agents/SPACES.md §13).
+        payload["config"][PORTAL_KEY] = space.portals
     return payload
 
 
