@@ -40,6 +40,7 @@ class Primitives:
             vocabulary={},
             on_control=self._control,
             on_edge=self._edge,
+            on_value=self.apply_value,
             on_spawn=self._spawn,
             on_stop=self._stop,
         )
@@ -93,15 +94,20 @@ class Primitives:
     # -- used by the tests ----------------------------------------------
 
     def apply_value(self, message: Dict[str, Any]) -> None:
-        """A value arriving from another module (`value_set`)."""
+        """A value arriving from another module (`value_set`), addressed at
+        the instance and the *port* it drives.
+
+        The port's name is the control key by construction (agents/SPACES.md
+        §14), so this lands exactly where the daemon's other spelling of the
+        same relay does — `control_set`, which is what it sends for a port
+        that drives a control — and the node's input reads it either way.
+        Nothing emits `value_set` today; the callback is wired so a relayed
+        value is applied rather than dropped.
+        """
         instance_id = str(message.get("instance_id") or "")
         port = str(message.get("port") or "")
-        node = self.engine.nodes.get(instance_id)
-        if node is None:
-            return
-        node["config"][f"in:{port}"] = message.get("value")
-        self.engine.evaluate()
-        self._publish()
+        if self.engine.set_control(instance_id, port, message.get("value")):
+            self._publish()
 
 
 def main() -> int:

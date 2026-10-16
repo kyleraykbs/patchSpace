@@ -1249,3 +1249,73 @@ message that would let a node feed another node's control - was defined in
   making the face jack routable needs the face node types to declare a
   value-kind output and the face record to carry the `field` method's stored
   value - S5's value sources and the client's face UI, not this step.
+
+## 2026-10-15 — S5: the value sources, and one slot per input
+
+`agents/SPACES.md` §16, the module half.  `modules/primitives` had eight types
+and exactly one way to have a value: a knob or a switch the user set, or (since
+S3) another producer's value relayed onto that control.  There was no literal to
+route (the spec's "sliders should be broken out into a custom 0.0-1.0 node type
+and then allowed to route" plus the string it names), and no *operation* had an
+addressable input at all.
+
+* **The sources.**  `const` (a number literal: `widget: "field"` with
+  `kind: "number"`, so a display draws a typed entry rather than a knob) and
+  `string` (a text literal: `field` → text) are **new type ids** beside the
+  existing `number`/`slider`/`toggle`.  Every source has an output port of the
+  kind it holds and reports `{"out": ...}` through `ModuleHost.report_values`,
+  which is what S3's relay follows.  `slider`'s *declaration* is unchanged and
+  needs to be: it is 0.0-1.0 by construction — its control declares no
+  `min`/`max` (the client's own default range for a slider widget is 0..1 —
+  `patchSpaceGui:gui/controls.py:_default_range`) and the engine clamps
+  whatever a display or a driver sends.  `number` (-100..100 knob) keeps its
+  range, which is what it is *for*.
+* **One slot per input (§14, made uniform).**  A port that drives a control is
+  named for it, so the port's name *is* the key: a wire inside this module
+  (`Engine._inputs`), a relayed value (`control_set` — and `value_set` for a raw
+  port, `Primitives.apply_value`) and the user's `node_control` all land in
+  `Engine.nodes[id]["config"][<port>]`, and an input reads the wire first, the
+  control second (`Engine._compute`'s `given`).  The module's own declarations
+  follow the same rule, which is how the *operations* gained inputs: `math` and
+  `compare` declare `a`/`b` as `drives_control` ports with controls of the same
+  name, `logic` its `a`/`b`, `invert` its `a`, `display` its `in`.  No
+  `cardinality` is declared anywhere, so each port keeps the rule its kind had
+  (number → many, boolean → one): **no edge that was accepted before is refused
+  now**.
+* **`display` is this module's text consumer.**  Its `text` input (kind `text`)
+  is a port and nothing else — no control, because there is no generic
+  text-entry widget for it to be a parameter of — so a `string` node wires
+  straight into it and the display reports the text it holds.  Where a text
+  value really goes today is *other* modules' control ports: the daemon's relay
+  carries a producer's text into any `drives_control` text port, and S3 gave
+  the PipeWire catalog 21 types with `field` controls (`regex_classifier.pattern`,
+  `app_classifier.app_key`, `sound.path`, the warp `name`s) exactly that.
+* **Unwiring releases the drive.**  `Engine._release_drive` forgets the value a
+  driver pushed into a port's slot when the last edge into that port goes away,
+  so an operand nothing feeds is `0.0` again instead of the last value it saw.
+  This leans on the daemon's message order: `protocol._node_edge` forwards
+  `edge_apply` **and then** binds the control edge, so the value it froze when
+  the drive began arrives *after* the clear and cannot be wiped (the docstring
+  and the socket test both say so).
+* **Not done here, and why:** the canvas cannot *type* into a `const`/`string`
+  yet.  The client's only text entry is `spec.field`, which sends the legacy
+  `set_node_property` — and the daemon refuses that for a node a module owns
+  (`central/main.py:_cmd_set_node_property` looks the node up in
+  `self.space.nodes`) — while its generic widgets (`slider`/`number`/`switch`/
+  `choice`) send `node_control`.  So a literal is settable over the module API
+  (`node_control "value"`) and by the relay onto its own `value` port, but not
+  by dragging in the canvas: a client-side gap in `patchSpaceGui`, not a daemon
+  one, and not worked around with a widget that lies about the value's shape.
+* **A pre-existing hole this step's tests ran into** (`modules/host.py` — found,
+  not fixed: it is outside this step's files, and a safe fix is its own piece of
+  work).  `ModuleHost._call` treats the next line off the socket as the reply it
+  is waiting for, so a *push* already queued in that window is consumed as the
+  reply and **dropped**.  Repro: two `spawn_instance` calls with no pump between
+  them, then one `pump` — only the first node arrives.  `report_values` `_call`s
+  too, so the same window can eat a `control_set`/`edge_apply` that arrives while
+  a module is waiting for its `ok` — i.e. a relayed value, which is now the
+  load-bearing message.  Answering it *inside* `_call` (dispatch pushes, keep
+  waiting) makes nested `_call`s likelier, and a nested one can eat the outer
+  reply and hang the read, so the real fix is reply routing by `ref` plus a
+  queue for pushes.  The primitives socket tests fetch one node per
+  `_pump_until` for exactly this reason.

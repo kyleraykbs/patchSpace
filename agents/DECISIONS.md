@@ -478,3 +478,85 @@ stored value lives in the registry
   nothing applies (the daemon does not proxy the model; a face's `space_in`
   node is a module-owned node, so its ports come from the catalog).
 - Reversible: yes (it is additive work, nothing here forecloses it).
+
+## [2026-10-15] S5: an operation's operand is a port *and* a control
+- Decision: `math`/`compare` (both operands), `logic` (both), `invert` (its
+  one) and `display` (`in`) declare `drives_control: true` on the input ports
+  they already had, and declare a control named for each of them (a bounded
+  number knob, or a switch).  No `cardinality` is declared, so each port keeps
+  the rule its kind always had (`number` → `many`, `boolean` → `one`).
+- Why: §14's whole point is that a node's parameter is an addressable input,
+  and an operand *is* that parameter — the two spellings are already the same
+  slot in the module's engine.  What the flag buys is reach: the daemon relays
+  a producer's value **only** onto a port that drives a control, so a plain
+  operand port can be fed from inside this module and nowhere else (the engine
+  reads its own edges), while a driven one is fed by any module's producer —
+  the PipeWire catalog's boolean outputs (`boolean_and`, `bool_space_in`, …)
+  into `logic`/`invert`, or any number source into a maths operand.  The
+  alternative — a second port (`a_input`) driving the control — would put two
+  names on one slot and leave the real port dead.  Undeclared cardinality is
+  deliberate: the port was `many` (number) or `one` (boolean) before this step
+  and still is, so no existing graph loses an edge it had.
+- Reversible: yes (drop the flag and the control; the ports behave exactly as
+  they did in S3, where only the daemon's auto-declared ports were driven).
+
+## [2026-10-15] S5: one slot per input, whatever the relay is spelled
+- Decision: `Engine._compute` reads an input as *the wire, else
+  `config[<port>]`* — the port's name is the control key (§14), so a value the
+  daemon relayed, a value the user set and a wire inside the module all reach
+  the same place — and `Primitives.apply_value` (the `value_set` callback, now
+  registered) writes that same slot instead of the `"in:<port>"` key nothing
+  read.  `value_set` and `control_set` are therefore the same application.
+- Why: S3 decided the relay is spelled `control_set` for a port that drives a
+  control and left `value_set` defined for a *raw* port, with no module
+  implementing it.  §16 gives the module a raw port for the first time — the
+  display's `text` — so the two spellings have to agree, or a `value_set`
+  addressed at it would be dropped on the floor.  Nothing emits `value_set`
+  today; the callback is wired so that it cannot be.
+- Reversible: yes (one call in `Primitives.__init__`, one expression in
+  `_compute`).
+
+## [2026-10-15] S5: unwiring the last driver clears the slot it drove
+- Decision: `Engine._release_drive` pops `config[<port>]` when the last edge
+  into that port is removed, so an input nothing feeds falls back to the node's
+  own default (an operand is `0.0` again).  The module leans on the daemon's
+  order in `protocol._node_edge`: `edge_apply` goes out **before**
+  `bind_control_edge`, so the value the daemon froze when the drive began (or
+  the remaining driver's value) arrives *after* the clear and stands.
+- Why: the module cannot tell a relayed value from a user-set one — both arrive
+  as the same `control_set` (S3's decision, "no module needs a new callback") —
+  so without this an unfed operand would keep the last driven value forever and
+  a maths node would compute with an operand whose wire the user just pulled.
+  S3's rule stands for a control the user *has* set: the daemon restores it,
+  and the restore lands after the clear.
+- Reversible: yes (delete the call; the old behaviour is "the last value
+  sticks", which is what the daemon alone cannot fix).
+
+## [2026-10-15] S5: the literals are `field` controls, not knobs
+- Decision: `const` declares `{"key": "value", "widget": "field", "kind":
+  "number"}`, `string` `{"key": "value", "widget": "field"}`.  The value kind
+  is stated for `const` because `field` derives `text` and the literal is a
+  number.
+- Why: §16 asks for a *literal* beside the two bounded knobs the module already
+  has (`number` -100..100, `slider` 0..1) — a literal is typed, not dragged, so
+  a slider widget would either lie about its range or duplicate `number`.  The
+  consequence is honest and reported rather than papered over: today's canvas
+  cannot type into them (the client's `field` path sends the legacy
+  `set_node_property`, which the daemon refuses for a module-owned node),
+  while the module API path (`node_control "value"`) and the relay onto the
+  literal's own `value` port both work.
+- Reversible: yes (the widget is data; the port kind is `number`/`text` either
+  way).
+
+## [2026-10-15] S5: no schema bump for the types that gained a control
+- Decision: `number`, `slider`, `toggle`, `math`, `compare`, `logic`, `invert`
+  and `display` all keep `schema: 1`, and the module still registers no
+  migration callback.
+- Why: the daemon sends one `migrate` per persisted instance of a declared
+  type, so a bump is a promise that a stored config changes shape — and none
+  does.  A control this step adds is simply *absent* from an old config, and
+  the engine reads an absent operand as `0.0`, which is exactly what the old
+  engine computed; the new types have no old instances by construction.  A bump
+  would ask the module to migrate every saved primitives node into a config
+  that comes back byte-identical.
+- Reversible: yes (raise `schema` the day a key actually changes meaning).

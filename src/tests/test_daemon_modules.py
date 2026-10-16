@@ -295,8 +295,8 @@ def test_a_control_is_an_input_port_in_the_catalog_a_display_installs():
 
 def test_the_primitives_types_gain_the_ports_they_lacked():
     """`modules/primitives` declared eight types and not one input port; the
-    daemon turns each of its value controls into one, with no change to the
-    module's own data (`types.py` is untouched)."""
+    daemon turns each of its value controls into one, and S5's own inputs
+    (the operands, and the display's) come declared by the module."""
     daemon = fresh_daemon()
     errors, _ = daemon.registry.declare_types("primitives", primitives_types.TYPES)
     assert errors == []
@@ -312,10 +312,32 @@ def test_the_primitives_types_gain_the_ports_they_lacked():
     assert port("slider", "value")["kind"] == "number"
     assert port("toggle", "on")["kind"] == "boolean"
     assert port("math", "op")["kind"] == "choice"
-    # `invert` and `display` declare no controls, so they gain nothing.
-    for type_id in ("invert", "display"):
-        assert all(not p.get("drives_control")
-                   for p in daemon.registry.type_decl(type_id).ports)
+    # The two literals S5 adds are sources, so they gain the port their own
+    # value control declares and nothing else.
+    assert port("const", "value")["kind"] == "number"
+    assert port("string", "value")["kind"] == "text"
+    assert [p["name"] for p in daemon.registry.type_decl("const").ports] == [
+        "out", "value"]
+    # An operand is a port the module declares *itself*, so it carries its
+    # own declaration: named for the control of the same name, and no
+    # `cardinality`, so a port that took several drivers still does.
+    for type_id, name, kind in (("math", "a", "number"),
+                                ("compare", "b", "number"),
+                                ("logic", "a", "boolean"),
+                                ("invert", "a", "boolean"),
+                                ("display", "in", "number")):
+        daemon.registry.place(f"{type_id}_probe", type_id)
+        entry = port(type_id, name)
+        assert entry["drives_control"] is True, (type_id, name)
+        assert entry["kind"] == kind and entry["direction"] == "in"
+        assert "cardinality" not in entry
+        assert daemon.registry.port_drives_control(f"{type_id}_probe", name) == name
+        assert daemon.registry.port_cardinality(
+            f"{type_id}_probe", name, "in") == api.default_cardinality(kind)
+    # The display's text input is a port only: a display shows what it is
+    # handed, and there is no generic text-entry widget to be a parameter of.
+    assert "text" in [p["name"] for p in daemon.registry.type_decl("display").ports]
+    assert daemon.registry.port_drives_control("display_probe", "text") == ""
 
 
 def test_a_declared_merge_is_surfaced_where_it_is_consumed():

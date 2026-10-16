@@ -62,8 +62,10 @@ space would appear on your canvas).
 * **Modules**: the daemon runs the built-in modules and serves what they declare.  A module is
   a separate program that attaches to the daemon's socket, declares its node types and
   announces the nodes it runs; the GUI draws whatever it declares, so a module needs no GUI
-  work of its own.  Today the daemon runs the **primitives** module (numbers, boolean logic,
-  a display) as a child process; its log is `~/.cache/patchspace/modules/primitives.log`.
+  work of its own.  Today the daemon runs the **primitives** module (its value sources — a
+  0.0–1.0 slider, a number and a text literal, an on/off — plus arithmetic, comparison,
+  boolean logic and a display) as a child process; its log is
+  `~/.cache/patchspace/modules/primitives.log`.
   Those children live in the unit's cgroup, so `systemctl --user stop patchspace` reaps them
   even though they are started in their own session (and the daemon stops them itself when it
   exits on purpose).  The PipeWire provider still runs *inside* the daemon (it is the next one

@@ -51,7 +51,7 @@ codebase deliberately documents *why* and *what failed before*, not just *what*.
     └── modules/           # built-in modules (PLAN.md moves the pipewire internals in here)
         ├── pipewire/      # pw substrate: pwgraph (live graph), pwproc (owned objects), pwmatch
         │   └── catalog.json   # the node types this module declares (ports, controls, display)
-        ├── primitives/    # numbers and boolean logic, its own process (types/engine/main)
+        ├── primitives/    # value sources (number/const/slider/toggle/string), arithmetic and logic, its own process (types/engine/main)
         └── host.py        # the module-side client (what a module *process* runs)
 ```
 
@@ -339,6 +339,36 @@ A control nothing has ever set has no stored value and is not restored to an
 invented one.  The stored value lives in the registry, the relay in
 `ProtocolHandler` beside the three messages it joins, and a node's removal
 releases the controls it was driving (`main._release_control_drives`).
+
+**The value sources, and one slot per input (S5).**  `modules/primitives` now
+ships what the spec names: a `const` (a number literal) and a `string` (a text
+literal), beside `slider`, which *is* the 0.0–1.0 node — its declaration
+carries no `min`/`max` (a display's own default range for a slider widget is
+0..1), and the engine clamps whatever a display or a driver sends.  Every
+source has an output port of the kind it holds and reports it through
+`node_values`, so S3's relay carries a source's value wherever its wire lands.
+A node's input port and the control it is named for are **one slot**: the
+engine reads *the wire, else `config[<port>]`*, so a wire inside the module, a
+relayed `control_set` (or `value_set`, the same relay addressed at a raw port —
+`Primitives.apply_value` is registered now) and the user's `node_control` all
+reach the same place.  That is also how the operations gained inputs: `math` and
+`compare` (`a`/`b`), `logic` (`a`/`b`), `invert` (`a`) and `display` (`in`)
+declare `drives_control` on the ports they already had, with controls of the
+same name and **no** `cardinality`, so every port keeps the rule its kind
+always had and no existing edge is refused.  `display.text` is the module's own
+text consumer (a `string` wires into it); the text consumers that exist today
+are other modules' — the relay delivers a string into any `drives_control` text
+port, and the PipeWire catalog's 21 `field` controls
+(`regex_classifier.pattern`, `app_classifier.app_key`, `sound.path`, …) are
+exactly that.  Unwiring the last driver clears the slot it drove, so an unfed
+operand is `0.0` again — the daemon's frozen local value arrives after that
+clear and stands (`Engine._release_drive`).  Two things this step deliberately
+leaves alone: the canvas still cannot *type* into a `const`/`string` (the
+client's `field` path sends the legacy `set_node_property`, which the daemon
+refuses for a module-owned node — a client-side gap), and a pre-existing hole in
+`ModuleHost._call` (it reads whatever line is queued as the reply it waits for,
+so a push already in flight can be dropped — see `agents/NOTES.md` for the
+repro; fixing it is reply routing by `ref`, its own piece of work).
 
 * `AllInputsNode` / `AllAppsNode` (`InputNode`) produce a source bundle from
   `source_filters()`; `AllOutputsNode` (`Node`) produces a sink bundle from
