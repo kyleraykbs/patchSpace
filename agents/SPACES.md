@@ -175,13 +175,9 @@ client keeps working at every point.
 | S7 | mycelion wiring + live smoke | **wiring done** (mycelion `ed160ea`); the **live smoke is Kyle's** — it needs the machine and his session |
 | S8 | **an app declares its own space** (§18) — `space_declare`, app-owned and non-permanent, takeover refused | **done** — daemon `437e77f`, client `6b0e63a` |
 | S9 | **one value grammar** (§19) — the S3 and S5 paths resolved, ranked and kind-checked in one place | **done** — daemon `28e46de`, client `6b0e63a` (eight divergent sites unified; nothing about which kinds may connect changed) |
-| S10 | **declarative means uneditable** (§20) — refuse interior edits inside a readonly space while still allowing it to be plugged into | open — an audit found the rule only partly enforced, which contradicts the spec |
+| S10 | **declarative means uneditable** (§20) — refuse interior edits inside a readonly space while still allowing it to be plugged into | **done** — daemon `536b568`, client `c968f18`; the daemon now refuses all declared-interior mutations at every entry point, while cross-boundary plugs remain allowed |
 
-Verified at each step: the daemon suite (560 passed, 28 skipped at S5), the
-client suite (347 passed), `scripts/smoke.sh` on a private instance, the
-offscreen canvas render, and `nix build .#checks…tests` (the sandbox check, which
-needs each new GTK test file added to its ignore list — a real trap: without it
-the check segfaults on a display-less machine).
+Verified at the final route boundary: daemon suite **754 passed, 28 skipped**, client suite **394 passed**, private `scripts/smoke.sh` every step, client `render-canvas.py` every check, the sandbox `nix build .#checks.x86_64-linux.tests`, and a real cross-repo private-daemon smoke using the client's own socket code (**0 failures**) covering the live `spaces` payload, S1 fields, declarative node/edge visibility, the S10 refusal and a `set_space_meta` round-trip.
 
 ## 9. Migration contract (S0)
 
