@@ -41,7 +41,11 @@ space would appear on your canvas).
   exactly what Nix said.  (`type` names the space's kind since S1: a generated space is live;
   the pre-S1 `"space"`/`"panel"` markers still load, and `lib.patchspace.normalise` unwraps all
   of them when a `spaces.<name>.imports` entry is a GUI-exported space file rather than a bare
-  config.)
+  config.)  A generated space is read-only, and read-only means its *file* is the authority:
+  an app that declares a space cannot claim a generated id (the daemon refuses the claim with
+  a reason) and nothing it declares is ever written into one of these files - an app's space
+  is non-permanent and exists only while its process does
+  (`agents/SPACES.md` §3, §18).
 * **Client**: the GUI is its own repo/flake (`patchSpaceGui`), so this module no longer
   supplies one.  `installClient` (default `true`) installs `clientPackage` — which a
   configuration must name — into `environment.systemPackages` (or `home.packages` in the

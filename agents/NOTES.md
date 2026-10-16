@@ -1319,3 +1319,99 @@ addressable input at all.
   reply and hang the read, so the real fix is reply routing by `ref` plus a
   queue for pushes.  The primitives socket tests fetch one node per
   `_pump_until` for exactly this reason.
+
+## 2026-10-15 — S8: an app declares its own space
+
+`agents/SPACES.md` §18, the spec's opening promise and the last gap it named:
+"an app can create its own space and know it can place nodes there".  S0–S6
+built the container (a space is a record, a file, a face, a portal target) but
+nothing ever *made* one for an app: `Registry.announce` stored
+`instance.space` from a node payload and stopped there, so an app that named
+its own space got its nodes filed under a space that did not exist — no record,
+no label, no owner, and no way for a UI to say whose space it was.
+
+* **`space_declare {space: {space_id, label?, color?, node_view?, parent?}}`**
+  is the new message (`module_api.space_declare`/`space_declared`,
+  `validate_space_declare`), answered with the record it ended up with.  It is
+  idempotent by construction: the **id is the identity**
+  (`spaces.declare_space`), so a second declaration updates the fields it
+  carries and a declaration after a restart — where nothing of the space was
+  persisted, so nothing came back — makes the same space again.  Declaring on
+  every attach is therefore the whole mechanism, and `ModuleHost` sends it
+  itself when a module was constructed with a `space` (on every `connect`,
+  including a reconnect), so an app cannot forget.
+* **App-owned, and no takeover.**  A declared space is
+  `permanent=False` (forced; only the user can turn Permanent on in the GUI)
+  with `declared_by` = the declaring client id, and the payload carries that
+  plus `declared_by_name` (the client's `hello` name) so a UI can say whose
+  space it is.  Refused, with a reason and no state touched: the root id, an id
+  that is permanent, an id that is declared by a file (read-only — nix's or the
+  deployment's word), and an id owned by a different client.  Editing a space
+  *by name* through the ordinary commands stays allowed (the "white box with
+  nice borders" rule) — the check refuses a *claim*, not access.
+* **Which space a node lands in** is one function
+  (`spaces.node_space(instance_id, named)`): the node's own id path when it has
+  one (`myapp::a` → `myapp`: the persistent contract, and what a GUI-placed
+  node is qualified with), else the space it names (`{"instance_id": "a",
+  "space": "mycelion"}` — mycelion's shape), and `main`/nothing means the root.
+  Treating `main` as a container id would have filed every PipeWire node into a
+  space called "main"; ignoring the named space would have left an app whose
+  ids are its own with nothing to name.  `Registry.announce` gained the
+  `on_space` hook that hands each accepted node's container to the space tree
+  (the registry knows *which node landed where*; the tree belongs to the
+  daemon), and `spaces.announce_space` creates the space as the announcer's own
+  when the daemon has never heard of it.  **Only when it has never heard of
+  it**: announcing into somebody else's space never claims it.
+* **A client going away gives up its claim, not its space.**
+  `ProtocolHandler.release_spaces` (called by the daemon's client loop, exactly
+  where `Registry.detach` already runs) clears `declared_by` on every space
+  that client declared and leaves the record.  The record stays because the
+  app's nodes stay — an offline placement is kept so a reconnecting module
+  binds it again — so dropping the box would only lose its label and color
+  while it was still drawn around those nodes; and *nothing of a declared space
+  is written anywhere*, so it cannot outlive the session, meaning a claim that
+  persisted past its connection would only block the id.  A reconnect gets the
+  same space back (same module id by name); a *different* app may claim an
+  ownerless id, which is not a takeover.
+* **The user can take it into the session.**  `set_space_meta {permanent:
+  true}` on a space with no file gives it one (`_give_space_a_file`: a free
+  stem beside the other spaces, a `child_ref` from its parent) and clears
+  `declared_by` in the same breath — the id is not declarable any more, so
+  calling it app-owned would be a lie about a deletion that now sticks.  §18
+  makes persistence the user's to grant; without that the checkbox would change
+  nothing, because an app-made space has no file, no stem and no reference for
+  `_write_spaces` to follow.
+* **The persistence filter needed no change** and that is the point: a declared
+  space is non-permanent, so `_write_spaces` → `prune_unpersisted` drops it —
+  its nodes, its interior edges, its diffs — while a portal *from* a permanent
+  space to it is still saved in the permanent space's own file (§13's rule).
+  `_build_spaces_from_space`'s "no record" branch (the synthesized
+  non-permanent space) is now the tail of the same story, and the rebuild
+  carries `declared_by` so a snapshot of the tree cannot quietly un-own an
+  app's space.
+* **What a client reads.**  Every space record comes from one builder
+  (`spaces.space_record`) — the GUI's `get_nodes`, `list_spaces` and a display's
+  `snapshot_reply` — and carries `declared_by`/`declared_by_name`.  The
+  snapshot's `spaces` are now the **container** spaces (the tree), each also
+  carrying `space_id`/`readonly`/`anchored` under their pre-S1 names and a
+  `nodes` list, so a display can line an app's nodes up with its space in one
+  message; a daemon that has not loaded a tree still shows the legacy routing
+  regions, which is what a pre-S1 display expects.
+* **Tests** (`src/tests/test_space_declare.py`): the rule (create, update in
+  place without duplicating, the four refusals, the role rule, the id-path
+  `parent` assertion, an announcement creating the space it names, an
+  announcement not claiming somebody else's, release-on-detach), and the
+  promise end to end — a real `ModuleHost` over a real socket against the real
+  daemon: declare on attach, run two nodes in the space, wire them, read the
+  space-with-both-nodes out of the display's snapshot; `_write_spaces` writes
+  no `mycelion.json`, no mention in the root session or the diffs, while a
+  portal from a user-made permanent space to it lands in that space's file; and
+  a second daemon on the same files comes up **without** the app's space and
+  gets it back, identical, from the app's next attach.
+* **Deliberately not done here:** nothing in the client — the GUI half (a space
+  chip saying "app-owned", not pretending a deletion sticks) is the separate
+  `patchSpaceGui` repo, whose author was told the exact wire fields
+  (`declared_by`, `declared_by_name`, present on every space record, `""` when
+  not app-owned).  `delete_space` on a declared space needs no daemon change:
+  the record goes and the app's next attach brings it back, which is the
+  honesty §18 asks for rather than a special case.

@@ -560,3 +560,119 @@ stored value lives in the registry
   would ask the module to migrate every saved primitives node into a config
   that comes back byte-identical.
 - Reversible: yes (raise `schema` the day a key actually changes meaning).
+
+## [2026-10-15] S8: an announcement into an undeclared space creates it, app-owned
+- Decision: a node announced with a space id the daemon has never heard of
+  **creates** that space as the announcer's own (`spaces.announce_space`:
+  `permanent: false`, `declared_by` = the announcing module), before the
+  declaration message exists as a round trip.  The alternative — refuse the
+  node and say so — was rejected.
+- Why: the nodes are the app's *program*; refusing them would take a module's
+  nodes offline for naming a space, which is a wire-vocabulary regression for
+  every existing module (§10) and the opposite of the promise §18 is about.
+  The auto-created space is indistinguishable from a declared one afterwards
+  (same record shape, same owner, same non-permanence), so `space_declare`
+  remains what adds the label/color and the answer — not what makes a node
+  legal.  An *existing* space is never touched by an announcement: ownership
+  is not taken over by announcing into somebody else's space ("white box with
+  nice borders" — every space may be extended, only a claim is refused).
+- Reversible: yes (return an error for the unknown-space case; nothing
+  persisted changes shape either way).
+
+## [2026-10-15] S8: the id path wins over the space a node names
+- Decision: `spaces.node_space(instance_id, named)` — a node with a qualified
+  id (`myapp::a`) is in `myapp` whatever its `space` field says; a bare id is
+  in the space it *names*; naming nothing, or naming only `main`, is the root.
+- Why: two models are in flight and both must keep working.  `Parent::Child`
+  is the persistent contract (§1) and it is what a GUI-placed node is
+  qualified with, while `node_announce`'s `space` is today the pre-container
+  *routing region* — every PipeWire node announces `"main"`.  Reading `space`
+  as a container naively would invent a container called `main` and file the
+  whole live graph under it; ignoring it would leave an app whose instance ids
+  are its own (`a`, `b` — mycelion's shape) with no way to name its space.
+  `main` is therefore treated as "the routing region, i.e. the root", never as
+  a space id.
+- Reversible: yes (one function; it is the only place the rule lives).
+
+## [2026-10-15] S8: `declared_by` is a claim by a connection, not file data
+- Decision: `Space.declared_by` is recorded, travels in every payload a client
+  reads (with `declared_by_name`, the client's `hello` name), and is **never
+  written** — `build_payload` omits it, `load_space` ignores it — and it is
+  cleared when the declaring client's connection goes
+  (`ProtocolHandler.release_spaces`, called from the daemon's client loop and
+  mirrored in the socket harness), while the space record itself stays.
+- Why: a declared space is non-permanent, so nothing of it is written anyway;
+  making the claim file data would be the one piece of imperative state the
+  persistence rule exists to avoid, and it would come back *stale* (a client
+  id belongs to a process that may be gone).  Clearing on detach is symmetry
+  with `Registry.detach`, which already clears each instance's `declared_by`:
+  a client that is gone owns nothing, so the id is not blocked for the rest of
+  the session — and the record stays because the app's nodes stay (offline
+  placements are kept so a reconnect binds them), so deleting it would only
+  lose the box's label and color while the box was still drawn.
+- Reversible: yes (keep the claim across detach; or delete the record).
+
+## [2026-10-15] S8: only a `module` connection may declare a space
+- Decision: `space_declare` requires the `module` role; a `display` gets
+  `"display connections may not do that"` and an `app` connection is not
+  accepted either.
+- Why: a declared space is the declaring client's own *because its nodes land
+  there*, and a module is the role that runs and announces nodes — a module is
+  what "an app" means in this architecture (mycelion attaches as one).  Only
+  the module role has a client id at all (`Registry.allocate_module_id`, stable
+  across reconnects by name, which is what makes `declared_by` meaningful and a
+  reconnect's re-declaration not a takeover).  A display's creation path stays
+  `create_space` — the user's, permanent by default — and the `app` role is the
+  read-only query path (`registry_query`), with no nodes and no client id to
+  own anything with.
+- Reversible: yes (allocate a client id for another role and add it to the
+  allowlist).
+
+## [2026-10-15] S8: a declaration's `parent` is asserted, never used to relocate
+- Decision: `space_declare` takes an optional `parent`, and a value that
+  contradicts the id path is **refused** (`space id 'myapp' is in ''; the
+  declaration says 'hub'`) rather than nesting the space somewhere else.  The
+  id path (`Parent::Child`) stays the only thing that says who contains whom,
+  and an update never changes a space's parent.
+- Why: the app names its nodes with the same id path, so a space the daemon
+  quietly moved would not hold them; and the tree's `make_id`/`parent_space`/
+  `lca`/`relative_id` invariants (edge ownership, portal cycles, the spawn and
+  write filters) all assume path = nesting.  Refusing a contradiction surfaces
+  an app bug instead of hiding it as a layout.  A missing intermediate space is
+  not invented either: the declared space is created and the path is what it
+  is, exactly as a synthesized container already behaved.
+- Reversible: yes (accept-and-relocate, if a client ever needs it).
+
+## [2026-10-15] S8: turning Permanent on gives an app's space a file
+- Decision: `set_space_meta {permanent: true}` on a space that has no file
+  gives it one (`main._give_space_a_file`: a free stem in the first writable
+  space dir, a `child_ref` from its parent, `writable`), and clears
+  `declared_by` in the same step.  A flip is then a real commit: the file is
+  written by the command's own `_write_spaces`, and the space loads back from
+  it on the next start.
+- Why: §18 makes persistence the *user's* to grant ("only the user can, by
+  turning Permanent on in the GUI"), and without this the flag would be a
+  checkbox that changes nothing — an app-made space has no path, no stem and
+  nothing referencing it, so `_write_spaces` would skip it and the space would
+  vanish at restart with "Permanent" ticked.  Clearing the claim is the other
+  half: the id is no longer declarable, so an "app-owned" label would be a lie
+  about a deletion that now sticks.  The stem is chosen *free* rather than
+  taking the local name: `create_space` resolves a local-name collision within
+  one parent, but two different spaces must never be handed the same file just
+  because their ids end alike.
+- Reversible: yes (drop the helper; the flag then only gates the write filter).
+
+## [2026-10-15] S8: the snapshot's `spaces` are the container spaces
+- Decision: `snapshot_reply.spaces` carries the daemon's **container** records
+  (`spaces.space_record` + `space_id`/`anchored`/`nodes`), not `graph.Graph`'s
+  routing regions — and a handler with no space tree loaded still shows those
+  routing regions.
+- Why: §18 needs an app's space to be visible to a display, and the two space
+  models are already carried side by side (`graph.Placement` has both `space`
+  and `space_id`); emitting only the routing regions would mean a declared
+  space is in no display payload at all.  `space_id`, `label`, `parent`,
+  `readonly` and `anchored` all keep their pre-S1 names and meanings for a
+  reader that only knows those, so the change is a superset except that the
+  hard-coded "main" entry is gone once a tree is loaded (its value was the
+  pre-container default, and the root's id is `""`).
+- Reversible: yes (one branch in `_snapshot_request`).

@@ -41,7 +41,8 @@ codebase deliberately documents *why* and *what failed before*, not just *what*.
     │   ├── main.py            # daemon: socket API, session load, node factory, wiring
     │   ├── pwnodes.py         # node graph model: PatchSpace, all Node classes, effect sandwich
     │   ├── spaces.py          # space containers: namespacing, LCA edges, tree IO, migration,
-    │   │                      #   the space record (type/permanent/node_view/template) + the write filter
+    │   │                      #   the space record (type/permanent/node_view/template/declared_by)
+    │   │                      #   + the write filter and the app-declared space rules (§18)
     │   ├── migrations.py      # versioned node/config migrations (legacy -> current)
     │   ├── session_repair.py  # validate/repair a session config (CLI + daemon)
     │   ├── patchspace_cli.py  # synchronous one-shot socket client (CLI tools)
@@ -485,6 +486,31 @@ automatically because ownership is derived from ids.
 (`--root-space`, default `~/.cache/patchspace/last_session.json`) — a legacy
 `{nodes,edges,groups}` cache and old declarative files are migrated in place on load
 (`_load_spaces_tree`).
+
+**An app declares its own space (S8, `agents/SPACES.md` §18).**  A *module* sends
+`space_declare {space: {space_id, label?, color?, node_view?, parent?}}` and the daemon
+creates or updates that space and answers with the record it ended up with
+(`space_declared`).  The id **is** the identity, so the message is idempotent — an app
+declares on every attach (`ModuleHost` sends it itself when constructed with a `space`,
+on reconnects too) and that is how its space survives updates and reboots with nothing
+persisted.  A declared space is app-owned: `permanent` is forced **false** (only the user
+can make a space persist, by turning Permanent on in the GUI — which gives the
+space a file of its own and ends the claim, since the id is not declarable then) and `declared_by` records
+the declaring client id, with `declared_by_name` (its `hello` name) beside it in every
+payload so a UI can say whose space it is.  A declaration that would **claim** an id that
+is permanent, declared by a file (read-only), or owned by another client is refused with a
+reason and changes nothing; editing a space *by name* through the ordinary commands stays
+allowed (the "white box with nice borders" rule).  Only the `module` role may declare
+(that is the role that runs nodes and has a client id).  A node found in a space the
+daemon has never heard of **makes** it, app-owned (`spaces.announce_space`, reached
+through `Registry.announce`'s `on_space` hook) — the pre-S8 modules keep working, and an
+announcement never claims somebody else's space.  Whose space a node is in comes from one
+rule (`spaces.node_space`): the node's own id path when it has one, else the space it
+names, and `main`/nothing means the root (`main` is the pre-container *routing region*,
+not a space).  When the declaring client's connection goes the claim goes with it
+(`ProtocolHandler.release_spaces`, next to `Registry.detach`) while the record stays — its
+nodes stay offline in the daemon, and nothing of a declared space is written anywhere, so
+it cannot outlive the session; the app re-declares the same id on its next attach.
 
 *Read-only spaces* (`mode: "read-only"`) keep a frozen snapshot
 (`self._readonly_snapshots`); the GUI controls stay live but `reset_space` / reload /

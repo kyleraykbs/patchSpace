@@ -271,6 +271,36 @@ def type_declare(types: List[Dict[str, Any]],
     return message
 
 
+#: What a ``space_declare`` may say about the space it declares
+#: (agents/SPACES.md §18).  ``space_id`` is the identity — the same id *is*
+#: the same space, which is what makes a declaration idempotent — and the
+#: rest is what the declaring app knows about it.  An app declares on every
+#: attach, and the declaration is the only thing that makes its space exist:
+#: a declared space is never written to disk, so re-declaring is how it
+#: survives updates and reboots with no imperative state to migrate.
+SPACE_DECLARE_FIELDS = ("space_id", "label", "color", "node_view", "parent")
+
+
+def space_declare(space: Dict[str, Any]) -> Dict[str, Any]:
+    """A module declaring (or updating) the space it owns.
+
+    ``space`` carries ``space_id`` and any of ``label``/``color``/
+    ``node_view``/``parent`` (see :data:`SPACE_DECLARE_FIELDS`).  The daemon
+    creates the space if it does not have it, updates the fields it is given
+    if it does, and answers with the record it ended up with
+    (:func:`space_declared`).  A declaration that would claim a space that is
+    permanent, declared by a file, or owned by another client is refused with
+    a reason and changes nothing.
+    """
+    return {"type": "space_declare", "space": dict(space)}
+
+
+def space_declared(space: Dict[str, Any]) -> Dict[str, Any]:
+    """The record a declaration ended up with — the answer to
+    :func:`space_declare`, in the shape a payload carries a space in."""
+    return {"type": "space_declared", "space": dict(space)}
+
+
 def node_announce(nodes: List[Dict[str, Any]]) -> Dict[str, Any]:
     """The instances a module is running (bulk on attach, then deltas).
 
@@ -567,4 +597,31 @@ def validate_node_announce(node: Dict[str, Any]) -> Tuple[bool, str]:
     requires = node.get("requires", [])
     if not isinstance(requires, list) or any(not _is_str(r) for r in requires):
         return False, f"{node.get('instance_id')}: requires must be a list of ids"
+    return True, ""
+
+
+def validate_space_declare(space: Any) -> Tuple[bool, str]:
+    """The *shape* of a ``space_declare`` payload (agents/SPACES.md §18).
+
+    What the id may be, and whether the claim is allowed at all, is the
+    daemon's space model's business (``central/spaces.py``): this checks the
+    message, so a malformed declaration is refused as a message rather than
+    half-applied as a space."""
+    if not isinstance(space, dict):
+        return False, "a space declaration must be an object"
+    unknown = sorted(set(space) - set(SPACE_DECLARE_FIELDS))
+    if unknown:
+        return False, (
+            f"unknown space declaration field(s): {', '.join(unknown)} "
+            f"(a declaration carries {', '.join(SPACE_DECLARE_FIELDS)})"
+        )
+    if space.get("space_id") is None or not isinstance(space.get("space_id"), str):
+        return False, "a space declaration needs a space_id"
+    for key in ("label", "color", "parent"):
+        if space.get(key) is not None and not isinstance(space.get(key), str):
+            return False, f"space declaration {key} must be a string"
+    if space.get("node_view") is not None and not isinstance(
+        space.get("node_view"), bool
+    ):
+        return False, "space declaration node_view must be true or false"
     return True, ""

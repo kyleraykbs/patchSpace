@@ -47,6 +47,18 @@ gui/patchspace_gui.py  ──(unix socket, JSON lines, $XDG_RUNTIME_DIR/patchspa
   a client resolves the real node behind one as `<space_id>::<key>` and a wire
   dropped there lands on the target's `space_in`/`space_out` - no new wire
   concept, and no second interior.
+  A space can also be **an app's own** (`agents/SPACES.md` §18): a module sends
+  `space_declare {space_id, label?, color?, node_view?, parent?}` on every
+  attach, and the daemon creates or updates that space, non-permanent and
+  owned by the declaring client (`declared_by`, with `declared_by_name` in
+  every payload).  Claiming an id that is permanent, declared by a file or
+  another client's is refused (editing a space *by name* stays allowed); a node
+  announced into a space nobody declared *makes* it, as the announcer's own,
+  so pre-S8 modules keep working.  Nothing of any of this is ever written
+  (`prune_unpersisted` drops it), so the declaration is what makes the space
+  exist and re-declaring after a restart reproduces it.  The user can still
+  take it into the session (`set_space_meta {permanent: true}` gives the space
+  a file of its own and ends the app's claim on it).
 
 Everything runs with `src/` as the import root (CWD or `PYTHONPATH`): daemon code
 imports as `central.*`, the PipeWire substrate as `modules.pipewire.*`.  The packaged
@@ -60,7 +72,7 @@ entry points are `python -m central.main` / `python -m central.session_repair`.
 | Graph snapshot | `modules/pipewire/pwgraph.py` | `pw-dump -m` stream → live nodes/ports/links; connect/disconnect; node-created/removed callbacks. |
 | Matching | `modules/pipewire/pwmatch.py` | Filter dicts → live node ids; port groups → channel pairs (a lone `MONO` endpoint bridges every channel of its peer); which objects are Patch Space's own. |
 | Model | `modules/pipewire/pwnodes.py` | `Node` taxonomy + `PatchSpace` (the reconcile/supervise engine: `sync_locked` = structure, `supervise` = health).  It lives on the module's side (it imports `modules.pipewire.*` and nothing from `central`), so the daemon reaches into it in-process — the transitional state before the report (EXTRACTION.md step 2). |
-| Containers | `central/spaces.py` | Space tree, namespaced ids, edge ownership (LCA), read-only snapshots, legacy migration (pre-S0 spellings of the file/marker still read), the space's `type`/`permanent`/`node_view`/`template` fields, the spawn rule (`spawns`), the write filter (`persists`/`prune_unpersisted`) and portals (`portals`/`embedded_in`, `embed_problem`, `drop_portals_to`). |
+| Containers | `central/spaces.py` | Space tree, namespaced ids, edge ownership (LCA), read-only snapshots, legacy migration (pre-S0 spellings of the file/marker still read), the space's `type`/`permanent`/`node_view`/`template`/`declared_by` fields, the spawn rule (`spawns`), the write filter (`persists`/`prune_unpersisted`) and portals (`portals`/`embedded_in`, `embed_problem`, `drop_portals_to`).  Also the app-owned space rules (§18): `space_record` (the one payload builder), `node_space` (which space a node is in), `declare_space`/`declare_problem`, `announce_space` (an announcement makes the space it names, as its own) and `release_declared`. |
 | Daemon | `central/main.py` | Socket protocol, node factory (`NODE_TYPE_REGISTRY`/`_create_node`), property handling, session load, watchdogs, built-in devices. |
 | Config | `central/migrations.py`, `central/session_repair.py`, `central/apply_config.py`, `central/export_config.py`, `central/patchspace_cli.py` | Versioned node migrations; validate/repair a session; CLI import/export. |
 
@@ -75,10 +87,10 @@ the model — and then the process move.  See `agents/EXTRACTION.md`:
 
 | Piece | File | Job |
 |---|---|---|
-| Vocabulary | `central/module_api.py` | Roles (`module`/`display`/`app`), message shapes, validation. JSON-stable: it crosses the socket unchanged.  Also the control vocabulary: which widget carries which value kind (`WIDGET_VALUE_KINDS`), and `control_input_ports` — the input port every value control auto-declares (§14). |
-| Catalogue | `central/registry.py` | Attached modules, declared types, instances; the status model (`online`/`offline_module`/`offline_dep`/`unbacked`), the `requires` closure, migration handoff, capability queries, `port_kind`/`port_cardinality`/`port_drives_control` (and `port_multi`/`port_merge`) for the graph rules, reported `values`, and a control's stored local value (`capture_control`/`set_control_value`/`local_control_value`). |
+| Vocabulary | `central/module_api.py` | Roles (`module`/`display`/`app`), message shapes, validation. JSON-stable: it crosses the socket unchanged.  Also the control vocabulary: which widget carries which value kind (`WIDGET_VALUE_KINDS`), and `control_input_ports` — the input port every value control auto-declares (§14).  And `space_declare`/`space_declared` + `validate_space_declare`: the app-owned space message (§18). |
+| Catalogue | `central/registry.py` | Attached modules, declared types, instances; `announce`'s `on_space` hook hands each accepted node's container space to the daemon's tree, which is where a declared space is made (§18); `client_name` is the friendly name behind a `declared_by`; the status model (`online`/`offline_module`/`offline_dep`/`unbacked`), the `requires` closure, migration handoff, capability queries, `port_kind`/`port_cardinality`/`port_drives_control` (and `port_multi`/`port_merge`) for the graph rules, reported `values`, and a control's stored local value (`capture_control`/`set_control_value`/`local_control_value`). |
 | Structure | `central/graph.py` | Spaces, placements, edges, and the **single connection authority** (`kinds_compatible` + the cardinality rule, resolved through the registry). `edges_from`/`edges_into` are what the value relay walks. Edge ids equal `PatchSpace._edge_id`, so persisted sessions survive. |
-| Wire | `central/protocol.py` | Daemon side of the API: `hello` + role gating, `type_declare` → migration fan-out → `node_announce`, `registry_query`, `catalog_request`/`snapshot_request`, `node_control`/`node_edge` (routed to the owning module), `node_values`, the **value relay** (`relay_values`/`bind_control_edge`: a reported value drives the consumer's control as a `control_set`; unwiring restores it), and module drop-off (a dead socket offlines its nodes). |
+| Wire | `central/protocol.py` | Daemon side of the API: `hello` + role gating, `type_declare` → migration fan-out → `node_announce`, `space_declare` (a module's own space: create/update, the takeover refusals, `release_spaces` when its connection goes — the snapshot's `spaces` are the container records), `registry_query`, `catalog_request`/`snapshot_request`, `node_control`/`node_edge` (routed to the owning module), `node_values`, the **value relay** (`relay_values`/`bind_control_edge`: a reported value drives the consumer's control as a `control_set`; unwiring restores it), and module drop-off (a dead socket offlines its nodes). |
 | Config | `central/module_config.py` | Which built-ins are enabled (`--modules-config`, else `~/.config/patchspace/modules.json`; a store path is deployment-managed).  `central/modules_cli.py` is `patchspace-modules`. |
 | Provider | `modules/pipewire/declarations.py` + `catalog.json` | The node types this module declares: ports, controls, display, the add-node menu and the vocabulary.  Emitted once from the legacy tables during phase 2 and **the source from then on** — a test asserts it covers every type the daemon can construct. |
 | Provider | `modules/pipewire/module.py` | The in-process module: greets through the same handler a socket client would use, answers migrations, announces the inventory the daemon hands it, and answers `control_set`/`edge_apply`. |

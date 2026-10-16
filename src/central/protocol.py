@@ -7,7 +7,8 @@ A socket connection is *untyped* until it sends ``hello``.  Anything else
 so phase 1/2 can land while the GUI keeps working.  Once a connection has
 greeted, its role decides what it may do:
 
-* ``module`` — declare types, announce instances, report health, answer
+* ``module`` — declare types, declare the space it owns (``space_declare``,
+  agents/SPACES.md §18), announce instances, report health, answer
   migrations;
 * ``display`` — (phase 2) subscribe to the graph and send user actions;
 * ``app`` — ask the registry what is available.
@@ -27,6 +28,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Union
 
 from central import module_api as api
+from central import spaces as spaces_mod
 from central.graph import edge_id as graph_edge_id
 from central.registry import Registry
 
@@ -77,12 +79,22 @@ class Connection:
 class ProtocolHandler:
     """Turns module-API messages into registry changes and replies."""
 
-    def __init__(self, registry: Registry, topology: Optional[Any] = None) -> None:
+    def __init__(self, registry: Registry, topology: Optional[Any] = None,
+                 spaces: Optional[Callable[[], Dict[str, Any]]] = None) -> None:
         self.registry = registry
         #: The generic structure (spaces/placements/edges).  Optional so a
         #: registry-only test harness needs no graph; a display's snapshot
         #: is empty without it.
         self.topology = topology
+        #: How to reach the container spaces — `central/spaces.py`'s tree,
+        #: which is what a `space_declare` creates and where an announced
+        #: node's space is made real (agents/SPACES.md §18).  A *callable*
+        #: because the daemon swaps its tree wholesale when it loads it
+        #: (`PatchSpaceDaemon._install_spaces`), exactly as
+        #: `registry.port_kind` is handed to the graph as a function rather
+        #: than a table.  None: this handler has no spaces (a harness that
+        #: only drives the registry), and a declaration is refused.
+        self.spaces_of = spaces
         #: module_id -> the connection to reach it on.  A socket module
         #: writes to its socket; the in-process provider has a callable
         #: (`Connection.deliver`).  This is what lets the daemon route a
@@ -104,6 +116,7 @@ class ProtocolHandler:
         handler = {
             "hello": self._hello,
             "type_declare": self._type_declare,
+            "space_declare": self._space_declare,
             "node_announce": self._node_announce,
             "node_remove": self._node_remove,
             "node_health": self._node_health,
@@ -180,7 +193,8 @@ class ProtocolHandler:
         if problem is not None:
             return problem
         bound, created, errors = self.registry.announce(
-            conn.module_id, msg.get("nodes") or []
+            conn.module_id, msg.get("nodes") or [],
+            on_space=lambda space_id: self.ensure_space(space_id, conn.module_id),
         )
         replies: List[Dict[str, Any]] = []
         for error in errors:
@@ -192,6 +206,86 @@ class ProtocolHandler:
             "created": created,
         })
         return replies
+
+    # -- the app's own space (agents/SPACES.md §18) -----------------------
+
+    def space_tree(self) -> Optional[Dict[str, Any]]:
+        """The container spaces right now (None when this handler has none)."""
+        return self.spaces_of() if self.spaces_of is not None else None
+
+    def ensure_space(self, space_id: str, client_id: str) -> Optional[Any]:
+        """Make the space an announcing node lands in exist, as the
+        announcer's own if the daemon has never heard of it (§18)."""
+        tree = self.space_tree()
+        if tree is None:
+            return None
+        return spaces_mod.announce_space(tree, space_id, client_id)
+
+    def release_spaces(self, client_id: str) -> List[str]:
+        """A client's connection is gone: it keeps no claim on the spaces it
+        declared (the records stay — see `spaces.release_declared`)."""
+        tree = self.space_tree()
+        if tree is None:
+            return []
+        return spaces_mod.release_declared(tree, client_id)
+
+    def _space_declare(self, msg: Dict[str, Any], conn: Connection) -> Reply:
+        """A module declaring the space it owns — on every attach (§18).
+
+        The claim is the declaring connection's: `declared_by` is the client
+        id this connection greeted with, and the check that refuses a
+        takeover is against that id, not against anything the payload says
+        (a client cannot name itself into somebody else's space).
+        """
+        problem = self._needs_module(conn)
+        if problem is not None:
+            return problem
+        tree = self.space_tree()
+        if tree is None:
+            return api.error("this daemon has no spaces", ref="space_declare")
+        declaration = msg.get("space")
+        ok, message = api.validate_space_declare(declaration)
+        if not ok:
+            return api.error(message, ref="space_declare")
+        space, message = spaces_mod.declare_space(
+            tree, declaration, conn.module_id
+        )
+        if space is None:
+            return api.error(message, ref="space_declare")
+        return api.space_declared(self.space_payload(space))
+
+    def space_payload(self, space: Any, nodes: Optional[List[str]] = None) -> Dict[str, Any]:
+        """One space as a payload carries it: the record plus what a reader
+        needs to find it in the graph — the space id under its pre-S1 name
+        too, and the instances that landed in it."""
+        record = spaces_mod.space_record(
+            space, declared_by_name=self.registry.client_name(space.declared_by)
+        )
+        record["space_id"] = space.id
+        record["anchored"] = bool(space.anchored)
+        record["nodes"] = self.instances_in(space.id) if nodes is None else nodes
+        return record
+
+    def spaces_payload(self, tree: Any) -> List[Dict[str, Any]]:
+        """Every space's record, with the instances in each — one pass over
+        the registry, so a snapshot does not re-scan it per space."""
+        by_space: Dict[str, List[str]] = {}
+        for instance in self.registry.instances():
+            by_space.setdefault(
+                spaces_mod.node_space(instance.instance_id, instance.space), []
+            ).append(instance.instance_id)
+        return [
+            self.space_payload(space, sorted(by_space.get(space.id, [])))
+            for space in tree
+        ]
+
+    def instances_in(self, space_id: str) -> List[str]:
+        """The instances sitting in one container space, by id path."""
+        return sorted(
+            instance.instance_id
+            for instance in self.registry.instances()
+            if spaces_mod.node_space(instance.instance_id, instance.space) == space_id
+        )
 
     def _node_remove(self, msg: Dict[str, Any], conn: Connection) -> Reply:
         problem = self._needs_module(conn)
@@ -507,7 +601,15 @@ class ProtocolHandler:
 
     def _snapshot_request(self, msg: Dict[str, Any], conn: Connection) -> Reply:
         """The graph as a display sees it: instances with their status,
-        where each sits, and the edges between them."""
+        where each sits, and the edges between them.
+
+        ``spaces`` are the **container** spaces (`central/spaces.py`'s tree:
+        the boxes nodes actually live in, an app's declared space among
+        them, with `declared_by` so a display can say whose it is — §18),
+        each carrying its `space_id` and `readonly` under those pre-S1 names
+        too.  A daemon that has not loaded a tree shows the routing regions
+        instead, which is what a display saw before containers.
+        """
         if not conn.greeted:
             return api.error("send hello first")
         instances = [i.to_dict() for i in self.registry.instances()]
@@ -522,5 +624,9 @@ class ProtocolHandler:
                     entry["instance_id"] = instance["instance_id"]
                     placements.append(entry)
             edges = [e.to_dict() for e in self.topology.edges.values()]
+        tree = self.space_tree()
+        if tree:
+            spaces = self.spaces_payload(tree.values())
+        elif self.topology is not None:
             spaces = [s.to_dict() for s in self.topology.spaces.values()]
         return api.snapshot_reply(instances, placements, edges, spaces)

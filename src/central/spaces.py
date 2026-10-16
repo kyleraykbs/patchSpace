@@ -80,6 +80,20 @@ the old spelling are still *read*, never written:
 an old file as a new one.  The node type ids that used to spell a space
 port (`panel_in`/`panel_out`/`bool_panel_in`/`bool_panel_out`) are read
 through the module's ``legacy_aliases`` (catalog.json), not here.
+
+App-declared spaces (S8, agents/SPACES.md §18)
+----------------------------------------------
+A space a *module or app* declares is its own: ``declared_by`` names the
+declaring client, ``permanent`` is forced off (only the user can make a
+space persist, by turning Permanent on in the GUI), and none of it is ever
+written anywhere.  An app declares on every attach — that is exactly how its
+space survives updates and reboots with nothing persisted — and a node it
+announces into that space lands there.  ``declared_by`` is a *live claim*,
+never file data: it is not in ``build_payload`` and is cleared when the
+declaring client's connection goes (``release_declared``), so it cannot
+outlive the process that made it.  ``declare_space`` is the whole rule
+(create, update, and the four refusals); ``announce_space`` is what an
+announcement does with a space id it has never seen.
 """
 
 from __future__ import annotations
@@ -88,9 +102,10 @@ import copy
 import json
 import logging
 import os
+import re
 import shutil
 from dataclasses import dataclass, field, replace
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +162,12 @@ VIEW_NODE = "node"
 VIEWS = (VIEW_INSIDE, VIEW_NODE)
 
 ROOT_ID = ""
+#: The name of the default *routing region*: `graph.Graph`'s own pre-container
+#: space, and what a module that names no space of its own announces with
+#: (`modules/pipewire`).  It is not a container anybody declared — a node that
+#: names only this, or names nothing, belongs to the **root** (see
+#: `node_space`), which is what keeps every pre-S1 announcement where it was.
+ROUTING_DEFAULT = "main"
 #: A space with no color of its own.  The client derives one from the space's
 #: own name out of the theme's class-color vocabulary (agents/SPACES.md §11);
 #: the daemon stores the name it is given, never a resolved color.
@@ -335,6 +356,13 @@ class Space:
     node_view: bool = False
     #: The id of the template this live space was instantiated from.
     template: Optional[str] = None
+    #: The client id of the app that *declared* this space (agents/SPACES.md
+    #: §18), "" when nobody did.  A live claim, never file data: a declared
+    #: space is non-permanent and writes no file, and a claim belongs to a
+    #: connection (``release_declared`` clears it when that connection goes),
+    #: so a space that came back from disk is ownerless until some client
+    #: declares it again.
+    declared_by: str = ""
 
     @property
     def is_root(self) -> bool:
@@ -682,6 +710,237 @@ def embed_problem(target_id: str, parent_id: str,
 
 
 # ---------------------------------------------------------------------------
+# the space record, and app-declared spaces (agents/SPACES.md §18)
+# ---------------------------------------------------------------------------
+
+#: What an id path segment may use.  An id is a path *and* (for a permanent
+#: space) the file stem it is loaded from, so a display name does not go here:
+#: it goes in ``label``.
+_ID_SEGMENT = re.compile(r"[A-Za-z0-9_.-]+")
+
+
+def space_id_problem(space_id: Any) -> Optional[str]:
+    """Why ``space_id`` cannot be a space's id, or None.
+
+    The root is not an id anybody declares (it is the session's own space),
+    an id is a ``::``-joined path of non-empty segments, and a segment uses
+    only letters, digits, ``_``, ``-`` and ``.``."""
+    if space_id == ROOT_ID:
+        return "the root space is the session's own; it is not declared"
+    if not isinstance(space_id, str) or not space_id.strip():
+        return "a space needs an id"
+    if space_id != space_id.strip():
+        return f"space id {space_id!r} has leading or trailing whitespace"
+    for segment in space_id.split(NAMESPACE_SEP):
+        if not _ID_SEGMENT.fullmatch(segment):
+            return (
+                f"space id {space_id!r} is not an id path: every "
+                f"{NAMESPACE_SEP!r}-separated segment must be non-empty and use "
+                f"only letters, digits, '_', '-' and '.' (a display name goes "
+                f"in `label`)"
+            )
+    return None
+
+
+def node_space(instance_id: str, named: str = "") -> str:
+    """The container space an announced (or placed) node lands in.
+
+    A node's **own id path wins** when it has one: ``Parent::Child`` is the
+    persistent contract (§1) and it is what a GUI-placed node is qualified
+    with, so ``myapp::a`` is in ``myapp`` whatever else the payload says.  A
+    node with a bare id is in the space it *names* — that is how an app whose
+    instance ids are its own (``a``, ``b``) says which space it is building,
+    and it is the sentence §18 is about.  Naming nothing, or naming only the
+    default routing region (``main``), is the root: ``main`` is a
+    pre-container leftover, not a space anybody declared."""
+    own = space_of(instance_id)
+    if own:
+        return own
+    named = str(named or "")
+    return ROOT_ID if named in ("", ROUTING_DEFAULT) else named
+
+
+def app_space(space_id: str, *, parent: Optional[str] = None, label: str = "",
+              color: str = DEFAULT_COLOR, node_view: bool = False,
+              declared_by: str = "") -> "Space":
+    """A freshly declared space: the declaring app's own, and non-permanent.
+
+    `permanent` is forced off — an app cannot make its space part of the
+    saved session — and there is no file, no stem and nothing writable, so
+    the persistence filter (§3) drops the whole record from every write."""
+    return Space(
+        id=space_id,
+        parent=parent if parent is not None else parent_space(space_id),
+        label=label or local_of(space_id) or space_id,
+        color=color or DEFAULT_COLOR,
+        mode=MODE_RW,
+        permanent=False,
+        node_view=node_view,
+        declared_by=declared_by,
+        config={"nodes": {}, "edges": [], "spaces": [], "groups": []},
+    )
+
+
+def declare_problem(space: "Space", declared_by: str) -> Optional[str]:
+    """Why ``declared_by`` may not claim this space, or None.
+
+    A **takeover** is what is refused (agents/SPACES.md §18): the id is
+    permanent (the user's or the deployment's — an app cannot make its space
+    persist, and only the user can turn Permanent on), the id is declared by
+    a *file* (a read-only space belongs to its file, which is nix's or the
+    deployment's word), or another client already owns it.  Editing a space
+    *by name* through the ordinary commands stays allowed — the white box
+    with nice borders rule — so this refuses a *claim*, not access."""
+    if space.permanent:
+        return (
+            f"space {space.id!r} is permanent: an app cannot declare it (only "
+            f"the user can make a space persist, and a permanent space is not "
+            f"an app's to claim)"
+        )
+    if space.is_readonly:
+        return (
+            f"space {space.id!r} is declared by its file (read-only): it "
+            f"belongs to the file, not to a client"
+        )
+    if space.declared_by and space.declared_by != declared_by:
+        return (
+            f"space {space.id!r} is owned by {space.declared_by!r}, not "
+            f"{declared_by!r}"
+        )
+    return None
+
+
+def declare_space(tree: Dict[str, "Space"], declaration: dict,
+                  declared_by: str) -> Tuple[Optional["Space"], str]:
+    """Create or update the space a client declares (agents/SPACES.md §18).
+
+    Idempotent by construction: the **id is the identity**, so a second
+    declaration returns the space the client already has, with the fields the
+    declaration carries updated in place, and a declaration after a restart
+    (where nothing of the space was persisted, so nothing came back) makes
+    the same space again.  That is the whole mechanism: an app declares on
+    every attach.
+
+    Returns ``(space, "")``, or ``(None, why)`` when the claim is refused —
+    in which case nothing is touched (see :func:`declare_problem`)."""
+    problem = space_id_problem(declaration.get("space_id"))
+    if problem:
+        return None, problem
+    space_id = str(declaration["space_id"])
+    if not declared_by:
+        return None, f"declaring {space_id!r} needs a declaring client"
+    parent = declaration.get("parent")
+    if parent is not None:
+        # The id path *is* the nesting (§1: `Parent::Child`), so a declaration
+        # stating a parent is held to it rather than moved somewhere else: the
+        # app names its nodes with the same id path, and a space that quietly
+        # lived elsewhere would not hold them.
+        expected = parent_space(space_id) or ROOT_ID
+        if str(parent) != expected:
+            return None, (
+                f"space id {space_id!r} is in {expected!r}; the declaration "
+                f"says {parent!r}"
+            )
+    existing = tree.get(space_id)
+    if existing is None:
+        space = app_space(
+            space_id,
+            label=str(declaration.get("label") or ""),
+            color=str(declaration.get("color") or DEFAULT_COLOR),
+            node_view=bool(declaration.get("node_view") or False),
+            declared_by=declared_by,
+        )
+        tree[space_id] = space
+        return space, ""
+    problem = declare_problem(existing, declared_by)
+    if problem:
+        return None, problem
+    # The same client (or nobody yet): what the declaration states is applied,
+    # what it leaves out is kept.
+    if declaration.get("label") is not None:
+        existing.label = str(declaration["label"])
+    if declaration.get("color") is not None:
+        existing.color = str(declaration["color"])
+    if declaration.get("node_view") is not None:
+        existing.node_view = bool(declaration["node_view"])
+    existing.permanent = False
+    existing.declared_by = declared_by
+    return existing, ""
+
+
+def announce_space(tree: Dict[str, "Space"], space_id: str,
+                   module_id: str) -> Optional["Space"]:
+    """Make sure the space an announcing node lands in exists (§18).
+
+    A node that names a space the daemon has never heard of **creates** it,
+    as the announcer's own — refusing the node instead would take an app's
+    nodes offline, and they are its program; this is the same promise
+    :func:`declare_space` makes, without a round trip per attach, which is
+    what keeps every pre-S8 module working unchanged.
+
+    An *existing* space is left exactly as it is: announcing into somebody
+    else's space never claims it (every space may be extended, only a claim
+    is refused).  Returns the space the node lands in, or None when the id is
+    not one a space can have — node ids are free-form, and this is not the
+    place to refuse one."""
+    if space_id_problem(space_id) is not None:
+        return None
+    existing = tree.get(space_id)
+    if existing is not None:
+        return existing
+    space = app_space(space_id, declared_by=module_id)
+    tree[space_id] = space
+    return space
+
+
+def release_declared(tree: Dict[str, "Space"], client_id: str) -> List[str]:
+    """Give up every space ``client_id`` declared — its connection is gone.
+
+    The **record stays**: its nodes stay in the daemon too (an offline
+    placement is kept so a reconnecting module binds it again), the space is
+    non-permanent so it cannot outlive the session or reach a file, and
+    dropping the record would only lose its label and color while the box was
+    still drawn around those nodes.  What goes is the *claim*: ownership
+    belongs to a connection, and a client that is gone owns nothing — exactly
+    as `Registry.detach` already clears each instance's `declared_by`.  The
+    app re-declares on its next attach and gets the same space back."""
+    released: List[str] = []
+    for space_id, space in tree.items():
+        if space.declared_by == client_id:
+            space.declared_by = ""
+            released.append(space_id)
+    return released
+
+
+def space_record(space: "Space", *, declared_by_name: str = "") -> dict:
+    """The space's own record, as every payload carries it.
+
+    One builder, so the GUI's `get_nodes`, `list_spaces` and a display's
+    snapshot cannot disagree about a space — in particular about who declared
+    it (§18), which is what lets a UI say whose space it is.  A caller adds
+    what is its own view of the space: the face, the portals, the nodes
+    inside it, whether it is in edit mode, where it sits on the canvas."""
+    return {
+        "id": space.id,
+        "parent": space.parent or ROOT_ID,
+        "label": space.label,
+        "color": space.color,
+        "type": space.type,
+        "permanent": bool(space.permanent),
+        "node_view": bool(space.node_view),
+        "template": space.template,
+        "mode": space.mode,
+        "readonly": space.is_readonly,
+        "writable": bool(space.writable),
+        "stem": space.stem,
+        # Who declared it: the client id, and the friendly name that id is
+        # known by ("" when the client is not attached any more).
+        "declared_by": space.declared_by,
+        "declared_by_name": declared_by_name,
+    }
+
+
+# ---------------------------------------------------------------------------
 # the spawn rule and the write filter (agents/SPACES.md §2, §3, §12)
 # ---------------------------------------------------------------------------
 
@@ -898,6 +1157,10 @@ def build_payload(space: Space) -> dict:
         "node_view": bool(space.node_view),
         "auto_load": space.auto_load,
         "placement": space.placement(),
+        # `declared_by` is deliberately absent (§18): it is a claim by a live
+        # connection, not something about the space, so it is not file data —
+        # and a declared space is non-permanent, so nothing of it is written
+        # anywhere in the first place.
         "config": {
             "nodes": space.nodes,
             "edges": space.edges,
@@ -967,7 +1230,9 @@ def load_space(path: str, space_id: str, parent: Optional[str],
         type=type_from_raw(raw),
         # A file that exists is the user's (or the deployment's) own space
         # unless it says otherwise - only a space a *module/app* made, which
-        # is never written, comes back non-permanent.
+        # is never written, comes back non-permanent.  `declared_by` is not
+        # read either: a claim does not survive the connection that made it
+        # (§18) - whoever declared the space declares it again.
         permanent=bool(raw.get("permanent", True)),
         node_view=bool(raw.get("node_view", False)),
         template=raw.get("template") or None,

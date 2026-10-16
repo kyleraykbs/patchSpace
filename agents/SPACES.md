@@ -173,6 +173,8 @@ client keeps working at every point.
 | S5 | primitives: routable **slider (0.0–1.0)**, **string**, `const` nodes | **done** — daemon `63b02df` |
 | S6 | **sidebar spaces menu** (live spaces) + **dropdown&search** to switch/embed anywhere | **done** — client `66df741` |
 | S7 | mycelion wiring + live smoke | **wiring done** (mycelion `ed160ea`); the **live smoke is Kyle's** — it needs the machine and his session |
+| S8 | **an app declares its own space** (§18) — `space_declare`, app-owned and non-permanent, takeover refused | open — the spec's opening promise, and the last gap it named |
+| S9 | **one value grammar** (§19) — the S3 and S5 paths resolved, ranked and kind-checked in one place | open |
 
 Verified at each step: the daemon suite (560 passed, 28 skipped at S5), the
 client suite (347 passed), `scripts/smoke.sh` on a private instance, the
@@ -371,3 +373,47 @@ Primitives gains what the spec names, all of them routable:
   since entering a space is navigation, not modal state.
 * Both come from one list installed from the payload, ordered through
   `sorting.order_spaces`, so the sidebar and the dropdown cannot disagree.
+
+## 18. S8 contract (frozen) — an app declares its own space
+
+The spec's opening sentence is the one promise S0–S6 do not yet keep: "an app can
+create its own space and know it can place nodes there".  Today a module's
+`node_announce` may carry a `space` per node and the registry records it, but
+**nothing creates the space** — an app that names its own space gets nodes in a
+space that does not exist.
+
+* New message `space_declare {space: {space_id, label?, color?, node_view?,
+  parent?}}` → creates the space or updates the one it declared, and is
+  **idempotent**: an app declares on every attach, which is exactly how its space
+  survives updates and reboots with nothing persisted.  It answers with the
+  record it ended up with.
+* A declared space is **app-owned**: `permanent` is forced **false** (an app
+  cannot make its space persist — only the user can, by turning Permanent on in
+  the GUI), and the daemon records `declared_by` = the declaring client id, so
+  the payload and the UI can say whose space it is.
+* **Refuse a takeover**: a declare may not claim an id that is permanent,
+  nix-declared, or owned by a different client.  Editing a space *by name*
+  through the ordinary edit paths stays allowed (the "white box with nice
+  borders" rule) — what is refused is claiming ownership.
+* The nodes an app announces into its own space are placed there and appear in
+  the payload with it, so the app can wire them inside the space or out of it
+  (S2: wires may cross).
+* GUI-visible consequence, stated honestly: deleting an app's space from the GUI
+  lasts until that app's next attach, because the app re-declares.  The UI must
+  say the space is app-owned rather than pretend the deletion sticks.
+
+## 19. S9 contract (frozen) — the value grammar, unified
+
+After S3 and S5 there are two ways a value reaches a consumer: an auto-declared
+`drives_control` port (S3) and a declared value input port (S5's
+`display.text`).  They must not diverge:
+
+* one resolution order everywhere — an edge on the port wins, then the stored
+  control value, then the declared default;
+* one kind vocabulary for value ports (`number`, `boolean`, `text`, `choice`) and
+  one place that decides whether two kinds may connect;
+* a `choice` value travels as its option value, and an unknown option is refused
+  at the consumer rather than silently kept.
+
+This is a coherence step, not a feature: it exists so the generalization cannot
+grow a second, slightly different rule.

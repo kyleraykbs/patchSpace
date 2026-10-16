@@ -45,6 +45,7 @@ class ModuleHost:
         menu: Optional[List[Dict[str, Any]]] = None,
         vocabulary: Optional[Dict[str, Any]] = None,
         aliases: Optional[Dict[str, str]] = None,
+        space: Optional[Mapping[str, Any]] = None,
         migrate: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
         on_control: Optional[Callable[[Dict[str, Any]], None]] = None,
         on_edge: Optional[Callable[[Dict[str, Any]], None]] = None,
@@ -64,6 +65,11 @@ class ModuleHost:
         self.menu = list(menu or [])
         self.vocabulary = dict(vocabulary or {})
         self.aliases = dict(aliases or {})
+        #: The space this module declares on every attach (§18): the id path
+        #: its nodes live in, declared so the daemon creates it.  None: the
+        #: module names no space of its own, and its nodes land per their own
+        #: id paths (the root, for a bare id).
+        self.space = dict(space) if space else None
         self.migrate = migrate
         self.on_control = on_control
         self.on_edge = on_edge
@@ -100,6 +106,13 @@ class ModuleHost:
             self.declarations, menu=self.menu, vocabulary=self.vocabulary,
             aliases=self.aliases,
         ))
+        if self.space is not None:
+            # On *every* attach, including a reconnect: the declaration is the
+            # only thing that makes an app's space exist (§18).  The answer is
+            # not fatal here (a claim the daemon refuses leaves the module's
+            # nodes to land per their own id paths); a module that wants the
+            # reason calls `declare_space` itself.
+            self.declare_space(self.space)
         return True
 
     def _open(self) -> Optional[socket.socket]:
@@ -133,6 +146,20 @@ class ModuleHost:
 
     def unannounce(self, instance_ids: Iterable[str]) -> Dict[str, Any]:
         return self._reply_of(api.node_remove(list(instance_ids)), "removed")
+
+    def declare_space(self, space: Mapping[str, Any]) -> Dict[str, Any]:
+        """Declare (or re-declare) the space this module owns
+        (agents/SPACES.md §18).
+
+        Sent on *every* attach — :meth:`connect` sends `self.space` if the
+        module gave one, so a reconnect re-declares it without the module
+        doing anything — which is how an app's space exists at all: it is
+        never persisted, so the declaration is what makes it, and the same
+        id every time is what makes it the same space.  Returns the daemon's
+        answer: `space_declared` with the record, or `error` with its reason
+        (a claim on a permanent, file-declared or another client's space)."""
+        replies = self._call(api.space_declare(dict(space)))
+        return replies[-1] if replies else {}
 
     def report_health(self, health: Mapping[str, str]) -> None:
         self._call(api.node_health(dict(health)))

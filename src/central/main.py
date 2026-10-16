@@ -626,7 +626,11 @@ class PatchSpaceDaemon:
         # module extraction moves that under modules/pipewire).
         self.registry = registry_mod.Registry()
         self.topology = graph_mod.Graph()
-        self._protocol = protocol_mod.ProtocolHandler(self.registry, self.topology)
+        # The handler reaches the space tree through a callable: `self.spaces`
+        # is loaded (and swapped) later, and `_install_spaces` rebinds it.
+        self._protocol = protocol_mod.ProtocolHandler(
+            self.registry, self.topology, spaces=lambda: self.spaces
+        )
         #: The built-in module host, attached by `attach_modules` (None
         #: until then; a test can drive the registry without a module).
         self._pw_module: Optional[pw_module.PipewireModule] = None
@@ -1801,6 +1805,9 @@ class PatchSpaceDaemon:
                     type=meta.type, permanent=meta.permanent,
                     node_view=meta.node_view,
                     template=meta.template,
+                    # Who declared it travels with the record: the rebuild must
+                    # not quietly un-own an app's space (§18).
+                    declared_by=meta.declared_by,
                     config=config,
                 )
             else:
@@ -1808,7 +1815,10 @@ class PatchSpaceDaemon:
                 # space the daemon has never loaded.  That is an app/module's
                 # own space, so it is not persisted - it is re-created by its
                 # owner every attach, which is what keeps imperative garbage
-                # out of the files across updates (agents/SPACES.md §3).
+                # out of the files across updates (agents/SPACES.md §3).  An
+                # *announcement* makes the record itself (`announce_space`,
+                # §18); this branch is the tail of it - a node whose space
+                # nobody can claim an owner for.
                 space = spaces.Space(
                     id=pid, parent=spaces.parent_space(pid),
                     label=spaces.local_of(pid) if pid else "root",
@@ -2145,19 +2155,12 @@ class PatchSpaceDaemon:
             if pid == spaces.ROOT_ID:
                 continue
             files.append({
-                "id": pid,
+                **spaces.space_record(
+                    space,
+                    declared_by_name=self.registry.client_name(space.declared_by),
+                ),
                 "name": spaces.local_of(pid),
-                "label": space.label,
-                "color": space.color,
-                "type": space.type,
-                "permanent": space.permanent,
-                "node_view": space.node_view,
-                "template": space.template,
-                "mode": space.mode,
-                "readonly": space.is_readonly,
-                "writable": space.writable,
                 "auto_load": space.auto_load,
-                "stem": space.stem,
                 "path": space.path,
                 "directory": os.path.dirname(space.path) if space.path else None,
                 "nodes": [spaces.make_id(pid, n) for n in space.nodes],
@@ -2179,6 +2182,58 @@ class PatchSpaceDaemon:
         """A filesystem-safe space stem from a display name."""
         stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", (name or "").strip()).strip("_")
         return stem or f"space_{int(time.time() * 1000)}"
+
+    def _give_space_a_file(self, space: spaces.Space) -> bool:
+        """Hand a space that has never had a file one of its own.
+
+        This is the user turning **Permanent on for an app-made space**
+        (agents/SPACES.md §18): an app's space is created in memory and never
+        written, so "persist it" means giving it a file, a stem and a
+        reference from its parent — which is otherwise `create_space`'s job.
+        The file is written by the `_write_spaces` at the end of the command
+        that flipped the flag.
+
+        The stem is a free one: two spaces must not end up sharing a file just
+        because their ids end in the same name, and the user's spaces are
+        already on disk.  Called with the lock held (it edits the parent's
+        child references); a space with no writable directory, or whose parent
+        space is missing, keeps no file and says so in the log rather than
+        pretending."""
+        target_dir = next((d for d, w in self.space_dirs if d and w), None)
+        if target_dir is None:
+            logger.warning(
+                "no writable space directory: space %r stays unpersisted "
+                "(its app will re-create it on its next attach)",
+                space.id,
+            )
+            return False
+        parent_id = space.parent or spaces.ROOT_ID
+        parent = self.spaces.get(parent_id)
+        if parent is None:
+            logger.warning(
+                "space %r has no parent space %r to be referenced from: it "
+                "stays unpersisted",
+                space.id, parent_id or "root",
+            )
+            return False
+        local = spaces.local_of(space.id)
+        stem = self._space_slug(local)
+        taken = {
+            spaces.file_stem(path)
+            for directory, _ in self.space_dirs
+            for path in spaces.list_files(directory)
+        }
+        unique, n = stem, 2
+        while unique in taken:
+            unique, n = f"{stem}_{n}", n + 1
+        space.stem = unique
+        space.path = os.path.join(target_dir, unique + spaces.SPACE_SUFFIX)
+        space.writable = True
+        if local not in parent.children:
+            parent.config.setdefault("spaces", []).append(
+                spaces.child_ref(local, unique)
+            )
+        return True
 
     def _cmd_create_space(self, cmd: dict) -> dict:
         """Create a new space (a file) and move the selection into it.
@@ -2324,6 +2379,15 @@ class PatchSpaceDaemon:
                 space.type = space_type
             if cmd.get("permanent") is not None:
                 space.permanent = _as_bool(cmd.get("permanent"), space.permanent)
+                if space.permanent:
+                    # The user took this space into the session: it is theirs
+                    # now.  Its id is no longer declarable (§18), so a client
+                    # cannot claim it back — and an "app-owned" label would be
+                    # a lie about a deletion that now sticks, which is exactly
+                    # what `declared_by` is for.
+                    space.declared_by = ""
+                    if not space.path:
+                        self._give_space_a_file(space)
             if cmd.get("color") is not None:
                 space.color = cmd["color"]
             if cmd.get("node_view") is not None:
@@ -6309,23 +6373,15 @@ class PatchSpaceDaemon:
             embedded = spaces.portal_index(self.spaces)
             return [
                 {
-                    "id": pid,
-                    "parent": space.parent or "",
-                    "label": space.label,
-                    "color": space.color,
-                    "type": space.type,
-                    "permanent": space.permanent,
-                    "node_view": space.node_view,
-                    "template": space.template,
-                    "mode": space.mode,
-                    "readonly": space.is_readonly,
-                    "writable": space.writable,
+                    **spaces.space_record(
+                        space,
+                        declared_by_name=self.registry.client_name(space.declared_by),
+                    ),
                     "x": space.x,
                     "y": space.y,
                     "w": space.w,
                     "h": space.h,
                     "anchored": space.anchored,
-                    "stem": space.stem,
                     "auto_load": space.auto_load,
                     "edit_mode": pid in self._edit_spaces,
                     "path": space.path,
@@ -7065,8 +7121,12 @@ class PatchSpaceDaemon:
             if conn.module_id:
                 # A module connection dying takes its nodes offline (their
                 # placements stay, so a reconnect binds them again) and
-                # stops being a forwarding target.
+                # stops being a forwarding target.  The spaces it declared
+                # keep their records but not its claim on them (§18): a
+                # declaration belongs to a connection, and the app declares
+                # again on its next attach.
                 self._protocol.unregister_module(conn)
+                self._protocol.release_spaces(conn.module_id)
                 self.registry.detach(conn.module_id)
             try:
                 client_socket.close()

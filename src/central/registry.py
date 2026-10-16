@@ -13,7 +13,11 @@ This is the daemon-side catalogue the whole plan hangs off:
   config, and reports ``unbacked`` (the gray node) or
   ``offline_module`` (its owning module is known but not attached);
 * an **app** asks the registry what is available instead of dialing a
-  module (``capability_query`` / ``type_query``).
+  module (``capability_query`` / ``type_query``);
+* a **declared space** (agents/SPACES.md §18) is a module's own: the record
+  lives in the space tree (``central/spaces.py``), and ``announce`` hands the
+  space each accepted node lands in over to it (``on_space``) rather than
+  holding a second copy of what a space is.
 
 Status is computed here, never by a module: ``online``,
 ``offline_module``, ``offline_dep`` (a node its ``requires`` list names is
@@ -25,9 +29,10 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 from central import module_api as api
+from central import spaces as spaces_mod
 
 
 @dataclass
@@ -199,6 +204,14 @@ class Registry:
         with self._lock:
             return self._modules.get(module_id)
 
+    def client_name(self, client_id: str) -> str:
+        """The friendly name a client id is known by — what a payload shows
+        for "whose space is this" (agents/SPACES.md §18), ``""`` when the
+        daemon has no such client (a declaration whose declarer has gone)."""
+        with self._lock:
+            record = self._modules.get(client_id)
+            return record.name if record is not None else ""
+
     # -- types -----------------------------------------------------------
 
     def declare_types(self, module_id: str,
@@ -342,16 +355,27 @@ class Registry:
             self._recompute()
             return instance
 
-    def announce(self, module_id: str, nodes: Iterable[Dict[str, Any]]
+    def announce(self, module_id: str, nodes: Iterable[Dict[str, Any]],
+                 on_space: Optional[Callable[[str], None]] = None
                  ) -> Tuple[List[str], List[str], List[str]]:
         """A module's running instances.
 
         Returns ``(bound, created, errors)``: ``bound`` are instance ids it
         adopted from existing placements, ``created`` are new ones.
+
+        ``on_space`` is how the space an accepted node lands in is kept real
+        (agents/SPACES.md §18): it is called once per accepted node with the
+        node's container space id (:func:`spaces.node_space` — the node's own
+        id path when it has one, else the space it names), *after* the lock
+        is dropped, and the caller decides what to do about a space it has
+        never heard of.  The registry stays the one that knows which node
+        landed where; the space tree belongs to the daemon, and this is the
+        hand-off — a declared space is created or updated there, never here.
         """
         bound: List[str] = []
         created: List[str] = []
         errors: List[str] = []
+        containers: List[str] = []
         with self._lock:
             record = self._modules.get(module_id)
             if record is None:
@@ -382,7 +406,13 @@ class Registry:
                     instance.requires = list(node["requires"])
                 instance.declared_by = module_id
                 record.instances.add(instance_id)
+                containers.append(
+                    spaces_mod.node_space(instance_id, str(node.get("space") or ""))
+                )
             self._recompute()
+        if on_space is not None:
+            for space_id in containers:
+                on_space(space_id)
         return bound, created, errors
 
     def unannounce(self, module_id: str, instance_ids: Iterable[str]) -> List[str]:
