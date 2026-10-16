@@ -163,16 +163,22 @@ ports, and a node's parameter becomes an addressable **input**:
 Each step ends green (daemon suite + client suite + offscreen render), and the
 client keeps working at every point.
 
-| # | Step | Notes |
+| # | Step | Status |
 |---|---|---|
-| S0 | **rename panel → space** across daemon, client, nix module, docs, with file/protocol migration | pure vocabulary + migration; no behaviour change |
-| S1 | space **type** (`template`/`live`), **`permanent`** + the persistence filter, `color`, `node_view` default, face-input `mode`/`kind`/`method` in the model + payload | templates stop spawning their nodes; non-permanent spaces stop being saved |
-| S2 | **portal** embedding (shared reference) + **direct cross-space wires** | view toggle per embedding |
-| S3 | **externalized value inputs** + `value_set` emission from value nodes | the space face becomes routable |
-| S4 | **cardinality** declared per port, enforced; hard-coded rules deleted | `SINGLE_DRIVER_KINDS` → declarations |
-| S5 | primitives: routable **slider (0.0–1.0)**, **string**, `const` nodes | value sources |
-| S6 | **sidebar spaces menu** (live spaces) + **dropdown&search** to switch/embed anywhere | the navigation affordance |
-| S7 | mycelion wiring (`services.patchspace.spaceDirs` etc.) + live smoke | Kyle's call to update |
+| S0 | **rename panel → space** across daemon, client, nix module, docs, with file/protocol migration | **done** — daemon `416b041`, client `12b64aa`, mycelion `b97d9b3` |
+| S1 | space **type** (`template`/`live`), **`permanent`** + the persistence filter, `color`, `node_view` default, face-input `mode`/`kind`/`method` | **done** — daemon `8a66890`, client `68bb882` |
+| S2 | **portal** embedding (shared reference) + **direct cross-space wires** | **done** — daemon `4758ab9`, client `af5b25f` |
+| S3 | **externalized value inputs** + `value_set` emission from value nodes | **done** — daemon `5c7b174`, client `cc226e1` |
+| S4 | **cardinality** declared per port, enforced; hard-coded rules deleted | **done** — daemon `ff49b6c` (two boolean bus ports deliberately go from one → many) |
+| S5 | primitives: routable **slider (0.0–1.0)**, **string**, `const` nodes | **done** — daemon `63b02df` |
+| S6 | **sidebar spaces menu** (live spaces) + **dropdown&search** to switch/embed anywhere | **done** — client `66df741` |
+| S7 | mycelion wiring + live smoke | **wiring done** (mycelion `ed160ea`); the **live smoke is Kyle's** — it needs the machine and his session |
+
+Verified at each step: the daemon suite (560 passed, 28 skipped at S5), the
+client suite (347 passed), `scripts/smoke.sh` on a private instance, the
+offscreen canvas render, and `nix build .#checks…tests` (the sandbox check, which
+needs each new GTK test file added to its ignore list — a real trap: without it
+the check segfaults on a display-less machine).
 
 ## 9. Migration contract (S0)
 
