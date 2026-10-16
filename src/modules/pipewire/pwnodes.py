@@ -1271,7 +1271,38 @@ class ButtonNode(Node):
         return "impulse" if direction == "out" else "audio"
 
 
-class SpaceInNode(TransparentNode):
+class SpaceFaceInput:
+    """The face configuration a space *input* port carries.
+
+    It is stored here, on the node, because the node is the one source of
+    truth (agents/SPACES.md §12): the daemon derives the space record's
+    ``face`` from these port nodes, and ``set_space_input`` writes the
+    configuration back onto them.  A space *output* port has none - an
+    output is always an ordinary jack.
+
+    * ``mode`` - ``"node"`` (an ordinary jack, wired from other nodes) or
+      ``"value"`` (externalized: a value the space publishes).
+    * ``kind`` - ``"audio"`` / ``"number"`` / ``"boolean"`` / ``"text"`` /
+      ``"choice"``.  Audio is node-only: a stream is not a value.
+    * ``method`` - for a value input, how it is driven: ``"field"`` (typed
+      inline on the face) or ``"edge"`` (from a value node).  Empty
+      otherwise.
+    * ``choices`` - the option list when ``kind == "choice"``.
+    """
+
+    #: What an unconfigured port of this class is.
+    FACE_MODE = "node"
+    FACE_KIND = "audio"
+
+    def init_face(self, mode: Optional[str] = None, kind: Optional[str] = None,
+                  method: Optional[str] = None, choices=None) -> None:
+        self.mode = mode or self.FACE_MODE
+        self.kind = kind or self.FACE_KIND
+        self.method = method or ""
+        self.choices = [str(c) for c in choices] if choices else None
+
+
+class SpaceInNode(SpaceFaceInput, TransparentNode):
     """A space input port: external audio arrives on "in" and the space's
     internal nodes pull it from "out".  Pure logical pass-through (no
     backing).  Unlike other single-input transparent nodes it is a *bus*:
@@ -1285,10 +1316,13 @@ class SpaceInNode(TransparentNode):
     def allows_multiple_inputs(self) -> bool:
         return True
 
-    def __init__(self, node_id, port_name: str = "", description: str = ""):
+    def __init__(self, node_id, port_name: str = "", description: str = "",
+                 mode: Optional[str] = None, kind: Optional[str] = None,
+                 method: Optional[str] = None, choices=None):
         super().__init__(node_id)
         self.port_name = port_name
         self.description = description
+        self.init_face(mode, kind, method, choices)
 
 
 class SpaceOutNode(TransparentNode):
@@ -1307,26 +1341,32 @@ class SpaceOutNode(TransparentNode):
         self.description = description
 
 
-class BoolSpaceInNode(Node):
+class BoolSpaceInNode(SpaceFaceInput, Node):
     """Boolean counterpart of SpaceInNode: a boolean enters from outside
     on "in" and is republished internally on "out".
 
     ``default_state`` is what the port emits when its external input is
     absent (the space used standalone with nothing plumbed into this
     input); ``None`` means "no default" (downstream falls back to its own
-    default, as before)."""
+    default, as before).  It carries the same face configuration as
+    SpaceInNode, with ``kind`` defaulting to ``"boolean"``."""
 
     BOOLEAN_INPUT = "boolean"
     # Several edges may land on the same boolean port; resolution takes
     # the first wired source (see _resolve_boolean_input).
     ALLOW_MULTIPLE_BOOLEAN = True
 
+    FACE_KIND = "boolean"
+
     def __init__(self, node_id, port_name: str = "", description: str = "",
-                 default_state: Optional[bool] = None):
+                 default_state: Optional[bool] = None,
+                 mode: Optional[str] = None, kind: Optional[str] = None,
+                 method: Optional[str] = None, choices=None):
         super().__init__(node_id)
         self.port_name = port_name
         self.description = description
         self.default_state = default_state
+        self.init_face(mode, kind, method, choices)
 
     def port_kind(self, port: str, direction: str) -> str:
         return "boolean"

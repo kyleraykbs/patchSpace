@@ -324,7 +324,10 @@ let
   # and `Reset` in the GUI re-applies exactly this content.
   spaceFile = name: space:
     pkgs.writeText "patchspace-space-${name}.json" (builtins.toJSON {
-      type = "space";
+      # The space's kind (S1).  A generated space is live: `space`/`panel`
+      # were the pre-S1 spellings of exactly that, and the daemon still reads
+      # them, but new files say what they are.
+      type = "live";
       mode = "read-only";
       label = space.label;
       color = space.color;

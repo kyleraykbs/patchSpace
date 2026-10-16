@@ -40,7 +40,8 @@ codebase deliberately documents *why* and *what failed before*, not just *what*.
     ├── central/           # the PipeWire-agnostic daemon core (run as `python -m central.main`)
     │   ├── main.py            # daemon: socket API, session load, node factory, wiring
     │   ├── pwnodes.py         # node graph model: PatchSpace, all Node classes, effect sandwich
-    │   ├── spaces.py          # space containers: namespacing, LCA edges, tree IO, migration
+    │   ├── spaces.py          # space containers: namespacing, LCA edges, tree IO, migration,
+    │   │                      #   the space record (type/permanent/node_view/template) + the write filter
     │   ├── migrations.py      # versioned node/config migrations (legacy -> current)
     │   ├── session_repair.py  # validate/repair a session config (CLI + daemon)
     │   ├── patchspace_cli.py  # synchronous one-shot socket client (CLI tools)

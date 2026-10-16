@@ -136,7 +136,9 @@ def test_legacy_session_cache_migrates_to_root_space(tmp_path):
     assert "a" in tree[spaces.ROOT_ID].nodes
     # The root file was rewritten in the space shape.
     raw = json.load(open(root))
-    assert raw.get("type") == spaces.TYPE_SPACE
+    # The file's `type` key carries the space's *kind* since S1 (`live`);
+    # `space`/`panel` are the pre-S1 spellings of a live space.
+    assert raw.get("type") == spaces.LIVE
 
 
 def test_create_and_delete_space(tmp_path):
@@ -203,16 +205,22 @@ def test_create_space_honours_placement(tmp_path):
     }
 
 
-def test_edit_space_changes_label_and_color(tmp_path):
+def test_edit_space_changes_label_and_set_space_meta_the_color(tmp_path):
+    """The space's name is the rename path (`edit_space`); everything S1
+    added about it - color, kind, permanence, the default view - is
+    `set_space_meta`.  One writer per field."""
     d, root, pdir = _daemon(tmp_path)
     d.spaces = d._load_spaces_tree()
     assert d._cmd_create_space({"name": "kit"})["status"] == "ok"
 
-    resp = d._cmd_edit_space(
-        {"space_id": "kit", "label": "Kitchen", "color": "#112233"}
-    )
+    resp = d._cmd_edit_space({"space_id": "kit", "label": "Kitchen"})
     assert resp["status"] == "ok", resp
     assert d.spaces["kit"].label == "Kitchen"
+    resp = d._cmd_set_space_meta({"space_id": "kit", "color": "#112233"})
+    assert resp["status"] == "ok", resp
+    resp = d._cmd_edit_space({"space_id": "kit", "color": "#112233"})
+    assert resp["status"] == "ok", resp
+    assert "color" not in resp              # edit_space no longer touches it
     assert d.spaces["kit"].color == "#112233"
     raw = json.load(open(os.path.join(pdir, "kit.json")))
     assert raw["label"] == "Kitchen"
@@ -331,7 +339,7 @@ def test_export_space_returns_live_state(tmp_path):
     d.space.nodes["kit::a"].pattern = "edited"
     resp = d._cmd_export_space({"space_id": "kit"})
     assert resp["status"] == "ok", resp
-    assert resp["payload"]["type"] == "space"
+    assert resp["payload"]["type"] == spaces.LIVE
     assert resp["payload"]["config"]["nodes"]["a"]["params"]["pattern"] == "edited"
 
 
@@ -1047,7 +1055,7 @@ def test_an_old_spelling_space_file_loads_and_resaves_under_the_new_one(tmp_path
     d._write_spaces()
 
     root_raw = json.load(open(root))
-    assert root_raw["type"] == "space"
+    assert root_raw["type"] == "live"
     # The child reference is re-written from the built tree: the placement it
     # carries (geometry on the reference, since the file is shared) comes back
     # as a dict, the reference by stem.
@@ -1056,7 +1064,7 @@ def test_an_old_spelling_space_file_loads_and_resaves_under_the_new_one(tmp_path
     assert "panels" not in root_raw["config"]
 
     kit_raw = json.load(open(os.path.join(pdir, "kit.json")))
-    assert kit_raw["type"] == "space"
+    assert kit_raw["type"] == "live"
     assert "panels" not in kit_raw["config"]
     assert kit_raw["config"]["nodes"]["pin"]["type"] == "space_in"
     # The placement survived the round trip (space-relative, as stored).
@@ -1090,42 +1098,398 @@ def test_the_pre_rename_dir_flag_still_works():
     assert main_mod.parse_space_dirs(None) is None
 
 
-def test_the_pre_rename_command_names_are_still_accepted(tmp_path, caplog):
-    """The protocol's one-release window (S0): a GUI started before an
-    activation keeps sending the old command names - and the old argument
-    keys - for hours, so the daemon maps them onto the same handlers with one
-    deprecation line each, while only ever emitting the new spelling."""
+def test_the_pre_rename_command_names_are_gone(tmp_path, caplog):
+    """S1 removed the protocol's one-release window for the S0 rename: the
+    command names *and* the argument keys are no longer accepted (they fall
+    through to an unknown command / are ignored), and no deprecation line is
+    logged.  The *data* aliases (old files, the old directory, the old flags
+    and the old type ids) stay - those are data, not protocol."""
     d, root, pdir = _daemon(tmp_path)
     d.spaces = d._load_spaces_tree()
 
     with caplog.at_level("WARNING"):
         listing = d.handle_command({"command": "list_panels"})
-    assert listing["status"] == "ok"
-    assert "panel" in caplog.text and "deprecation" in caplog.text
+    assert listing["status"] == "error"
+    assert "Unknown command" in listing["message"]
+    assert "deprecation" not in caplog.text
 
     caplog.clear()
     d.handle_command({"command": "add_node", "node_type": "regex_input",
                       "node_id": "a", "config": {"pattern": ".*"}})
     with caplog.at_level("WARNING"):
-        # `create_panel` is the old name *and* carries the old key; `move_nodes`
-        # kept its name and only the key is legacy.
+        # The old command name is not a command any more...
         resp = d.handle_command({"command": "create_panel", "name": "Kitchen",
                                  "panel_id": "", "node_ids": ["a"]})
-    assert resp["status"] == "ok", resp
-    assert resp["space_id"] == "Kitchen"          # emitted new, not old
-    assert "deprecation" in caplog.text
-
+    assert resp["status"] == "error", resp
+    assert "Unknown command" in resp["message"]
+    assert "deprecation" not in caplog.text
+    # ...and the old argument key is not honoured either: `move_nodes` with
+    # only `panel_id` names no space, so nothing moves.
     caplog.clear()
     with caplog.at_level("WARNING"):
         moved = d.handle_command({"command": "move_nodes", "panel_id": "",
-                                  "node_ids": ["Kitchen::a"]})
+                                  "node_ids": ["a"]})
     assert moved["status"] == "ok", moved
-    assert moved["moved"] == ["a"], moved       # the old key was honoured
-    assert "deprecation" in caplog.text
+    assert moved["moved"] == [], moved          # the old key was ignored
+    assert "deprecation" not in caplog.text
 
-    # A canonical command logs nothing and is not copied.
-    caplog.clear()
-    cmd = {"command": "list_spaces"}
-    with caplog.at_level("WARNING"):
-        assert d.handle_command(cmd)["status"] == "ok"
-    assert caplog.text == ""
+
+# ---------------------------------------------------------------------------
+# S1: space type (template/live), permanence, the face
+# ---------------------------------------------------------------------------
+
+
+def test_a_templates_interior_is_not_spawned(tmp_path):
+    """A template is a definition: loading it brings up no module instance,
+    no live node and no placement - and a node added inside one is refused
+    rather than silently spawned and then lost."""
+    d, root, pdir = _daemon(tmp_path)
+    template = spaces.Space(
+        id="tmpl", parent="", label="Filter", color="@blue",
+        type=spaces.TEMPLATE,
+        path=os.path.join(pdir, "tmpl.json"), writable=True, stem="tmpl",
+        config={"nodes": {"in": {"type": "space_in",
+                                 "params": {"port_name": "In", "x": 5, "y": 5}},
+                          "fx": {"type": "regex_input",
+                                 "params": {"pattern": "x", "x": 5, "y": 60}}},
+                "edges": [{"from": "in", "to": "fx"}],
+                "spaces": [], "groups": []},
+    )
+    spaces.write_file(os.path.join(pdir, "tmpl.json"), template)
+    spaces.write_file(root, spaces.Space(
+        id="", parent=None, label="root", color="#fff", mode="read-write",
+        writable=True,
+        config={"nodes": {}, "edges": [], "spaces": ["tmpl"], "groups": []},
+    ))
+    d.spaces = d._load_spaces_tree()
+    assert d.spaces["tmpl"].is_template
+    assert d._flatten_spaces(d.spaces)["nodes"] == {}
+    d._load_session(d._flatten_spaces(d.spaces), declarative=True)
+    assert d.space.nodes == {}                     # not spawned
+
+    # The node ids still come back from the *definition*.
+    assert set(d.spaces["tmpl"].nodes) == {"in", "fx"}
+    # Its record carries the face derived from those definition nodes.
+    record = next(s for s in d._serialize_spaces() if s["id"] == "tmpl")
+    assert [e["key"] for e in record["face"]] == ["in"]
+    assert record["face"][0]["kind"] == "audio"
+
+    resp = d.handle_command({"command": "add_node", "node_type": "regex_input",
+                             "node_id": "tmpl::extra",
+                             "config": {"pattern": "y"}})
+    assert resp["status"] == "error", resp
+    assert "template" in resp["message"]
+    assert "tmpl::extra" not in d.space.nodes
+
+
+def test_instantiate_template_makes_a_nested_live_space(tmp_path):
+    """Dropping a template in materializes it: a *nested live* space whose
+    nodes are spawned and whose `template` names the source."""
+    d, root, pdir = _daemon(tmp_path)
+    template = spaces.Space(
+        id="tmpl", parent="", label="Filter", color="@blue",
+        type=spaces.TEMPLATE,
+        path=os.path.join(pdir, "tmpl.json"), writable=True, stem="tmpl",
+        config={"nodes": {"fx": {"type": "regex_input",
+                                 "params": {"pattern": "x", "x": 5, "y": 60}}},
+                "edges": [], "spaces": [], "groups": []},
+    )
+    spaces.write_file(os.path.join(pdir, "tmpl.json"), template)
+    spaces.write_file(root, spaces.Space(
+        id="", parent=None, label="root", color="#fff", mode="read-write",
+        writable=True,
+        config={"nodes": {}, "edges": [], "spaces": ["tmpl"], "groups": []},
+    ))
+    d.spaces = d._load_spaces_tree()
+    d._cmd_create_space({"name": "Host"})
+
+    resp = d.handle_command(
+        {"command": "instantiate_template", "template_id": "tmpl",
+         "parent_space": "Host"}
+    )
+    assert resp["status"] == "ok", resp
+    new_id = resp["space_id"]
+    # Nested in the parent, named after the template but with a file of its
+    # own (the template's file is already called `tmpl`).
+    assert new_id.startswith("Host::") and "tmpl" in new_id
+    inst = d.spaces[new_id]
+    assert inst.path != d.spaces["tmpl"].path
+    assert inst.type == spaces.LIVE
+    assert inst.template == "tmpl"
+    assert inst.permanent is True
+    # Spawned: the definition's node is live inside the new space.
+    assert f"{new_id}::fx" in d.space.nodes
+    assert d.space.nodes[f"{new_id}::fx"].pattern == "x"
+    # The template itself is still a definition (nothing of it runs).
+    assert "tmpl::fx" not in d.space.nodes
+
+    record = next(s for s in d._serialize_spaces() if s["id"] == new_id)
+    assert record["type"] == "live"
+    assert record["template"] == "tmpl"
+
+    # Round-trips: the template's file is still the definition (untouched
+    # by the instantiation), and the instance is its own live space file.
+    raw = json.load(open(os.path.join(pdir, "tmpl.json")))
+    assert raw["type"] == "template"
+    assert set(raw["config"]["nodes"]) == {"fx"}   # the definition, untouched
+    inst_path = d.spaces[new_id].path
+    raw = json.load(open(inst_path))
+    assert raw["type"] == "live"
+    assert raw["template"] == "tmpl"
+    assert "fx" in raw["config"]["nodes"]
+
+    tree = d._load_spaces_tree()
+    assert tree[new_id].template == "tmpl"
+    assert tree[new_id].type == spaces.LIVE
+
+    # A live space is not a template, and a missing one is an error.
+    assert d._cmd_instantiate_template(
+        {"template_id": "Host", "parent_space": ""}
+    )["status"] == "error"
+    assert d._cmd_instantiate_template(
+        {"template_id": "nope", "parent_space": ""}
+    )["status"] == "error"
+
+
+def test_switching_a_space_to_template_freezes_and_despawns_it(tmp_path):
+    """The "Space Types" switch: flipping a live space to Template captures
+    its interior as the definition and takes it out of the running graph;
+    flipping back materializes it again."""
+    d, root, pdir = _daemon(tmp_path)
+    d.spaces = d._load_spaces_tree()
+    d.handle_command({"command": "add_node", "node_type": "regex_input",
+                      "node_id": "a", "config": {"pattern": "x", "x": 3, "y": 4}})
+    assert d._cmd_create_space({"name": "kit", "node_ids": ["a"]})["status"] == "ok"
+    assert "kit::a" in d.space.nodes
+
+    resp = d.handle_command(
+        {"command": "set_space_meta", "space_id": "kit", "type": "template"}
+    )
+    assert resp["status"] == "ok", resp
+    assert resp["type"] == "template"
+    assert "kit::a" not in d.space.nodes          # despawned
+    d._write_spaces()
+    raw = json.load(open(os.path.join(pdir, "kit.json")))
+    assert raw["type"] == "template"
+    assert raw["config"]["nodes"]["a"]["params"]["pattern"] == "x"   # kept
+
+    resp = d.handle_command(
+        {"command": "set_space_meta", "space_id": "kit", "type": "live"}
+    )
+    assert resp["status"] == "ok", resp
+    assert "kit::a" in d.space.nodes              # materialized again
+    assert d.space.nodes["kit::a"].pattern == "x"
+
+    # The root is the session: it may not become a template.
+    resp = d._cmd_set_space_meta({"space_id": "", "type": "template"})
+    assert resp["status"] == "error", resp
+    assert "root" in resp["message"]
+    # An unknown space, and an unknown kind, are refused too.
+    assert d._cmd_set_space_meta({"space_id": "nope"})["status"] == "error"
+    assert d._cmd_set_space_meta(
+        {"space_id": "kit", "type": "sideways"}
+    )["status"] == "error"
+
+
+def test_a_non_permanent_space_is_written_nowhere(tmp_path):
+    """Persistence is filtered per space: a non-permanent space - and its
+    nodes, edges and placement - reaches no file, while a permanent
+    neighbour is fully written.  Its layout is still accepted in memory."""
+    d, root, pdir = _daemon(tmp_path)
+    d.spaces = d._load_spaces_tree()
+    d._cmd_create_space({"name": "Keep"})
+    d.handle_command({"command": "add_node", "node_type": "regex_input",
+                      "node_id": "Keep::k",
+                      "config": {"pattern": "keep", "x": 1, "y": 1}})
+    # An app/module-created space: not part of the session at all.
+    resp = d._cmd_create_space({"name": "App", "permanent": False})
+    assert resp["status"] == "ok", resp
+    d.handle_command({"command": "add_node", "node_type": "regex_input",
+                      "node_id": "App::a",
+                      "config": {"pattern": "app", "x": 2, "y": 2}})
+    # A cross-space edge: it is *owned* by the root, so it must be dropped
+    # with the space its endpoint lives in.
+    d.handle_command({"command": "add_edge", "from_node": "App::a",
+                      "to_node": "Keep::k"})
+    d._write_spaces()
+
+    assert not os.path.exists(os.path.join(pdir, "App.json"))
+    raw = json.load(open(root))
+    assert [spaces.child_name(c) for c in raw["config"]["spaces"]] == ["Keep"]
+    assert raw["config"]["edges"] == []
+    assert raw["config"]["nodes"] == {}
+    # The permanent neighbour is fully written.
+    keep = json.load(open(os.path.join(pdir, "Keep.json")))
+    assert keep["type"] == "live"
+    assert keep["permanent"] is True
+    assert set(keep["config"]["nodes"]) == {"k"}
+    # And nothing of the non-permanent space reached the diff sidecar.
+    diffs = json.load(open(os.path.join(tmp_path, "placement_diffs.json")))
+    assert "App" not in diffs["placements"]
+
+    # Its layout is still accepted and applied in memory (the app owns it).
+    resp = d._cmd_set_space_layout({"space_id": "App", "x": 400, "y": 50})
+    assert resp["status"] == "ok", resp
+    assert (d.spaces["App"].x, d.spaces["App"].y) == (400.0, 50.0)
+    assert "App::a" in d.space.nodes              # live while it exists
+    d._write_spaces()
+    assert not os.path.exists(os.path.join(pdir, "App.json"))
+    assert json.load(open(root))["config"]["nodes"] == {}
+
+    # Flipping it permanent brings it back into the session.
+    assert d._cmd_set_space_meta(
+        {"space_id": "App", "permanent": True}
+    )["status"] == "ok"
+    d._write_spaces()
+    assert os.path.isfile(os.path.join(pdir, "App.json"))
+    raw = json.load(open(root))
+    assert sorted(spaces.child_name(c) for c in raw["config"]["spaces"]) == [
+        "App", "Keep"
+    ]
+
+
+def test_a_non_permanent_parent_hides_its_whole_subtree(tmp_path):
+    """Outermost first: a permanent space nested inside a non-permanent one
+    is written to nothing either."""
+    d, root, pdir = _daemon(tmp_path)
+    d.spaces = d._load_spaces_tree()
+    d._cmd_create_space({"name": "App", "permanent": False})
+    d._cmd_create_space({"name": "Inner", "parent_id": "App"})
+    d.handle_command({"command": "add_node", "node_type": "regex_input",
+                      "node_id": "App::Inner::i", "config": {"pattern": "i"}})
+    assert d.spaces["App::Inner"].permanent is True     # the child itself is
+    d._write_spaces()
+    assert not os.path.exists(os.path.join(pdir, "App.json"))
+    assert not os.path.exists(os.path.join(pdir, "Inner.json"))
+    raw = json.load(open(root))
+    assert raw["config"].get("spaces") or [] == []
+
+    tree = d._load_spaces_tree()
+    assert sorted(tree) == [""]                          # nothing came back
+
+
+def test_set_space_meta_and_set_space_input_round_trip(tmp_path):
+    """The whole S1 record survives save -> load: the space's kind, its
+    permanence, color and default view, and the face input's configuration
+    (stored on the port node)."""
+    d, root, pdir = _daemon(tmp_path)
+    d.spaces = d._load_spaces_tree()
+    d._cmd_create_space({"name": "Kitchen"})
+    d.handle_command({"command": "add_node", "node_type": "space_in",
+                      "node_id": "Kitchen::mic",
+                      "config": {"port_name": "Mic", "label": "Mic",
+                                 "x": 5, "y": 5}})
+    d.handle_command({"command": "add_node", "node_type": "space_out",
+                      "node_id": "Kitchen::out",
+                      "config": {"port_name": "Out", "x": 5, "y": 100}})
+
+    # Over the wire: a command carrying a `type` key of its own must still
+    # be read as a command (only the module API keys off a bare `type`).
+    resp = d.handle_command({
+        "command": "set_space_meta", "space_id": "Kitchen", "color": "@green",
+        "node_view": True, "permanent": True, "type": "live",
+    })
+    assert resp["status"] == "ok", resp
+    resp = d.handle_command({
+        "command": "set_space_input", "space_id": "Kitchen", "key": "mic",
+        "mode": "value", "kind": "choice", "method": "field",
+        "choices": ["a", "b"],
+    })
+    assert resp["status"] == "ok", resp
+    assert [e for e in resp["face"] if e["key"] == "mic"] == [{
+        "key": "mic", "label": "Mic", "direction": "in", "mode": "value",
+        "kind": "choice", "method": "field", "choices": ["a", "b"],
+    }]
+    # A partial update leaves the rest of the input alone.
+    assert d.handle_command(
+        {"command": "set_space_input", "space_id": "Kitchen", "key": "mic",
+         "method": "edge"}
+    )["status"] == "ok"
+    d._write_spaces()
+
+    raw = json.load(open(os.path.join(pdir, "Kitchen.json")))
+    assert raw["type"] == "live"
+    assert raw["permanent"] is True
+    assert raw["node_view"] is True
+    assert raw["color"] == "@green"
+    params = raw["config"]["nodes"]["mic"]["params"]
+    assert (params["mode"], params["kind"], params["method"]) == (
+        "value", "choice", "edge"
+    )
+    assert params["choices"] == ["a", "b"]
+    # An output has no face configuration at all.
+    assert "mode" not in raw["config"]["nodes"]["out"]["params"]
+
+    # Bring it back up from the file and check the node holds it.
+    tree = d._load_spaces_tree()
+    assert tree["Kitchen"].color == "@green"
+    assert tree["Kitchen"].node_view is True
+    d._load_session(d._flatten_spaces(tree), declarative=True)
+    node = d.space.nodes["Kitchen::mic"]
+    assert (node.mode, node.kind, node.method) == ("value", "choice", "edge")
+    assert node.choices == ["a", "b"]
+    # And the record still derives the same face from the live node.
+    record = next(s for s in d._serialize_spaces() if s["id"] == "Kitchen")
+    assert [e["key"] for e in record["face"]] == ["mic", "out"]
+    assert record["face"][1] == {
+        "key": "out", "label": "Out", "direction": "out",
+    }
+
+
+def test_a_face_inputs_configuration_is_refused_when_it_contradicts(tmp_path):
+    """Audio is node-only: it is neither an externalized value nor driven by
+    a field/edge.  An unknown key, mode, kind or method is refused, and a
+    refusal changes nothing."""
+    d, root, pdir = _daemon(tmp_path)
+    d.spaces = d._load_spaces_tree()
+    d._cmd_create_space({"name": "Kitchen"})
+    d.handle_command({"command": "add_node", "node_type": "space_in",
+                      "node_id": "Kitchen::mic",
+                      "config": {"port_name": "Mic"}})
+
+    def set_input(**kw):
+        return d.handle_command(
+            {"command": "set_space_input", "space_id": "Kitchen", "key": "mic",
+             **kw}
+        )
+
+    assert set_input(mode="value", kind="audio")["status"] == "error"
+    assert set_input(kind="audio", method="field")["status"] == "error"
+    assert set_input(kind="audio", method="edge")["status"] == "error"
+    assert set_input(mode="sideways")["status"] == "error"
+    assert set_input(kind="colour")["status"] == "error"
+    assert set_input(method="wizard")["status"] == "error"
+    assert set_input(choices="a")["status"] == "error"        # not a list
+    assert d.handle_command(
+        {"command": "set_space_input", "space_id": "Kitchen", "key": "out"}
+    )["status"] == "error"                                    # no such input
+    assert d.handle_command(
+        {"command": "set_space_input", "space_id": "nope", "key": "mic"}
+    )["status"] == "error"
+    # None of that changed anything.
+    node = d.space.nodes["Kitchen::mic"]
+    assert (node.mode, node.kind, node.method, node.choices) == (
+        "node", "audio", "", None
+    )
+    # A number input may be an edge-driven value, and a boolean port is a
+    # boolean by default.
+    assert set_input(mode="value", kind="number", method="edge")["status"] == "ok"
+    assert set_input(mode="value", kind="boolean")["status"] == "ok"
+
+
+def test_the_space_record_carries_the_s1_fields(tmp_path):
+    """What a display reads: kind, permanence, default view, the template it
+    came from and the derived face."""
+    d, root, pdir = _daemon(tmp_path)
+    d.spaces = d._load_spaces_tree()
+    d._cmd_create_space({"name": "kit", "node_view": True, "color": "@red"})
+    record = next(s for s in d._serialize_spaces() if s["id"] == "kit")
+    assert record["type"] == "live"
+    assert record["permanent"] is True
+    assert record["node_view"] is True
+    assert record["color"] == "@red"
+    assert record["template"] is None
+    assert record["face"] == []
+    root_record = next(s for s in d._serialize_spaces() if s["id"] == "")
+    assert root_record["type"] == "live"
+    assert root_record["permanent"] is True

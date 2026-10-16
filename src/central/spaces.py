@@ -34,9 +34,12 @@ File shape
 ::
 
     {
-      "type": "space",
+      "type": "live" | "template",
+      "permanent": true | false,
+      "node_view": false,
+      "template": "<space id>"?          # the template an instance came from
       "mode": "read-write" | "read-only",
-      "label": "...", "color": "#rrggbb",
+      "label": "...", "color": "@blue" | "#rrggbb" | "",
       "placement": {"x":0,"y":0,"w":420,"h":260,"anchored":false},
       "config": {
         "nodes":  {"<local>": {"type","params"}},   # x/y space-relative
@@ -61,6 +64,9 @@ the old spelling are still *read*, never written:
   the daemon must not "migrate" it away (see ``is_space_type``);
 * the child-reference list ``config.panels`` (``_child_entries``), read
   when ``config.spaces`` is absent.
+* the file's old ``"type": "space"`` marker, which S1 repurposed: the key
+  now carries the space's *kind* (``live``/``template``), so both old
+  spellings read as a live space (``type_from_raw``).
 
 ``build_payload`` emits only the new spelling, so the first save rewrites
 an old file as a new one.  The node type ids that used to spell a space
@@ -70,21 +76,30 @@ through the module's ``legacy_aliases`` (catalog.json), not here.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 SPACE_SUFFIX = ".json"
 NAMESPACE_SEP = "::"
+#: A file's ``type`` key says what *kind* of space the file defines
+#: (``LIVE`` / ``TEMPLATE``).  ``TYPE_SPACE`` is what that key said before S1
+#: and ``LEGACY_TYPE_SPACE`` before the S0 rename: both are still *read* as a
+#: live space, because a file on disk is data (agents/SPACES.md §12) - only a
+#: bare session cache, which carries no marker at all, is migrated.
 TYPE_SPACE = "space"
-#: The pre-rename spelling of the file's ``type`` marker.  Read, never
-#: written (S0 migration; see the module docstring).
 LEGACY_TYPE_SPACE = "panel"
+
+LIVE = "live"
+TEMPLATE = "template"
+SPACE_TYPES = (LIVE, TEMPLATE)
+
 #: The pre-rename spelling of a file's child-reference list.  Read, never
 #: written.
 LEGACY_CHILD_KEY = "panels"
@@ -92,8 +107,26 @@ LEGACY_CHILD_KEY = "panels"
 MODE_RW = "read-write"
 MODE_RO = "read-only"
 
+# --- a face input's configuration (agents/SPACES.md §5, §12) --------------
+#
+# Stored on the ``space_in`` node itself (one source of truth) and *derived*
+# into the space record's ``face`` by the daemon.
+FACE_MODE_NODE = "node"
+FACE_MODE_VALUE = "value"
+FACE_MODES = (FACE_MODE_NODE, FACE_MODE_VALUE)
+
+FACE_KIND_AUDIO = "audio"
+FACE_KINDS = ("audio", "number", "boolean", "text", "choice")
+
+FACE_METHOD_FIELD = "field"
+FACE_METHOD_EDGE = "edge"
+FACE_METHODS = (FACE_METHOD_FIELD, FACE_METHOD_EDGE)
+
 ROOT_ID = ""
-DEFAULT_COLOR = "#3584e4"
+#: A space with no color of its own.  The client derives one from the space's
+#: own name out of the theme's class-color vocabulary (agents/SPACES.md §11);
+#: the daemon stores the name it is given, never a resolved color.
+DEFAULT_COLOR = ""
 #: Horizontal gap left between an auto-placed space and the spaces it is
 #: placed beside (see main._place_unplaced_spaces).
 PLACE_GAP = 80.0
@@ -265,6 +298,19 @@ class Space:
     # instead of leaving it at the origin - see main._place_unplaced_spaces.
     placed: bool = False
     config: dict = field(default_factory=dict)
+    #: ``LIVE`` (spawned and running) or ``TEMPLATE`` (a definition whose
+    #: interior is never spawned until it is instantiated; §2).
+    type: str = LIVE
+    #: Whether this space is written to disk *at all* - session, space file,
+    #: placement diffs - and whether anything inside it is (§3).  True for the
+    #: root and for spaces a user made; False for anything a module/app made,
+    #: so nothing of it accumulates across updates.
+    permanent: bool = True
+    #: The *default* view this space takes where it is embedded (the GUI's
+    #: "Node" checkbox).  The embedding's own toggle overrides it.
+    node_view: bool = False
+    #: The id of the template this live space was instantiated from.
+    template: Optional[str] = None
 
     @property
     def is_root(self) -> bool:
@@ -273,6 +319,10 @@ class Space:
     @property
     def is_readonly(self) -> bool:
         return self.mode == MODE_RO
+
+    @property
+    def is_template(self) -> bool:
+        return self.type == TEMPLATE
 
     @property
     def child_entries(self) -> List:
@@ -319,12 +369,14 @@ class Space:
 
 
 def is_space_type(raw: dict) -> bool:
-    """Is `raw` a space file, under either spelling of the ``type`` marker?
+    """Is `raw` a space file, under any spelling of the ``type`` marker?
 
     A bare session cache (or an old flat declarative file) carries no
-    marker, or a non-space one, and is migrated; a pre-rename space file
-    says ``"panel"`` and must *not* be mistaken for one."""
-    return raw.get("type") in (TYPE_SPACE, LEGACY_TYPE_SPACE)
+    marker, or a non-space one, and is migrated.  Every spelling of a space
+    file must answer yes: ``live``/``template`` (what S1 writes) and the
+    older ``space``/``panel`` markers - a pre-S1 root mistaken for a legacy
+    session would be rewritten as an empty one and the graph would be gone."""
+    return raw.get("type") in (TYPE_SPACE, LEGACY_TYPE_SPACE, LIVE, TEMPLATE)
 
 
 def raw_child_entries(config: dict) -> list:
@@ -336,6 +388,137 @@ def raw_child_entries(config: dict) -> list:
     if "spaces" in config:
         return list(config.get("spaces") or [])
     return list(config.get(LEGACY_CHILD_KEY) or [])
+
+
+def type_from_raw(raw: dict) -> str:
+    """A file's space *kind*.  Anything but an explicit ``template`` is a
+    live space: the pre-S1 markers (``space``/``panel``) and a file with no
+    marker at all (a migrated session/declarative file) are all live."""
+    return TEMPLATE if raw.get("type") == TEMPLATE else LIVE
+
+
+def face_input_problem(mode: str, kind: str, method: str) -> Optional[str]:
+    """Why this face-input configuration is not allowed, or None.
+
+    The rule (agents/SPACES.md §5): a face input is either an ordinary jack
+    (``mode == "node"``) or an externalized value (``mode == "value"``),
+    whose declared ``kind`` says what it carries.  Audio is node-only - a
+    media stream is not a value - so it admits neither a ``value`` mode nor
+    a ``field``/``edge`` method; every other kind may be either."""
+    if mode not in FACE_MODES:
+        return f"mode must be one of {', '.join(FACE_MODES)}"
+    if kind not in FACE_KINDS:
+        return f"kind must be one of {', '.join(FACE_KINDS)}"
+    if method not in ("",) + FACE_METHODS:
+        return f"method must be one of {', '.join(FACE_METHODS)}"
+    if kind == FACE_KIND_AUDIO:
+        if mode != FACE_MODE_NODE:
+            return "kind 'audio' is node-only: it cannot be an externalized value"
+        if method:
+            return f"kind 'audio' is node-only: it takes no {method!r} method"
+    return None
+
+
+# ---------------------------------------------------------------------------
+# the spawn rule and the write filter (agents/SPACES.md §2, §3, §12)
+# ---------------------------------------------------------------------------
+
+
+def spawns(space_id: str, tree: Dict[str, "Space"]) -> bool:
+    """Is this space's interior materialized in the running graph?
+
+    A *template* is a definition: its nodes exist as data only - no module
+    instance, no live node, no placement - and neither does anything inside
+    it.  ``instantiate_template`` is what materializes them."""
+    pid = space_id
+    for _ in range(64):
+        space = tree.get(pid)
+        if space is None or pid == ROOT_ID or space.parent is None:
+            return True
+        if space.type == TEMPLATE:
+            return False
+        pid = space.parent or ROOT_ID
+    return True
+
+
+def persists(space_id: str, tree: Dict[str, "Space"]) -> bool:
+    """May this space be written to disk?
+
+    Persistence is filtered **per space, outermost first** (§3): a space
+    whose ``permanent`` is false is never written - session, space file,
+    placement diffs - and neither is anything inside it.  An unknown space
+    writes nothing (the daemon keeps no record to write from)."""
+    pid = space_id
+    for _ in range(64):
+        space = tree.get(pid)
+        if space is None or not space.permanent:
+            return False
+        if pid == ROOT_ID or space.parent is None:
+            return True
+        pid = space.parent or ROOT_ID
+    return False
+
+
+def prune_unpersisted(tree: Dict[str, "Space"]) -> Dict[str, "Space"]:
+    """The part of `tree` that may be written, as a fresh dict.
+
+    Non-permanent spaces and everything inside them are dropped, and so is
+    every reference to them a surviving space carries: a child reference, an
+    edge whose endpoint lives there (the edge is owned by an ancestor, so it
+    would otherwise be written into a *permanent* space and reference a node
+    that comes back nowhere), and a group member.  The surviving records are
+    copies only where something had to be pruned, so a snapshot object is
+    never mutated in place."""
+    keep = {pid for pid in tree if persists(pid, tree)}
+    if len(keep) == len(tree):
+        return tree
+    out: Dict[str, "Space"] = {
+        pid: space for pid, space in tree.items() if pid in keep
+    }
+
+    def node_kept(qualified: str) -> bool:
+        return space_of(qualified) in keep
+
+    for pid, space in out.items():
+        refs = [
+            entry for entry in space.child_entries
+            if make_id(pid, child_name(entry)) in keep
+        ]
+        config = space.config
+        if refs != space.child_entries:
+            config = dict(config)
+            config["spaces"] = refs
+        edges = [
+            e for e in space.edges
+            if node_kept(e.get("from", "")) and node_kept(e.get("to", ""))
+        ]
+        if edges != space.edges:
+            config = dict(config)
+            config["edges"] = edges
+        groups = [
+            g for g in space.groups
+            if all(node_kept(m) for m in (g.get("nodes") or []))
+        ]
+        if groups != space.groups:
+            config = dict(config)
+            config["groups"] = groups
+        if config is not space.config:
+            out[pid] = replace(space, config=config)
+    return out
+
+
+def copy_config(config: dict) -> dict:
+    """A deep copy of a space's config.
+
+    A space file is shared by every placement of it, and a template's
+    definition is copied into each live space instantiated from it, so the
+    copy must not alias the source's dictionaries."""
+    return {
+        "nodes": copy.deepcopy(dict(config.get("nodes") or {})),
+        "edges": copy.deepcopy(list(config.get("edges") or [])),
+        "spaces": copy.deepcopy(list(config.get("spaces") or [])),
+        "groups": copy.deepcopy(list(config.get("groups") or [])),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -431,10 +614,14 @@ def config_from_raw(raw: dict) -> dict:
 
 def build_payload(space: Space) -> dict:
     payload = {
-        "type": TYPE_SPACE,
+        "type": space.type,
         "mode": space.mode,
         "label": space.label,
         "color": space.color,
+        # Explicit even when true: whether a space is part of the session at
+        # all is not something to infer from a key's absence.
+        "permanent": bool(space.permanent),
+        "node_view": bool(space.node_view),
         "auto_load": space.auto_load,
         "placement": space.placement(),
         "config": {
@@ -442,6 +629,8 @@ def build_payload(space: Space) -> dict:
             "edges": space.edges,
         },
     }
+    if space.template:
+        payload["template"] = space.template
     if space.config.get("spaces"):
         payload["config"]["spaces"] = space.child_entries
     if space.config.get("groups"):
@@ -495,6 +684,13 @@ def load_space(path: str, space_id: str, parent: Optional[str],
         stem=stem,
         config=config_from_raw(raw),
         placed=placed,
+        type=type_from_raw(raw),
+        # A file that exists is the user's (or the deployment's) own space
+        # unless it says otherwise - only a space a *module/app* made, which
+        # is never written, comes back non-permanent.
+        permanent=bool(raw.get("permanent", True)),
+        node_view=bool(raw.get("node_view", False)),
+        template=raw.get("template") or None,
         **placement,
     )
 
@@ -603,5 +799,11 @@ def migrate_declarative_file(stem: str, raw: dict) -> Space:
             "spaces": [],
             "groups": list((config or {}).get("groups") or []),
         },
+        # A generated file may declare itself a template (a definition the
+        # deployment ships); everything else here is a live space.
+        type=type_from_raw(raw),
+        permanent=bool(raw.get("permanent", True)),
+        node_view=bool(raw.get("node_view", False)),
+        template=raw.get("template") or None,
         **placement,
     )

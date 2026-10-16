@@ -14,12 +14,32 @@ that isn't here, ask (and then add it).  When a mapping here is a guess, it is m
 | "the GUI" / "the canvas" | `gui/patchspace_widget.py` (`PatchSpaceGraphWidget`) |
 | "session" / "save" | the root space file (`~/.cache/patchspace/last_session.json`) |
 | "space" (until 2026-10-15: **"panel"**) | `spaces.py` space: a nestable, file-backed container of nodes |
+| "Space Types" / the Template-Live switch | a space's `type`: `template` (a definition - its nodes are not loaded, see below) or `live` (spawned and running).  `set_space_meta {type}`, the file's `type` key |
+| "Template" | a space whose interior is a *definition*: no live node, no module instance, no placement.  Dropping one in (`instantiate_template`) makes a nested live space that records the source in `template` |
+| "Live" | a spawned, running space; the default for everything that already existed |
+| "Permanent" (checkbox) | the space's `permanent`: whether it is written to disk *at all* - session, space file, placement diffs - and whether anything inside it is.  On for the root and for spaces you make in the GUI; **off** for spaces an app/module made, so nothing of them accumulates across updates |
+| "Node" (checkbox) | `node_view`: the *default* view when the space is embedded elsewhere (collapsed to a node); the per-embedding toggle overrides it |
+| "face" / "the space's inputs and outputs" | the space record's `face`: derived by the daemon from the `space_in`/`space_out` nodes placed in the space (see below) |
+| "space input is a node input or an externalized value" | a face input's `mode`: `node` (an ordinary jack) or `value` (externalized).  A value input declares a `kind` (`number`/`boolean`/`text`/`choice`) and a `method` (`field` on the face, or `edge` from a value node).  Audio is node-only |
 
 The container was called a **panel** until S0 (`agents/SPACES.md`, 2026-10-15), and
 Kyle still says "panel" for it.  `space` is now the word in code, files, the
-protocol, the daemon flags and the Nix options; the *old* spellings are still
-read for one release - the exact list is in `agents/NOTES.md` ("S0 aliases").
+protocol, the daemon flags and the Nix options.  S1 closed the protocol's
+one-release window (the old `*_panel*` command names and their argument keys
+now fall through as unknown - a GUI started before the update must be
+relaunched) and repurposed the file's `type` key to carry the space's *kind*;
+old files (`type: "space"`/`"panel"`) still load as live spaces, as do the old
+directory, flags and node type ids - those are data, not protocol.
 ("side panel"/"panel" in the UI sense - a GTK panel - stays a panel.)
+
+A space's **face** is what a client reads instead of walking the nodes: the
+space record carries `face[]`, one entry per `space_in`/`space_out` node placed
+in the space (`direction` `in`/`out`; an input also carries
+`mode`/`kind`/`method`, and `choices` when it is a choice).  The configuration
+is *stored on the port node* (`SpaceFaceInput` in `pwnodes`, written by
+`set_space_input`), so the node is the one source of truth and there is no
+second copy to drift.  A template's face is derived from its definition, since
+a template's nodes are not live.
 
 ## Graph vocabulary
 

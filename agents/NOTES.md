@@ -972,14 +972,20 @@ Do those three first, then the move is mechanical.  Nothing was left half-split:
   that can be re-derived) and **the protocol is read-old/write-new** (a GUI
   started before an activation runs the old store path for hours, so it keeps
   sending the old command names).
-* **S0 aliases — read, never written.  Delete these in S1:**
-  * `central/main.py`: `_LEGACY_COMMAND_ALIASES` (every `*_panel*` command
-    name) and `_LEGACY_ARG_KEYS` (`panel_id` -> `space_id`,
-    `panel_files` -> `space_files`), applied by `_normalize_legacy_command` in
-    `handle_command` (one deprecation line each);
+* **Deleted in S1 (done — the protocol half of the aliases):**
+  * `central/main.py`: `_LEGACY_COMMAND_ALIASES` (the 16 `*_panel*` command
+    names) and `_LEGACY_ARG_KEYS` (`panel_id` -> `space_id`, `panel_files` ->
+    `space_files`), and `_normalize_legacy_command` itself, which
+    `handle_command` called on every message.  Those spellings now fall
+    through to `Unknown command`, and an old argument key is simply ignored -
+    a GUI started before the update has to be relaunched (the S1 contract says
+    so; the pair moves together in one release).
+* **Kept: they are data, not protocol** (S1's frozen scope deletes the
+  protocol aliases only, and each of these is read, never written):
   * `central/main.py`: `NODE_TYPE_REGISTRY`'s `panel_in`/`panel_out`/
     `bool_panel_in`/`bool_panel_out` entries (the module announces the same
-    four through `catalog.json`'s `legacy_aliases`);
+    four through `catalog.json`'s `legacy_aliases`) - a *type id* is a
+    persistent contract;
   * `central/main.py`: the env fallbacks (`PATCHSPACE_PANEL_DIR`,
     `PATCHBAY_PANEL_DIR`, `PATCHSPACE_ROOT_PANEL`, `PATCHBAY_ROOT_PANEL`) and
     `LEGACY_OLD_SPELLING_SPACE_DIR` (`~/.local/share/patchspace/panels`, the
@@ -988,8 +994,8 @@ Do those three first, then the move is mechanical.  Nothing was left half-split:
   * `central/spaces.py`: `LEGACY_TYPE_SPACE` (the `"type": "panel"` marker
     read by `is_space_type`) and `LEGACY_CHILD_KEY` (the `config.panels` child
     list read by `raw_child_entries`);
-  * `nix/lib.nix`: `normalise`'s `"panel"` branch (an export written before
-    the rename still unwraps to its config);
+  * `nix/lib.nix`: `normalise`'s `"panel"`/`"space"` branches (an export
+    written before either rename still unwraps to its config);
   * `nix/module.nix`: the three `mkRenamedOptionModule`s (`panelDirs`,
     `rootPanel`, `panels`), the read-only `panelsDir` alias, and the four
     `panel_*` ids kept in the `nodeTypes` enum.
@@ -997,5 +1003,75 @@ Do those three first, then the move is mechanical.  Nothing was left half-split:
   panels`) is *not* S0's - it is the older PatchBay -> Patch Space copy and
   stays.
 * `--root-panel`/`PATCHSPACE_ROOT_PANEL` were renamed with the rest
-  (`--root-space`) because they are the same vocabulary; they are aliases in
-  the same one-release window, not permanent.
+  (`--root-space`) because they are the same vocabulary.
+
+## 2026-10-15 — S1: space type, permanence, the face (what changed, and why)
+
+* **`handle_command` checks `command` before `type`.**  The two protocols
+  coexisted by "a message with a `type` key is the module API, one with
+  `command` is the legacy command set" - and S1 gives two commands a `type`
+  *of their own* (`set_space_meta`, `create_space`), which the old order read
+  as a module message of type `"template"`.  The module API never sends a
+  `command`, so `command` wins when both are present.
+* **The file's `type` key now carries the space's *kind*** (`live`/
+  `template`, `agents/SPACES.md` §12: "a space record (payload `spaces[]`, and
+  the space files) gains `type`").  It used to be the file-format marker
+  (`space`, `panel` before S0), so `is_space_type` accepts all four spellings:
+  a root written by an older daemon must still read as *a space file*, or
+  `_load_spaces_tree` would "migrate" it as a bare session cache and rewrite
+  the graph away.  `spaces.type_from_raw` reads anything but `template` as
+  live.  The daemon writes `live`/`template` from then on; the Nix module's
+  generated files say `live` too, and `nix/lib.nix`'s `normalise` unwraps all
+  four markers (it is what imports a GUI-exported space file).
+* **`permanent` is the persistence switch**, filtered per space and outermost
+  first (`spaces.persists` + `spaces.prune_unpersisted`, used by
+  `_write_spaces`/`_capture_diffs`): a non-permanent space is written to
+  nothing - no space file, no child reference in its parent, no edge owned by
+  an ancestor that touches one of its nodes, no placement diff - and neither is
+  anything nested inside it.  It stays live in the graph, and a *layout* for it
+  is still accepted in memory (the app owns it and re-sends it on attach).  The
+  GUI's `create_space` defaults `permanent` on, and a space the daemon has no
+  record for (a node/announcement inside an id nobody loaded) is created
+  `permanent: false` by `_build_spaces_from_space` - that is the app/module
+  creation path.  Turning it *off* leaves any file the space already had alone
+  (deleting is `delete_space_file`), and turning it off on the **root** is
+  allowed and means exactly what it says: nothing is written at all, including
+  the session.
+* **Templates never spawn.**  `_flatten_spaces` skips a space whose type is
+  `template`, and everything nested inside it; `_build_spaces_from_space` keeps
+  a template's interior from its *definition* (the record's config) instead of
+  rebuilding it from live state, so writing a template can never empty it.
+  Because there is nowhere to put a live node inside a template, `add_node`
+  refuses an id inside one (and `create_space` refuses `node_ids` with
+  `type: "template"`): the way to make one is to build the space live and flip
+  the Space Types switch - `set_space_meta {type: "template"}` captures the
+  interior as the definition and despawns it, and flipping back materializes it
+  again.  `instantiate_template {template_id, parent_space}` copies the
+  definition into a nested **live** space (`template` = the source id, its own
+  space file, spawned at once; a nested child of the template becomes another
+  placement of the file its template child already points at).  The root may
+  not become a template: it *is* the session, and a template root would spawn
+  nothing on the next start.  Authoring a template *from scratch* (rather than
+  freezing a live space) is deliberately left open: `create_space` under a
+  template adds a nested space to the definition, and `create_space
+  {type: "template"}` makes an empty definition, but a live editing mode for a
+  definition does not exist yet - that is the "a template's own edit requires
+  edit mode" item in `agents/SPACES.md` §11.
+* **The face is derived, the node is the source of truth.**  `space_in`/
+  `bool_space_in` carry `mode`/`kind`/`method`/`choices` (`pwnodes.
+  SpaceFaceInput`), round-tripping through the ordinary node params
+  (`_SERIAL_ATTRS`).  `_serialize_spaces` derives each space's `face[]` from
+  the port nodes placed in it - from the *live* nodes when the interior is
+  spawned, from the definition when it is not - and `set_space_input` is the
+  only writer (it validates: unknown space, unknown key, and a configuration
+  the kind does not allow - audio is node-only - are refused and change
+  nothing).  `bool_space_in` is a face input of kind `boolean`; an output entry
+  carries only `key`/`label`/`direction`.
+* `color` no longer defaults to a hardcoded blue: it is `""` (the client
+  derives one from the space's name out of the theme vocabulary), and the
+  daemon stores whatever name it is given (`"@green"`, a hex string, `""`).
+  `set_space_meta` is its one writer - `edit_space` (which keeps the label and
+  the auto-load flag) used to take a color too, with different semantics (an
+  empty string meant "no change", so a color could not be cleared).
+* Not done here (S2+): portal embedding, cross-space wires, so nothing routes
+  into an embedded space yet; the face is data a client can draw today.

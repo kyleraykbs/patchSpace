@@ -217,3 +217,151 @@ From `PLAN.md` / `EXTRACTION.md` / the notes:
 * [D] how a non-permanent space announces itself: the app re-creates it on
   attach and its placement comes from the app's own `space_announce` payload, so
   the daemon must accept a layout for a space it has never persisted.
+
+## 12. S1 contract (frozen)
+
+A space record (payload `spaces[]`, and the space files) gains:
+
+| field | values | default |
+|---|---|---|
+| `type` | `"template"` \| `"live"` | `"live"` (existing spaces and the root) |
+| `permanent` | bool | `true` for the root and for GUI-created spaces; `false` for module/app-created |
+| `color` | a theme class-color name (`theme_class_color` vocabulary) or `""` | `""` (derived from the space's own name) |
+| `node_view` | bool — the default view when embedded | `false` |
+| `template` | the space id this live space was instantiated from, or absent | absent |
+
+`face[]` is **derived** from the `space_in`/`space_out` nodes placed in the
+space (one source of truth: the node), and each *input* entry gains a config
+stored on that node:
+
+| field | values |
+|---|---|
+| `mode` | `"node"` (an ordinary jack) \| `"value"` (externalized) |
+| `kind` | `"audio"` \| `"number"` \| `"boolean"` \| `"text"` \| `"choice"` |
+| `method` | `"field"` \| `"edge"` (audio is node-only; `value` allows either) |
+| `choices` | the option list, for `kind == "choice"` |
+
+New commands: `set_space_meta {space_id, type?, permanent?, color?, node_view?}`,
+`set_space_input {space_id, key, mode?, kind?, method?, choices?}`,
+`instantiate_template {template_id, parent_space}` → creates a **nested live
+space** from the template (whose id is recorded in `template`).
+
+Behaviour in this step:
+
+* **A template's interior is not spawned.**  Its nodes exist as data in the
+  definition only; no module instance, no live node, no placement in the running
+  graph.  `instantiate_template` is what materializes them (as a live space).
+* **Persistence is filtered per space, outermost first.**  A space whose
+  `permanent` is false is written to nothing — session, space file, placement
+  diffs — and neither is anything inside it.  The daemon must still accept a
+  layout for a non-permanent space it has never persisted (the app owns it).
+* **The S0 protocol aliases are deleted here.**  The pair moves together in one
+  release; the *data* aliases (old files, old directory, old flags, old type
+  ids) stay — they are data, not protocol.  A GUI process started before the
+  update must be relaunched.
+
+## 13. S2 contract (frozen) — portal embedding, and wires that leave a box
+
+**A portal is a placement of a live space inside another space, by reference.**
+There is never a second interior: the embedded space keeps its own nodes,
+module instances and diffs, and the embedding contributes only a position and a
+view mode.
+
+| command | effect |
+|---|---|
+| `embed_space {space_id, parent_space, x, y}` | the parent gains a portal entry naming `space_id` |
+| `remove_space_embedding {space_id, parent_space}` | drops it (never the target space itself) |
+| `set_embedding_view {space_id, parent_space, view}` | `"inside"` \| `"node"` — a pure view flag |
+
+Space record additions:
+
+* `portals[]` — `{space_id, view, x, y}`: the spaces this space embeds.
+* `embedded_in[]` — the spaces that portal this one (so a space can be shown in
+  several places at once, and the UI can say where it is).
+
+Rules:
+
+* **Refuse a cycle.**  A space may not be embedded in itself or in any of its own
+  descendants (the id path makes the test cheap); the command answers with a
+  clear error rather than a self-referential tree.
+* **A portal's jacks are the space's own face nodes**, drawn at the collapsed
+  position: dropping a wire on a portal jack resolves to the real
+  `space_in`/`space_out` node inside the embedded space, so "route nodes into
+  that live space and have them aggregate into its input nodes" needs no new
+  wire concept — it is the existing fan-in the `space_in` node already does.
+* `node_view` on the space is the **default** view for a new embedding; the
+  portal's own `view` wins once set (per the spec: the checkbox is just the
+  default).
+* **Direct cross-space wires need no daemon change** — edges already connect node
+  ids across space boundaries (the daemon deliberately does not enforce that a
+  wire respects a box).  The work is in the client: routing, drawing and
+  hit-testing a wire whose endpoints are in different spaces, and not treating a
+  box as a clipping wall.
+* Persistence follows S1's per-space rule: a portal is part of the parent's saved
+  record; if the embed *target* is non-permanent, the parent still saves the
+  portal placement and the target's interior is saved nowhere.
+
+## 14. S3 contract (frozen) — value inputs, and `value_set` becomes real
+
+The load-bearing generalization: **a node's parameter is an addressable input.**
+
+* Every declared control whose value kind is `number`, `boolean`, `text` or
+  `choice` also becomes an **input port** on that node type, auto-declared by the
+  daemon from the module's `controls` list: `{name: <control key>, kind,
+  direction: "in", drives_control: true}`.  Modules declare no extra metadata.
+* `value_set {instance_id, port, value}` — already in `module_api` and, today,
+  **emitted nowhere** — becomes the relay: the daemon forwards a producer
+  module's reported value to the consumer module owning the driven control.  The
+  consumer applies it exactly as if the user had set the control (its
+  `on_control` path), so no module needs a new callback.
+* An edge landing on a `drives_control` port means: forward `edge_apply` (for
+  wiring bookkeeping) and then relay values.  Removing the edge returns the
+  control to its stored local value.
+* On a space face, `mode: "value"` + `method: "edge"` is exactly this: the face
+  jack is the space's `space_in` node in value mode, which is a value **source**
+  inside its own space, so "route into the space and aggregate on its input
+  nodes" and "drive a parameter from outside" are the same mechanism.
+* `method: "field"` keeps the typed inline field on the face and stores the value
+  on the space (`space_input` config), applied as the default when nothing drives
+  it.
+
+## 15. S4 contract (frozen) — cardinality is declared, never assumed
+
+* A port declares its cardinality in the type declaration:
+  `cardinality: "one" | "many"` (absent = `"one"` for the single-driver kinds,
+  `"many"` for the mixable ones — the *existing* behaviour, now stated rather
+  than hard-coded by kind name).
+* `central/graph.py`'s `SINGLE_DRIVER_KINDS` list is deleted; validation reads
+  the declaration through `registry`.  A receiving node that needs a merge
+  declares `merge: "mix" | "sum" | "last"`; the daemon only refuses what the
+  declaration refuses.
+* Shipped where it is needed: the four space port types (`space_in`/`space_out`
+  and their boolean variants) declare what they actually do today — the boolean
+  panel ports are the ones the docstrings already claim opt out of the
+  single-driver rule — and nothing else changes behaviour.
+
+## 16. S5 contract (frozen) — the value sources
+
+Primitives gains what the spec names, all of them routable:
+
+* `slider` becomes the **0.0–1.0 slider node** (its own type, output port kind
+  `number`, no `min`/`max` UI — it *is* 0..1); a separate `const` (number
+  literal) and `string` (text literal) round it out.
+* Every one of them has an output port and reports its value through the module's
+  existing `report_values`, so S3's relay carries it to whatever consumes it.
+* The existing `number`/`toggle`/`display`/`math`/`compare`/`logic`/`invert`
+  types gain input ports where a value can meaningfully arrive (today none of
+  them has one).
+
+## 17. S6 contract (frozen) — finding and entering a space
+
+* **Sidebar**: the spaces view lists **live** spaces (the spec), with their color
+  and a marker when a space has portals in it; templates are a separate section
+  (they are the source of a drop, not somewhere to go).
+* **Dropdown + search**: one affordance available in every space — type to filter
+  by name, Enter to *enter* (switch the canvas focus), Shift/ctrl-modified action
+  to *embed* into the current space.
+* A **breadcrumb** of the id path (`Parent::Child`) is the reverse affordance,
+  since entering a space is navigation, not modal state.
+* Both come from one list installed from the payload, ordered through
+  `sorting.order_spaces`, so the sidebar and the dropdown cannot disagree.

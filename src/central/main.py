@@ -35,7 +35,8 @@ import socket
 import threading
 import time
 from collections import deque
-from typing import Any, Dict, Optional
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
 from modules.pipewire import pwgraph
 from modules.pipewire import pwmatch
@@ -75,6 +76,7 @@ from modules.pipewire.pwnodes import (
     SpaceOutNode,
     BoolSpaceInNode,
     BoolSpaceOutNode,
+    SpaceFaceInput,
     VolumeProcessNode,
     NoiseCancelNode,
     SensitivityGateNode,
@@ -549,12 +551,25 @@ _SERIAL_ATTRS = (
     # A Sound Dump's own fields, so the node can show them on its body.
     "folder",
     "name",
+    # A space input port's face configuration (agents/SPACES.md §5, §12):
+    # it is stored on the node and derived into the space record's `face`.
+    # Only the port nodes have these attributes (`choices` is written
+    # separately, only when set - see _export_node_params).
+    "mode",
+    "kind",
+    "method",
 )
 
 # GUI layout state a node may carry.  Serialized separately (only when
 # set) rather than via _SERIAL_ATTRS so a node the GUI hasn't positioned
 # yet doesn't emit x:null / y:null / anchored:null into every export.
 _LAYOUT_ATTRS = ("x", "y", "anchored", "exclude")
+
+# Node type ids that form a space's *face* (agents/SPACES.md §12): the audio
+# ports and their boolean counterparts - `bool_space_in` is the boolean
+# `space_in`, so it is a face input of kind "boolean" like any other.
+FACE_IN_TYPES = ("space_in", "bool_space_in")
+FACE_OUT_TYPES = ("space_out", "bool_space_out")
 
 
 def _apply_layout_attrs(node, config: dict) -> None:
@@ -565,73 +580,29 @@ def _apply_layout_attrs(node, config: dict) -> None:
             setattr(node, attr, config[attr])
 
 
-# ---------------------------------------------------------------------------
-# legacy command spellings (S0: panel -> space)
-# ---------------------------------------------------------------------------
-
-# Pre-rename command names -> the canonical one.  The daemon still *accepts*
-# them - mapped onto the same handler, one deprecation line each - but only
-# *emits* the new spelling.  This is a deliberate one-release window: a GUI
-# started before an activation keeps running the old store path for hours, so
-# its commands must not start failing the moment the daemon is upgraded.
-# Removal: step S1, recorded in agents/SPACES.md §9 and agents/NOTES.md.
-_LEGACY_COMMAND_ALIASES: Dict[str, str] = {
-    "reload_panels": "reload_spaces",
-    "list_panels": "list_spaces",
-    "set_panel_layout": "set_space_layout",
-    "reset_panel": "reset_space",
-    "set_panel_edit_mode": "set_space_edit_mode",
-    "move_panel": "move_space",
-    "create_panel": "create_space",
-    "delete_panel": "delete_space",
-    "delete_panel_file": "delete_space_file",
-    "edit_panel": "edit_space",
-    "export_panel": "export_space",
-    "clone_panel": "clone_space",
-    "list_panel_files": "list_space_files",
-    "set_panel_file_autoload": "set_space_file_autoload",
-    "place_panel": "place_space",
-    "remove_panel_placement": "remove_space_placement",
-}
-
-# Pre-rename argument keys -> the canonical key.  Applied to *any* command
-# (an old ``move_nodes`` carries ``panel_id`` too, and that command kept its
-# name), and like the command names: read, never written.
-_LEGACY_ARG_KEYS: Dict[str, str] = {
-    "panel_id": "space_id",
-    "panel_files": "space_files",
-}
+def _as_bool(value, default: bool = False) -> bool:
+    """A command's boolean argument, tolerating the spellings a JSON client
+    may send (``true``/``false``, ``1``/``0``, ``"true"``/``"off"``).  An
+    absent value is the caller's default - which matters here: whether a
+    space is persisted at all is not something to guess wrong."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
 
 
-def _normalize_legacy_command(cmd: dict) -> dict:
-    """Map a pre-rename command spelling (and its argument keys) onto the
-    canonical one, with one deprecation line per call.
-
-    A canonical command with no legacy key comes back as the *same dict*
-    (two membership tests and nothing else) - this sits on the hot path of
-    every command the GUI sends."""
-    command = cmd.get("command")
-    renamed = _LEGACY_COMMAND_ALIASES.get(command)
-    legacy_keys = [k for k in _LEGACY_ARG_KEYS if k in cmd]
-    if renamed is None and not legacy_keys:
-        return cmd
-    out = dict(cmd)
-    if renamed is not None:
-        logger.warning(
-            "deprecation: command %r is the pre-rename spelling of %r; "
-            "the alias goes away in S1",
-            command, renamed,
-        )
-        out["command"] = renamed
-    for key in legacy_keys:
-        out[_LEGACY_ARG_KEYS[key]] = out.pop(key)
-    if legacy_keys:
-        logger.warning(
-            "deprecation: argument key(s) %s are the pre-rename spelling; "
-            "the alias goes away in S1",
-            ", ".join(repr(k) for k in legacy_keys),
-        )
-    return out
+@dataclass
+class _FaceInput:
+    """One face input's current configuration, read off a live port node or
+    off a space's definition entry - the two are one thing seen from two
+    sides (agents/SPACES.md §12)."""
+    mode: str = "node"
+    kind: str = "audio"
+    method: str = ""
+    choices: Optional[List[str]] = None
 
 
 class PatchSpaceDaemon:
@@ -1653,12 +1624,19 @@ class PatchSpaceDaemon:
         """Spaces -> one load-ready config with fully-qualified node ids
         and absolute node coordinates.  ``only_spaces`` restricts the
         emitted nodes/edges/groups (the whole ``tree`` is still used for
-        origin folding)."""
+        origin folding).
+
+        A template's interior is a *definition*, not a running graph: it is
+        never spawned, and neither is anything nested inside it.  The space
+        itself stays in the tree - the client reads its record, and
+        `instantiate_template` is what materializes it."""
         nodes: Dict[str, dict] = {}
         edges: List[dict] = []
         groups: List[dict] = []
         for pid, space in tree.items():
             if only_spaces is not None and pid not in only_spaces:
+                continue
+            if not spaces.spawns(pid, tree):
                 continue
             ox, oy = self._space_origin(tree, pid)
             for local, cfg in space.nodes.items():
@@ -1730,6 +1708,7 @@ class PatchSpaceDaemon:
         self._placement_diffs = {
             str(pid): dict(diff) for pid, diff in stored.items()
             if isinstance(diff, dict) and pid in tree
+            and spaces.persists(pid, tree)
         }
 
     def _merge_placement_diffs(self, nodes: Dict[str, dict]) -> None:
@@ -1802,24 +1781,45 @@ class PatchSpaceDaemon:
                 return out[pid]
             meta = self.spaces.get(pid)
             if meta is not None:
+                # A template's interior is a definition, not live state: the
+                # record keeps what its file (or its instantiating copy) says,
+                # because there is no live graph to rebuild it from.
+                config = (
+                    spaces.copy_config(meta.config) if meta.is_template
+                    else {"nodes": {}, "edges": [],
+                          "spaces": list(meta.child_entries), "groups": []}
+                )
                 space = spaces.Space(
                     id=pid, parent=meta.parent, label=meta.label, color=meta.color,
                     mode=meta.mode, x=meta.x, y=meta.y, w=meta.w, h=meta.h,
                     anchored=meta.anchored, path=meta.path, writable=meta.writable,
                     stem=meta.stem, auto_load=meta.auto_load,
-                    config={"nodes": {}, "edges": [],
-                            "spaces": list(meta.child_entries), "groups": []},
+                    type=meta.type, permanent=meta.permanent,
+                    node_view=meta.node_view,
+                    template=meta.template,
+                    config=config,
                 )
             else:
+                # No record: a node (or an announcement) put something in a
+                # space the daemon has never loaded.  That is an app/module's
+                # own space, so it is not persisted - it is re-created by its
+                # owner every attach, which is what keeps imperative garbage
+                # out of the files across updates (agents/SPACES.md §3).
                 space = spaces.Space(
                     id=pid, parent=spaces.parent_space(pid),
                     label=spaces.local_of(pid) if pid else "root",
                     color=spaces.DEFAULT_COLOR, mode=spaces.MODE_RW,
+                    permanent=False,
                     config={"nodes": {}, "edges": [], "spaces": [], "groups": []},
                 )
             # Read-only spaces are not rebuilt from live state (unless the
             # caller explicitly asks for the current state).
-            if use_snapshots and space.is_readonly and pid in self._readonly_snapshots:
+            if (
+                use_snapshots
+                and space.is_readonly
+                and pid in self._readonly_snapshots
+                and not space.is_template
+            ):
                 out[pid] = self._readonly_snapshots[pid]
                 return out[pid]
             out[pid] = space
@@ -1837,6 +1837,10 @@ class PatchSpaceDaemon:
                 if imperative_only and getattr(node, "declarative", False):
                     continue
                 pid = spaces.space_of(nid)
+                if not spaces.spawns(pid, out):
+                    # Inside a template: a definition, rebuilt in `ensure`
+                    # from the space's own config - never from live state.
+                    continue
                 space = ensure(pid)
                 entry = self._export_node_params(nid, node)
                 inner = entry["params"]
@@ -1880,6 +1884,8 @@ class PatchSpaceDaemon:
                     continue
                 f, t, tp, fp = logical
                 owner = spaces.edge_owner(f, t)
+                if not spaces.spawns(owner, out):
+                    continue
                 space = ensure(owner)
                 entry = {
                     "from": spaces.relative_id(owner, f),
@@ -1899,6 +1905,8 @@ class PatchSpaceDaemon:
                 owner = spaces.space_of(members[0])
                 for m in members[1:]:
                     owner = spaces.lca(owner, spaces.space_of(m))
+                if not spaces.spawns(owner, out):
+                    continue
                 space = ensure(owner)
                 space.config["groups"].append(
                     {
@@ -1937,12 +1945,18 @@ class PatchSpaceDaemon:
         those snapshots, and finally the root (the session autosave), which
         carries the diffs.  Capturing before the writes would record a
         committed change as a local diff.
+
+        Persistence is filtered per space, outermost first (agents/SPACES.md
+        §3): a non-permanent space is written to nothing - no file, no
+        session reference, no diff - and neither is anything inside it.  It
+        stays live in the graph; its owner re-creates it next attach.
         """
         tree = self._build_spaces_from_space()
+        persisted = spaces.prune_unpersisted(tree)
         canon = self._canonical_by_stem()
         groups = self._plan_placement_groups()
         written = set()
-        for pid, space in tree.items():
+        for pid, space in persisted.items():
             if pid == spaces.ROOT_ID:
                 continue
             if not space.writable or space.is_readonly or not space.path:
@@ -1956,7 +1970,7 @@ class PatchSpaceDaemon:
             written.add(space.path)
             canonical = canon.get(space.stem or "")
             if canonical:
-                spaces.write_file(space.path, tree.get(canonical, space))
+                spaces.write_file(space.path, persisted.get(canonical, space))
                 continue
             if len(groups.get(space.stem or "", [])) > 1:
                 continue
@@ -1969,7 +1983,7 @@ class PatchSpaceDaemon:
         for pid in canon.values():
             if pid in tree:
                 self._space_snapshots[pid] = tree[pid]
-        root = tree.get(spaces.ROOT_ID)
+        root = persisted.get(spaces.ROOT_ID)
         if root is not None:
             spaces.write_file(self.root_space_path, root)
         # The per-placement diffs ride beside the session: local state, not
@@ -2086,6 +2100,11 @@ class PatchSpaceDaemon:
         for pid, space in self.spaces.items():
             if pid == spaces.ROOT_ID or not space.stem:
                 continue
+            if not spaces.persists(pid, self.spaces):
+                # A non-permanent space (or one inside one) has no persisted
+                # local state either - its owner re-creates it from scratch.
+                self._placement_diffs.pop(pid, None)
+                continue
             snap = self._space_snapshots.get(pid)
             live = live_all.get(pid)
             if snap is None or live is None:
@@ -2125,6 +2144,10 @@ class PatchSpaceDaemon:
                 "name": spaces.local_of(pid),
                 "label": space.label,
                 "color": space.color,
+                "type": space.type,
+                "permanent": space.permanent,
+                "node_view": space.node_view,
+                "template": space.template,
                 "mode": space.mode,
                 "readonly": space.is_readonly,
                 "writable": space.writable,
@@ -2134,6 +2157,7 @@ class PatchSpaceDaemon:
                 "directory": os.path.dirname(space.path) if space.path else None,
                 "nodes": [spaces.make_id(pid, n) for n in space.nodes],
                 "children": space.child_ids(),
+                "face": self._space_face(pid, space),
             })
         return {
             "status": "ok",
@@ -2154,10 +2178,19 @@ class PatchSpaceDaemon:
 
         When ``parent_id`` names a space (the selection's own space), the
         new space is nested inside it; otherwise it is created at the
-        root.  This is the space form of the old "Declare" action."""
+        root.  This is the space form of the old "Declare" action.
+
+        This is the *user's* creation path, so the space is permanent by
+        default: what you make here is part of your session."""
         name = (cmd.get("name") or "").strip()
         if not name:
             return {"status": "error", "message": "name required"}
+        space_type = cmd.get("type") or spaces.LIVE
+        if space_type not in spaces.SPACE_TYPES:
+            return {
+                "status": "error",
+                "message": f"type must be one of {', '.join(spaces.SPACE_TYPES)}",
+            }
         stem = self._space_slug(name)
         parent_id = cmd.get("parent_id", "") or spaces.ROOT_ID
         parent = self.spaces.get(parent_id)
@@ -2189,6 +2222,12 @@ class PatchSpaceDaemon:
             return {"status": "error", "message": "no writable space directory"}
         path = os.path.join(target_dir, local + spaces.SPACE_SUFFIX)
         node_ids = list(cmd.get("node_ids") or [])
+        if node_ids and space_type == spaces.TEMPLATE:
+            return {
+                "status": "error",
+                "message": "a template's interior is a definition: build the "
+                           "space live and switch it to Template instead",
+            }
         moved: List[str] = []
         px, py = self._space_origin(self.spaces, parent_id)
         with self._lock:
@@ -2209,6 +2248,9 @@ class PatchSpaceDaemon:
                 label=cmd.get("label") or name,
                 color=cmd.get("color") or spaces.DEFAULT_COLOR,
                 mode=mode, path=path, writable=True, stem=local,
+                type=space_type,
+                permanent=_as_bool(cmd.get("permanent"), True),
+                node_view=_as_bool(cmd.get("node_view"), False),
                 # New spaces start pinned/paused so the layout doesn't shove
                 # them around the moment they're created (the space header's
                 # physics toggle re-arms them).
@@ -2234,6 +2276,351 @@ class PatchSpaceDaemon:
             "status": "ok", "space_id": new_space_id,
             "moved": moved, "path": path,
         }
+
+    def _cmd_set_space_meta(self, cmd: dict) -> dict:
+        """Set a space's kind and presentation: `type` (template/live),
+        `permanent` (is it part of the saved session at all), `color` and
+        `node_view` (the default view where the space is embedded).
+
+        Only the keys the caller sends change.  Flipping `type` re-runs the
+        spawn rule in place: a live space turned into a template has its
+        interior captured as the definition and taken out of the running
+        graph, and a template turned live materializes it - which is the
+        whole point of a template (agents/SPACES.md §2)."""
+        space_id = cmd.get("space_id", "")
+        space = self.spaces.get(space_id)
+        if space is None:
+            return {"status": "error", "message": f"no space {space_id!r}"}
+        space_type = cmd.get("type")
+        if space_type is not None:
+            if space_type not in spaces.SPACE_TYPES:
+                return {
+                    "status": "error",
+                    "message": f"type must be one of {', '.join(spaces.SPACE_TYPES)}",
+                }
+            if space_type == spaces.TEMPLATE and space_id == spaces.ROOT_ID:
+                # The root *is* the session: a template root would spawn
+                # nothing at all on the next start.
+                return {
+                    "status": "error",
+                    "message": "the root space cannot be a template",
+                }
+        if cmd.get("color") is not None and not isinstance(cmd.get("color"), str):
+            return {"status": "error", "message": "color must be a string"}
+        changed_kind = (
+            space_type is not None and space_type != space.type
+        )
+        if changed_kind and space_type == spaces.TEMPLATE:
+            self._freeze_space_interior(space)
+        with self._lock:
+            if space_type is not None:
+                space.type = space_type
+            if cmd.get("permanent") is not None:
+                space.permanent = _as_bool(cmd.get("permanent"), space.permanent)
+            if cmd.get("color") is not None:
+                space.color = cmd["color"]
+            if cmd.get("node_view") is not None:
+                space.node_view = _as_bool(cmd.get("node_view"), space.node_view)
+        if changed_kind and space_type == spaces.TEMPLATE:
+            self._despawn_space(space_id)
+        elif changed_kind:
+            self._spawn_space_definition(space_id)
+        if changed_kind:
+            # Refresh the in-memory tree from live state so the records,
+            # snapshots and diffs agree with the graph that just changed.
+            self._install_spaces(self._build_spaces_from_space())
+        self._write_spaces()
+        self._dirty = True
+        self._wake_ticker()
+        return {
+            "status": "ok",
+            "space_id": space_id,
+            "type": space.type,
+            "permanent": space.permanent,
+            "color": space.color,
+            "node_view": space.node_view,
+        }
+
+    def _cmd_set_space_input(self, cmd: dict) -> dict:
+        """Configure one face input of a space.
+
+        The configuration is *stored on the port node* (the one source of
+        truth) and derived into the space record's `face`; this command is
+        the only way to write it, so a partial update leaves the rest of the
+        input alone.  Only a key the space's face actually has is accepted,
+        and a configuration the kind does not allow is refused (audio is
+        node-only: it is neither a value nor driven by a field/edge)."""
+        space_id = cmd.get("space_id", "")
+        space = self.spaces.get(space_id)
+        if space is None:
+            return {"status": "error", "message": f"no space {space_id!r}"}
+        key = str(cmd.get("key") or "")
+        if not key:
+            return {"status": "error", "message": "key required"}
+        node = self._face_input(space_id, key)
+        if node is None:
+            return {
+                "status": "error",
+                "message": f"no face input {key!r} in space {space_id!r}",
+            }
+        mode = cmd.get("mode")
+        kind = cmd.get("kind")
+        method = cmd.get("method")
+        for name, value in (("mode", mode), ("kind", kind), ("method", method)):
+            if value is not None and not isinstance(value, str):
+                return {"status": "error", "message": f"{name} must be a string"}
+        choices = cmd.get("choices")
+        if choices is not None and (
+            not isinstance(choices, list)
+            or any(not isinstance(c, str) for c in choices)
+        ):
+            return {"status": "error", "message": "choices must be a list of strings"}
+        problem = spaces.face_input_problem(
+            mode if mode is not None else node.mode,
+            kind if kind is not None else node.kind,
+            method if method is not None else node.method,
+        )
+        if problem:
+            return {"status": "error", "message": problem}
+        if choices is not None and not choices:
+            # An empty list clears and configures nothing; a client sending
+            # one for every input it applies must not litter a number/audio
+            # port with a meaningless `choices`.
+            effective_kind = kind if kind is not None else node.kind
+            choices = [] if effective_kind == spaces.FACE_KIND_CHOICE else None
+        self._apply_face_input(space_id, key, mode, kind, method, choices)
+        self._write_spaces()
+        self._dirty = True
+        self._wake_ticker()
+        return {
+            "status": "ok",
+            "space_id": space_id,
+            "key": key,
+            "face": self._space_face(space_id, space),
+        }
+
+    def _cmd_instantiate_template(self, cmd: dict) -> dict:
+        """Instantiate a template into a live space nested in `parent_space`
+        (root by default).
+
+        The template is a definition, so nothing of it runs until this: the
+        new space gets a copy of the template's interior, is *live* (its
+        nodes are spawned into the running graph), and records the template
+        it came from in `template` - so the definition stays the source and
+        the instance keeps its own state (agents/SPACES.md §2)."""
+        template_id = cmd.get("template_id", "")
+        template = self.spaces.get(template_id)
+        if template_id == "" or template is None:
+            return {"status": "error", "message": f"no space {template_id!r}"}
+        if not template.is_template:
+            return {
+                "status": "error",
+                "message": f"space {template_id!r} is not a template",
+            }
+        parent_id = cmd.get("parent_space", "") or spaces.ROOT_ID
+        parent = self.spaces.get(parent_id)
+        if parent is None:
+            return {"status": "error", "message": f"no space {parent_id!r}"}
+        with self._lock:
+            existing = set(parent.children)
+            base = spaces.local_of(template_id) or template.label or "space"
+            local = base
+            n = 2
+            # The instance is its own space, not a placement of the
+            # template's file: its name must not collide with a child, a
+            # loaded space or a file already on disk (the template's own
+            # file is called exactly this).
+            while (
+                local in existing
+                or spaces.make_id(parent_id, local) in self.spaces
+                or self._space_file_path(local)[0] is not None
+            ):
+                local = f"{base}_{n}"
+                n += 1
+            new_id = spaces.make_id(parent_id, local)
+            self._materialize_template(
+                template_id, new_id, parent_id, local,
+                permanent=_as_bool(cmd.get("permanent"), True),
+                x=float(cmd.get("x", 0.0) or 0.0),
+                y=float(cmd.get("y", 0.0) or 0.0),
+            )
+            parent.config.setdefault("spaces", []).append(
+                spaces.child_ref(local, local)
+            )
+        # Materialize the copy's interior into the running graph.
+        self._spawn_space_definition(new_id)
+        self._install_spaces(self._build_spaces_from_space())
+        self._write_spaces()
+        self._dirty = True
+        self._wake_ticker()
+        return {"status": "ok", "space_id": new_id, "template": template_id}
+
+    # -- templates: spawn rule and definition plumbing -------------------
+
+    def _template_edit_refusal(self, node_id: str) -> Optional[str]:
+        """Why a node *inside a template* may not be created, or None.
+
+        A template's interior is a definition - no live node, no module
+        instance, no placement (agents/SPACES.md §12) - so there is nowhere
+        to put a live node.  Build the space live and flip it to Template
+        (`set_space_meta`): that captures the interior as the definition and
+        takes it out of the running graph."""
+        pid = spaces.space_of(str(node_id))
+        if pid == spaces.ROOT_ID or spaces.spawns(pid, self.spaces):
+            return None
+        return (
+            f"space {pid!r} is a template: its interior is a definition, so "
+            f"{node_id!r} cannot be added live (instantiate the template into "
+            f"a live space, or edit it in a live space and switch it to "
+            f"Template)"
+        )
+
+    def _face_input(self, space_id: str, key: str) -> Optional["_FaceInput"]:
+        """The configuration of one face input (`key` is the port node's
+        local id), live if the space is spawned, else straight off the
+        space's definition.  None when the space has no such input."""
+        qualified = spaces.make_id(space_id, key)
+        node = self.space.nodes.get(qualified)
+        if isinstance(node, SpaceFaceInput):
+            return _FaceInput(node.mode, node.kind, node.method, node.choices)
+        space = self.spaces.get(space_id)
+        entry = (space.nodes.get(key) if space is not None else None) or {}
+        if entry.get("type") not in FACE_IN_TYPES:
+            return None
+        params = entry.get("params") or {}
+        return _FaceInput(
+            params.get("mode") or "node",
+            params.get("kind") or (
+                "boolean" if entry.get("type") == "bool_space_in" else "audio"
+            ),
+            params.get("method") or "",
+            params.get("choices"),
+        )
+
+    def _apply_face_input(self, space_id: str, key: str, mode, kind, method,
+                          choices) -> None:
+        """Write a face input's configuration onto its node - and onto the
+        space's own definition entry, which is where a space whose interior
+        is not spawned (a template) keeps it.  The two are the same thing
+        for a live space: the definition entry is what its file holds."""
+        qualified = spaces.make_id(space_id, key)
+        with self._lock:
+            node = self.space.nodes.get(qualified)
+            if isinstance(node, SpaceFaceInput):
+                if mode is not None:
+                    node.mode = mode
+                if kind is not None:
+                    node.kind = kind
+                if method is not None:
+                    node.method = method
+                if choices is not None:
+                    node.choices = [str(c) for c in choices]
+            space = self.spaces.get(space_id)
+            entry = (space.nodes.get(key) if space is not None else None)
+            if isinstance(entry, dict):
+                params = entry.setdefault("params", {})
+                if mode is not None:
+                    params["mode"] = mode
+                if kind is not None:
+                    params["kind"] = kind
+                if method is not None:
+                    params["method"] = method
+                if choices is not None:
+                    params["choices"] = [str(c) for c in choices]
+
+    def _freeze_space_interior(self, space: spaces.Space) -> None:
+        """Capture a live space's interior as its definition, so flipping it
+        to a template does not throw the graph away."""
+        built = self._build_spaces_from_space(
+            use_snapshots=False, freeze_params=False
+        ).get(space.id)
+        if built is None:
+            return
+        space.config = spaces.copy_config(built.config)
+
+    def _despawn_space(self, space_id: str) -> None:
+        """Take a space's subtree out of the running graph, leaving its file
+        (and the definition held in memory) alone."""
+        prefix = space_id + spaces.NAMESPACE_SEP
+        with self._lock:
+            for nid in [
+                n for n in list(self.space.nodes)
+                if n == space_id or n.startswith(prefix)
+            ]:
+                self.space.remove_node(nid)
+            for gid in list(self.groups):
+                members = self.groups[gid].get("nodes") or []
+                if members and all(
+                    self._in_space_subtree(m, space_id) for m in members
+                ):
+                    self.groups.pop(gid, None)
+        self._edit_spaces = {
+            pid for pid in self._edit_spaces
+            if pid != space_id and not pid.startswith(prefix)
+        }
+
+    def _spawn_space_definition(self, space_id: str) -> None:
+        """Materialize a space's definition into the running graph: what an
+        instantiated template (and a space flipped back to live) gets.  The
+        whole subtree comes up in one staged load, straight from the
+        in-memory tree - a non-permanent parent has no file to reload from."""
+        prefix = space_id + spaces.NAMESPACE_SEP
+        subtree = {
+            pid for pid in self.spaces
+            if pid == space_id or pid.startswith(prefix)
+        }
+        config = self._flatten_spaces(self.spaces, only_spaces=subtree)
+        self._load_session(config, declarative=True, migrate=False)
+
+    def _materialize_template(self, template_id: str, new_id: str,
+                              parent_id: str, local: str, permanent: bool,
+                              x: float, y: float,
+                              path: Optional[str] = None) -> None:
+        """Create the live space `new_id` as a copy of template
+        `template_id`'s definition, recursively for the spaces nested in it.
+
+        The top-level copy gets a space file of its own (it is a new
+        space); a nested one is another placement of the file its template
+        child already points at, so it shares that file exactly as any other
+        placement does - `path` carries that through."""
+        src = self.spaces[template_id]
+        if path is None:
+            target_dir = next((d for d, w in self.space_dirs if d and w), None)
+            path = (os.path.join(target_dir, local + spaces.SPACE_SUFFIX)
+                    if target_dir else None)
+        stem = spaces.file_stem(path) if path else None
+        new = spaces.Space(
+            id=new_id, parent=parent_id, label=src.label, color=src.color,
+            mode=spaces.MODE_RW, path=path, writable=path is not None,
+            stem=stem,
+            type=spaces.LIVE, permanent=permanent, node_view=src.node_view,
+            template=template_id,
+            # Pinned/paused like any newly created space.
+            anchored=True, x=x, y=y,
+            config=spaces.copy_config(src.config),
+        )
+        self.spaces[new_id] = new
+        refs = []
+        for entry in src.child_entries:
+            name = spaces.child_name(entry)
+            stem = spaces.child_stem(entry)
+            child_src_id = spaces.make_id(template_id, name)
+            child_src = self.spaces.get(child_src_id)
+            if not name or child_src is None:
+                logger.warning(
+                    "template %r references unknown child %r", template_id, name
+                )
+                refs.append(entry)
+                continue
+            child_id = spaces.make_id(new_id, name)
+            self._materialize_template(
+                child_src_id, child_id, new_id, name, permanent, 0.0, 0.0,
+                path=child_src.path,
+            )
+            refs.append(
+                spaces.child_ref(name, stem, self.spaces[child_id].placement())
+            )
+        new.config["spaces"] = refs
 
     def _cmd_delete_space(self, cmd: dict) -> dict:
         """Delete a space file.
@@ -2388,7 +2775,13 @@ class PatchSpaceDaemon:
             cur = os.path.dirname(cur)
 
     def _cmd_edit_space(self, cmd: dict) -> dict:
-        """Change a writable space's display label and/or color."""
+        """Change a writable space's display label and/or its auto-load flag.
+
+        The color used to be set here too; since S1 it belongs to
+        `set_space_meta`, which is the one writer for everything about the
+        space *itself* (kind, permanence, color, default view) - two spellings
+        of one field drift, and this one treated an empty color as "no
+        change", so a color could not be cleared through it."""
         space_id = cmd.get("space_id", "")
         space = self.spaces.get(space_id)
         if not space_id or space is None:
@@ -2398,9 +2791,6 @@ class PatchSpaceDaemon:
         label = (cmd.get("label") or "").strip()
         if label:
             space.label = label
-        color = (cmd.get("color") or "").strip()
-        if color:
-            space.color = color
         if cmd.get("auto_load") is not None:
             space.auto_load = bool(cmd["auto_load"])
         self._write_spaces()
@@ -2410,7 +2800,6 @@ class PatchSpaceDaemon:
             "status": "ok",
             "space_id": space_id,
             "label": space.label,
-            "color": space.color,
         }
 
     def _cmd_export_space(self, cmd: dict) -> dict:
@@ -2522,6 +2911,9 @@ class PatchSpaceDaemon:
                     "stem": stem,
                     "label": raw.get("label") or stem,
                     "color": raw.get("color") or spaces.DEFAULT_COLOR,
+                    "type": spaces.type_from_raw(raw),
+                    "permanent": bool(raw.get("permanent", True)),
+                    "node_view": bool(raw.get("node_view", False)),
                     "mode": spaces.mode_from_raw(raw),
                     "auto_load": bool(raw.get("auto_load")),
                     "path": path,
@@ -3955,6 +4347,10 @@ class PatchSpaceDaemon:
             params["initial_volume"] = node.volume
         if node_id.startswith("mute_"):
             params["is_mute"] = True
+        # A space input's option list rides with its face config; absent when
+        # the input is not a choice (so an audio port writes none).
+        if getattr(node, "choices", None):
+            params["choices"] = list(node.choices)
         label = getattr(node, "label", "")
         if label:
             params["label"] = label
@@ -4112,7 +4508,13 @@ class PatchSpaceDaemon:
             return cls(node_id)
         if cls in (WarpInNode, WarpOutNode, BooleanWarpInNode, BooleanWarpOutNode):
             return cls(node_id, g("warp_name", ""))
-        if cls in (SpaceInNode, SpaceOutNode, BoolSpaceInNode, BoolSpaceOutNode):
+        if cls in (SpaceInNode, BoolSpaceInNode):
+            # Only an *input* carries a face configuration (an output is
+            # always an ordinary jack) - agents/SPACES.md §5, §12.
+            return cls(node_id, g("port_name", ""), g("description", ""),
+                       mode=g("mode", None), kind=g("kind", None),
+                       method=g("method", None), choices=g("choices", None))
+        if cls in (SpaceOutNode, BoolSpaceOutNode):
             return cls(node_id, g("port_name", ""), g("description", ""))
         if cls is ExcludeFilterNode:
             return cls(node_id, g("pattern", ""))
@@ -4235,6 +4637,9 @@ class PatchSpaceDaemon:
         config = cmd.get("config", {}) or {}
         if not node_type or not node_id:
             return {"status": "error", "message": "node_type and node_id required"}
+        problem = self._template_edit_refusal(node_id)
+        if problem:
+            return {"status": "error", "message": problem}
         cls = NODE_TYPE_REGISTRY.get(node_type)
         if cls is None:
             # Not a type the daemon models itself: a *module* may provide it
@@ -5647,14 +6052,25 @@ class PatchSpaceDaemon:
     def _serialize_spaces(self) -> list:
         """Space metadata for get_nodes.  Space placement is stored on the
         daemon; a space's on-canvas bounds are derived by the GUI from its
-        member nodes (the box auto-fits, with an explicit min w/h)."""
+        member nodes (the box auto-fits, with an explicit min w/h).
+
+        This record is the *whole* story a client reads: its kind
+        (`type`), whether it is persisted (`permanent`), its default view
+        when embedded (`node_view`), the template it came from, and its
+        `face` - derived here from the `space_in`/`space_out` nodes placed
+        inside it (the node is the one source of truth)."""
         with self._lock:
+            live_faces = self._faces_by_space()
             return [
                 {
                     "id": pid,
                     "parent": space.parent or "",
                     "label": space.label,
                     "color": space.color,
+                    "type": space.type,
+                    "permanent": space.permanent,
+                    "node_view": space.node_view,
+                    "template": space.template,
                     "mode": space.mode,
                     "readonly": space.is_readonly,
                     "writable": space.writable,
@@ -5668,9 +6084,90 @@ class PatchSpaceDaemon:
                     "edit_mode": pid in self._edit_spaces,
                     "path": space.path,
                     "children": space.child_ids(),
+                    "face": self._space_face(pid, space, live_faces),
                 }
                 for pid, space in self.spaces.items()
             ]
+
+    def _space_face(self, pid: str, space: spaces.Space,
+                    live_faces: Optional[Dict[str, list]] = None) -> list:
+        """The space record's ``face``: one entry per `space_in`/`space_out`
+        node placed in the space, sorted by their local id.
+
+        A spawned space's face comes from its *live* nodes (dropping a port
+        node in shows up on the next poll); a space whose interior is not
+        spawned - a template, or anything nested in one - has only its
+        definition, so it is read from the space's own config.  Either way
+        the configuration lives on the node (agents/SPACES.md §5, §12).
+
+        `live_faces` is `_faces_by_space()`'s one-pass result, so a caller
+        that derives several spaces' faces does the walk once."""
+        if spaces.spawns(pid, self.spaces):
+            if live_faces is None:
+                live_faces = self._faces_by_space()
+            return list(live_faces.get(pid, []))
+        return self._face_entries(
+            (local, cfg.get("type"), dict(cfg.get("params") or {}))
+            for local, cfg in space.nodes.items()
+        )
+
+    def _faces_by_space(self) -> Dict[str, list]:
+        """``{space id: face}`` for every space with port nodes, in one pass
+        over the live nodes (get_nodes polls this every 400 ms)."""
+        found: Dict[str, list] = {}
+        for nid, node in self.space.nodes.items():
+            type_id = CLASS_TO_TYPE.get(type(node), "")
+            if type_id not in FACE_IN_TYPES and type_id not in FACE_OUT_TYPES:
+                continue
+            pid = spaces.space_of(str(nid))
+            found.setdefault(pid, []).append(
+                self._face_entry(
+                    spaces.local_of(str(nid)), type_id,
+                    {
+                        attr: getattr(node, attr, None)
+                        for attr in ("label", "port_name", "mode", "kind",
+                                     "method", "choices")
+                    },
+                )
+            )
+        for entries in found.values():
+            entries.sort(key=lambda e: e["key"])
+        return found
+
+    def _face_entries(self, source) -> list:
+        """Face entries from (key, type id, params) triples, sorted by key.
+        An *input* carries the configuration stored on its node; an output is
+        always an ordinary jack, so it carries only its name."""
+        entries = [
+            entry for entry in (
+                self._face_entry(key, type_id, params)
+                for key, type_id, params in sorted(source, key=lambda e: e[0])
+            )
+            if entry is not None
+        ]
+        return entries
+
+    @staticmethod
+    def _face_entry(key: str, type_id: str, params: dict) -> Optional[dict]:
+        label = params.get("label") or params.get("port_name") or key
+        if type_id in FACE_IN_TYPES:
+            kind = params.get("kind") or (
+                "boolean" if type_id == "bool_space_in" else "audio"
+            )
+            entry = {
+                "key": key,
+                "label": label,
+                "direction": "in",
+                "mode": params.get("mode") or "node",
+                "kind": kind,
+                "method": params.get("method") or "",
+            }
+            if kind == "choice":
+                entry["choices"] = list(params.get("choices") or [])
+            return entry
+        if type_id in FACE_OUT_TYPES:
+            return {"key": key, "label": label, "direction": "out"}
+        return None
 
     def _serialize_nodes(self) -> dict:
         result = {}
@@ -6078,9 +6575,14 @@ class PatchSpaceDaemon:
         # announce, registry_query); one with "command" is the legacy
         # protocol the GUI still speaks.  The two coexist until phase 2
         # moves the display over.
-        if "type" in cmd:
+        #
+        # `command` is checked FIRST: a command may legitimately carry a
+        # "type" of its own now (`set_space_meta`/`create_space` take the
+        # space's kind), and the module API never sends a "command" - so
+        # without this, every `set_space_meta {type: "template"}` would be
+        # read as a module message of type "template".
+        if "command" not in cmd and "type" in cmd:
             return self._protocol.handle(cmd, conn or protocol_mod.Connection())
-        cmd = _normalize_legacy_command(cmd)
         command = cmd.get("command")
         try:
             if command == "add_node":
@@ -6163,6 +6665,12 @@ class PatchSpaceDaemon:
                 response = self._cmd_move_space(cmd)
             elif command == "create_space":
                 response = self._cmd_create_space(cmd)
+            elif command == "set_space_meta":
+                response = self._cmd_set_space_meta(cmd)
+            elif command == "set_space_input":
+                response = self._cmd_set_space_input(cmd)
+            elif command == "instantiate_template":
+                response = self._cmd_instantiate_template(cmd)
             elif command == "delete_space":
                 response = self._cmd_delete_space(cmd)
             elif command == "delete_space_file":

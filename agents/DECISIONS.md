@@ -233,3 +233,72 @@
   `spaces.LEGACY_TYPE_SPACE`/`LEGACY_CHILD_KEY`, the `catalog.json`
   `legacy_aliases`, the nix `mkRenamedOptionModule`s).  The removal list and
   the step that deletes them (S1) are in `agents/NOTES.md`.
+
+## [2026-10-15] S1: the file's `type` key carries the space's kind
+- Decision: the space file's `type` is now `live`/`template` (the space's
+  kind, `agents/SPACES.md` §12), and every older spelling of a space file
+  (`space`, and `panel` from before S0) is still *read* as a live space
+  (`spaces.is_space_type`/`type_from_raw`).  `nix/lib.nix`'s `normalise`
+  unwraps all four, and the Nix module's generated files say `live`.
+- Why: §12 says the space *files* gain `type`, and the file is where a
+  template must be recorded or a reboot would spawn it.  The key already
+  existed as the file-format marker, so the alternative was a second key
+  (`space_type`) that means the same thing and can disagree with it.  Reading
+  all four spellings matters for the same reason S0's did: `_load_spaces_tree`
+  decides "space file vs bare legacy session" from this key, so a file it does
+  not recognise gets rewritten as an *empty* migrated session - the graph would
+  be gone.  (`nix/lib.nix` has the same decision to make about imports of
+  GUI-exported space files.)
+- Reversible: yes (one tuple in `spaces.py`, one line in `lib.nix`, one in
+  `module.nix`).
+
+## [2026-10-15] S1: a template is never spawned, so a live node cannot be put in one
+- Decision: `add_node` refuses a node id inside a template (and `create_space`
+  refuses `node_ids` with `type: "template"`).  The way to make a template is
+  to build the space live and flip the "Space Types" switch
+  (`set_space_meta {type: "template"}`), which captures the interior as the
+  definition and takes it out of the graph; flipping back materializes it.
+- Why: §12 is unconditional - "no module instance, no live node, no placement
+  in the running graph".  The alternative readings both lose data: spawning the
+  node contradicts the contract, and recording it only in the definition leaves
+  a node the client was told exists but never sees (get_nodes reads live nodes).
+  Refusing is the one behaviour that neither lies nor empties a file, and it
+  makes the spec's own switch the creation path.
+- Reversible: yes (one guard in `_cmd_add_node`, one in `_cmd_create_space`).
+
+## [2026-10-15] S1: a non-permanent space leaves its old file alone
+- Decision: flipping `permanent` off stops all writing of that space (and its
+  subtree) but does *not* delete a file it wrote while it was permanent.
+  Deleting stays an explicit user action (`delete_space_file`).
+- Why: "written to nothing" is about what the daemon writes, and a space file
+  is the user's graph - a metadata toggle must not be able to destroy it.  The
+  stray file is not reachable any more (its reference was pruned from every
+  parent) unless it opted in with `auto_load`, in which case it comes back
+  live-but-unpersisted, which is still what its own record asks for.
+- Reversible: yes (call `delete_space_file` on the flip).
+
+## [2026-10-15] S1: face keys are the port node's local id
+- Decision: a `face[]` entry's `key` (what `set_space_input` takes) is the
+  `space_in`/`space_out` node's *local id* inside the space, and `label` is
+  the node's label, else its `port_name`, else the key.  Output entries carry
+  only `key`/`label`/`direction`.
+- Why: the key has to identify the input unambiguously and survive a save/load
+  round trip; a local id cannot collide inside one space (two `port_name`s
+  can), and it is what every other command in the protocol already addresses a
+  node by.  `port_name` is a display name, so it belongs in `label`.
+- Reversible: yes (one expression in `main._space_face`).
+
+## [2026-10-15] S1: an instance inherits its template's look, not its permanence
+- Decision: `instantiate_template` gives the new live space the template's
+  `label`, `color` and `node_view`, records `template`, and takes `permanent`
+  from the command (default true: dropping a template in is a user action).
+  A nested child of the template becomes another placement of the *same file*,
+  while the top-level instance gets a space file of its own (deduplicated
+  against the files on disk - the template's own file is usually named after
+  it).
+- Why: the definition is where a space's presentation lives, so an instance
+  should look like what it was made from; permanence is a separate question
+  (should this instance be in the session), and the nested-child rule is the
+  existing placement model, which is what makes an instance diverge from its
+  blueprint instead of copying it twice.
+- Reversible: yes (per-field in `_materialize_template`).

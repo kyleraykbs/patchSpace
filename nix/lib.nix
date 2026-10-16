@@ -58,13 +58,15 @@ let
   #
   # An import may be a path to JSON (what `export_config.py` wrote, or a space
   # file the GUI exported) or an inline attrset; the GUI has export paths for
-  # both shapes, so accept either.  The pre-rename `"panel"` marker (S0:
-  # panel -> space) is read too, so an export written before the rename is
-  # still unwrapped to its config rather than merged as a bare one; the alias
-  # goes away in S1.
+  # both shapes, so accept either.  A space file's `type` key names the *kind*
+  # of space since S1 (`live`/`template`), and carries the pre-S1 marker
+  # (`space`) or the pre-rename one (`panel`) in an older file; all four must
+  # unwrap to the config, or importing a space file would merge an empty one.
   normalise = raw:
     let marker = raw.type or null;
-    in if marker == "space" || marker == "panel" then (raw.config or { }) else raw;
+    in if marker == "live" || marker == "template"
+          || marker == "space" || marker == "panel"
+       then (raw.config or { }) else raw;
 
   readConfig = p:
     normalise (builtins.fromJSON (builtins.readFile p));

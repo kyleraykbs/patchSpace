@@ -35,9 +35,13 @@ space would appear on your canvas).
   `pipewire.service` and `wireplumber.service`, `Restart=on-failure`, started at
   `default.target`. It drives the logged-in user's PipeWire session, which is why it is a user
   service and not a system one.
-* **Graph**: every declared space is written as a `mode = "read-only"`, `auto_load = true`
-  space file in a store directory passed to the daemon **last and read-only**. The daemon never
-  writes it back, and `Reset` in the GUI re-applies exactly what Nix said.
+* **Graph**: every declared space is written as a `type = "live"`,
+  `mode = "read-only"`, `auto_load = true` space file in a store directory passed to the daemon
+  **last and read-only**. The daemon never writes it back, and `Reset` in the GUI re-applies
+  exactly what Nix said.  (`type` names the space's kind since S1: a generated space is live;
+  the pre-S1 `"space"`/`"panel"` markers still load, and `lib.patchspace.normalise` unwraps all
+  of them when a `spaces.<name>.imports` entry is a GUI-exported space file rather than a bare
+  config.)
 * **Client**: the GUI is its own repo/flake (`patchSpaceGui`), so this module no longer
   supplies one.  `installClient` (default `true`) installs `clientPackage` — which a
   configuration must name — into `environment.systemPackages` (or `home.packages` in the
