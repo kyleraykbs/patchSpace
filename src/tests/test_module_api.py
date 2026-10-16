@@ -57,6 +57,62 @@ def test_a_complete_declaration_passes():
     assert ok, message
 
 
+def test_a_port_may_declare_its_cardinality_and_merge():
+    """S4's declaration (agents/SPACES.md §15): how many drivers a port
+    takes, and how the receiving node combines them."""
+    ok, message = api.validate_type_decl({
+        "type_id": "space_in",
+        "schema": 1,
+        "ports": [
+            {"name": "audio", "kind": "audio", "direction": "in",
+             "cardinality": "many", "merge": "mix"},
+            {"name": "out", "kind": "audio", "direction": "out"},
+        ],
+    })
+    assert ok, message
+    # Absent means the pre-S4 default, so an old declaration is still valid
+    # (and JSON null reads as absent, not as a value).
+    assert api.validate_type_decl({
+        "type_id": "t",
+        "ports": [{"name": "in", "kind": "boolean", "direction": "in",
+                   "cardinality": None, "merge": None}],
+    })[0]
+
+
+@pytest.mark.parametrize("bad", ["", "One", "one ", "many ", "several", True, 1])
+def test_an_unknown_cardinality_is_refused(bad):
+    ok, message = api.validate_type_decl({
+        "type_id": "t",
+        "ports": [{"name": "in", "kind": "audio", "direction": "in",
+                   "cardinality": bad}],
+    })
+    assert not ok and "cardinality" in message and "t.in" in message
+
+
+@pytest.mark.parametrize("bad", ["", "mix ", "average", "first", "sums", 1])
+def test_an_unknown_merge_is_refused(bad):
+    ok, message = api.validate_type_decl({
+        "type_id": "t",
+        "ports": [{"name": "in", "kind": "audio", "direction": "in",
+                   "merge": bad}],
+    })
+    assert not ok and "merge" in message and "t.in" in message
+
+
+def test_the_declared_cardinality_vocabulary_is_closed():
+    assert api.CARDINALITIES == ("one", "many")
+    assert api.MERGES == ("mix", "sum", "last")
+    # The pre-S4 rule, kept as the default for a port that declares nothing.
+    assert api.default_cardinality("boolean") == "one"
+    assert api.default_cardinality("impulse") == "one"
+    assert api.default_cardinality("sound") == "one"
+    assert api.default_cardinality("camera") == "one"
+    assert api.default_cardinality("audio") == "many"
+    assert api.default_cardinality("bundle") == "many"
+    assert api.default_cardinality("number") == "many"
+    assert api.default_cardinality("filter") == "many"
+
+
 def test_node_announce_validation():
     assert not api.validate_node_announce({"type_id": "t"})[0]
     assert not api.validate_node_announce({"instance_id": "n", "type_id": ""})[0]

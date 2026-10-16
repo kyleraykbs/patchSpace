@@ -208,6 +208,45 @@ def test_port_introspection_answers_the_graph_rules():
     assert reg.port_kind("nobody", "out", "out") == ""
     assert reg.port_multi("vcam_1", "out") is True
     assert reg.port_multi("vcam_1", "in") is False
+    # S4: cardinality resolves through the declaration — the legacy
+    # `multi: true` is a declaration of "many", a camera input that declares
+    # nothing keeps the pre-S4 rule, and the merge declaration is surfaced.
+    assert reg.port_cardinality("vcam_1", "in", "in") == "one"
+    assert reg.port_cardinality("vcam_1", "out", "out") == "many"
+    assert reg.port_cardinality("nobody", "in", "in") == "many"
+    assert reg.port_merge("vcam_1", "in", "in") == ""
+
+
+def test_port_cardinality_reads_the_declaration_first():
+    """The declaration wins over the kind's default, in both directions,
+    and a declared merge is itself a declaration of several drivers."""
+    reg = Registry()
+    module_id = _attached(reg)
+    reg.declare_types(module_id, [{
+        "type_id": "declared_ports",
+        "schema": 1,
+        "ports": [
+            {"name": "one_audio", "kind": "audio", "direction": "in",
+             "cardinality": "one"},
+            {"name": "many_boolean", "kind": "boolean", "direction": "in",
+             "cardinality": "many"},
+            {"name": "merged", "kind": "number", "direction": "in",
+             "merge": "sum"},
+            {"name": "plain", "kind": "boolean", "direction": "in"},
+        ],
+    }])
+    reg.place("declared_1", "declared_ports")
+
+    assert reg.port_cardinality("declared_1", "one_audio", "in") == "one"
+    assert reg.port_cardinality("declared_1", "many_boolean", "in") == "many"
+    assert reg.port_cardinality("declared_1", "merged", "in") == "many"
+    assert reg.port_cardinality("declared_1", "plain", "in") == "one"
+    assert reg.port_merge("declared_1", "merged", "in") == "sum"
+    assert reg.port_merge("declared_1", "plain", "in") == ""
+    # The declaration travels in the catalog a display installs, unchanged.
+    ports = reg.type_query("declared_ports")["type"]["ports"]
+    assert [p.get("merge") for p in ports] == [None, None, "sum", None]
+    assert [p.get("cardinality") for p in ports] == ["one", "many", None, None]
 
 
 def test_snapshot_is_serialisable_and_complete():

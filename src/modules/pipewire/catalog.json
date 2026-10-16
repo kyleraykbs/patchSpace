@@ -570,6 +570,7 @@
    },
    "ports": [
     {
+     "cardinality": "many",
      "direction": "in",
      "kind": "boolean",
      "name": "boolean"
@@ -627,6 +628,7 @@
    },
    "ports": [
     {
+     "cardinality": "many",
      "direction": "in",
      "kind": "boolean",
      "name": "boolean"
@@ -2333,6 +2335,7 @@
    },
    "ports": [
     {
+     "cardinality": "many",
      "direction": "in",
      "kind": "audio",
      "name": "audio"
@@ -2385,6 +2388,7 @@
    },
    "ports": [
     {
+     "cardinality": "many",
      "direction": "in",
      "kind": "audio",
      "name": "audio"

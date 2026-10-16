@@ -295,6 +295,24 @@ dragging); `render_utils.theme_palette` gains `bundle_port`/`filter_port`/`impul
 colors.  `session_repair` and the client both derive from the declared port kinds;
 so the GUI/repair can never fabricate a connection the daemon rejects.
 
+**Cardinality is declared, never assumed (S4).**  How many drivers a *receiving*
+port takes is part of the declaration: `cardinality: "one" | "many"` on the port
+(`merge: "mix" | "sum" | "last"` says how a node that takes several combines
+them).  `central/graph.py` holds no kind list any more — its deleted
+`SINGLE_DRIVER_KINDS` was the hard-coded rule — and resolves every edge through
+`Registry.port_cardinality`, which reads the declaration and, for a port that
+declares nothing, falls back to the pre-S4 rule for its kind (`boolean`,
+`impulse`, `sound`, `camera` take one; everything else mixes), so an old
+`type_declare` and the whole existing catalog behave exactly as they did.  A
+declared `merge` is a declared `many`.  The daemon is still the only authority
+and never merges anything itself: it refuses a second edge only where the
+declaration says `one`.  The space ports declare it where it matters — their
+input is a bus (`MIX_INPUTS`/`ALLOW_MULTIPLE_BOOLEAN`), so `space_in`,
+`space_out`, `bool_space_in` and `bool_space_out` all declare `many`, which is
+what the old docstrings claimed and the by-kind list denied.  `merge` travels to
+a display unchanged in `catalog_reply` (`api.validate_type_decl` refuses an
+unknown `cardinality`/`merge` value at declare time rather than ignoring it).
+
 * `AllInputsNode` / `AllAppsNode` (`InputNode`) produce a source bundle from
   `source_filters()`; `AllOutputsNode` (`Node`) produces a sink bundle from
   `sink_filters()`. `bundle_side()` reports which.
@@ -845,7 +863,9 @@ them in the right file. Unlike ordinary single-input transparent nodes, a space 
 `allows_multiple_inputs()`, so several edges may land on the same audio port and their
 sources are all resolved/summed (`PatchSpace._resolve_sources`). Boolean space ports set
 `ALLOW_MULTIPLE_BOOLEAN`, letting several edges target one boolean port; resolution still
-takes the first wired source (`_resolve_boolean_input`).
+takes the first wired source (`_resolve_boolean_input`). Since S4 their input ports say so
+in the catalog (`cardinality: "many"`), so the daemon's connection authority accepts a
+second driver into a space port instead of restricting it by kind name.
 
 *Spaces side view.* A docked, scrollable list of space files lives on the right (the endchild of an outer `Gtk.Paned`), toggled by a button directly under the top-right
 hamburger (`main_window._spaces_toggle` / `_build_spaces_view`). A column-header row labels
@@ -1099,6 +1119,11 @@ A new tunable/serialized attribute usually touches all of these:
   display (`catalog_request` → `catalog_reply`) and `tests/test_pipewire_declarations.py`
   fails if a registered type has no declaration. Pure control-plane nodes declare
   `boolean_inputs`/`boolean_outputs` and carry no backing.
+- A port that may take **several** drivers (or that must take exactly one) says so in the
+  catalog: `"cardinality": "one" | "many"` on the port (absent = the pre-S4 default for
+  its kind), plus `"merge": "mix" | "sum" | "last"` when the node combines them. The daemon
+  refuses a second driver only where the declaration says `one` (`Registry.port_cardinality`,
+  S4 in `agents/SPACES.md`); an unknown value is refused at declare time.
 - Effects with async multi-stream modules (`EchoCancelNode`, `NoiseCancelNode`,
   `SensitivityGateNode`, `NormalizeNode`, `ReverbNode`) must be in `_CAREFUL_NODE_TYPES`
   so session load gives them a dedicated per-input bring-up pass.

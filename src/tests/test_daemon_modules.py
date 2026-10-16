@@ -68,7 +68,7 @@ def test_an_added_node_can_be_wired_through_the_new_authority():
     edge = daemon.topology.connect(
         "in1", "g1", "audio", "out",
         kind_of=daemon.registry.port_kind,
-        multi_of=daemon.registry.port_multi,
+        cardinality_of=daemon.registry.port_cardinality,
     )
     assert edge.id == "in1->g1:audio"
 
@@ -77,7 +77,7 @@ def test_an_added_node_can_be_wired_through_the_new_authority():
     ok, message = daemon.topology.can_connect(
         "b1", "g1", "audio", "out",
         kind_of=daemon.registry.port_kind,
-        multi_of=daemon.registry.port_multi,
+        cardinality_of=daemon.registry.port_cardinality,
     )
     assert not ok and "boolean" in message
 
@@ -137,7 +137,7 @@ def test_a_display_gets_the_catalog_and_the_graph_snapshot():
     daemon.topology.connect(
         "in1", "g1", "audio", "out",
         kind_of=daemon.registry.port_kind,
-        multi_of=daemon.registry.port_multi,
+        cardinality_of=daemon.registry.port_cardinality,
     )
 
     display = Connection()
@@ -205,3 +205,89 @@ def test_get_nodes_marks_nodes_the_registry_is_not_running():
     nodes = daemon.handle_command({"command": "get_nodes"})["nodes"]
     assert nodes["g1"]["status"] == api.STATUS_OFFLINE_MODULE
     assert "pipewire" in nodes["g1"]["status_reason"]
+
+
+def test_a_declared_many_port_takes_several_drivers_through_the_daemon():
+    """The shipped opt-out, through the daemon's authority: `bool_space_in`
+    is a *bus* of control signals - several sources may be offered, the
+    first wired one wins (`BoolSpaceInNode.ALLOW_MULTIPLE_BOOLEAN`, which the
+    model has always allowed) - so its input declares
+    `cardinality: "many"` and the daemon accepts a second driver where the
+    pre-S4 kind name refused it."""
+    daemon = fresh_daemon()
+    daemon.attach_modules()
+    add_node(daemon, "bool_space_in", "in1")
+    add_node(daemon, "boolean_switch", "b1")
+    add_node(daemon, "boolean_switch", "b2")
+
+    def wire(from_node, to_node):
+        return daemon.topology.connect(
+            from_node, to_node, "boolean", "out",
+            kind_of=daemon.registry.port_kind,
+            cardinality_of=daemon.registry.port_cardinality,
+        )
+
+    wire("b1", "in1")
+    ok, message = daemon.topology.can_connect(
+        "b2", "in1", "boolean", "out",
+        kind_of=daemon.registry.port_kind,
+        cardinality_of=daemon.registry.port_cardinality,
+    )
+    assert ok, message
+    wire("b2", "in1")
+    assert len(daemon.topology.edges_into("in1", "boolean")) == 2
+
+
+def test_a_display_wires_a_second_driver_onto_a_bus_port():
+    """The daemon's authority as a display reaches it: `node_edge` onto a
+    boolean panel port takes the second source (its input declares `many`),
+    while a `boolean` input that declares nothing still refuses one."""
+    daemon = fresh_daemon()
+    daemon.attach_modules()
+    add_node(daemon, "bool_space_in", "in1")
+    add_node(daemon, "boolean_switch", "b1")
+    add_node(daemon, "boolean_switch", "b2")
+    add_node(daemon, "gate", "g1")
+
+    display = Connection()
+    daemon.handle_command(api.hello(api.ROLE_DISPLAY, "patchspaceGui"), display)
+
+    def edge(from_node, to_node, to_port):
+        return daemon.handle_command(
+            api.node_edge(from_node, to_node, to_port, "out"), display
+        )
+
+    assert edge("b1", "in1", "boolean")["type"] == "ok"
+    assert edge("b2", "in1", "boolean")["type"] == "ok"
+
+    assert edge("b1", "g1", "ctrl")["type"] == "ok"
+    refused = edge("b2", "g1", "ctrl")
+    assert refused["type"] == "error" and "already driven" in refused["message"]
+
+
+def test_a_declared_merge_is_surfaced_where_it_is_consumed():
+    """`merge` is part of the declaration and travels to whatever consumes
+    it: the daemon relays the ports it was given, so a display sees how a
+    receiving node combines several drivers (the daemon itself never
+    merges - the module does)."""
+    daemon = fresh_daemon()
+    errors, _ = daemon.registry.declare_types("probe", [{
+        "type_id": "mixer_probe",
+        "schema": 1,
+        "ports": [
+            {"name": "in", "kind": "number", "direction": "in",
+             "cardinality": "many", "merge": "sum"},
+            {"name": "out", "kind": "number", "direction": "out"},
+        ],
+        "display": {"name": "Mixer Probe"},
+    }])
+    assert errors == []
+    daemon.registry.place("probe_1", "mixer_probe")
+
+    display = Connection()
+    daemon.handle_command(api.hello(api.ROLE_DISPLAY, "patchspaceGui"), display)
+    catalog = daemon.handle_command(api.catalog_request(), display)
+    probe = next(t for t in catalog["types"] if t["type_id"] == "mixer_probe")
+    port = next(p for p in probe["ports"] if p["name"] == "in")
+    assert (port["cardinality"], port["merge"]) == ("many", "sum")
+    assert daemon.registry.port_merge("probe_1", "in", "in") == "sum"

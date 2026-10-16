@@ -519,31 +519,75 @@ class Registry:
         unknown.  This is what the graph's connection rules resolve against
         (``Graph.can_connect(..., kind_of=registry.port_kind)``)."""
         with self._lock:
-            instance = self._instances.get(instance_id)
-            if instance is None:
-                return ""
-            decl = self._type_decl(instance.type_id)
-            if decl is None:
-                return ""
-            for entry in decl.ports:
-                if entry.get("name") == port and entry.get("direction") == direction:
-                    return str(entry.get("kind") or "")
-            return ""
+            entry = self._port_entry(instance_id, port, direction)
+            return str(entry.get("kind") or "") if entry else ""
 
     def port_multi(self, instance_id: str, port: str) -> bool:
-        """Whether a single-driver input port opted out of the one-driver
-        rule (``multi: true`` in its declaration)."""
+        """Whether a port declared the legacy ``multi: true`` opt-out (no
+        shipped type does; ``cardinality: "many"`` is the spelling now)."""
         with self._lock:
-            instance = self._instances.get(instance_id)
-            if instance is None:
-                return False
-            decl = self._type_decl(instance.type_id)
-            if decl is None:
-                return False
-            for entry in decl.ports:
-                if entry.get("name") == port:
-                    return bool(entry.get("multi", False))
-            return False
+            entry = self._port_entry(instance_id, port)
+            return bool(entry.get("multi", False)) if entry else False
+
+    def port_cardinality(self, instance_id: str, port: str,
+                         direction: str = "") -> str:
+        """How many drivers one port takes — ``"one"`` or ``"many"``.
+
+        The type's own declaration decides: ``cardinality`` when it states
+        one, ``many`` for a declared ``merge`` (a merge makes sense only
+        for several drivers) and for the legacy ``multi: true`` opt-out,
+        otherwise the pre-S4 rule for the port's kind
+        (:func:`api.default_cardinality`).  This is what the graph's
+        connection rules resolve against
+        (``Graph.can_connect(..., cardinality_of=registry.port_cardinality)``);
+        the graph itself holds no kind knowledge.
+        """
+        with self._lock:
+            entry = self._port_entry(instance_id, port, direction)
+            if entry is None:
+                # Nothing declared about an unknown port: refuse nothing
+                # here (the kind lookup has already refused the edge).
+                return api.CARDINALITY_MANY
+            declared = entry.get("cardinality")
+            if declared in api.CARDINALITIES:
+                return str(declared)
+            if entry.get("merge") in api.MERGES:
+                return api.CARDINALITY_MANY
+            if bool(entry.get("multi", False)):
+                return api.CARDINALITY_MANY
+            return api.default_cardinality(str(entry.get("kind") or ""))
+
+    def port_merge(self, instance_id: str, port: str, direction: str = "") -> str:
+        """How a receiving port that takes several drivers combines them —
+        ``"mix"``/``"sum"``/``"last"``, or ``""`` when it declares none.
+
+        Surfaced to whatever consumes it: the declaration travels verbatim
+        to a display in the catalogs the daemon serves (``catalog_reply``,
+        ``type_query``, ``snapshot`` — ``TypeDecl.to_dict`` copies the
+        ports), and a module that owns the receiving node reads its own."""
+        with self._lock:
+            entry = self._port_entry(instance_id, port, direction)
+            if entry is None:
+                return ""
+            declared = entry.get("merge")
+            return str(declared) if declared in api.MERGES else ""
+
+    def _port_entry(self, instance_id: str, port: str,
+                    direction: str = "") -> Optional[Dict[str, Any]]:
+        """One port's declaration entry (name, and direction when given)."""
+        instance = self._instances.get(instance_id)
+        if instance is None:
+            return None
+        decl = self._type_decl(instance.type_id)
+        if decl is None:
+            return None
+        for entry in decl.ports:
+            if entry.get("name") != port:
+                continue
+            if direction and entry.get("direction") != direction:
+                continue
+            return entry
+        return None
 
     def type_query(self, type_id: str) -> Dict[str, Any]:
         with self._lock:

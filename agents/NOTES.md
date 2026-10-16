@@ -1075,3 +1075,106 @@ Do those three first, then the move is mechanical.  Nothing was left half-split:
   empty string meant "no change", so a color could not be cleared).
 * Not done here (S2+): portal embedding, cross-space wires, so nothing routes
   into an embedded space yet; the face is data a client can draw today.
+  (The daemon half of portal embedding landed in S2 - see the next section;
+  the drawing, the cross-space wire hit-test and the sidebar/dropdown are the
+  client's.)
+
+## 2026-10-15 — S2: portals, the daemon half (a placement by reference)
+
+`agents/SPACES.md` §13, daemon side.  A **portal** is a placement of a live
+space inside another space, **by reference**: there is never a second interior.
+
+* **The record.**  The space that *embeds* carries `config.portals` (written:
+  `[{"space_id", "view", "x", "y"}]`, `x`/`y` in the parent's frame), and the
+  space record a client reads carries `portals[]` plus `embedded_in[]` - the
+  spaces that portal this one, **derived** on every payload
+  (`spaces.portal_index`), never stored (agents/DECISIONS.md, 2026-10-15).  The
+  portal is written with the parent and nowhere else: the target's file is not
+  touched by being shown, and a non-permanent target (§3) is still written
+  nowhere while the portal that shows it is saved with its parent.
+* **The commands.**  `embed_space {space_id, parent_space, x, y}` appends the
+  entry (view seeded from the target's `node_view` - the "Node" checkbox is
+  only the default), `remove_space_embedding {space_id, parent_space}` drops
+  the placement and never the space, and `set_embedding_view {space_id,
+  parent_space, view}` sets one embedding's `inside`/`node` (one embedding's
+  view says nothing about another).  All three answer with the parent's new
+  `portals` (and the target's `embedded_in` where it changed), so a client can
+  treat the reply as the fence.
+* **Validation is decided before anything is touched** (`spaces.embed_problem`
+  + the x/y parse in the handler), so every refusal leaves no partial state: an
+  unknown space (either side), a template as the target (its interior is a
+  definition - `instantiate_template` is the drop path), a space embedded in
+  itself, a space embedded in any of its own descendants (the `Parent::Child`
+  id path makes that a prefix test), a duplicate embedding of the same target
+  in the same parent, and a read-only parent (its portals are declared by its
+  file).  The root can never be the target: it contains every space, so the
+  descendant test refuses it.
+* **`embedded_in` stays consistent on both sides.**  Removal is consistent by
+  construction (it is derived), and a *deleted* space takes the portals that
+  named it with it (`spaces.drop_portals_to`, called by `delete_space`,
+  `delete_space_file` and `remove_space_placement`): a dangling portal does not
+  survive.  A *move* re-keys ids, so the portals that named a moved space
+  follow it (`spaces.retarget_portals`), and a move that would nest a space
+  into the space it shows is refused with the cycle message
+  (`spaces.move_cycle`) rather than left self-referential.
+* **Jacks need no new model.**  A space's `face[]` already names each port node
+  by its local id, so the real node behind a portal jack is
+  `<space_id>::<key>` - the target's own record, resolved by the client.  The
+  daemon's `face` output is unchanged, and a wire onto a portal is an ordinary
+  edge onto the target's `space_in`/`space_out` (cross-space wires already
+  work: the daemon deliberately does not enforce that a wire respects a box).
+* **Templates.**  A template's portals are part of its definition, so
+  `instantiate_template` copies them: the instance shows the *same* live spaces
+  (that is what "by reference" means).  One that would show a space containing
+  the instance itself is not copied (it would be a cycle).  `clone_space`
+  carries the source's portals for the same reason.
+* Not done here: anything the user *sees* - drawing the portal (node-faced box
+  or the space box in place), the wire hit-test across a box, the tooltip, the
+  sidebar's live-space list and the dropdown&search (S6), and the drag that
+  moves a portal's `x`/`y` after it is placed (a client sends
+  remove+embed today; a `set_space_layout`-style command for a portal is not
+  written yet).
+
+## 2026-10-15 — S4: cardinality is declared, never assumed
+
+`agents/SPACES.md` §15.  How many drivers a *receiving* port takes used to be a
+hard-coded list of *kinds* in `central/graph.py` (`SINGLE_DRIVER_KINDS`:
+boolean, impulse, sound, camera), with a `multi: true` port opt-out that **no
+shipped type declared** - so the restriction was by kind name and a port that
+should take several edges had no way to say so.
+
+* **The declaration.**  A port now states `cardinality: "one" | "many"` in its
+  type declaration, and a receiving node that needs a merge states
+  `merge: "mix" | "sum" | "last"`.  `api.CARDINALITIES`/`api.MERGES` are the
+  closed vocabulary and `validate_type_decl` **refuses** an unknown value (the
+  message names the type and port) instead of ignoring it.
+* **The resolver.**  `Registry.port_cardinality(instance, port, direction)`
+  answers the graph: the declaration wins, then a declared `merge` (which
+  implies several drivers - `merge` says *how*, it cannot mean "one"), then the
+  legacy `multi: true`, and otherwise `api.default_cardinality(kind)` - the
+  pre-S4 rule, kept verbatim (`boolean`/`impulse`/`sound`/`camera` → `one`,
+  everything else → `many`).  `port_merge` is the daemon-side reader; the
+  declaration also travels to a display unchanged in `catalog_reply`
+  (`TypeDecl.to_dict` copies ports).
+* **The daemon path.**  `graph.can_connect`/`connect` take
+  `cardinality_of=Registry.port_cardinality` (the `multi_of` parameter is gone)
+  and refuse a second edge only where that answer is not `"many"`.  The graph
+  holds no kind list at all now - `SINGLE_DRIVER_KINDS` is deleted - so the
+  registry stays the one place that knows what a port is.  `protocol.py`'s
+  `node_edge` passes the resolver; the legacy `add_edge` command path is
+  unaffected (it stores through the model, whose rules did not change).
+* **Shipped exactly where it matters.**  The four space port types declare
+  `cardinality: "many"` on their input port: their input is a *bus* today
+  (`SpaceInNode`/`SpaceOutNode` `MIX_INPUTS` + `allows_multiple_inputs`,
+  `BoolSpaceInNode`/`BoolSpaceOutNode` `ALLOW_MULTIPLE_BOOLEAN` - "several
+  sources may be offered, the first wired one wins"), which is exactly what the
+  old docstrings claimed and the by-kind list denied.  Net effect: for the two
+  *boolean* panel ports the daemon's `node_edge` path now accepts a second
+  driver where it used to refuse one - the daemon now agrees with the model and
+  the client instead of being a third opinion.  Nothing else declares, so
+  nothing else changes: `test_pipewire_declarations` sweeps **every** port of
+  the shipped catalog and asserts each declaration-less one still resolves the
+  pre-S4 way, and pins the declaration sites to those four.
+* Backward compatible on the wire: an old `type_declare` with no `cardinality`
+  (including `multi: true`) keeps working exactly as it did.  No persisted data
+  changes; edge ids untouched.

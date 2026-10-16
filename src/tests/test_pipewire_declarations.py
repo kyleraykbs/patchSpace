@@ -14,6 +14,7 @@ import pytest
 
 from central import module_api as api
 from central.main import NODE_TYPE_REGISTRY
+from central.registry import Registry
 from modules.pipewire import declarations
 
 
@@ -100,3 +101,98 @@ def test_known_details_of_a_few_types(catalog):
     assert aliases["bool_panel_in"] == "bool_space_in"
     assert aliases["bool_panel_out"] == "bool_space_out"
     assert "panel_in" not in by_type
+
+
+# ----------------------------------------------------------------------
+# S4: cardinality is declared, never assumed (agents/SPACES.md §15)
+# ----------------------------------------------------------------------
+
+#: The rule the deleted `central/graph.py` `SINGLE_DRIVER_KINDS` list named,
+#: written out here so the shipped catalog is measured against the rule that
+#: was in force *before* cardinality existed.  (`api.default_cardinality` is
+#: the same rule resolved at runtime; the sweep below is the independent
+#: statement of it, so a port that changes an accept/refuse decision without
+#: declaring it fails here.)
+PRE_S4_ONE_DRIVER_KINDS = frozenset({"boolean", "impulse", "sound", "camera"})
+
+
+def _shipped_registry(catalog):
+    """A registry holding the shipped catalog, so cardinality resolves
+    through the daemon's own path (`Registry.port_cardinality`)."""
+    reg = Registry()
+    module_id = reg.allocate_module_id("pipewire")
+    reg.attach(module_id, "pipewire", "1.0")
+    errors, _ = reg.declare_types(module_id, catalog)
+    assert errors == []
+    return reg
+
+
+def test_every_port_that_declares_nothing_resolves_as_it_did_before(catalog):
+    """The sweep S4's safety rests on: a port that declares no cardinality
+    keeps the pre-S4 rule exactly, for every port of every shipped type (no
+    hand list of types), so no existing type changed behaviour."""
+    reg = _shipped_registry(catalog)
+    inspected = declared = 0
+    for decl in catalog:
+        type_id = decl["type_id"]
+        instance_id = f"probe_{type_id}"
+        reg.place(instance_id, type_id)
+        for port in decl["ports"]:
+            inspected += 1
+            resolved = reg.port_cardinality(instance_id, port["name"],
+                                            port["direction"])
+            if "cardinality" in port or "merge" in port:
+                declared += 1
+                assert resolved == (port.get("cardinality")
+                                    or api.CARDINALITY_MANY), (type_id, port)
+                continue
+            before = ("one" if port["kind"] in PRE_S4_ONE_DRIVER_KINDS
+                      else "many")
+            assert resolved == before, (type_id, port)
+    assert inspected > 100, "the sweep must actually walk the catalog"
+    assert declared, "the shipped catalog does declare the buses"
+
+
+def test_only_the_space_port_buses_declare_a_cardinality(catalog):
+    """`agents/SPACES.md` §15 ships the declaration where it matters and
+    nowhere else: the four space port types, whose input is a bus today."""
+    sites = sorted(
+        (decl["type_id"], port["name"])
+        for decl in catalog
+        for port in decl["ports"]
+        if "cardinality" in port or "merge" in port
+    )
+    assert sites == [
+        ("bool_space_in", "boolean"),
+        ("bool_space_out", "boolean"),
+        ("space_in", "audio"),
+        ("space_out", "audio"),
+    ]
+
+
+def test_the_space_ports_declare_what_their_node_classes_already_do(catalog):
+    """Not a new opinion: each declaration states the bus its class already
+    implements (`MIX_INPUTS`/`allows_multiple_inputs` for the audio ports,
+    `ALLOW_MULTIPLE_BOOLEAN` for the boolean ones) - which is what the old
+    docstrings claimed and the by-kind list denied."""
+    declared = {
+        decl["type_id"]: port
+        for decl in catalog
+        for port in decl["ports"]
+        if port.get("cardinality")
+    }
+    assert set(declared) == {"space_in", "space_out",
+                             "bool_space_in", "bool_space_out"}
+    for type_id in ("space_in", "space_out"):
+        assert declared[type_id]["cardinality"] == "many"
+        assert NODE_TYPE_REGISTRY[type_id].MIX_INPUTS is True, type_id
+    for type_id in ("bool_space_in", "bool_space_out"):
+        assert declared[type_id]["cardinality"] == "many"
+        assert NODE_TYPE_REGISTRY[type_id].ALLOW_MULTIPLE_BOOLEAN is True, type_id
+    # ... and the daemon now gives the same answer the model always did.
+    reg = _shipped_registry(catalog)
+    for type_id in declared:
+        reg.place(f"declared_{type_id}", type_id)
+        port = declared[type_id]
+        assert reg.port_cardinality(f"declared_{type_id}", port["name"],
+                                    port["direction"]) == "many"

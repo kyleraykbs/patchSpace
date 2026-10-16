@@ -356,13 +356,13 @@ class ProtocolHandler:
         if op == "add":
             ok, message = self.topology.can_connect(
                 from_node, to_node, to_port, from_port,
-                self.registry.port_kind, self.registry.port_multi,
+                self.registry.port_kind, self.registry.port_cardinality,
             )
             if not ok:
                 return api.error(message)
             self.topology.connect(
                 from_node, to_node, to_port, from_port,
-                self.registry.port_kind, self.registry.port_multi,
+                self.registry.port_kind, self.registry.port_cardinality,
             )
         else:
             if not self.topology.disconnect(from_node, to_node, to_port, from_port):

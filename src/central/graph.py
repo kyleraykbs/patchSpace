@@ -10,10 +10,17 @@ Ownership split (agents/PLAN.md):
   is, and the edges between instances.
 
 Node records are looked up by id, never duplicated here.  The edge rules
-live in exactly one place (``kinds_compatible`` plus the single-driver
-rule in ``Graph.can_connect``) so that the old three-way mirror — the
+live in exactly one place (``kinds_compatible`` plus the cardinality rule
+in ``Graph.can_connect``) so that the old three-way mirror — the
 model, the GUI's ``node_catalog`` and ``session_repair`` each re-checking
 compatibility — has one authority to defer to.
+
+How many drivers a receiving port takes is **declared, never assumed**:
+``cardinality: "one" | "many"`` in the type declaration (S4, agents/SPACES.md
+§15).  This module holds no kind list of its own (``SINGLE_DRIVER_KINDS`` is
+gone) — the caller passes the registry's resolution in
+(``cardinality_of=Registry.port_cardinality``), exactly as it passes port
+kinds, and a port that declares nothing keeps the pre-S4 rule.
 """
 
 from __future__ import annotations
@@ -22,14 +29,11 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from central import module_api as api
+
 #: Port kinds that interoperate with each other: a bundle is a set of
 #: audio streams and one stream is a bundle of one (see the bundle nodes).
 LINKABLE_KINDS = frozenset({"audio", "bundle"})
-
-#: Kinds whose *input* takes exactly one driver (a level signal, an event,
-#: a file reference, a video feed — not a mixable bus).  A port may opt out
-#: with ``multi: true`` in its type declaration (space boolean ports do).
-SINGLE_DRIVER_KINDS = frozenset({"boolean", "impulse", "sound", "camera"})
 
 
 def kinds_compatible(from_kind: str, to_kind: str) -> bool:
@@ -136,8 +140,9 @@ def _kind_of_none(_instance: str, _port: str, _direction: str) -> str:
     return ""
 
 
-def _multi_none(_instance: str, _port: str) -> bool:
-    return False
+def _cardinality_none(_instance: str, _port: str, _direction: str) -> str:
+    """No resolver given: nothing is declared, so nothing is restricted."""
+    return api.CARDINALITY_MANY
 
 
 class Graph:
@@ -224,11 +229,18 @@ class Graph:
         to_port: str = "in",
         from_port: str = "out",
         kind_of: Callable[[str, str, str], str] = _kind_of_none,
-        multi_of: Callable[[str, str], bool] = _multi_none,
+        cardinality_of: Callable[[str, str, str], str] = _cardinality_none,
     ) -> Tuple[bool, str]:
-        """Whether the edge may be made.  ``kind_of``/``multi_of`` are how
-        the caller (the daemon, via the registry) answers "what kind of port
-        is this" — the graph holds no type knowledge of its own."""
+        """Whether the edge may be made.  ``kind_of``/``cardinality_of`` are
+        how the caller (the daemon, via the registry) answers "what kind of
+        port is this, and how many drivers does it take" — the graph holds
+        no type knowledge of its own, so a port that declares ``one`` is
+        refused a second driver and one that declares ``many`` is not.
+
+        The declaration is the *only* thing refused: what a receiving node
+        does with several drivers (``merge: mix|sum|last``) is the module's
+        business, not the daemon's.
+        """
         with self._lock:
             if from_node == to_node:
                 return False, "a node cannot be wired to itself"
@@ -242,7 +254,7 @@ class Graph:
                 return False, (
                     f"cannot connect a {from_kind} output to a {to_kind} input"
                 )
-            if to_kind in SINGLE_DRIVER_KINDS and not multi_of(to_node, to_port):
+            if cardinality_of(to_node, to_port, "in") != api.CARDINALITY_MANY:
                 for existing in self.edges.values():
                     if existing.to_node == to_node and existing.to_port == to_port:
                         return False, f"{to_node}.{to_port} is already driven"
@@ -255,10 +267,10 @@ class Graph:
         to_port: str = "in",
         from_port: str = "out",
         kind_of: Callable[[str, str, str], str] = _kind_of_none,
-        multi_of: Callable[[str, str], bool] = _multi_none,
+        cardinality_of: Callable[[str, str, str], str] = _cardinality_none,
     ) -> Edge:
         ok, message = self.can_connect(from_node, to_node, to_port, from_port,
-                                       kind_of, multi_of)
+                                       kind_of, cardinality_of)
         if not ok:
             raise ValueError(message)
         with self._lock:

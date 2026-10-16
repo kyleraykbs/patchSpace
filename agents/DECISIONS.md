@@ -302,3 +302,103 @@
   existing placement model, which is what makes an instance diverge from its
   blueprint instead of copying it twice.
 - Reversible: yes (per-field in `_materialize_template`).
+
+## [2026-10-15] S2: `embedded_in` is derived, never stored
+- Decision: a portal is written **once**, in the embedding space's own record
+  (`config.portals`); the reverse list (`embedded_in[]`) is computed on every
+  payload from all spaces' portals (`spaces.portal_index`), exactly as `face`
+  is derived from the port nodes and `children` from the parent's child refs.
+- Why: §13 says "a portal is part of the parent's saved record", and two
+  stored copies of one relation is how "which side is right?" bugs are born -
+  removing an embedding would have to remember to fix up the target's file,
+  and a *non-permanent* target (§3) has no file to fix up: it is written
+  nowhere, yet it is still shown, and the UI must be able to say where.
+- Reversible: yes (compute it in `build_payload` and drop `portal_index`).
+
+## [2026-10-15] S2: deleting a space takes the portals that named it
+- Decision: when a space (a subtree, a file and all its placements, or a
+  placement) goes, every portal that named a doomed id is removed from every
+  space that survives - in memory, and therefore in the file
+  (`spaces.drop_portals_to`, called by `delete_space`, `delete_space_file` and
+  `remove_space_placement`).  A *move* is the other half of the same rule: the
+  ids are re-keyed, so the portals that named a moved space follow it
+  (`spaces.retarget_portals`) instead of dangling at the path it used to live
+  at.  Nothing about the *target* is ever touched by removing an embedding.
+- Why: a portal is a placement of a live space, and with the target gone it is
+  a placement of nothing: the client would draw a box that opens onto no
+  interior, and `embedded_in` would name a space that is not there.  The
+  alternative readings are worse: keeping it invites a "space that comes back"
+  promise the daemon cannot keep, and rewriting the file by hand is the user's
+  job, not a bug we hand them.
+- Reversible: yes (one call site each; the loop is 10 lines).
+
+## [2026-10-15] S2: a read-only space's portals are declared by its file
+- Decision: `embed_space`, `remove_space_embedding` and `set_embedding_view`
+  refuse a parent whose `mode` is `read-only` ("its portals are declared by
+  its file and cannot be changed at runtime").  A read-only space may still be
+  *the target* - embedding it elsewhere is exactly what §2 says a declarative
+  space is for.
+- Why: every other way of putting something inside a space (`move_nodes`,
+  `move_space`) already refuses a read-only target, and `_write_spaces` skips
+  read-only spaces entirely - so accepting the command would place a portal
+  that is silently gone on the next reload.  A refusal that says so is
+  strictly better than an edit that evaporates, and the declarative
+  file remains the one place that can declare a portal inside a read-only
+  space (its file is read, so a Nix-generated space *may* ship portals).
+- Reversible: yes (one guard in `embed_problem`, one in each of the two other
+  handlers).
+
+## [2026-10-15] S2: a second embedding of the same space in one parent is refused
+- Decision: `embed_space` answers "space 'X' is already embedded in 'Y'" rather
+  than moving or duplicating the existing entry.
+- Why: a portal is addressed by `(space_id, parent_space)` - its identity is
+  the pair - so a second entry for the same pair would make
+  `remove_space_embedding` and `set_embedding_view` ambiguous about which one
+  they mean.  The *user* affordance for "put it somewhere else" is a drag
+  (`set_space_layout` on the entry is not a command yet; a client that wants to
+  move one sends remove+embed).  Showing the same space twice in one parent is
+  not in the spec's model; showing it in two *different* parents is, and works.
+- Reversible: yes (return the existing entry instead of the error).
+
+## [2026-10-15] S2: `embedded_in` includes the spaces whose *definition* portals it
+- Decision: the derived `embedded_in` lists every space whose `portals` name
+  the space, a template among them; it does not filter by the parent's
+  `spawns`/`live` state.
+- Why: a template's portals are part of its definition - they materialize
+  when it is instantiated - so the entry is data, not a claim about where the
+  space is drawn right now; the client holds the parent's record and can see
+  its `type`.  Filtering would be a second rule to keep in sync with the
+  spawn rule, and it would hide a placement the user can still be shown in an
+  editor.
+- Reversible: yes (one `if` in `spaces.portal_index`).
+
+## [2026-10-15] S4: cardinality is a port declaration, and the kind list is gone
+- Decision: a port declares `cardinality: "one" | "many"` (and, for a node
+  that combines several drivers, `merge: "mix" | "sum" | "last"`) in its type
+  declaration.  `central/graph.py`'s `SINGLE_DRIVER_KINDS` is deleted; the
+  graph resolves each edge through `Registry.port_cardinality`, and a port
+  that declares nothing keeps the pre-S4 rule for its kind
+  (`api.default_cardinality`), so no undeclared type changes behaviour.  An
+  unknown `cardinality`/`merge` value is refused by `validate_type_decl`.
+- Why: the restriction was by *kind name*, so a port that can take several
+  edges could not say so (the `multi: true` opt-out was declared by no shipped
+  type, while the model already allowed it).  The registry stays the one place
+  that knows what a port is; the graph keeps holding no type knowledge.
+- Reversible: yes (the declaration is data; the fallback is the old rule).
+
+## [2026-10-15] S4: the space ports declare the bus they already are
+- Decision: the four space port types (`space_in`/`space_out`,
+  `bool_space_in`/`bool_space_out`) declare `cardinality: "many"` on their
+  input port, and nothing else in the catalog declares anything.
+- Why: their input is a bus today - `MIX_INPUTS`/
+  `allows_multiple_inputs()` for the audio pair, `ALLOW_MULTIPLE_BOOLEAN` for
+  the boolean pair ("several sources may be offered, the first wired one
+  wins"), which the model has always allowed and the old docstrings already
+  claimed.  The by-kind list denied it, so the daemon was a third opinion: the
+  `node_edge` path refused a second boolean edge into a panel port that the
+  model and the client accepted.  Shipping the declaration here makes the
+  daemon agree (S4's point: the daemon only refuses what the declaration
+  refuses).  The audio pair's `many` states the rule that was already in
+  force; the boolean pair's `many` is the deliberate opt-out the docstrings
+  promised.
+- Reversible: yes (drop the `cardinality` key and the pre-S4 rule returns).

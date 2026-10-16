@@ -38,6 +38,15 @@ gui/patchspace_gui.py  ──(unix socket, JSON lines, $XDG_RUNTIME_DIR/patchspa
   per-input `mode`/`kind`/`method`/`choices`) and exposes `face[]` on the space
   record a client reads.  A template's interior is a definition and is never
   spawned; `instantiate_template` copies it into a nested live space.
+  A space may also **embed** another by reference - a **portal**
+  (`agents/SPACES.md` §13): the parent's record carries
+  `portals[] = {space_id, view, x, y}`, the target keeps its one interior and
+  reports the parents in `embedded_in[]` (derived, never stored), and the three
+  commands (`embed_space`/`remove_space_embedding`/`set_embedding_view`) are
+  the only writers.  A portal's jacks are the target's own `face[]` entries, so
+  a client resolves the real node behind one as `<space_id>::<key>` and a wire
+  dropped there lands on the target's `space_in`/`space_out` - no new wire
+  concept, and no second interior.
 
 Everything runs with `src/` as the import root (CWD or `PYTHONPATH`): daemon code
 imports as `central.*`, the PipeWire substrate as `modules.pipewire.*`.  The packaged
@@ -51,7 +60,7 @@ entry points are `python -m central.main` / `python -m central.session_repair`.
 | Graph snapshot | `modules/pipewire/pwgraph.py` | `pw-dump -m` stream → live nodes/ports/links; connect/disconnect; node-created/removed callbacks. |
 | Matching | `modules/pipewire/pwmatch.py` | Filter dicts → live node ids; port groups → channel pairs (a lone `MONO` endpoint bridges every channel of its peer); which objects are Patch Space's own. |
 | Model | `modules/pipewire/pwnodes.py` | `Node` taxonomy + `PatchSpace` (the reconcile/supervise engine: `sync_locked` = structure, `supervise` = health).  It lives on the module's side (it imports `modules.pipewire.*` and nothing from `central`), so the daemon reaches into it in-process — the transitional state before the report (EXTRACTION.md step 2). |
-| Containers | `central/spaces.py` | Space tree, namespaced ids, edge ownership (LCA), read-only snapshots, legacy migration (pre-S0 spellings of the file/marker still read), the space's `type`/`permanent`/`node_view`/`template` fields, the spawn rule (`spawns`) and the write filter (`persists`/`prune_unpersisted`). |
+| Containers | `central/spaces.py` | Space tree, namespaced ids, edge ownership (LCA), read-only snapshots, legacy migration (pre-S0 spellings of the file/marker still read), the space's `type`/`permanent`/`node_view`/`template` fields, the spawn rule (`spawns`), the write filter (`persists`/`prune_unpersisted`) and portals (`portals`/`embedded_in`, `embed_problem`, `drop_portals_to`). |
 | Daemon | `central/main.py` | Socket protocol, node factory (`NODE_TYPE_REGISTRY`/`_create_node`), property handling, session load, watchdogs, built-in devices. |
 | Config | `central/migrations.py`, `central/session_repair.py`, `central/apply_config.py`, `central/export_config.py`, `central/patchspace_cli.py` | Versioned node migrations; validate/repair a session; CLI import/export. |
 
@@ -67,8 +76,8 @@ the model — and then the process move.  See `agents/EXTRACTION.md`:
 | Piece | File | Job |
 |---|---|---|
 | Vocabulary | `central/module_api.py` | Roles (`module`/`display`/`app`), message shapes, validation. JSON-stable: it crosses the socket unchanged. |
-| Catalogue | `central/registry.py` | Attached modules, declared types, instances; the status model (`online`/`offline_module`/`offline_dep`/`unbacked`), the `requires` closure, migration handoff, capability queries, `port_kind`/`port_multi` for the graph rules, reported `values`. |
-| Structure | `central/graph.py` | Spaces, placements, edges, and the **single connection authority** (`kinds_compatible` + the one-driver rule). Edge ids equal `PatchSpace._edge_id`, so persisted sessions survive. |
+| Catalogue | `central/registry.py` | Attached modules, declared types, instances; the status model (`online`/`offline_module`/`offline_dep`/`unbacked`), the `requires` closure, migration handoff, capability queries, `port_kind`/`port_cardinality` (and `port_multi`/`port_merge`) for the graph rules, reported `values`. |
+| Structure | `central/graph.py` | Spaces, placements, edges, and the **single connection authority** (`kinds_compatible` + the cardinality rule, resolved through the registry). Edge ids equal `PatchSpace._edge_id`, so persisted sessions survive. |
 | Wire | `central/protocol.py` | Daemon side of the API: `hello` + role gating, `type_declare` → migration fan-out → `node_announce`, `registry_query`, `catalog_request`/`snapshot_request`, `node_control`/`node_edge` (routed to the owning module), `node_values`, and module drop-off (a dead socket offlines its nodes). |
 | Config | `central/module_config.py` | Which built-ins are enabled (`--modules-config`, else `~/.config/patchspace/modules.json`; a store path is deployment-managed).  `central/modules_cli.py` is `patchspace-modules`. |
 | Provider | `modules/pipewire/declarations.py` + `catalog.json` | The node types this module declares: ports, controls, display, the add-node menu and the vocabulary.  Emitted once from the legacy tables during phase 2 and **the source from then on** — a test asserts it covers every type the daemon can construct. |
@@ -120,9 +129,23 @@ port pairs for it - see `pwnodes.VirtualCameraNode`.
 | `impulse` | event | **pushed**: `PatchSpace.pulse()` walks the edges on a button press |
 
 The pairing rules live in exactly one place — `central/graph.py`'s
-`kinds_compatible` plus the single-driver rule.  `session_repair` calls it, the
+`kinds_compatible` plus the cardinality rule.  `session_repair` calls it, the
 daemon enforces it on every edge, and the client derives the same answer from the
 declared port kinds (so it can refuse a drop locally).  There is no second copy.
+
+How many drivers a *receiving* port takes is declared, never assumed (S4,
+`agents/SPACES.md` §15): a port states `cardinality: "one" | "many"` in its type
+declaration, `graph.py` no longer names a kind list (`SINGLE_DRIVER_KINDS` is
+deleted) and resolves each edge through `Registry.port_cardinality`, which reads
+the declaration and falls back to the pre-S4 rule for the port's kind
+(`boolean`/`impulse`/`sound`/`camera` take one; everything else mixes) — so a
+declaration-less type behaves exactly as before.  A receiving node that needs a
+merge declares `merge: "mix" | "sum" | "last"`; the daemon never merges and only
+refuses what the declaration refuses (a declared `merge` is a declared `many`).
+The four space port types (`space_in`/`space_out`, `bool_space_in`/
+`bool_space_out`) declare `many` on their input: they are buses today
+(`MIX_INPUTS`/`ALLOW_MULTIPLE_BOOLEAN` in the module), which is what the old
+docstrings already claimed.
 
 ## The client (its own repo)
 

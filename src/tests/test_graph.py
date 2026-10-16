@@ -13,10 +13,10 @@ def _kinds(mapping):
     return kind_of
 
 
-def _multi(mapping):
-    def multi_of(instance_id, port):
-        return mapping.get((instance_id, port), False)
-    return multi_of
+def _cardinality(mapping):
+    def cardinality_of(instance_id, port, direction):
+        return mapping.get((instance_id, port), "many")
+    return cardinality_of
 
 
 @pytest.mark.parametrize(
@@ -87,23 +87,53 @@ def test_connect_refuses_a_kind_mismatch():
     assert not ok
 
 
-def test_single_driver_inputs_take_one_edge_but_multi_opt_out_takes_many():
+def test_an_input_declared_one_takes_a_single_driver():
+    """Cardinality is *declared* per port (S4, agents/SPACES.md §15): a
+    port that declares ``one`` refuses the second driver."""
     graph = g.Graph()
     kinds = _kinds({
         ("btn1", "out", "out"): "impulse",
         ("btn2", "out", "out"): "impulse",
         ("play", "in", "in"): "impulse",
-        ("space", "in", "in"): "impulse",
     })
-    multi = _multi({("space", "in"): True})
+    one = _cardinality({("play", "in"): "one"})
 
-    graph.connect("btn1", "play", "in", "out", kinds, multi)
-    ok, message = graph.can_connect("btn2", "play", "in", "out", kinds, multi)
+    graph.connect("btn1", "play", "in", "out", kinds, one)
+    ok, message = graph.can_connect("btn2", "play", "in", "out", kinds, one)
     assert not ok and "already driven" in message
 
-    graph.connect("btn1", "space", "in", "out", kinds, multi)
-    ok, _ = graph.can_connect("btn2", "space", "in", "out", kinds, multi)
-    assert ok, "a multi input accepts a second driver"
+
+def test_a_port_declaring_many_takes_several_even_on_a_single_driver_kind():
+    """The step's whole point: impulse is single-driver by default, and a
+    port that *can* take several says so instead of being restricted by
+    its kind's name."""
+    graph = g.Graph()
+    kinds = _kinds({
+        ("btn1", "out", "out"): "impulse",
+        ("btn2", "out", "out"): "impulse",
+        ("space", "in", "in"): "impulse",
+    })
+    many = _cardinality({("space", "in"): "many"})
+
+    graph.connect("btn1", "space", "in", "out", kinds, many)
+    ok, message = graph.can_connect("btn2", "space", "in", "out", kinds, many)
+    assert ok, message
+
+
+def test_a_mixable_kind_can_still_be_declared_to_take_one():
+    """The declaration is the authority in both directions: audio is
+    mixable by default, so only a declaration restricts it."""
+    graph = g.Graph()
+    kinds = _kinds({
+        ("a", "out", "out"): "audio",
+        ("b", "out", "out"): "audio",
+        ("mix", "in", "in"): "audio",
+    })
+    one = _cardinality({("mix", "in"): "one"})
+
+    graph.connect("a", "mix", "in", "out", kinds, one)
+    ok, message = graph.can_connect("b", "mix", "in", "out", kinds, one)
+    assert not ok and "already driven" in message
 
 
 def test_audio_inputs_are_mixable():
@@ -116,6 +146,22 @@ def test_audio_inputs_are_mixable():
     graph.connect("a", "mix", "in", "out", kinds)
     ok, _ = graph.can_connect("b", "mix", "in", "out", kinds)
     assert ok, "audio sums; a second driver is the point"
+
+
+def test_the_graph_holds_no_kind_list_of_its_own():
+    """The pre-S4 `SINGLE_DRIVER_KINDS` is gone: how many drivers a port
+    takes is the caller's answer (the registry's resolution), and without
+    a resolver the graph restricts nothing but the kind mismatch."""
+    assert not hasattr(g, "SINGLE_DRIVER_KINDS")
+    graph = g.Graph()
+    kinds = _kinds({
+        ("b1", "out", "out"): "impulse",
+        ("b2", "out", "out"): "impulse",
+        ("btn", "in", "in"): "impulse",
+    })
+    graph.connect("b1", "btn", "in", "out", kinds)
+    ok, message = graph.can_connect("b2", "btn", "in", "out", kinds)
+    assert ok, message
 
 
 def test_disconnect_by_id_and_by_endpoints():

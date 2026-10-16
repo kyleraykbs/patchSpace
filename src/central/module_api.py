@@ -74,6 +74,39 @@ PORT_KINDS = ("audio", "bundle", "boolean", "filter", "impulse", "sound",
 DIR_IN = "in"
 DIR_OUT = "out"
 
+#: How many drivers a *receiving* port takes, declared per port as
+#: ``cardinality`` in the type declaration: ``"one"`` refuses a second
+#: inbound edge, ``"many"`` accepts several (the daemon never merges - the
+#: module that owns the receiving node does).  A port that declares nothing
+#: keeps the pre-S4 rule (:func:`default_cardinality`), so an old
+#: declaration behaves exactly as it did.
+CARDINALITY_ONE = "one"
+CARDINALITY_MANY = "many"
+CARDINALITIES = (CARDINALITY_ONE, CARDINALITY_MANY)
+
+#: How a receiving node that takes several drivers combines them, declared
+#: as ``merge`` on the port.  The daemon does not merge: it relays the
+#: declaration (it travels to a display in the catalog, unchanged) and, a
+#: merge making sense only for several drivers, treats a declared merge as
+#: a declaration of ``"many"`` too.
+MERGE_MIX = "mix"
+MERGE_SUM = "sum"
+MERGE_LAST = "last"
+MERGES = (MERGE_MIX, MERGE_SUM, MERGE_LAST)
+
+#: The kinds whose *input* takes exactly one driver (a level signal, an
+#: event, a file reference, a video feed - not a mixable bus).  This is the
+#: fallback for a port that declares nothing: verbatim the rule the deleted
+#: ``central/graph.py`` ``SINGLE_DRIVER_KINDS`` list named, so no
+#: undeclared type changes behaviour.  A port that *is* a bus says so in
+#: its own declaration (the space ports do).
+DEFAULT_ONE_KINDS = ("boolean", "impulse", "sound", "camera")
+
+
+def default_cardinality(kind: str) -> str:
+    """The cardinality of a port that declares none — the pre-S4 rule."""
+    return CARDINALITY_ONE if kind in DEFAULT_ONE_KINDS else CARDINALITY_MANY
+
 
 # ----------------------------------------------------------------------
 # builders (daemon -> client and client -> daemon)
@@ -105,7 +138,9 @@ def type_declare(types: List[Dict[str, Any]],
         {"type_id": "virtual_camera",         # stable, never renamed
          "schema": 3,                          # bumped when the shape changes
          "ports": [{"name": "in", "kind": "camera", "direction": "in",
-                    "multi": false}],
+                    "cardinality": "one",     # "one" (default) | "many"
+                    "merge": "last",          # "mix" | "sum" | "last"
+                    "multi": false}],         # legacy spelling of "many"
          "controls": [{"key": "output_device", "widget": "field",
                        "label": "Device"}],
          "display": {"name": "Virtual Cam", "category": "video",
@@ -117,6 +152,12 @@ def type_declare(types: List[Dict[str, Any]],
     the types a user may create) and ``vocabulary`` its presentation tables
     (field labels, choice lists).  Both are relayed to a display unchanged —
     the daemon does not interpret them.
+
+    A port's ``cardinality`` is the one declaration the daemon *does*
+    interpret: it is what the connection rules resolve against, in place of
+    the old by-kind list (``CARDINALITIES``).  Absent means the pre-S4 rule
+    (:func:`default_cardinality`), so a declaration written before
+    cardinality existed keeps its behaviour exactly.
     """
     message: Dict[str, Any] = {"type": "type_declare", "types": list(types)}
     if menu is not None:
@@ -343,6 +384,19 @@ def validate_type_decl(decl: Dict[str, Any]) -> Tuple[bool, str]:
             return False, (
                 f"{decl.get('type_id')}.{port.get('name')}: unknown port kind "
                 f"{port.get('kind')!r}"
+            )
+        cardinality = port.get("cardinality")
+        if cardinality is not None and cardinality not in CARDINALITIES:
+            return False, (
+                f"{decl.get('type_id')}.{port.get('name')}: unknown cardinality "
+                f"{cardinality!r} (expected one of "
+                f"{', '.join(CARDINALITIES)}, or absent for the default)"
+            )
+        merge = port.get("merge")
+        if merge is not None and merge not in MERGES:
+            return False, (
+                f"{decl.get('type_id')}.{port.get('name')}: unknown merge "
+                f"{merge!r} (expected one of {', '.join(MERGES)}, or absent)"
             )
     controls = decl.get("controls", [])
     if not isinstance(controls, list) or any(
